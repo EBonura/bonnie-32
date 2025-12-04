@@ -134,6 +134,15 @@ impl Texture {
         let ty = ((v * self.height as f32) as usize) % self.height;
         self.pixels[ty * self.width + tx]
     }
+
+    /// Get pixel at x,y coordinates
+    pub fn get_pixel(&self, x: usize, y: usize) -> Color {
+        if x < self.width && y < self.height {
+            self.pixels[y * self.width + x]
+        } else {
+            Color::BLACK
+        }
+    }
 }
 
 /// Shading mode

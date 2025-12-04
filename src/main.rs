@@ -9,13 +9,24 @@
 
 mod rasterizer;
 mod world;
+mod ui;
+mod editor;
 
 use macroquad::prelude::*;
 use rasterizer::{
-    Camera, Color, Framebuffer, RasterSettings, ShadingMode, Texture,
+    Camera, Color as RasterColor, Framebuffer, RasterSettings, ShadingMode, Texture,
     render_mesh, HEIGHT, WIDTH,
 };
 use world::{Level, create_test_level, load_level};
+use ui::{UiContext, MouseState};
+use editor::{EditorState, EditorLayout, EditorAction, draw_editor};
+
+/// Application mode
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AppMode {
+    Game,
+    Editor,
+}
 
 /// Convert our framebuffer to a macroquad texture
 fn framebuffer_to_texture(fb: &Framebuffer) -> Texture2D {
@@ -72,9 +83,9 @@ async fn main() {
     // Create textures for each room
     let textures = vec![
         // Texture 0: Orange/blue checkerboard (room 0)
-        Texture::checkerboard(32, 32, Color::new(200, 100, 50), Color::new(50, 100, 200)),
+        Texture::checkerboard(32, 32, RasterColor::new(200, 100, 50), RasterColor::new(50, 100, 200)),
         // Texture 1: Green/purple checkerboard (room 1)
-        Texture::checkerboard(32, 32, Color::new(50, 200, 100), Color::new(150, 50, 200)),
+        Texture::checkerboard(32, 32, RasterColor::new(50, 200, 100), RasterColor::new(150, 50, 200)),
     ];
 
     // Rasterizer settings
@@ -83,12 +94,23 @@ async fn main() {
     // Mouse state for camera control
     let mut last_mouse_pos = mouse_position();
     let mut mouse_captured = false;
+    let mut last_left_down = false;
 
     // Track which room camera is in
     let mut current_room: Option<usize> = Some(0);
 
+    // App mode (game or editor) - start in editor
+    let mut mode = AppMode::Editor;
+
+    // Editor state
+    let mut editor_state = EditorState::new(level.clone());
+    let mut editor_layout = EditorLayout::new();
+    let mut ui_ctx = UiContext::new();
+
     println!("=== bonnie-rs ===");
     println!("Controls:");
+    println!("  Editor: Click 'Play' to test level");
+    println!("  Game: Press Esc to return to editor");
     println!("  Right-click + drag: Look around");
     println!("  WASD: Move camera");
     println!("  Q/E: Move up/down");
@@ -96,141 +118,176 @@ async fn main() {
     println!("  P: Toggle perspective correction");
     println!("  J: Toggle vertex jitter");
     println!("  Z: Toggle Z-buffer");
-    println!("  ESC: Quit (native only)");
-    println!();
-    println!("Level: 2 connected rooms");
-    println!("Walk through the portal on the +Z wall to enter room 2!");
 
     loop {
-        // Handle input
-        #[cfg(not(target_arch = "wasm32"))]
-        if is_key_pressed(KeyCode::Escape) {
-            break;
-        }
-
-        // Toggle settings
-        if is_key_pressed(KeyCode::Key1) {
-            settings.shading = ShadingMode::None;
-            println!("Shading: None");
-        }
-        if is_key_pressed(KeyCode::Key2) {
-            settings.shading = ShadingMode::Flat;
-            println!("Shading: Flat");
-        }
-        if is_key_pressed(KeyCode::Key3) {
-            settings.shading = ShadingMode::Gouraud;
-            println!("Shading: Gouraud");
-        }
-        if is_key_pressed(KeyCode::P) {
-            settings.affine_textures = !settings.affine_textures;
-            println!(
-                "Textures: {}",
-                if settings.affine_textures { "Affine (PS1)" } else { "Perspective-correct" }
-            );
-        }
-        if is_key_pressed(KeyCode::J) {
-            settings.vertex_snap = !settings.vertex_snap;
-            println!(
-                "Vertex snap: {}",
-                if settings.vertex_snap { "ON (PS1 jitter)" } else { "OFF (smooth)" }
-            );
-        }
-        if is_key_pressed(KeyCode::Z) {
-            settings.use_zbuffer = !settings.use_zbuffer;
-            println!(
-                "Z-buffer: {}",
-                if settings.use_zbuffer { "ON" } else { "OFF (painter's)" }
-            );
-        }
-
-        // Camera rotation with right mouse button
+        // Update UI context with mouse state
         let mouse_pos = mouse_position();
-        if is_mouse_button_down(MouseButton::Right) {
-            if mouse_captured {
-                // Note: negated dx for non-inverted vertical look
-                let dx = -(mouse_pos.1 - last_mouse_pos.1) * 0.005;
-                let dy = (mouse_pos.0 - last_mouse_pos.0) * 0.005;
-                camera.rotate(dx, dy);
-            }
-            mouse_captured = true;
-        } else {
-            mouse_captured = false;
-        }
-        last_mouse_pos = mouse_pos;
-
-        // Camera movement (WASD + Q/E for vertical)
-        let move_speed = 0.05;
-        if is_key_down(KeyCode::W) {
-            camera.position = camera.position + camera.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::S) {
-            camera.position = camera.position - camera.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::A) {
-            camera.position = camera.position - camera.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::D) {
-            camera.position = camera.position + camera.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::Q) {
-            camera.position = camera.position - camera.basis_y * move_speed;
-        }
-        if is_key_down(KeyCode::E) {
-            camera.position = camera.position + camera.basis_y * move_speed;
-        }
-
-        // Update current room (with hint for faster lookup)
-        let new_room = level.find_room_at_with_hint(camera.position, current_room);
-        if new_room != current_room {
-            if let Some(room_id) = new_room {
-                println!("Entered room {}", room_id);
-            }
-            current_room = new_room;
-        }
-
-        // Clear framebuffer
-        fb.clear(Color::new(20, 20, 30));
-
-        // Render the level (all rooms for now - portal culling comes later)
-        render_level(&mut fb, &level, &textures, &camera, &settings);
-
-        // Convert framebuffer to macroquad texture
-        let texture = framebuffer_to_texture(&fb);
-
-        // Draw to screen (scaled up)
-        clear_background(BLACK);
-
-        // Calculate scaled size maintaining aspect ratio
-        let screen_w = screen_width();
-        let screen_h = screen_height();
-        let scale = (screen_w / WIDTH as f32).min(screen_h / HEIGHT as f32);
-        let draw_w = WIDTH as f32 * scale;
-        let draw_h = HEIGHT as f32 * scale;
-        let draw_x = (screen_w - draw_w) / 2.0;
-        let draw_y = (screen_h - draw_h) / 2.0;
-
-        draw_texture_ex(
-            &texture,
-            draw_x,
-            draw_y,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(Vec2::new(draw_w, draw_h)),
-                ..Default::default()
-            },
-        );
-
-        // Draw HUD
-        let room_text = match current_room {
-            Some(id) => format!("Room: {}", id),
-            None => "Room: outside".to_string(),
+        let left_down = is_mouse_button_down(MouseButton::Left);
+        let mouse_state = MouseState {
+            x: mouse_pos.0,
+            y: mouse_pos.1,
+            left_down,
+            right_down: is_mouse_button_down(MouseButton::Right),
+            left_pressed: left_down && !last_left_down,
+            left_released: !left_down && last_left_down,
+            scroll: mouse_wheel().1,
         };
-        draw_text(&format!("FPS: {}", get_fps()), 10.0, 20.0, 20.0, WHITE);
-        draw_text(&room_text, 10.0, 40.0, 20.0, WHITE);
-        draw_text(
-            &format!("Pos: ({:.1}, {:.1}, {:.1})", camera.position.x, camera.position.y, camera.position.z),
-            10.0, 60.0, 20.0, WHITE
-        );
+        last_left_down = left_down;
+        ui_ctx.begin_frame(mouse_state);
+
+        match mode {
+            AppMode::Game => {
+                // Toggle settings
+                if is_key_pressed(KeyCode::Key1) {
+                    settings.shading = ShadingMode::None;
+                    println!("Shading: None");
+                }
+                if is_key_pressed(KeyCode::Key2) {
+                    settings.shading = ShadingMode::Flat;
+                    println!("Shading: Flat");
+                }
+                if is_key_pressed(KeyCode::Key3) {
+                    settings.shading = ShadingMode::Gouraud;
+                    println!("Shading: Gouraud");
+                }
+                if is_key_pressed(KeyCode::P) {
+                    settings.affine_textures = !settings.affine_textures;
+                    println!(
+                        "Textures: {}",
+                        if settings.affine_textures { "Affine (PS1)" } else { "Perspective-correct" }
+                    );
+                }
+                if is_key_pressed(KeyCode::J) {
+                    settings.vertex_snap = !settings.vertex_snap;
+                    println!(
+                        "Vertex snap: {}",
+                        if settings.vertex_snap { "ON (PS1 jitter)" } else { "OFF (smooth)" }
+                    );
+                }
+                if is_key_pressed(KeyCode::Z) {
+                    settings.use_zbuffer = !settings.use_zbuffer;
+                    println!(
+                        "Z-buffer: {}",
+                        if settings.use_zbuffer { "ON" } else { "OFF (painter's)" }
+                    );
+                }
+
+                // Camera rotation with right mouse button
+                if is_mouse_button_down(MouseButton::Right) {
+                    if mouse_captured {
+                        // Note: negated dx for non-inverted vertical look
+                        let dx = -(mouse_pos.1 - last_mouse_pos.1) * 0.005;
+                        let dy = (mouse_pos.0 - last_mouse_pos.0) * 0.005;
+                        camera.rotate(dx, dy);
+                    }
+                    mouse_captured = true;
+                } else {
+                    mouse_captured = false;
+                }
+                last_mouse_pos = mouse_pos;
+
+                // Camera movement (WASD + Q/E for vertical)
+                let move_speed = 0.05;
+                if is_key_down(KeyCode::W) {
+                    camera.position = camera.position + camera.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::S) {
+                    camera.position = camera.position - camera.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::A) {
+                    camera.position = camera.position - camera.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::D) {
+                    camera.position = camera.position + camera.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::Q) {
+                    camera.position = camera.position - camera.basis_y * move_speed;
+                }
+                if is_key_down(KeyCode::E) {
+                    camera.position = camera.position + camera.basis_y * move_speed;
+                }
+
+                // Update current room (with hint for faster lookup)
+                let new_room = level.find_room_at_with_hint(camera.position, current_room);
+                if new_room != current_room {
+                    if let Some(room_id) = new_room {
+                        println!("Entered room {}", room_id);
+                    }
+                    current_room = new_room;
+                }
+
+                // Clear framebuffer
+                fb.clear(RasterColor::new(20, 20, 30));
+
+                // Render the level (all rooms for now - portal culling comes later)
+                render_level(&mut fb, &level, &textures, &camera, &settings);
+
+                // Convert framebuffer to macroquad texture
+                let texture = framebuffer_to_texture(&fb);
+
+                // Draw to screen (scaled up)
+                clear_background(BLACK);
+
+                // Calculate scaled size maintaining aspect ratio
+                let screen_w = screen_width();
+                let screen_h = screen_height();
+                let scale = (screen_w / WIDTH as f32).min(screen_h / HEIGHT as f32);
+                let draw_w = WIDTH as f32 * scale;
+                let draw_h = HEIGHT as f32 * scale;
+                let draw_x = (screen_w - draw_w) / 2.0;
+                let draw_y = (screen_h - draw_h) / 2.0;
+
+                draw_texture_ex(
+                    &texture,
+                    draw_x,
+                    draw_y,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(Vec2::new(draw_w, draw_h)),
+                        ..Default::default()
+                    },
+                );
+
+                // Draw HUD
+                let room_text = match current_room {
+                    Some(id) => format!("Room: {}", id),
+                    None => "Room: outside".to_string(),
+                };
+                draw_text(&format!("FPS: {}", get_fps()), 10.0, 20.0, 20.0, WHITE);
+                draw_text(&room_text, 10.0, 40.0, 20.0, WHITE);
+                draw_text(
+                    &format!("Pos: ({:.1}, {:.1}, {:.1})", camera.position.x, camera.position.y, camera.position.z),
+                    10.0, 60.0, 20.0, WHITE
+                );
+                draw_text("[Esc] Editor", 10.0, 80.0, 16.0, Color::from_rgba(150, 150, 150, 255));
+
+                // Return to editor with Escape
+                if is_key_pressed(KeyCode::Escape) {
+                    mode = AppMode::Editor;
+                    println!("Switched to Editor mode");
+                }
+            }
+
+            AppMode::Editor => {
+                clear_background(Color::from_rgba(30, 30, 35, 255));
+
+                // Draw editor UI
+                let action = draw_editor(
+                    &mut ui_ctx,
+                    &mut editor_layout,
+                    &mut editor_state,
+                    &textures,
+                    &mut fb,
+                    &settings,
+                );
+
+                // Handle editor actions
+                if action == EditorAction::Play {
+                    mode = AppMode::Game;
+                    println!("Switched to Game mode");
+                }
+            }
+        }
 
         next_frame().await;
     }
