@@ -350,12 +350,19 @@ async fn main() {
                     }
                 }
 
+                // Build textures array from texture packs for editor rendering
+                let editor_textures: Vec<Texture> = editor_state.texture_packs
+                    .iter()
+                    .flat_map(|pack| &pack.textures)
+                    .cloned()
+                    .collect();
+
                 // Draw editor UI
                 let action = draw_editor(
                     &mut ui_ctx,
                     &mut editor_layout,
                     &mut editor_state,
-                    &textures,
+                    &editor_textures,
                     &mut fb,
                     &settings,
                 );
