@@ -413,40 +413,9 @@ pub fn draw_viewport_3d(
             }
             } // end of if state.tool == EditorTool::Select
             else if state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling {
-                // Cast ray from camera through mouse click to find where to place floor/ceiling
+                // Use grid search method to find where to place floor/ceiling
+                // This mirrors the vertex hover detection approach for accuracy
                 if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
-                    // Get camera parameters
-                    let camera_pos = state.camera_3d.position;
-                    let basis_x = state.camera_3d.basis_x;
-                    let basis_y = state.camera_3d.basis_y;
-                    let basis_z = state.camera_3d.basis_z;
-
-                    // Use same projection constants as world_to_screen
-                    const SCALE: f32 = 0.75;
-                    let vs = (fb.width.min(fb.height) as f32 / 2.0) * SCALE;
-                    let ud = 5.0;
-                    let us = ud - 1.0;
-
-                    // Convert framebuffer coords to normalized coords relative to center
-                    let norm_x = (mouse_fb_x - fb.width as f32 / 2.0) / vs;
-                    let norm_y = (mouse_fb_y - fb.height as f32 / 2.0) / vs;
-
-                    // Build ray in camera space
-                    // The projection is: sx = (cam_x * us / (cam_z + ud)) * vs + center
-                    // Inverting: (sx - center) / vs = (cam_x * us) / (cam_z + ud)
-                    // We want a direction, so we can set cam_z = us (depth = 1 in view space)
-                    let denom = us + ud;
-                    let ray_cam_x = norm_x * denom / us;
-                    let ray_cam_y = norm_y * denom / us;
-                    let ray_cam_z = 1.0; // Forward
-
-                    // Transform ray from camera space to world space
-                    let ray_dir = Vec3::new(
-                        ray_cam_x * basis_x.x + ray_cam_y * basis_y.x + ray_cam_z * basis_z.x,
-                        ray_cam_x * basis_x.y + ray_cam_y * basis_y.y + ray_cam_z * basis_z.y,
-                        ray_cam_x * basis_x.z + ray_cam_y * basis_y.z + ray_cam_z * basis_z.z,
-                    ).normalize();
-
                     // Determine target plane height
                     let target_y = if state.tool == EditorTool::DrawFloor {
                         0.0
@@ -454,23 +423,56 @@ pub fn draw_viewport_3d(
                         1024.0 // Ceiling height
                     };
 
-                    // Intersect ray with horizontal plane at target_y
-                    if ray_dir.y.abs() > 0.001 {
-                        let t = (target_y - camera_pos.y) / ray_dir.y;
+                    use super::SECTOR_SIZE;
 
-                        if t > 0.0 {
-                            let intersection = Vec3::new(
-                                camera_pos.x + t * ray_dir.x,
+                    // Search grid around camera position to find closest sector to mouse
+                    let search_radius = 20; // Number of sectors to search in each direction
+                    let mut closest_sector: Option<(f32, f32, f32)> = None; // (x, z, screen_distance)
+
+                    // Calculate starting search position (snap camera position to grid)
+                    let cam_x = state.camera_3d.position.x;
+                    let cam_z = state.camera_3d.position.z;
+                    let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+                    let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+
+                    // Sample grid positions and find which projects closest to mouse
+                    for ix in 0..(search_radius * 2) {
+                        for iz in 0..(search_radius * 2) {
+                            let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
+                            let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
+
+                            // Test the sector's center point
+                            let test_pos = Vec3::new(
+                                grid_x + SECTOR_SIZE / 2.0,
                                 target_y,
-                                camera_pos.z + t * ray_dir.z,
+                                grid_z + SECTOR_SIZE / 2.0,
                             );
 
-                            // Snap to TRLE sector grid
-                            use super::SECTOR_SIZE;
-                            let snapped_x = (intersection.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-                            let snapped_z = (intersection.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                            // Project to screen using the same function as vertex hover
+                            if let Some((sx, sy)) = world_to_screen(
+                                test_pos,
+                                state.camera_3d.position,
+                                state.camera_3d.basis_x,
+                                state.camera_3d.basis_y,
+                                state.camera_3d.basis_z,
+                                fb.width,
+                                fb.height,
+                            ) {
+                                // Calculate screen distance to mouse
+                                let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
 
-                            // Create floor or ceiling sector
+                                // Update closest if this is better
+                                if closest_sector.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                                    closest_sector = Some((grid_x, grid_z, dist));
+                                }
+                            }
+                        }
+                    }
+
+                    // Place sector at closest grid position if found within reasonable distance
+                    if let Some((snapped_x, snapped_z, dist)) = closest_sector {
+                        // Only place if mouse is reasonably close (within ~50 pixels)
+                        if dist < 100.0 {
                             state.save_undo();
                             if let Some(room) = state.level.rooms.get_mut(state.current_room) {
                                 use crate::world::FaceType;
