@@ -456,6 +456,14 @@ async fn main() {
                                     storage.set("_bonnie_export_filename", &filename);
                                 }
 
+                                // Call JS to trigger the download
+                                extern "C" {
+                                    fn bonnie_export_file();
+                                }
+                                unsafe {
+                                    bonnie_export_file();
+                                }
+
                                 editor_state.dirty = false;
                                 editor_state.set_status(&format!("Exported {}", filename), 3.0);
                             }

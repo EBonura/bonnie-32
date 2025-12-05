@@ -43,13 +43,35 @@
         document.getElementById('glcanvas').addEventListener('contextmenu', e => e.preventDefault());
 
         // Bonnie engine file import/export functions
+        // These use native browser localStorage directly
 
-        // Poll for export requests from Rust
-        setInterval(function() {
+        // Import: open file picker and store result in localStorage for Rust to read
+        window.bonnie_import_file = function() {
+            var input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.ron';
+            input.onchange = function(e) {
+                var file = e.target.files[0];
+                if (file) {
+                    var reader = new FileReader();
+                    reader.onload = function(e) {
+                        localStorage.setItem('_bonnie_import_data', e.target.result);
+                        localStorage.setItem('_bonnie_import_filename', file.name);
+                        localStorage.setItem('_bonnie_import_ready', 'true');
+                        console.log('Import: file loaded into localStorage:', file.name);
+                    };
+                    reader.readAsText(file);
+                }
+            };
+            input.click();
+        };
+
+        // Export: trigger download with data from localStorage
+        window.bonnie_export_file = function() {
             var exportData = localStorage.getItem('_bonnie_export_data');
             var exportFilename = localStorage.getItem('_bonnie_export_filename');
+            console.log('Export called, data length:', exportData ? exportData.length : 0, 'filename:', exportFilename);
             if (exportData && exportFilename) {
-                // Trigger download
                 var blob = new Blob([exportData], {type: 'text/plain'});
                 var url = URL.createObjectURL(blob);
                 var a = document.createElement('a');
@@ -63,27 +85,15 @@
                 localStorage.removeItem('_bonnie_export_data');
                 localStorage.removeItem('_bonnie_export_filename');
             }
-        }, 100);
-
-        // Import file function - called from Rust via extern "C"
-        window.bonnie_import_file = function() {
-            var input = document.createElement('input');
-            input.type = 'file';
-            input.accept = '.ron';
-            input.onchange = function(e) {
-                var file = e.target.files[0];
-                if (file) {
-                    var reader = new FileReader();
-                    reader.onload = function(e) {
-                        localStorage.setItem('_bonnie_import_data', e.target.result);
-                        localStorage.setItem('_bonnie_import_filename', file.name);
-                        localStorage.setItem('_bonnie_import_ready', 'true');
-                    };
-                    reader.readAsText(file);
-                }
-            };
-            input.click();
         };
+
+        // Register as WASM imports so Rust can call them
+        miniquad_add_plugin({
+            register_plugin: function(importObject) {
+                importObject.env.bonnie_import_file = window.bonnie_import_file;
+                importObject.env.bonnie_export_file = window.bonnie_export_file;
+            }
+        });
 
         load("bonnie-rs.wasm");
     </script>

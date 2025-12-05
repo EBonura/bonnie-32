@@ -140,11 +140,11 @@ fn draw_menu_bar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) -> Ed
 
     #[cfg(target_arch = "wasm32")]
     {
-        // Browser: import/export via JS
-        if toolbar.button(ctx, "Import", 50.0) {
+        // Browser: upload/download via JS
+        if toolbar.button(ctx, "Upload", 50.0) {
             action = EditorAction::Import;
         }
-        if toolbar.button(ctx, "Export", 50.0) {
+        if toolbar.button(ctx, "Download", 60.0) {
             action = EditorAction::Export;
         }
     }
@@ -396,7 +396,7 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
     #[cfg(not(target_arch = "wasm32"))]
     let hints = "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New";
     #[cfg(target_arch = "wasm32")]
-    let hints = "Ctrl+S: Export | Ctrl+O: Import | Ctrl+N: New";
+    let hints = "Ctrl+S: Download | Ctrl+O: Upload | Ctrl+N: New";
 
     let hint_width = hints.len() as f32 * 6.0; // Approximate width
     draw_text(
