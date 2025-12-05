@@ -1,4 +1,4 @@
-# bonnie-rs
+# Bonnie Engine
 
 **Live Demo:** [https://ebonura.github.io/bonnie-engine](https://ebonura.github.io/bonnie-engine)
 
