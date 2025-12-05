@@ -255,6 +255,7 @@ dependencies = [
  "quad-storage",
  "rfd",
  "ron",
+ "sapp-jsutils",
  "serde",
 ]
 

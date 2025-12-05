@@ -66,10 +66,20 @@
             input.click();
         };
 
-        // Export: trigger download with data from localStorage
+        // Export: receive data from Rust via sapp-jsutils JsObject
+        window._bonnie_pending_export = null;
+        window.bonnie_set_export_data = function(data_handle, filename_handle) {
+            // sapp-jsutils passes handles to JS objects stored in wasm_exports.js_objects
+            // We need to convert them to strings
+            var data = wasm_exports.js_objects[data_handle];
+            var filename = wasm_exports.js_objects[filename_handle];
+            console.log('bonnie_set_export_data called, data type:', typeof data, 'filename:', filename);
+            window._bonnie_pending_export = { data: data, filename: filename };
+        };
         window.bonnie_export_file = function() {
-            var exportData = localStorage.getItem('_bonnie_export_data');
-            var exportFilename = localStorage.getItem('_bonnie_export_filename');
+            var exportData = window._bonnie_pending_export ? window._bonnie_pending_export.data : null;
+            var exportFilename = window._bonnie_pending_export ? window._bonnie_pending_export.filename : null;
+
             console.log('Export called, data length:', exportData ? exportData.length : 0, 'filename:', exportFilename);
             if (exportData && exportFilename) {
                 var blob = new Blob([exportData], {type: 'text/plain'});
@@ -81,9 +91,7 @@
                 a.click();
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
-                // Clear the flags
-                localStorage.removeItem('_bonnie_export_data');
-                localStorage.removeItem('_bonnie_export_filename');
+                window._bonnie_pending_export = null;
             }
         };
 
@@ -91,6 +99,7 @@
         miniquad_add_plugin({
             register_plugin: function(importObject) {
                 importObject.env.bonnie_import_file = window.bonnie_import_file;
+                importObject.env.bonnie_set_export_data = window.bonnie_set_export_data;
                 importObject.env.bonnie_export_file = window.bonnie_export_file;
             }
         });

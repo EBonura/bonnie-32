@@ -449,18 +449,16 @@ async fn main() {
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_else(|| "level.ron".to_string());
 
-                                // Store data in localStorage, then call JS function to download
-                                {
-                                    let mut storage = quad_storage::STORAGE.lock().unwrap();
-                                    storage.set("_bonnie_export_data", &ron_str);
-                                    storage.set("_bonnie_export_filename", &filename);
-                                }
+                                // Pass data to JS using sapp-jsutils
+                                let data_js = sapp_jsutils::JsObject::string(&ron_str);
+                                let filename_js = sapp_jsutils::JsObject::string(&filename);
 
-                                // Call JS to trigger the download
                                 extern "C" {
+                                    fn bonnie_set_export_data(data: sapp_jsutils::JsObject, filename: sapp_jsutils::JsObject);
                                     fn bonnie_export_file();
                                 }
                                 unsafe {
+                                    bonnie_set_export_data(data_js, filename_js);
                                     bonnie_export_file();
                                 }
 
