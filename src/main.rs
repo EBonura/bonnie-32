@@ -290,25 +290,33 @@ async fn main() {
                 {
                     extern "C" {
                         fn bonnie_check_import() -> i32;
-                        fn bonnie_get_import_data() -> sapp_jsutils::JsObject;
-                        fn bonnie_get_import_filename() -> sapp_jsutils::JsObject;
+                        fn bonnie_get_import_data_len() -> usize;
+                        fn bonnie_get_import_filename_len() -> usize;
+                        fn bonnie_copy_import_data(ptr: *mut u8, max_len: usize) -> usize;
+                        fn bonnie_copy_import_filename(ptr: *mut u8, max_len: usize) -> usize;
                         fn bonnie_clear_import();
                     }
 
                     let has_import = unsafe { bonnie_check_import() };
 
                     if has_import != 0 {
-                        // Get the string data from JS
-                        let data_js = unsafe { bonnie_get_import_data() };
-                        let filename_js = unsafe { bonnie_get_import_filename() };
+                        // Get lengths first
+                        let data_len = unsafe { bonnie_get_import_data_len() };
+                        let filename_len = unsafe { bonnie_get_import_filename_len() };
 
-                        let mut data = String::new();
-                        let mut filename = String::new();
-                        data_js.to_string(&mut data);
-                        filename_js.to_string(&mut filename);
+                        // Allocate buffers and copy data
+                        let mut data_buf = vec![0u8; data_len];
+                        let mut filename_buf = vec![0u8; filename_len];
 
-                        // Clear the import data in localStorage
-                        unsafe { bonnie_clear_import(); }
+                        unsafe {
+                            bonnie_copy_import_data(data_buf.as_mut_ptr(), data_len);
+                            bonnie_copy_import_filename(filename_buf.as_mut_ptr(), filename_len);
+                            bonnie_clear_import();
+                        }
+
+                        // Convert to strings
+                        let data = String::from_utf8_lossy(&data_buf).to_string();
+                        let filename = String::from_utf8_lossy(&filename_buf).to_string();
 
                         // Parse the level data
                         match ron::from_str::<Level>(&data) {
@@ -455,14 +463,16 @@ async fn main() {
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_else(|| "level.ron".to_string());
 
-                                // Pass data to JS using sapp-jsutils and trigger download
+                                // Pass data to JS via raw pointers and trigger download
                                 extern "C" {
-                                    fn bonnie_download(data: sapp_jsutils::JsObject, filename: sapp_jsutils::JsObject);
+                                    fn bonnie_set_export_data(ptr: *const u8, len: usize);
+                                    fn bonnie_set_export_filename(ptr: *const u8, len: usize);
+                                    fn bonnie_trigger_download();
                                 }
-                                let data_js = sapp_jsutils::JsObject::string(&ron_str);
-                                let filename_js = sapp_jsutils::JsObject::string(&filename);
                                 unsafe {
-                                    bonnie_download(data_js, filename_js);
+                                    bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
+                                    bonnie_set_export_filename(filename.as_ptr(), filename.len());
+                                    bonnie_trigger_download();
                                 }
 
                                 editor_state.dirty = false;

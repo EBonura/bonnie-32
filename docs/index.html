@@ -66,14 +66,14 @@
             input.click();
         };
 
-        // Download: receive data from Rust via sapp-jsutils JsObject and trigger download
-        window.bonnie_download = function(data_handle, filename_handle) {
-            // sapp-jsutils passes handles to JS objects stored in wasm_exports.js_objects
-            var data = wasm_exports.js_objects[data_handle];
-            var filename = wasm_exports.js_objects[filename_handle];
-            console.log('bonnie_download called, data length:', data ? data.length : 0, 'filename:', filename);
+        // Download: check localStorage for export data and trigger download
+        // Called from Rust after writing data to localStorage
+        window.bonnie_trigger_download = function() {
+            var data = localStorage.getItem('_bonnie_export_data');
+            var filename = localStorage.getItem('_bonnie_export_filename') || 'level.ron';
+            console.log('bonnie_trigger_download called, data length:', data ? data.length : 0, 'filename:', filename);
 
-            if (data && filename) {
+            if (data) {
                 var blob = new Blob([data], {type: 'text/plain'});
                 var url = URL.createObjectURL(blob);
                 var a = document.createElement('a');
@@ -83,7 +83,28 @@
                 a.click();
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
+
+                // Clear the export data
+                localStorage.removeItem('_bonnie_export_data');
+                localStorage.removeItem('_bonnie_export_filename');
             }
+        };
+
+        // Set export data in localStorage (called from Rust via quad-storage or direct)
+        window.bonnie_set_export_data = function(ptr, len) {
+            // Read string from WASM memory
+            var bytes = new Uint8Array(wasm_exports.memory.buffer, ptr, len);
+            var data = new TextDecoder().decode(bytes);
+            localStorage.setItem('_bonnie_export_data', data);
+            console.log('bonnie_set_export_data: stored', len, 'bytes');
+        };
+
+        // Set export filename in localStorage
+        window.bonnie_set_export_filename = function(ptr, len) {
+            var bytes = new Uint8Array(wasm_exports.memory.buffer, ptr, len);
+            var filename = new TextDecoder().decode(bytes);
+            localStorage.setItem('_bonnie_export_filename', filename);
+            console.log('bonnie_set_export_filename:', filename);
         };
 
         // Check if import is ready
@@ -93,16 +114,36 @@
             return ready === 'true' ? 1 : 0;
         };
 
-        // Get the imported data string (call after check returns 1)
-        window.bonnie_get_import_data = function() {
+        // Get the length of imported data (for buffer allocation)
+        window.bonnie_get_import_data_len = function() {
             var data = localStorage.getItem('_bonnie_import_data') || '';
-            return data;
+            return data.length;
         };
 
-        // Get the imported filename string (call after check returns 1)
-        window.bonnie_get_import_filename = function() {
-            var filename = localStorage.getItem('_bonnie_import_filename') || 'imported.ron';
-            return filename;
+        // Get the length of imported filename (for buffer allocation)
+        window.bonnie_get_import_filename_len = function() {
+            var filename = localStorage.getItem('_bonnie_import_filename') || '';
+            return filename.length;
+        };
+
+        // Copy imported data to WASM memory buffer
+        window.bonnie_copy_import_data = function(ptr, max_len) {
+            var data = localStorage.getItem('_bonnie_import_data') || '';
+            var len = Math.min(data.length, max_len);
+            var bytes = new TextEncoder().encode(data);
+            var dest = new Uint8Array(wasm_exports.memory.buffer, ptr, len);
+            dest.set(bytes.subarray(0, len));
+            return len;
+        };
+
+        // Copy imported filename to WASM memory buffer
+        window.bonnie_copy_import_filename = function(ptr, max_len) {
+            var filename = localStorage.getItem('_bonnie_import_filename') || '';
+            var len = Math.min(filename.length, max_len);
+            var bytes = new TextEncoder().encode(filename);
+            var dest = new Uint8Array(wasm_exports.memory.buffer, ptr, len);
+            dest.set(bytes.subarray(0, len));
+            return len;
         };
 
         // Clear the import data (call after successfully reading)
@@ -117,11 +158,15 @@
         miniquad_add_plugin({
             register_plugin: function(importObject) {
                 importObject.env.bonnie_import_file = window.bonnie_import_file;
-                importObject.env.bonnie_download = window.bonnie_download;
                 importObject.env.bonnie_check_import = window.bonnie_check_import;
-                importObject.env.bonnie_get_import_data = window.bonnie_get_import_data;
-                importObject.env.bonnie_get_import_filename = window.bonnie_get_import_filename;
+                importObject.env.bonnie_get_import_data_len = window.bonnie_get_import_data_len;
+                importObject.env.bonnie_get_import_filename_len = window.bonnie_get_import_filename_len;
+                importObject.env.bonnie_copy_import_data = window.bonnie_copy_import_data;
+                importObject.env.bonnie_copy_import_filename = window.bonnie_copy_import_filename;
                 importObject.env.bonnie_clear_import = window.bonnie_clear_import;
+                importObject.env.bonnie_set_export_data = window.bonnie_set_export_data;
+                importObject.env.bonnie_set_export_filename = window.bonnie_set_export_filename;
+                importObject.env.bonnie_trigger_download = window.bonnie_trigger_download;
             }
         });
 
