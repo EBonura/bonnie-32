@@ -193,6 +193,20 @@ impl EditorState {
         state
     }
 
+    /// Load a new level, preserving view state (camera, zoom, etc.)
+    pub fn load_level(&mut self, level: Level, path: PathBuf) {
+        self.level = level;
+        self.current_file = Some(path);
+        self.dirty = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.selection = Selection::None;
+        // Clamp current_room to valid range
+        if self.current_room >= self.level.rooms.len() {
+            self.current_room = 0;
+        }
+    }
+
     /// Set a status message that will be displayed for a duration
     pub fn set_status(&mut self, message: &str, duration_secs: f64) {
         let expiry = macroquad::time::get_time() + duration_secs;

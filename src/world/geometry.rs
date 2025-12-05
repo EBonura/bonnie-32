@@ -269,15 +269,45 @@ impl Room {
     }
 }
 
+/// Editor layout configuration (saved with level)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorLayoutConfig {
+    /// Main horizontal split ratio (left panels | center+right)
+    pub main_split: f32,
+    /// Right split ratio (center viewport | right panels)
+    pub right_split: f32,
+    /// Left vertical split ratio (2D grid | room properties)
+    pub left_split: f32,
+    /// Right vertical split ratio (texture palette | properties)
+    pub right_panel_split: f32,
+}
+
+impl Default for EditorLayoutConfig {
+    fn default() -> Self {
+        Self {
+            main_split: 0.25,
+            right_split: 0.75,
+            left_split: 0.6,
+            right_panel_split: 0.6,
+        }
+    }
+}
+
 /// The entire level
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Level {
     pub rooms: Vec<Room>,
+    /// Editor layout configuration (optional, uses default if missing)
+    #[serde(default)]
+    pub editor_layout: EditorLayoutConfig,
 }
 
 impl Level {
     pub fn new() -> Self {
-        Self { rooms: Vec::new() }
+        Self {
+            rooms: Vec::new(),
+            editor_layout: EditorLayoutConfig::default(),
+        }
     }
 
     /// Add a room and return its index

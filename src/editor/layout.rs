@@ -43,6 +43,24 @@ impl EditorLayout {
             right_panel_split: SplitPanel::vertical(4).with_ratio(0.6).with_min_size(100.0),
         }
     }
+
+    /// Apply layout config from a level
+    pub fn apply_config(&mut self, config: &crate::world::EditorLayoutConfig) {
+        self.main_split.ratio = config.main_split;
+        self.right_split.ratio = config.right_split;
+        self.left_split.ratio = config.left_split;
+        self.right_panel_split.ratio = config.right_panel_split;
+    }
+
+    /// Extract current layout as a config (for saving with level)
+    pub fn to_config(&self) -> crate::world::EditorLayoutConfig {
+        crate::world::EditorLayoutConfig {
+            main_split: self.main_split.ratio,
+            right_split: self.right_split.ratio,
+            left_split: self.left_split.ratio,
+            right_panel_split: self.right_panel_split.ratio,
+        }
+    }
 }
 
 /// Draw the complete editor UI, returns action if triggered

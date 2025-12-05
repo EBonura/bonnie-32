@@ -321,7 +321,9 @@ async fn main() {
                         // Parse the level data
                         match ron::from_str::<Level>(&data) {
                             Ok(level) => {
-                                editor_state = EditorState::with_file(level, PathBuf::from(&filename));
+                                // Apply saved layout from level (or default if not present)
+                                editor_layout.apply_config(&level.editor_layout);
+                                editor_state.load_level(level, PathBuf::from(&filename));
                                 editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
                             }
                             Err(e) => {
@@ -351,10 +353,15 @@ async fn main() {
                         // Create a new empty level with one room
                         let new_level = create_empty_level();
                         editor_state = EditorState::new(new_level);
+                        // Reset layout to default for new level
+                        editor_layout.apply_config(&editor_state.level.editor_layout);
                         editor_state.set_status("Created new level", 3.0);
                         println!("Created new level");
                     }
                     EditorAction::Save => {
+                        // Save current layout to level before saving
+                        editor_state.level.editor_layout = editor_layout.to_config();
+
                         // Save to current file, or prompt for Save As if no file
                         if let Some(path) = &editor_state.current_file.clone() {
                             match save_level(&editor_state.level, path) {
@@ -391,6 +398,9 @@ async fn main() {
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     EditorAction::SaveAs => {
+                        // Save current layout to level before saving
+                        editor_state.level.editor_layout = editor_layout.to_config();
+
                         // Show native save dialog (blocking on macOS)
                         let default_dir = PathBuf::from("assets/levels");
                         let _ = std::fs::create_dir_all(&default_dir);
@@ -416,6 +426,8 @@ async fn main() {
                         } else {
                             editor_state.set_status("Save cancelled", 2.0);
                         }
+                        // Reset layout to default after blocking dialog (mouse state may be stale)
+                        editor_layout.apply_config(&editor_state.level.editor_layout);
                     }
                     #[cfg(target_arch = "wasm32")]
                     EditorAction::SaveAs => {
@@ -434,7 +446,9 @@ async fn main() {
                         if let Some(path) = dialog.pick_file() {
                             match load_level(&path) {
                                 Ok(level) => {
-                                    editor_state = EditorState::with_file(level, path.clone());
+                                    // Apply saved layout from level (or default if not present)
+                                    editor_layout.apply_config(&level.editor_layout);
+                                    editor_state.load_level(level, path.clone());
                                     editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
                                     println!("Loaded level from {}", path.display());
                                 }
@@ -449,10 +463,13 @@ async fn main() {
                     }
                     #[cfg(target_arch = "wasm32")]
                     EditorAction::PromptLoad => {
-                        editor_state.set_status("Open not available in browser - use Import", 3.0);
+                        editor_state.set_status("Open not available in browser - use Upload", 3.0);
                     }
                     #[cfg(target_arch = "wasm32")]
                     EditorAction::Export => {
+                        // Save current layout to level before exporting
+                        editor_state.level.editor_layout = editor_layout.to_config();
+
                         // Serialize level to RON string
                         match ron::ser::to_string_pretty(&editor_state.level, ron::ser::PrettyConfig::default()) {
                             Ok(ron_str) => {
@@ -507,7 +524,9 @@ async fn main() {
                         let path = PathBuf::from(&path_str);
                         match load_level(&path) {
                             Ok(level) => {
-                                editor_state = EditorState::with_file(level, path.clone());
+                                // Apply saved layout from level (or default if not present)
+                                editor_layout.apply_config(&level.editor_layout);
+                                editor_state.load_level(level, path.clone());
                                 editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
                                 println!("Loaded level from {}", path.display());
                             }
