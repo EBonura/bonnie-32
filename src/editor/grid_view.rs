@@ -62,10 +62,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     let center_y = rect.y + rect.h * 0.5 + state.grid_offset_y;
     let scale = state.grid_zoom;
 
-    // World to screen conversion (X-Z plane, Y is up)
+    // World to screen conversion (X-Z plane, viewing from top)
     let world_to_screen = |wx: f32, wz: f32| -> (f32, f32) {
         let sx = center_x + wx * scale;
-        let sy = center_y + wz * scale; // Z maps to screen Y
+        let sy = center_y - wz * scale; // Negated Z for top-down view
         (sx, sy)
     };
 
@@ -74,11 +74,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         let grid_color = Color::from_rgba(40, 40, 45, 255);
         let grid_step = state.grid_size;
 
-        // Calculate visible grid range
+        // Calculate visible grid range (negated Z for top-down view)
         let min_wx = (rect.x - center_x) / scale;
         let max_wx = (rect.right() - center_x) / scale;
-        let min_wz = (rect.y - center_y) / scale;
-        let max_wz = (rect.bottom() - center_y) / scale;
+        let min_wz = -(rect.bottom() - center_y) / scale; // Swapped and negated
+        let max_wz = -(rect.y - center_y) / scale;
 
         // Vertical lines
         let start_x = (min_wx / grid_step).floor() * grid_step;
@@ -357,7 +357,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
                 // Move vertex to mouse position (convert screen to world)
                 let wx = (mouse_pos.0 - center_x) / scale;
-                let wz = (mouse_pos.1 - center_y) / scale;
+                let wz = -(mouse_pos.1 - center_y) / scale; // Negated for top-down view
 
                 // Snap to TRLE sector grid (1024 units)
                 let snapped_x = (wx / SECTOR_SIZE).round() * SECTOR_SIZE;
