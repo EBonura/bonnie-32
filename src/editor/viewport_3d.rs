@@ -4,6 +4,7 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext};
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, RasterSettings, render_mesh, Color as RasterColor, Vec3,
+    perspective_transform,
 };
 use super::{EditorState, Selection, CLICK_HEIGHT};
 
@@ -240,12 +241,34 @@ pub fn draw_viewport_3d(
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             for (room_idx, room) in state.level.rooms.iter().enumerate() {
                 for (face_idx, face) in room.faces.iter().enumerate() {
-                    // Project all 4 vertices
+                    // Get world positions
                     let v0 = room.vertices[face.indices[0]] + room.position;
                     let v1 = room.vertices[face.indices[1]] + room.position;
                     let v2 = room.vertices[face.indices[2]] + room.position;
                     let v3 = room.vertices[face.indices[3]] + room.position;
 
+                    // Transform to camera space for backface culling
+                    let rel0 = v0 - state.camera_3d.position;
+                    let rel1 = v1 - state.camera_3d.position;
+                    let rel2 = v2 - state.camera_3d.position;
+
+                    let cv0 = perspective_transform(rel0, state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z);
+                    let cv1 = perspective_transform(rel1, state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z);
+                    let cv2 = perspective_transform(rel2, state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z);
+
+                    // Calculate face normal in camera space
+                    let edge1 = cv1 - cv0;
+                    let edge2 = cv2 - cv0;
+                    let normal = edge1.cross(edge2);
+
+                    // Backface culling - skip faces pointing away from camera
+                    // In our coordinate system, +Z is forward (camera looks down +Z axis)
+                    // Skip if normal.z > 0 (face pointing away)
+                    if normal.z > 0.0 {
+                        continue;
+                    }
+
+                    // Project vertices to screen
                     if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
                         world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
                             state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
