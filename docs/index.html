@@ -41,6 +41,50 @@
     <script src="mq_js_bundle.js"></script>
     <script>
         document.getElementById('glcanvas').addEventListener('contextmenu', e => e.preventDefault());
+
+        // Bonnie engine file import/export functions
+
+        // Poll for export requests from Rust
+        setInterval(function() {
+            var exportData = localStorage.getItem('_bonnie_export_data');
+            var exportFilename = localStorage.getItem('_bonnie_export_filename');
+            if (exportData && exportFilename) {
+                // Trigger download
+                var blob = new Blob([exportData], {type: 'text/plain'});
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = exportFilename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                // Clear the flags
+                localStorage.removeItem('_bonnie_export_data');
+                localStorage.removeItem('_bonnie_export_filename');
+            }
+        }, 100);
+
+        // Import file function - called from Rust via extern "C"
+        window.bonnie_import_file = function() {
+            var input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.ron';
+            input.onchange = function(e) {
+                var file = e.target.files[0];
+                if (file) {
+                    var reader = new FileReader();
+                    reader.onload = function(e) {
+                        localStorage.setItem('_bonnie_import_data', e.target.result);
+                        localStorage.setItem('_bonnie_import_filename', file.name);
+                        localStorage.setItem('_bonnie_import_ready', 'true');
+                    };
+                    reader.readAsText(file);
+                }
+            };
+            input.click();
+        };
+
         load("bonnie-rs.wasm");
     </script>
 </body>

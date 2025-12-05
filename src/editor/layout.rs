@@ -18,6 +18,8 @@ pub enum EditorAction {
     SaveAs,
     Load(String), // Path to load
     PromptLoad,   // Show file prompt
+    Export,       // Browser: download as file
+    Import,       // Browser: upload file
 }
 
 /// Editor layout state (split panel ratios)
@@ -117,18 +119,34 @@ fn draw_menu_bar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) -> Ed
     let mut action = EditorAction::None;
     let mut toolbar = Toolbar::new(rect);
 
-    // File operations
+    // File operations - platform-specific buttons
     if toolbar.button(ctx, "New", 35.0) {
         action = EditorAction::New;
     }
-    if toolbar.button(ctx, "Open", 40.0) {
-        action = EditorAction::PromptLoad;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Desktop: native file dialogs
+        if toolbar.button(ctx, "Open", 40.0) {
+            action = EditorAction::PromptLoad;
+        }
+        if toolbar.button(ctx, "Save", 40.0) {
+            action = EditorAction::Save;
+        }
+        if toolbar.button(ctx, "Save As", 55.0) {
+            action = EditorAction::SaveAs;
+        }
     }
-    if toolbar.button(ctx, "Save", 40.0) {
-        action = EditorAction::Save;
-    }
-    if toolbar.button(ctx, "Save As", 55.0) {
-        action = EditorAction::SaveAs;
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Browser: import/export via JS
+        if toolbar.button(ctx, "Import", 50.0) {
+            action = EditorAction::Import;
+        }
+        if toolbar.button(ctx, "Export", 50.0) {
+            action = EditorAction::Export;
+        }
     }
 
     toolbar.separator();
@@ -156,13 +174,25 @@ fn draw_menu_bar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) -> Ed
     if ctrl && is_key_pressed(KeyCode::N) {
         action = EditorAction::New;
     }
-    if ctrl && is_key_pressed(KeyCode::O) {
-        action = EditorAction::PromptLoad;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if ctrl && is_key_pressed(KeyCode::O) {
+            action = EditorAction::PromptLoad;
+        }
+        if ctrl && shift && is_key_pressed(KeyCode::S) {
+            action = EditorAction::SaveAs;
+        } else if ctrl && is_key_pressed(KeyCode::S) {
+            action = EditorAction::Save;
+        }
     }
-    if ctrl && shift && is_key_pressed(KeyCode::S) {
-        action = EditorAction::SaveAs;
-    } else if ctrl && is_key_pressed(KeyCode::S) {
-        action = EditorAction::Save;
+    #[cfg(target_arch = "wasm32")]
+    {
+        if ctrl && is_key_pressed(KeyCode::O) {
+            action = EditorAction::Import;
+        }
+        if ctrl && is_key_pressed(KeyCode::S) {
+            action = EditorAction::Export;
+        }
     }
     if ctrl && is_key_pressed(KeyCode::Z) {
         if shift {
@@ -362,8 +392,12 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
 
     draw_text(&status, (rect.x + 8.0).floor(), (rect.y + 15.0).floor(), 16.0, WHITE);
 
-    // Show keyboard shortcuts hint on the right
+    // Show keyboard shortcuts hint on the right (platform-specific)
+    #[cfg(not(target_arch = "wasm32"))]
     let hints = "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New";
+    #[cfg(target_arch = "wasm32")]
+    let hints = "Ctrl+S: Export | Ctrl+O: Import | Ctrl+N: New";
+
     let hint_width = hints.len() as f32 * 6.0; // Approximate width
     draw_text(
         hints,

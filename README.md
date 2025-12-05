@@ -55,7 +55,7 @@ This project uses the following free texture packs:
 
 ## Roadmap
 
-- [ ] Cross-platform file save/load (browser and desktop)
+- [x] Cross-platform file save/load (browser: Import/Export, desktop: Open/Save As)
 - [ ] Audio system with sequencer/tracker
 - [ ] Particle system (dust, sparks, blood splatter)
 - [ ] Sprite/billboard rendering (classic PS1 technique for trees, items, enemies)

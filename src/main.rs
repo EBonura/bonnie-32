@@ -285,6 +285,38 @@ async fn main() {
             AppMode::Editor => {
                 clear_background(Color::from_rgba(30, 30, 35, 255));
 
+                // Check for pending import from browser (WASM only)
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // Check if import is ready via quad-storage (set by JS in index.html)
+                    if quad_storage::STORAGE.lock().unwrap().get("_bonnie_import_ready") == Some("true".to_string()) {
+                        if let Some(data) = quad_storage::STORAGE.lock().unwrap().get("_bonnie_import_data") {
+                            let filename = quad_storage::STORAGE.lock().unwrap()
+                                .get("_bonnie_import_filename")
+                                .unwrap_or_else(|| "imported.ron".to_string());
+
+                            // Clear the import flags
+                            {
+                                let mut storage = quad_storage::STORAGE.lock().unwrap();
+                                storage.remove("_bonnie_import_ready");
+                                storage.remove("_bonnie_import_data");
+                                storage.remove("_bonnie_import_filename");
+                            }
+
+                            // Parse the level data
+                            match ron::from_str::<Level>(&data) {
+                                Ok(level) => {
+                                    editor_state = EditorState::with_file(level, PathBuf::from(&filename));
+                                    editor_state.set_status(&format!("Imported {}", filename), 3.0);
+                                }
+                                Err(e) => {
+                                    editor_state.set_status(&format!("Import failed: {}", e), 5.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Draw editor UI
                 let action = draw_editor(
                     &mut ui_ctx,
@@ -403,7 +435,54 @@ async fn main() {
                     }
                     #[cfg(target_arch = "wasm32")]
                     EditorAction::PromptLoad => {
-                        editor_state.set_status("Open not available in browser", 3.0);
+                        editor_state.set_status("Open not available in browser - use Import", 3.0);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    EditorAction::Export => {
+                        // Serialize level to RON string
+                        match ron::ser::to_string_pretty(&editor_state.level, ron::ser::PrettyConfig::default()) {
+                            Ok(ron_str) => {
+                                // Trigger browser download via JS
+                                let filename = editor_state.current_file
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "level.ron".to_string());
+
+                                // Store data in localStorage, then call JS function to download
+                                {
+                                    let mut storage = quad_storage::STORAGE.lock().unwrap();
+                                    storage.set("_bonnie_export_data", &ron_str);
+                                    storage.set("_bonnie_export_filename", &filename);
+                                }
+
+                                editor_state.dirty = false;
+                                editor_state.set_status(&format!("Exported {}", filename), 3.0);
+                            }
+                            Err(e) => {
+                                editor_state.set_status(&format!("Export failed: {}", e), 5.0);
+                            }
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    EditorAction::Export => {
+                        editor_state.set_status("Export is for browser - use Save As", 3.0);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    EditorAction::Import => {
+                        // Trigger the file input via JS (defined in index.html)
+                        // The import is handled asynchronously at the start of the editor loop
+                        extern "C" {
+                            fn bonnie_import_file();
+                        }
+                        unsafe {
+                            bonnie_import_file();
+                        }
+                        editor_state.set_status("Select a .ron file to import...", 3.0);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    EditorAction::Import => {
+                        editor_state.set_status("Import is for browser - use Open", 3.0);
                     }
                     EditorAction::Load(path_str) => {
                         let path = PathBuf::from(&path_str);
