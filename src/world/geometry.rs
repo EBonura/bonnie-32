@@ -344,19 +344,20 @@ impl Level {
 }
 
 /// Create an empty level with a single starter room (floor only)
+/// Uses TRLE sector size (1024 units) for proper grid alignment
 pub fn create_empty_level() -> Level {
     let mut level = Level::new();
 
-    // Create a single starter room with just a floor
+    // Create a single starter room with one sector floor
     let mut room0 = Room::new(0, Vec3::ZERO);
 
-    // Floor vertices (y = 0, 4x4 floor)
-    let f0 = room0.add_vertex(-2.0, 0.0, -2.0);
-    let f1 = room0.add_vertex(2.0, 0.0, -2.0);
-    let f2 = room0.add_vertex(2.0, 0.0, 2.0);
-    let f3 = room0.add_vertex(-2.0, 0.0, 2.0);
+    // Floor vertices - single 1024×1024 TRLE sector at y = 0
+    let f0 = room0.add_vertex(0.0, 0.0, 0.0);
+    let f1 = room0.add_vertex(1024.0, 0.0, 0.0);
+    let f2 = room0.add_vertex(1024.0, 0.0, 1024.0);
+    let f3 = room0.add_vertex(0.0, 0.0, 1024.0);
 
-    // Just a floor face
+    // Floor face
     room0.add_quad(f0, f1, f2, f3, 0);
 
     room0.recalculate_bounds();
@@ -366,23 +367,24 @@ pub fn create_empty_level() -> Level {
 }
 
 /// Create a simple test level with two connected rooms
+/// Uses TRLE sector sizes (1024 units per sector)
 pub fn create_test_level() -> Level {
     let mut level = Level::new();
 
-    // Room 0: Main room (4x3x4 units)
+    // Room 0: Single sector room (1024×1024, height 1024 = 4 clicks)
     let mut room0 = Room::new(0, Vec3::ZERO);
 
     // Floor vertices (y = 0)
-    let f0 = room0.add_vertex(-2.0, 0.0, -2.0);
-    let f1 = room0.add_vertex(2.0, 0.0, -2.0);
-    let f2 = room0.add_vertex(2.0, 0.0, 2.0);
-    let f3 = room0.add_vertex(-2.0, 0.0, 2.0);
+    let f0 = room0.add_vertex(0.0, 0.0, 0.0);
+    let f1 = room0.add_vertex(1024.0, 0.0, 0.0);
+    let f2 = room0.add_vertex(1024.0, 0.0, 1024.0);
+    let f3 = room0.add_vertex(0.0, 0.0, 1024.0);
 
-    // Ceiling vertices (y = 3)
-    let c0 = room0.add_vertex(-2.0, 3.0, -2.0);
-    let c1 = room0.add_vertex(2.0, 3.0, -2.0);
-    let c2 = room0.add_vertex(2.0, 3.0, 2.0);
-    let c3 = room0.add_vertex(-2.0, 3.0, 2.0);
+    // Ceiling vertices (y = 1024 = 4 clicks high)
+    let c0 = room0.add_vertex(0.0, 1024.0, 0.0);
+    let c1 = room0.add_vertex(1024.0, 1024.0, 0.0);
+    let c2 = room0.add_vertex(1024.0, 1024.0, 1024.0);
+    let c3 = room0.add_vertex(0.0, 1024.0, 1024.0);
 
     // Floor
     room0.add_quad(f0, f1, f2, f3, 0);
@@ -390,109 +392,18 @@ pub fn create_test_level() -> Level {
     // Ceiling
     room0.add_quad(c3, c2, c1, c0, 0);
 
-    // Walls (excluding the portal wall on +Z side)
-    // Back wall (-Z)
+    // Four walls
+    // Wall at Z=0 (-Z side)
     room0.add_quad(f0, c0, c1, f1, 0);
-    // Left wall (-X)
+    // Wall at X=0 (-X side)
     room0.add_quad(f3, c3, c0, f0, 0);
-    // Right wall (+X)
+    // Wall at X=1024 (+X side)
     room0.add_quad(f1, c1, c2, f2, 0);
-    // Front wall (+Z) - partial, with portal opening in center
-    // Left section
-    let pw0 = room0.add_vertex(-2.0, 0.0, 2.0); // Same as f3
-    let pw1 = room0.add_vertex(-0.8, 0.0, 2.0);
-    let pw2 = room0.add_vertex(-0.8, 2.5, 2.0);
-    let pw3 = room0.add_vertex(-2.0, 2.5, 2.0);
-    room0.add_quad(pw0, pw1, pw2, pw3, 0);
-    // Right section
-    let pw4 = room0.add_vertex(0.8, 0.0, 2.0);
-    let pw5 = room0.add_vertex(2.0, 0.0, 2.0); // Same as f2
-    let pw6 = room0.add_vertex(2.0, 2.5, 2.0);
-    let pw7 = room0.add_vertex(0.8, 2.5, 2.0);
-    room0.add_quad(pw4, pw5, pw6, pw7, 0);
-    // Top section (above portal)
-    let pw8 = room0.add_vertex(-2.0, 2.5, 2.0);
-    let pw9 = room0.add_vertex(2.0, 2.5, 2.0);
-    let pw10 = room0.add_vertex(2.0, 3.0, 2.0);
-    let pw11 = room0.add_vertex(-2.0, 3.0, 2.0);
-    room0.add_quad(pw8, pw9, pw10, pw11, 0);
+    // Wall at Z=1024 (+Z side)
+    room0.add_quad(f2, c2, c3, f3, 0);
 
-    // Portal to room 1
-    room0.add_portal(
-        1,
-        [
-            Vec3::new(-0.8, 0.0, 2.0),
-            Vec3::new(0.8, 0.0, 2.0),
-            Vec3::new(0.8, 2.5, 2.0),
-            Vec3::new(-0.8, 2.5, 2.0),
-        ],
-        Vec3::new(0.0, 0.0, 1.0), // Portal faces +Z
-    );
-
+    room0.recalculate_bounds();
     level.add_room(room0);
-
-    // Room 1: Connected room (offset on +Z axis)
-    let mut room1 = Room::new(1, Vec3::new(0.0, 0.0, 4.0));
-
-    // Floor vertices
-    let f0 = room1.add_vertex(-2.0, 0.0, 0.0);
-    let f1 = room1.add_vertex(2.0, 0.0, 0.0);
-    let f2 = room1.add_vertex(2.0, 0.0, 3.0);
-    let f3 = room1.add_vertex(-2.0, 0.0, 3.0);
-
-    // Ceiling vertices
-    let c0 = room1.add_vertex(-2.0, 3.0, 0.0);
-    let c1 = room1.add_vertex(2.0, 3.0, 0.0);
-    let c2 = room1.add_vertex(2.0, 3.0, 3.0);
-    let c3 = room1.add_vertex(-2.0, 3.0, 3.0);
-
-    // Floor (different texture)
-    room1.add_quad(f0, f1, f2, f3, 1);
-
-    // Ceiling
-    room1.add_quad(c3, c2, c1, c0, 1);
-
-    // Walls
-    // Back wall (portal side, -Z relative to room) - partial
-    // Left section
-    let pw0 = room1.add_vertex(-2.0, 0.0, 0.0);
-    let pw1 = room1.add_vertex(-0.8, 0.0, 0.0);
-    let pw2 = room1.add_vertex(-0.8, 2.5, 0.0);
-    let pw3 = room1.add_vertex(-2.0, 2.5, 0.0);
-    room1.add_quad(pw3, pw2, pw1, pw0, 1); // Reversed winding (faces -Z)
-    // Right section
-    let pw4 = room1.add_vertex(0.8, 0.0, 0.0);
-    let pw5 = room1.add_vertex(2.0, 0.0, 0.0);
-    let pw6 = room1.add_vertex(2.0, 2.5, 0.0);
-    let pw7 = room1.add_vertex(0.8, 2.5, 0.0);
-    room1.add_quad(pw7, pw6, pw5, pw4, 1);
-    // Top section
-    let pw8 = room1.add_vertex(-2.0, 2.5, 0.0);
-    let pw9 = room1.add_vertex(2.0, 2.5, 0.0);
-    let pw10 = room1.add_vertex(2.0, 3.0, 0.0);
-    let pw11 = room1.add_vertex(-2.0, 3.0, 0.0);
-    room1.add_quad(pw11, pw10, pw9, pw8, 1);
-
-    // Left wall
-    room1.add_quad(f0, c0, c3, f3, 1);
-    // Right wall
-    room1.add_quad(f2, c2, c1, f1, 1);
-    // Far wall (+Z)
-    room1.add_quad(f3, c3, c2, f2, 1);
-
-    // Portal back to room 0
-    room1.add_portal(
-        0,
-        [
-            Vec3::new(0.8, 0.0, 0.0),
-            Vec3::new(-0.8, 0.0, 0.0),
-            Vec3::new(-0.8, 2.5, 0.0),
-            Vec3::new(0.8, 2.5, 0.0),
-        ],
-        Vec3::new(0.0, 0.0, -1.0), // Portal faces -Z
-    );
-
-    level.add_room(room1);
 
     level
 }
