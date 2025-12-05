@@ -426,10 +426,11 @@ pub fn create_empty_level() -> Level {
     let mut room0 = Room::new(0, Vec3::ZERO);
 
     // Floor vertices - single 1024×1024 TRLE sector at y = 0
+    // Counter-clockwise winding when viewed from above (for correct normal direction)
     let f0 = room0.add_vertex(0.0, 0.0, 0.0);
-    let f1 = room0.add_vertex(1024.0, 0.0, 0.0);
+    let f1 = room0.add_vertex(0.0, 0.0, 1024.0);
     let f2 = room0.add_vertex(1024.0, 0.0, 1024.0);
-    let f3 = room0.add_vertex(0.0, 0.0, 1024.0);
+    let f3 = room0.add_vertex(1024.0, 0.0, 0.0);
 
     // Floor face with SAMPLE texture (first texture in SAMPLE pack)
     // If SAMPLE pack doesn't exist or texture doesn't exist, will fall back to checkerboard
