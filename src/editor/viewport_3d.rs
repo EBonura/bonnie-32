@@ -100,7 +100,6 @@ pub fn draw_viewport_3d(
     } else if !ctx.mouse.right_down {
         state.viewport_mouse_captured = false;
     }
-    state.viewport_last_mouse = mouse_pos;
 
     // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
     let move_speed = 100.0; // Scaled for TRLE units (1024 per sector)
@@ -261,6 +260,9 @@ pub fn draw_viewport_3d(
             }
         }
     }
+
+    // Update mouse position for next frame (after all mouse interaction logic)
+    state.viewport_last_mouse = mouse_pos;
 
     // Clear framebuffer
     fb.clear(RasterColor::new(30, 30, 40));
