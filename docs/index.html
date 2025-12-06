@@ -229,29 +229,31 @@
                 var ctx = AudioOutput.ensureContext();
                 if (!ctx) return;
 
+                var now = ctx.currentTime;
+
+                // Don't queue too far ahead (max 100ms buffer)
+                if (AudioOutput.nextStartTime > now + 0.1) {
+                    return; // Already have enough buffered
+                }
+
                 // Copy samples from WASM memory (must copy, not view, as memory may move)
                 var leftView = new Float32Array(wasm_exports.memory.buffer, leftPtr, len);
                 var rightView = new Float32Array(wasm_exports.memory.buffer, rightPtr, len);
 
                 // Check if there's any non-zero audio (skip silence)
                 var hasAudio = false;
-                var maxSample = 0;
-                for (var i = 0; i < len; i++) {
-                    var absLeft = Math.abs(leftView[i]);
-                    var absRight = Math.abs(rightView[i]);
-                    if (absLeft > maxSample) maxSample = absLeft;
-                    if (absRight > maxSample) maxSample = absRight;
-                    if (absLeft > 0.0001 || absRight > 0.0001) {
+                for (var i = 0; i < len; i += 32) {
+                    if (Math.abs(leftView[i]) > 0.0001 || Math.abs(rightView[i]) > 0.0001) {
                         hasAudio = true;
+                        break;
                     }
                 }
 
-                if (hasAudio && !AudioOutput.logged) {
-                    console.log('Audio detected! max sample:', maxSample, 'len:', len, 'ctx state:', ctx.state);
-                    AudioOutput.logged = true;
+                if (!hasAudio) {
+                    // Reset scheduling when silent so next sound plays immediately
+                    AudioOutput.nextStartTime = now;
+                    return;
                 }
-
-                if (!hasAudio) return; // Don't queue silence
 
                 // Copy the data
                 var leftData = new Float32Array(len);
@@ -269,15 +271,12 @@
                 source.connect(ctx.destination);
 
                 // Schedule seamlessly after previous buffer
-                var now = ctx.currentTime;
                 if (AudioOutput.nextStartTime < now) {
-                    AudioOutput.nextStartTime = now + 0.01; // Small delay to avoid clicks
+                    AudioOutput.nextStartTime = now;
                 }
                 source.start(AudioOutput.nextStartTime);
                 AudioOutput.nextStartTime += buffer.duration;
-            },
-
-            logged: false
+            }
         };
 
         // =============================================================================
