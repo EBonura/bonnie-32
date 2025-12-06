@@ -196,25 +196,31 @@
         var AudioOutput = {
             ctx: null,
             sampleRate: 44100,
-            bufferSize: 4096,
+            pendingBuffers: [],
+            isPlaying: false,
             nextStartTime: 0,
 
             init: function(sampleRate) {
                 AudioOutput.sampleRate = sampleRate;
-                // Don't create context here - browsers require user gesture
                 console.log('Audio output initialized, sample rate:', sampleRate);
             },
 
             ensureContext: function() {
                 if (!AudioOutput.ctx) {
-                    AudioOutput.ctx = new (window.AudioContext || window.webkitAudioContext)({
-                        sampleRate: AudioOutput.sampleRate
-                    });
-                    AudioOutput.nextStartTime = AudioOutput.ctx.currentTime;
-                    console.log('AudioContext created');
+                    try {
+                        AudioOutput.ctx = new (window.AudioContext || window.webkitAudioContext)({
+                            sampleRate: AudioOutput.sampleRate
+                        });
+                        console.log('AudioContext created, state:', AudioOutput.ctx.state);
+                    } catch (e) {
+                        console.error('Failed to create AudioContext:', e);
+                        return null;
+                    }
                 }
                 if (AudioOutput.ctx.state === 'suspended') {
-                    AudioOutput.ctx.resume();
+                    AudioOutput.ctx.resume().then(function() {
+                        console.log('AudioContext resumed');
+                    });
                 }
                 return AudioOutput.ctx;
             },
@@ -223,28 +229,55 @@
                 var ctx = AudioOutput.ensureContext();
                 if (!ctx) return;
 
-                // Read samples from WASM memory
-                var leftData = new Float32Array(wasm_exports.memory.buffer, leftPtr, len);
-                var rightData = new Float32Array(wasm_exports.memory.buffer, rightPtr, len);
+                // Copy samples from WASM memory (must copy, not view, as memory may move)
+                var leftView = new Float32Array(wasm_exports.memory.buffer, leftPtr, len);
+                var rightView = new Float32Array(wasm_exports.memory.buffer, rightPtr, len);
 
-                // Create audio buffer
+                // Check if there's any non-zero audio (skip silence)
+                var hasAudio = false;
+                var maxSample = 0;
+                for (var i = 0; i < len; i++) {
+                    var absLeft = Math.abs(leftView[i]);
+                    var absRight = Math.abs(rightView[i]);
+                    if (absLeft > maxSample) maxSample = absLeft;
+                    if (absRight > maxSample) maxSample = absRight;
+                    if (absLeft > 0.0001 || absRight > 0.0001) {
+                        hasAudio = true;
+                    }
+                }
+
+                if (hasAudio && !AudioOutput.logged) {
+                    console.log('Audio detected! max sample:', maxSample, 'len:', len, 'ctx state:', ctx.state);
+                    AudioOutput.logged = true;
+                }
+
+                if (!hasAudio) return; // Don't queue silence
+
+                // Copy the data
+                var leftData = new Float32Array(len);
+                var rightData = new Float32Array(len);
+                leftData.set(leftView);
+                rightData.set(rightView);
+
+                // Create and schedule audio buffer
                 var buffer = ctx.createBuffer(2, len, AudioOutput.sampleRate);
                 buffer.getChannelData(0).set(leftData);
                 buffer.getChannelData(1).set(rightData);
 
-                // Schedule playback
                 var source = ctx.createBufferSource();
                 source.buffer = buffer;
                 source.connect(ctx.destination);
 
-                // Schedule seamlessly
+                // Schedule seamlessly after previous buffer
                 var now = ctx.currentTime;
                 if (AudioOutput.nextStartTime < now) {
-                    AudioOutput.nextStartTime = now;
+                    AudioOutput.nextStartTime = now + 0.01; // Small delay to avoid clicks
                 }
                 source.start(AudioOutput.nextStartTime);
                 AudioOutput.nextStartTime += buffer.duration;
-            }
+            },
+
+            logged: false
         };
 
         // =============================================================================
