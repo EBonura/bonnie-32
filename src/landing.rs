@@ -26,6 +26,9 @@ impl LandingState {
 
 /// Draw the landing page
 pub fn draw_landing(rect: Rect, state: &mut LandingState) {
+    // DPI scale for high-DPI displays (layout only, not font sizes)
+    let dpi = screen_dpi_scale();
+
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
@@ -34,7 +37,21 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState) {
     state.scroll_y += scroll_delta;
     state.scroll_y = state.scroll_y.min(0.0); // Can't scroll above top
 
-    // Content area with padding - use integer positions for crisp text
+    // Enable scissor clipping to prevent content from overflowing into tab bar
+    // Scissor uses physical pixels, so scale by DPI
+    gl_use_default_material();
+    unsafe {
+        get_internal_gl().quad_gl.scissor(
+            Some((
+                (rect.x * dpi) as i32,
+                (rect.y * dpi) as i32,
+                (rect.w * dpi) as i32,
+                (rect.h * dpi) as i32
+            ))
+        );
+    }
+
+    // Content area with padding (all in logical pixels)
     let padding = 40.0;
     let content_width = (rect.w - padding * 2.0).min(800.0).round();
     let content_x = (rect.x + (rect.w - content_width) / 2.0).round();
@@ -84,32 +101,32 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState) {
 
     y = draw_faq_item(content_x, y, content_width,
         "Is this a game or an engine?",
-        "Both! The goal is to ship a complete Souls-like game, but the engine and\neditor are part of the package. Think of it like RPG Maker but for PS1 games."
+        "Both! The goal is to ship a complete Souls-like game, but the engine and\neditor are part of the package. Think of it like RPG Maker but for PS1 games.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Why not use Unity/Unreal/Godot?",
-        "Those engines are designed for modern games. Getting true PS1-style rendering\nrequires fighting against their design. Building from scratch lets me embrace\nthe limitations rather than simulate them."
+        "Those engines are designed for modern games. Getting true PS1-style rendering\nrequires fighting against their design. Building from scratch lets me embrace\nthe limitations rather than simulate them.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Will this be on Steam?",
-        "Probably! The native build is intended for Steam distribution.\nThe web version may be offered as a free demo or as a SaaS product."
+        "Probably! The native build is intended for Steam distribution.\nThe web version may be offered as a free demo or a SaaS product - not to\nmonetize, just to cover hosting costs if the userbase grows.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Can I use this to make my own game?",
-        "Eventually, yes! Once the engine is more mature, I'd love to release it\nas a standalone tool. For now, it's focused on my specific game."
+        "Eventually, yes! Once the engine is more mature, I'd love to release it\nas a standalone tool. For now, it's focused on my specific game.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Will you add scripting language support?",
-        "Maybe, but it's not the immediate plan. The focus is on building a PS1-like\nplatform with modern, flexible tools. Scripting might come later if there's\na clear need for it."
+        "Maybe, but it's not the immediate plan. The focus is on building a PS1-like\nplatform with modern, flexible tools. Scripting might come later if there's\na clear need for it.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "What's with the name \"Bonnie\"?",
-        "Back in my short but intense music career as a metal guitarist, we'd record\ndemos on a cheap laptop with makeshift gear in whatever garage was available.\nWe jokingly called it \"Bonnie Studios\" - a playful twist on my last name.\nThis engine carries on that DIY spirit."
+        "Back in my short but intense music career as a metal guitarist, we'd record\ndemos on a cheap laptop with makeshift gear in whatever garage was available.\nWe jokingly called it \"Bonnie Studios\" - a playful twist on my last name.\nThis engine carries on that DIY spirit.",
     );
 
     // === FOOTER ===
@@ -121,16 +138,19 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState) {
     let content_height = y - rect.y - state.scroll_y;
     let max_scroll = -(content_height - rect.h + padding).max(0.0);
     state.scroll_y = state.scroll_y.max(max_scroll);
+
+    // Disable scissor clipping
+    unsafe {
+        get_internal_gl().quad_gl.scissor(None);
+    }
 }
 
 /// Draw a section with title and body text
 fn draw_section(x: f32, y: f32, width: f32, title: &str, lines: &[&str]) -> f32 {
-    // Use integer positions for crisp rendering
     let x = x.round();
     let y = y.round();
     let text_x = x + 16.0;
 
-    // Section background
     let line_height = 22.0;
     let title_height = 26.0;
     let padding = 16.0;
@@ -138,10 +158,8 @@ fn draw_section(x: f32, y: f32, width: f32, title: &str, lines: &[&str]) -> f32 
 
     draw_rectangle(x, y, width.round(), section_height, SECTION_BG);
 
-    // Title - use 16px like FAQ questions for crisp rendering
     draw_text(title, text_x, y + padding + 16.0, 16.0, ACCENT_COLOR);
 
-    // Body
     let mut text_y = y + padding + title_height;
     for line in lines {
         draw_text(line, text_x, text_y + 16.0, 16.0, TEXT_COLOR);
@@ -153,7 +171,6 @@ fn draw_section(x: f32, y: f32, width: f32, title: &str, lines: &[&str]) -> f32 
 
 /// Draw an FAQ item
 fn draw_faq_item(x: f32, y: f32, width: f32, question: &str, answer: &str) -> f32 {
-    // Use integer positions for crisp rendering
     let x = x.round();
     let y = y.round();
     let text_x = x + 16.0;
@@ -165,10 +182,8 @@ fn draw_faq_item(x: f32, y: f32, width: f32, question: &str, answer: &str) -> f3
 
     draw_rectangle(x, y, width.round(), section_height, SECTION_BG);
 
-    // Question
     draw_text(question, text_x, y + padding + 16.0, 16.0, ACCENT_COLOR);
 
-    // Answers
     let mut text_y = y + padding + 26.0;
     for line in answer_lines {
         draw_text(line, text_x, text_y + 16.0, 16.0, MUTED_COLOR);

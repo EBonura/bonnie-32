@@ -31,6 +31,7 @@ fn window_conf() -> Conf {
         window_width: WIDTH as i32 * 3,
         window_height: HEIGHT as i32 * 3,
         window_resizable: true,
+        high_dpi: true,
         icon: Some(miniquad::conf::Icon {
             small: *include_bytes!("../assets/icons/icon16.rgba"),
             medium: *include_bytes!("../assets/icons/icon32.rgba"),
