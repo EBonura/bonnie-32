@@ -1,7 +1,7 @@
 //! Tracker UI layout and rendering
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, Toolbar, icon, ACCENT_COLOR};
+use crate::ui::{Rect, UiContext, Toolbar, icon, ACCENT_COLOR, draw_knob};
 use super::state::{TrackerState, TrackerView};
 
 // Colors
@@ -500,15 +500,23 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let presets = state.audio.get_preset_names();
     let item_height = 18.0;
     let list_start_y = list_rect.y + 35.0;
-    let visible_items = ((list_rect.h - 45.0) / item_height) as usize;
+    let list_height = list_rect.h - 45.0;
+    let visible_items = (list_height / item_height) as usize;
+    let max_scroll = presets.len().saturating_sub(visible_items);
 
-    // Simple scroll based on current channel's instrument
+    // Handle mouse wheel scrolling over the instrument list
+    let list_content_rect = Rect::new(list_rect.x, list_start_y, list_rect.w, list_height);
+    if ctx.mouse.inside(&list_content_rect) {
+        let scroll = mouse_wheel().1;
+        if scroll != 0.0 {
+            let scroll_amount = if scroll > 0.0 { -3 } else { 3 }; // Scroll 3 items at a time
+            let new_scroll = (state.instrument_scroll as i32 + scroll_amount).max(0) as usize;
+            state.instrument_scroll = new_scroll.min(max_scroll);
+        }
+    }
+
     let current_inst = state.current_instrument();
-    let scroll_offset = if current_inst as usize > visible_items / 2 {
-        (current_inst as usize - visible_items / 2).min(presets.len().saturating_sub(visible_items))
-    } else {
-        0
-    };
+    let scroll_offset = state.instrument_scroll.min(max_scroll);
 
     for (i, (_, program, name)) in presets.iter().enumerate().skip(scroll_offset).take(visible_items) {
         let y = list_start_y + (i - scroll_offset) as f32 * item_height;
@@ -537,6 +545,18 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         // Text
         let color = if is_current { NOTE_COLOR } else { TEXT_COLOR };
         draw_text(&format!("{:03}: {}", program, name), item_rect.x + 5.0, y + 13.0, 12.0, color);
+    }
+
+    // Draw scrollbar if needed
+    if presets.len() > visible_items {
+        let scrollbar_x = list_rect.x + list_rect.w - 8.0;
+        let scrollbar_h = list_height * (visible_items as f32 / presets.len() as f32);
+        let scrollbar_y = list_start_y + (scroll_offset as f32 / max_scroll as f32) * (list_height - scrollbar_h);
+
+        // Track
+        draw_rectangle(scrollbar_x, list_start_y, 6.0, list_height, Color::new(0.15, 0.15, 0.18, 1.0));
+        // Thumb
+        draw_rectangle(scrollbar_x, scrollbar_y, 6.0, scrollbar_h, Color::new(0.35, 0.35, 0.4, 1.0));
     }
 
     // === RIGHT: Piano Keyboard ===
@@ -641,105 +661,119 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     draw_text(&format!("Current: {:03} - {}", current_inst, current_name),
               piano_x, info_y, 16.0, INST_COLOR);
 
-    // === EFFECT SLIDERS ===
+    // === EFFECT KNOBS ===
     let effects_y = info_y + 30.0;
     let ch = state.current_channel;
 
     draw_text("Effects Preview", piano_x, effects_y, 14.0, TEXT_COLOR);
 
-    let slider_x = piano_x;
-    let slider_width = 200.0;
-    let slider_height = 16.0;
-    let slider_spacing = 24.0;
+    let knob_radius = 28.0;
+    let knob_spacing = 70.0;
+    let knob_y = effects_y + 50.0;
 
-    // Helper closure for drawing a slider
-    let draw_effect_slider = |y: f32, label: &str, value: u8, is_centered: bool| -> Option<u8> {
-        // Label
-        draw_text(label, slider_x, y + 12.0, 12.0, TEXT_DIM);
+    // Knob definitions: (index, label, value, is_bipolar)
+    let knob_data = [
+        (0, "Pan", state.preview_pan[ch], true),
+        (1, "Reverb", state.preview_reverb[ch], false),
+        (2, "Chorus", state.preview_chorus[ch], false),
+        (3, "Mod", state.preview_modulation[ch], false),
+        (4, "Expr", state.preview_expression[ch], false),
+    ];
 
-        // Slider track
-        let track_x = slider_x + 80.0;
-        let track_rect = Rect::new(track_x, y, slider_width, slider_height);
-        draw_rectangle(track_x, y, slider_width, slider_height, Color::new(0.15, 0.15, 0.18, 1.0));
-
-        // Value position (0-127 mapped to slider width)
-        let fill_ratio = value as f32 / 127.0;
-        let fill_width = slider_width * fill_ratio;
-
-        // For centered sliders (pan), draw from center
-        if is_centered {
-            let center_x = track_x + slider_width / 2.0;
-            if value < 64 {
-                let w = (64.0 - value as f32) / 64.0 * (slider_width / 2.0);
-                draw_rectangle(center_x - w, y + 2.0, w, slider_height - 4.0, ACCENT_COLOR);
-            } else {
-                let w = (value as f32 - 64.0) / 63.0 * (slider_width / 2.0);
-                draw_rectangle(center_x, y + 2.0, w, slider_height - 4.0, ACCENT_COLOR);
+    // Handle text input for knob editing
+    if let Some(editing_idx) = state.editing_knob {
+        // Handle keyboard input for editing
+        for key in 0..10 {
+            let keycode = match key {
+                0 => KeyCode::Key0,
+                1 => KeyCode::Key1,
+                2 => KeyCode::Key2,
+                3 => KeyCode::Key3,
+                4 => KeyCode::Key4,
+                5 => KeyCode::Key5,
+                6 => KeyCode::Key6,
+                7 => KeyCode::Key7,
+                8 => KeyCode::Key8,
+                9 => KeyCode::Key9,
+                _ => continue,
+            };
+            if is_key_pressed(keycode) && state.knob_edit_text.len() < 3 {
+                state.knob_edit_text.push(char::from_digit(key as u32, 10).unwrap());
             }
-            // Center line
-            draw_line(center_x, y, center_x, y + slider_height, 1.0, Color::new(0.4, 0.4, 0.4, 1.0));
-        } else {
-            draw_rectangle(track_x + 2.0, y + 2.0, fill_width - 4.0, slider_height - 4.0, ACCENT_COLOR);
         }
 
-        // Value text (with hex in parentheses for pattern entry reference)
-        let value_str = if is_centered {
-            if value < 64 { format!("L{} ({:02X})", 64 - value, value) }
-            else if value > 64 { format!("R{} ({:02X})", value - 64, value) }
-            else { format!("C ({:02X})", value) }
-        } else {
-            format!("{} ({:02X})", value, value)
-        };
-        draw_text(&value_str, track_x + slider_width + 10.0, y + 12.0, 12.0, TEXT_COLOR);
-
-        // Handle mouse interaction
-        let hovered = ctx.mouse.inside(&track_rect);
-        if hovered && is_mouse_button_down(MouseButton::Left) {
-            let new_value = ((ctx.mouse.x - track_x) / slider_width * 127.0).clamp(0.0, 127.0) as u8;
-            return Some(new_value);
+        // Backspace
+        if is_key_pressed(KeyCode::Backspace) {
+            state.knob_edit_text.pop();
         }
 
-        None
-    };
+        // Enter to confirm
+        if is_key_pressed(KeyCode::Enter) {
+            if let Ok(val) = state.knob_edit_text.parse::<u8>() {
+                let clamped = val.min(127);
+                match editing_idx {
+                    0 => state.set_preview_pan(clamped),
+                    1 => state.set_preview_reverb(clamped),
+                    2 => state.set_preview_chorus(clamped),
+                    3 => state.set_preview_modulation(clamped),
+                    4 => state.set_preview_expression(clamped),
+                    _ => {}
+                }
+            }
+            state.editing_knob = None;
+            state.knob_edit_text.clear();
+        }
 
-    // Pan slider (centered)
-    let pan_y = effects_y + 15.0;
-    if let Some(v) = draw_effect_slider(pan_y, "Pan", state.preview_pan[ch], true) {
-        state.set_preview_pan(v);
+        // Escape to cancel
+        if is_key_pressed(KeyCode::Escape) {
+            state.editing_knob = None;
+            state.knob_edit_text.clear();
+        }
     }
 
-    // Reverb slider
-    let reverb_y = pan_y + slider_spacing;
-    if let Some(v) = draw_effect_slider(reverb_y, "Reverb", state.preview_reverb[ch], false) {
-        state.set_preview_reverb(v);
-    }
+    // Draw knobs
+    for (i, (idx, label, value, is_bipolar)) in knob_data.iter().enumerate() {
+        let knob_x = piano_x + 35.0 + i as f32 * knob_spacing;
+        let is_editing = state.editing_knob == Some(*idx);
 
-    // Chorus slider
-    let chorus_y = reverb_y + slider_spacing;
-    if let Some(v) = draw_effect_slider(chorus_y, "Chorus", state.preview_chorus[ch], false) {
-        state.set_preview_chorus(v);
-    }
+        let result = draw_knob(
+            ctx,
+            knob_x,
+            knob_y,
+            knob_radius,
+            *value,
+            label,
+            *is_bipolar,
+            is_editing,
+        );
 
-    // Modulation slider
-    let mod_y = chorus_y + slider_spacing;
-    if let Some(v) = draw_effect_slider(mod_y, "Modulation", state.preview_modulation[ch], false) {
-        state.set_preview_modulation(v);
-    }
+        // Handle knob value change
+        if let Some(new_val) = result.value {
+            match idx {
+                0 => state.set_preview_pan(new_val),
+                1 => state.set_preview_reverb(new_val),
+                2 => state.set_preview_chorus(new_val),
+                3 => state.set_preview_modulation(new_val),
+                4 => state.set_preview_expression(new_val),
+                _ => {}
+            }
+        }
 
-    // Expression slider
-    let expr_y = mod_y + slider_spacing;
-    if let Some(v) = draw_effect_slider(expr_y, "Expression", state.preview_expression[ch], false) {
-        state.set_preview_expression(v);
+        // Handle editing start
+        if result.editing {
+            state.editing_knob = Some(*idx);
+            state.knob_edit_text = format!("{}", value);
+        }
     }
 
     // Reset button
-    let reset_y = expr_y + slider_spacing + 5.0;
-    let reset_rect = Rect::new(slider_x, reset_y, 100.0, 20.0);
+    let reset_y = knob_y + knob_radius + 35.0;
+    let reset_rect = Rect::new(piano_x, reset_y, 100.0, 20.0);
     let reset_hovered = ctx.mouse.inside(&reset_rect);
 
     draw_rectangle(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h,
         if reset_hovered { Color::new(0.25, 0.25, 0.3, 1.0) } else { Color::new(0.18, 0.18, 0.22, 1.0) });
-    draw_text("Reset", reset_rect.x + 30.0, reset_rect.y + 14.0, 12.0, TEXT_COLOR);
+    draw_text("Reset All", reset_rect.x + 22.0, reset_rect.y + 14.0, 12.0, TEXT_COLOR);
 
     if reset_hovered && is_mouse_button_pressed(MouseButton::Left) {
         state.reset_preview_effects();
@@ -752,7 +786,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
               piano_x, help_y, 12.0, TEXT_DIM);
     draw_text("[ ] = prev/next instrument | +/- = octave up/down",
               piano_x, help_y + 17.0, 12.0, TEXT_DIM);
-    draw_text("Drag sliders to adjust effects | Effects apply to current channel",
+    draw_text("Drag knobs to adjust | Click value to type",
               piano_x, help_y + 34.0, 12.0, TEXT_DIM);
 }
 

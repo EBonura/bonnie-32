@@ -1,9 +1,10 @@
 //! Core types for the rasterizer
 
 use super::math::{Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 
 /// RGBA color (0-255 per channel)
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Color {
     pub r: u8,
     pub g: u8,

@@ -86,6 +86,15 @@ pub struct TrackerState {
     pub preview_modulation: [u8; MAX_CHANNELS],
     /// Expression value per channel (0-127)
     pub preview_expression: [u8; MAX_CHANNELS],
+
+    /// Instrument list scroll offset
+    pub instrument_scroll: usize,
+
+    /// Which knob is being edited (for text input)
+    /// None = not editing, Some(index) = editing knob at index
+    pub editing_knob: Option<usize>,
+    /// Text being edited for knob value
+    pub knob_edit_text: String,
 }
 
 /// Soundfont filename
@@ -189,6 +198,9 @@ impl TrackerState {
             preview_chorus: [0; MAX_CHANNELS],      // No chorus
             preview_modulation: [0; MAX_CHANNELS],  // No modulation
             preview_expression: [127; MAX_CHANNELS], // Full expression
+            instrument_scroll: 0,
+            editing_knob: None,
+            knob_edit_text: String::new(),
         }
     }
 

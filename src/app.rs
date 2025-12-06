@@ -5,6 +5,7 @@
 
 use crate::editor::{EditorState, EditorLayout};
 use crate::landing::LandingState;
+use crate::modeler::{ModelerState, ModelerLayout};
 use crate::tracker::TrackerState;
 use crate::world::Level;
 use macroquad::prelude::Font;
@@ -15,13 +16,15 @@ use std::path::PathBuf;
 pub enum Tool {
     Home = 0,
     WorldEditor = 1,
-    Tracker = 2,
+    Modeler = 2,
+    Tracker = 3,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 3] = [
+    pub const ALL: [Tool; 4] = [
         Tool::Home,
         Tool::WorldEditor,
+        Tool::Modeler,
         Tool::Tracker,
     ];
 
@@ -29,14 +32,16 @@ impl Tool {
         match self {
             Tool::Home => "Home",
             Tool::WorldEditor => "World Editor",
+            Tool::Modeler => "Modeler",
             Tool::Tracker => "Music Editor",
         }
     }
 
-    pub fn labels() -> [&'static str; 3] {
+    pub fn labels() -> [&'static str; 4] {
         [
             Tool::Home.label(),
             Tool::WorldEditor.label(),
+            Tool::Modeler.label(),
             Tool::Tracker.label(),
         ]
     }
@@ -52,6 +57,12 @@ pub struct WorldEditorState {
     pub editor_layout: EditorLayout,
 }
 
+/// State for the Modeler tool
+pub struct ModelerToolState {
+    pub modeler_state: ModelerState,
+    pub modeler_layout: ModelerLayout,
+}
+
 /// Main application state containing all tool states
 pub struct AppState {
     /// Currently active tool
@@ -62,6 +73,9 @@ pub struct AppState {
 
     /// World Editor state
     pub world_editor: WorldEditorState,
+
+    /// Modeler state
+    pub modeler: ModelerToolState,
 
     /// Music Editor state
     pub tracker: TrackerState,
@@ -85,6 +99,10 @@ impl AppState {
             world_editor: WorldEditorState {
                 editor_state,
                 editor_layout: EditorLayout::new(),
+            },
+            modeler: ModelerToolState {
+                modeler_state: ModelerState::new(),
+                modeler_layout: ModelerLayout::new(),
             },
             tracker: TrackerState::new(),
             icon_font,

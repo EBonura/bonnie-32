@@ -15,6 +15,7 @@ mod world;
 mod ui;
 mod editor;
 mod landing;
+mod modeler;
 mod tracker;
 mod app;
 
@@ -214,6 +215,24 @@ async fn main() {
 
                 // Handle editor actions
                 handle_editor_action(action, ws);
+            }
+
+            Tool::Modeler => {
+                // Update animation playback
+                let delta = get_frame_time() as f64;
+                app.modeler.modeler_state.update_playback(delta);
+
+                // Draw modeler UI
+                let _action = modeler::draw_modeler(
+                    &mut ui_ctx,
+                    &mut app.modeler.modeler_layout,
+                    &mut app.modeler.modeler_state,
+                    &mut fb,
+                    content_rect,
+                    app.icon_font.as_ref(),
+                );
+
+                // TODO: Handle modeler actions (New, Save, Load, Export, Import)
             }
 
             Tool::Tracker => {

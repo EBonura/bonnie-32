@@ -116,7 +116,7 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState) {
 
     y = draw_faq_item(content_x, y, content_width,
         "Can I use this to make my own game?",
-        "Eventually, yes! Once the engine is more mature, I'd love to release it\nas a standalone tool. For now, it's focused on my specific game.",
+        "Absolutely - feel free to use this however you like! Contributing assets or ideas to my\nproject would be awesome, but you're welcome to build your own thing too. Just keep in mind\nthis isn't a general-purpose engine - it's tailored to my specific vision, so it may lack\nfeatures you'd expect. Note: Some code and assets have their own licenses. Please review\nTHIRD_PARTY.md before using or distributing anything.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
