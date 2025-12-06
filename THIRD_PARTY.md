@@ -10,6 +10,6 @@ This document lists all third-party assets and libraries used in Bonnie Engine a
 - **Author**: Peter Hull (peter.hull@oikoi.com)
 - **License**: SIL Open Font License 1.1 (OFL-1.1)
 - **License File**: [assets/fonts/OFL.txt](assets/fonts/OFL.txt)
-- **Usage**: Main UI font for XMB menu system
+- **Usage**: UI font for editor interface
 
 The VT323 font is used under the SIL Open Font License, which permits use, modification, and redistribution in both commercial and non-commercial projects, provided the license is included with the font files.

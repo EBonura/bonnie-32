@@ -11,83 +11,32 @@ mod rasterizer;
 mod world;
 mod ui;
 mod editor;
-mod xmb;
+mod app;
 
 use macroquad::prelude::*;
-use rasterizer::{
-    Camera, Color as RasterColor, Framebuffer, RasterSettings, ShadingMode, Texture,
-    render_mesh, HEIGHT, WIDTH,
-};
-use world::{Level, create_empty_level, load_level, save_level};
-use ui::{UiContext, MouseState};
-use editor::{EditorState, EditorLayout, EditorAction, draw_editor};
+use rasterizer::{Framebuffer, RasterSettings, Texture, HEIGHT, WIDTH};
+use world::{create_empty_level, load_level, save_level};
+use ui::{UiContext, MouseState, Rect, draw_fixed_tabs, layout as tab_layout};
+use editor::{EditorAction, draw_editor};
+use app::{AppState, Tool};
 use std::path::PathBuf;
-
-/// Application mode
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum AppMode {
-    XMB,      // Landing page / main menu
-    Game,
-    Editor,
-}
-
-/// Convert our framebuffer to a macroquad texture
-fn framebuffer_to_texture(fb: &Framebuffer) -> Texture2D {
-    let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
-    texture.set_filter(FilterMode::Nearest); // No filtering - crispy pixels!
-    texture
-}
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: "bonnie-rs :: PS1 Software Rasterizer".to_owned(),
-        window_width: WIDTH as i32 * 3,  // 960x720 window
+        window_title: "Bonnie Engine".to_owned(),
+        window_width: WIDTH as i32 * 3,
         window_height: HEIGHT as i32 * 3,
         window_resizable: true,
         ..Default::default()
     }
 }
 
-/// Render all rooms in a level
-fn render_level(
-    fb: &mut Framebuffer,
-    level: &Level,
-    textures: &[Texture],
-    camera: &Camera,
-    settings: &RasterSettings,
-) {
-    // Build a texture map from (pack, name) -> index
-    // For the simple game mode (not editor), we only have one "pack" - the SAMPLE directory
-    let texture_map: std::collections::HashMap<(String, String), usize> = textures
-        .iter()
-        .enumerate()
-        .map(|(idx, tex)| ((String::from("SAMPLE"), tex.name.clone()), idx))
-        .collect();
-
-    // Texture resolver closure
-    let resolve_texture = |tex_ref: &world::TextureRef| -> Option<usize> {
-        if !tex_ref.is_valid() {
-            return Some(0); // Fallback to first texture (checkerboard)
-        }
-        texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
-    };
-
-    for room in &level.rooms {
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        render_mesh(fb, &vertices, &faces, textures, camera, settings);
-    }
-}
-
 #[macroquad::main(window_conf)]
 async fn main() {
-    // Initialize framebuffer
+    // Initialize framebuffer (used by 3D viewport in editor)
     let mut fb = Framebuffer::new(WIDTH, HEIGHT);
 
-    // Initialize camera - position inside first room
-    let mut camera = Camera::new();
-    camera.position = rasterizer::Vec3::new(0.0, 1.5, 0.0);
-
-    // Load level from file, fall back to empty level with single floor tile
+    // Load level from file, fall back to empty level
     let level = match load_level("assets/levels/test.ron") {
         Ok(l) => {
             println!("Loaded level from assets/levels/test.ron");
@@ -99,73 +48,49 @@ async fn main() {
         }
     };
 
-    // Load textures from assets/textures/SAMPLE, fall back to checkerboards
-    let mut textures = Texture::load_directory("assets/textures/SAMPLE");
-    if textures.is_empty() {
-        println!("No textures found in assets/textures/SAMPLE, using checkerboard fallbacks");
-        textures = vec![
-            Texture::checkerboard(32, 32, RasterColor::new(200, 100, 50), RasterColor::new(50, 100, 200)),
-            Texture::checkerboard(32, 32, RasterColor::new(50, 200, 100), RasterColor::new(150, 50, 200)),
-        ];
-    } else {
-        println!("Loaded {} textures", textures.len());
-    }
+    // Load textures (used by editor via texture packs)
+    let _textures = {
+        let loaded = Texture::load_directory("assets/textures/SAMPLE");
+        if loaded.is_empty() {
+            println!("No textures found, using checkerboard fallbacks");
+            Vec::<Texture>::new()
+        } else {
+            println!("Loaded {} textures", loaded.len());
+            loaded
+        }
+    };
 
     // Rasterizer settings
-    let mut settings = RasterSettings::default();
+    let settings = RasterSettings::default();
 
-    // Mouse state for camera control
-    let mut last_mouse_pos = mouse_position();
-    let mut mouse_captured = false;
+    // Mouse state tracking
     let mut last_left_down = false;
 
-    // Track which room camera is in
-    let mut current_room: Option<usize> = Some(0);
+    // UI context
+    let mut ui_ctx = UiContext::new();
 
-    // App mode - start with XMB landing page
-    let mut mode = AppMode::XMB;
-
-    // XMB state
-    let mut xmb_state = xmb::XMBState::new();
-
-    // Load XMB font (VT323 for CRT terminal aesthetic)
-    let xmb_font = match load_ttf_font("assets/fonts/VT323-Regular.ttf").await {
+    // Load icon font (Lucide)
+    let icon_font = match load_ttf_font("assets/fonts/lucide.ttf").await {
         Ok(font) => {
-            println!("Loaded VT323 font");
+            println!("Loaded Lucide icon font");
             Some(font)
         }
         Err(e) => {
-            println!("Failed to load VT323 font: {}, using default", e);
+            println!("Failed to load Lucide font: {}, icons will be missing", e);
             None
         }
     };
 
-    // Editor state - track the file we loaded from
+    // App state with all tools
     let initial_file = if std::path::Path::new("assets/levels/test.ron").exists() {
         Some(PathBuf::from("assets/levels/test.ron"))
     } else {
         None
     };
-    let mut editor_state = if let Some(path) = initial_file {
-        EditorState::with_file(level.clone(), path)
-    } else {
-        EditorState::new(level.clone())
-    };
-    let mut editor_layout = EditorLayout::new();
-    let mut ui_ctx = UiContext::new();
+    let mut app = AppState::new(level, initial_file, icon_font);
 
     println!("=== Bonnie Engine ===");
-    println!("XMB Controls:");
-    println!("  Arrow keys: Navigate menu");
-    println!("  Enter/Click: Select item");
-    println!("  Esc: Return to XMB from any mode");
-    println!();
-    println!("Game Controls:");
-    println!("  Right-click + drag: Look around");
-    println!("  WASD: Move camera");
-    println!("  Q/E: Move up/down");
-    println!("  1/2/3: Shading mode");
-    println!("  P/J/Z: Toggle PS1 effects");
+    println!("Click tabs to switch between tools");
 
     loop {
         // Update UI context with mouse state
@@ -183,181 +108,28 @@ async fn main() {
         last_left_down = left_down;
         ui_ctx.begin_frame(mouse_state);
 
-        match mode {
-            AppMode::XMB => {
-                // Update XMB animations
-                xmb_state.update(get_frame_time());
+        let screen_w = screen_width();
+        let screen_h = screen_height();
 
-                // Process XMB input (now uses screen coordinates directly)
-                let xmb_result = xmb::process_input(&mut xmb_state);
+        // Clear background
+        clear_background(Color::from_rgba(30, 30, 35, 255));
 
-                // Handle XMB actions
-                match xmb_result {
-                    xmb::XMBInputResult::Activate(action) => {
-                        match action {
-                            xmb::XMBAction::LaunchEditor => {
-                                mode = AppMode::Editor;
-                                println!("Launched Editor");
-                            }
-                            xmb::XMBAction::LaunchGame => {
-                                xmb_state.set_status("Game not yet implemented", 2.5);
-                            }
-                            xmb::XMBAction::LaunchTracker => {
-                                xmb_state.set_status("Sound tools not yet implemented", 2.5);
-                            }
-                            xmb::XMBAction::OpenSettings => {
-                                xmb_state.set_status("Settings not yet implemented", 2.5);
-                            }
-                            _ => {}
-                        }
-                    }
-                    xmb::XMBInputResult::Cancel => {
-                        // Escape from XMB - could show exit confirmation
-                        println!("Press Escape again to exit");
-                    }
-                    xmb::XMBInputResult::None => {}
-                }
-
-                // Render XMB directly to screen (crisp text at any resolution)
-                clear_background(BLACK);
-                xmb::draw_xmb_with_font(&xmb_state, xmb_font.clone());
+        // Draw tab bar at top
+        let tab_bar_rect = Rect::new(0.0, 0.0, screen_w, tab_layout::BAR_HEIGHT);
+        let labels = Tool::labels();
+        if let Some(clicked) = draw_fixed_tabs(&mut ui_ctx, tab_bar_rect, &labels, app.active_tool_index()) {
+            if let Some(tool) = Tool::from_index(clicked) {
+                app.set_active_tool(tool);
             }
+        }
 
-            AppMode::Game => {
-                // Toggle settings
-                if is_key_pressed(KeyCode::Key1) {
-                    settings.shading = ShadingMode::None;
-                    println!("Shading: None");
-                }
-                if is_key_pressed(KeyCode::Key2) {
-                    settings.shading = ShadingMode::Flat;
-                    println!("Shading: Flat");
-                }
-                if is_key_pressed(KeyCode::Key3) {
-                    settings.shading = ShadingMode::Gouraud;
-                    println!("Shading: Gouraud");
-                }
-                if is_key_pressed(KeyCode::P) {
-                    settings.affine_textures = !settings.affine_textures;
-                    println!(
-                        "Textures: {}",
-                        if settings.affine_textures { "Affine (PS1)" } else { "Perspective-correct" }
-                    );
-                }
-                if is_key_pressed(KeyCode::J) {
-                    settings.vertex_snap = !settings.vertex_snap;
-                    println!(
-                        "Vertex snap: {}",
-                        if settings.vertex_snap { "ON (PS1 jitter)" } else { "OFF (smooth)" }
-                    );
-                }
-                if is_key_pressed(KeyCode::Z) {
-                    settings.use_zbuffer = !settings.use_zbuffer;
-                    println!(
-                        "Z-buffer: {}",
-                        if settings.use_zbuffer { "ON" } else { "OFF (painter's)" }
-                    );
-                }
+        // Content area below tab bar
+        let content_rect = Rect::new(0.0, tab_layout::BAR_HEIGHT, screen_w, screen_h - tab_layout::BAR_HEIGHT);
 
-                // Camera rotation with right mouse button
-                if is_mouse_button_down(MouseButton::Right) {
-                    if mouse_captured {
-                        // Inverted to match Y-down coordinate system
-                        let dx = (mouse_pos.1 - last_mouse_pos.1) * 0.005;
-                        let dy = -(mouse_pos.0 - last_mouse_pos.0) * 0.005;
-                        camera.rotate(dx, dy);
-                    }
-                    mouse_captured = true;
-                } else {
-                    mouse_captured = false;
-                }
-                last_mouse_pos = mouse_pos;
-
-                // Camera movement (WASD + Q/E for vertical)
-                // Scale movement speed for TRLE units (1024 per sector)
-                let move_speed = 1000.0; // Fast movement for TRLE scale (1024 units per sector)
-                if is_key_down(KeyCode::W) {
-                    camera.position = camera.position + camera.basis_z * move_speed;
-                }
-                if is_key_down(KeyCode::S) {
-                    camera.position = camera.position - camera.basis_z * move_speed;
-                }
-                if is_key_down(KeyCode::A) {
-                    camera.position = camera.position - camera.basis_x * move_speed;
-                }
-                if is_key_down(KeyCode::D) {
-                    camera.position = camera.position + camera.basis_x * move_speed;
-                }
-                if is_key_down(KeyCode::Q) {
-                    camera.position = camera.position - camera.basis_y * move_speed;
-                }
-                if is_key_down(KeyCode::E) {
-                    camera.position = camera.position + camera.basis_y * move_speed;
-                }
-
-                // Update current room (with hint for faster lookup)
-                let new_room = level.find_room_at_with_hint(camera.position, current_room);
-                if new_room != current_room {
-                    if let Some(room_id) = new_room {
-                        println!("Entered room {}", room_id);
-                    }
-                    current_room = new_room;
-                }
-
-                // Clear framebuffer
-                fb.clear(RasterColor::new(20, 20, 30));
-
-                // Render the level (all rooms for now - portal culling comes later)
-                render_level(&mut fb, &level, &textures, &camera, &settings);
-
-                // Convert framebuffer to macroquad texture
-                let texture = framebuffer_to_texture(&fb);
-
-                // Draw to screen (scaled up)
-                clear_background(BLACK);
-
-                // Calculate scaled size maintaining aspect ratio
-                let screen_w = screen_width();
-                let screen_h = screen_height();
-                let scale = (screen_w / WIDTH as f32).min(screen_h / HEIGHT as f32);
-                let draw_w = WIDTH as f32 * scale;
-                let draw_h = HEIGHT as f32 * scale;
-                let draw_x = (screen_w - draw_w) / 2.0;
-                let draw_y = (screen_h - draw_h) / 2.0;
-
-                draw_texture_ex(
-                    &texture,
-                    draw_x,
-                    draw_y,
-                    WHITE,
-                    DrawTextureParams {
-                        dest_size: Some(Vec2::new(draw_w, draw_h)),
-                        ..Default::default()
-                    },
-                );
-
-                // Draw HUD
-                let room_text = match current_room {
-                    Some(id) => format!("Room: {}", id),
-                    None => "Room: outside".to_string(),
-                };
-                draw_text(&format!("FPS: {}", get_fps()), 10.0, 20.0, 20.0, WHITE);
-                draw_text(&room_text, 10.0, 40.0, 20.0, WHITE);
-                draw_text(
-                    &format!("Pos: ({:.1}, {:.1}, {:.1})", camera.position.x, camera.position.y, camera.position.z),
-                    10.0, 60.0, 20.0, WHITE
-                );
-                draw_text("[Esc] Return to XMB", 10.0, 80.0, 16.0, Color::from_rgba(150, 150, 150, 255));
-
-                // Return to XMB with Escape
-                if is_key_pressed(KeyCode::Escape) {
-                    mode = AppMode::XMB;
-                    println!("Returned to XMB");
-                }
-            }
-
-            AppMode::Editor => {
-                clear_background(Color::from_rgba(30, 30, 35, 255));
+        // Draw active tool content
+        match app.active_tool {
+            Tool::WorldEditor => {
+                let ws = &mut app.world_editor;
 
                 // Check for pending import from browser (WASM only)
                 #[cfg(target_arch = "wasm32")]
@@ -374,11 +146,9 @@ async fn main() {
                     let has_import = unsafe { bonnie_check_import() };
 
                     if has_import != 0 {
-                        // Get lengths first
                         let data_len = unsafe { bonnie_get_import_data_len() };
                         let filename_len = unsafe { bonnie_get_import_filename_len() };
 
-                        // Allocate buffers and copy data
                         let mut data_buf = vec![0u8; data_len];
                         let mut filename_buf = vec![0u8; filename_len];
 
@@ -388,27 +158,24 @@ async fn main() {
                             bonnie_clear_import();
                         }
 
-                        // Convert to strings
                         let data = String::from_utf8_lossy(&data_buf).to_string();
                         let filename = String::from_utf8_lossy(&filename_buf).to_string();
 
-                        // Parse the level data
-                        match ron::from_str::<Level>(&data) {
+                        match ron::from_str::<world::Level>(&data) {
                             Ok(level) => {
-                                // Apply saved layout from level (or default if not present)
-                                editor_layout.apply_config(&level.editor_layout);
-                                editor_state.load_level(level, PathBuf::from(&filename));
-                                editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
+                                ws.editor_layout.apply_config(&level.editor_layout);
+                                ws.editor_state.load_level(level, PathBuf::from(&filename));
+                                ws.editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
                             }
                             Err(e) => {
-                                editor_state.set_status(&format!("Upload failed: {}", e), 5.0);
+                                ws.editor_state.set_status(&format!("Upload failed: {}", e), 5.0);
                             }
                         }
                     }
                 }
 
-                // Build textures array from texture packs for editor rendering
-                let editor_textures: Vec<Texture> = editor_state.texture_packs
+                // Build textures array from texture packs
+                let editor_textures: Vec<Texture> = ws.editor_state.texture_packs
                     .iter()
                     .flat_map(|pack| &pack.textures)
                     .cloned()
@@ -417,215 +184,209 @@ async fn main() {
                 // Draw editor UI
                 let action = draw_editor(
                     &mut ui_ctx,
-                    &mut editor_layout,
-                    &mut editor_state,
+                    &mut ws.editor_layout,
+                    &mut ws.editor_state,
                     &editor_textures,
                     &mut fb,
                     &settings,
+                    content_rect,
+                    app.icon_font.as_ref(),
                 );
 
                 // Handle editor actions
-                match action {
-                    EditorAction::Play => {
-                        mode = AppMode::Game;
-                        println!("Switched to Game mode");
-                    }
-                    EditorAction::New => {
-                        // Create a new empty level with one room
-                        let new_level = create_empty_level();
-                        editor_state = EditorState::new(new_level);
-                        // Reset layout to default for new level
-                        editor_layout.apply_config(&editor_state.level.editor_layout);
-                        editor_state.set_status("Created new level", 3.0);
-                        println!("Created new level");
-                    }
-                    EditorAction::Save => {
-                        // Save current layout to level before saving
-                        editor_state.level.editor_layout = editor_layout.to_config();
+                handle_editor_action(action, ws);
+            }
 
-                        // Save to current file, or prompt for Save As if no file
-                        if let Some(path) = &editor_state.current_file.clone() {
-                            match save_level(&editor_state.level, path) {
-                                Ok(()) => {
-                                    editor_state.dirty = false;
-                                    editor_state.set_status(&format!("Saved to {}", path.display()), 3.0);
-                                    println!("Saved level to {}", path.display());
-                                }
-                                Err(e) => {
-                                    editor_state.set_status(&format!("Save failed: {}", e), 5.0);
-                                    eprintln!("Failed to save: {}", e);
-                                }
-                            }
-                        } else {
-                            // No current file - save to default location
-                            let default_path = PathBuf::from("assets/levels/untitled.ron");
-                            // Ensure directory exists
-                            if let Some(parent) = default_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            match save_level(&editor_state.level, &default_path) {
-                                Ok(()) => {
-                                    editor_state.current_file = Some(default_path.clone());
-                                    editor_state.dirty = false;
-                                    editor_state.set_status(&format!("Saved to {}", default_path.display()), 3.0);
-                                    println!("Saved level to {}", default_path.display());
-                                }
-                                Err(e) => {
-                                    editor_state.set_status(&format!("Save failed: {}", e), 5.0);
-                                    eprintln!("Failed to save: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    EditorAction::SaveAs => {
-                        // Save current layout to level before saving
-                        editor_state.level.editor_layout = editor_layout.to_config();
+            Tool::SoundDesigner => {
+                draw_placeholder(content_rect, "Sound Designer", Color::from_rgba(25, 30, 35, 255));
+            }
 
-                        // Show native save dialog (blocking on macOS)
-                        let default_dir = PathBuf::from("assets/levels");
-                        let _ = std::fs::create_dir_all(&default_dir);
+            Tool::Tracker => {
+                draw_placeholder(content_rect, "Tracker", Color::from_rgba(30, 25, 35, 255));
+            }
 
-                        let dialog = rfd::FileDialog::new()
-                            .add_filter("RON Level", &["ron"])
-                            .set_directory(&default_dir)
-                            .set_file_name("level.ron");
-
-                        if let Some(save_path) = dialog.save_file() {
-                            match save_level(&editor_state.level, &save_path) {
-                                Ok(()) => {
-                                    editor_state.current_file = Some(save_path.clone());
-                                    editor_state.dirty = false;
-                                    editor_state.set_status(&format!("Saved as {}", save_path.display()), 3.0);
-                                    println!("Saved level as {}", save_path.display());
-                                }
-                                Err(e) => {
-                                    editor_state.set_status(&format!("Save failed: {}", e), 5.0);
-                                    eprintln!("Failed to save: {}", e);
-                                }
-                            }
-                        } else {
-                            editor_state.set_status("Save cancelled", 2.0);
-                        }
-                        // Reset layout to default after blocking dialog (mouse state may be stale)
-                        editor_layout.apply_config(&editor_state.level.editor_layout);
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    EditorAction::SaveAs => {
-                        editor_state.set_status("Save As not available in browser", 3.0);
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    EditorAction::PromptLoad => {
-                        // Show native open dialog (blocking on macOS)
-                        let default_dir = PathBuf::from("assets/levels");
-                        let _ = std::fs::create_dir_all(&default_dir);
-
-                        let dialog = rfd::FileDialog::new()
-                            .add_filter("RON Level", &["ron"])
-                            .set_directory(&default_dir);
-
-                        if let Some(path) = dialog.pick_file() {
-                            match load_level(&path) {
-                                Ok(level) => {
-                                    // Apply saved layout from level (or default if not present)
-                                    editor_layout.apply_config(&level.editor_layout);
-                                    editor_state.load_level(level, path.clone());
-                                    editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
-                                    println!("Loaded level from {}", path.display());
-                                }
-                                Err(e) => {
-                                    editor_state.set_status(&format!("Load failed: {}", e), 5.0);
-                                    eprintln!("Failed to load: {}", e);
-                                }
-                            }
-                        } else {
-                            editor_state.set_status("Open cancelled", 2.0);
-                        }
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    EditorAction::PromptLoad => {
-                        editor_state.set_status("Open not available in browser - use Upload", 3.0);
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    EditorAction::Export => {
-                        // Save current layout to level before exporting
-                        editor_state.level.editor_layout = editor_layout.to_config();
-
-                        // Serialize level to RON string
-                        match ron::ser::to_string_pretty(&editor_state.level, ron::ser::PrettyConfig::default()) {
-                            Ok(ron_str) => {
-                                // Trigger browser download via JS
-                                let filename = editor_state.current_file
-                                    .as_ref()
-                                    .and_then(|p| p.file_name())
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| "level.ron".to_string());
-
-                                // Pass data to JS via raw pointers and trigger download
-                                extern "C" {
-                                    fn bonnie_set_export_data(ptr: *const u8, len: usize);
-                                    fn bonnie_set_export_filename(ptr: *const u8, len: usize);
-                                    fn bonnie_trigger_download();
-                                }
-                                unsafe {
-                                    bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
-                                    bonnie_set_export_filename(filename.as_ptr(), filename.len());
-                                    bonnie_trigger_download();
-                                }
-
-                                editor_state.dirty = false;
-                                editor_state.set_status(&format!("Downloaded {}", filename), 3.0);
-                            }
-                            Err(e) => {
-                                editor_state.set_status(&format!("Export failed: {}", e), 5.0);
-                            }
-                        }
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    EditorAction::Export => {
-                        editor_state.set_status("Export is for browser - use Save As", 3.0);
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    EditorAction::Import => {
-                        // Trigger the file input via JS (defined in index.html)
-                        // The import is handled asynchronously at the start of the editor loop
-                        extern "C" {
-                            fn bonnie_import_file();
-                        }
-                        unsafe {
-                            bonnie_import_file();
-                        }
-                        editor_state.set_status("Select a .ron file to import...", 3.0);
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    EditorAction::Import => {
-                        editor_state.set_status("Import is for browser - use Open", 3.0);
-                    }
-                    EditorAction::Load(path_str) => {
-                        let path = PathBuf::from(&path_str);
-                        match load_level(&path) {
-                            Ok(level) => {
-                                // Apply saved layout from level (or default if not present)
-                                editor_layout.apply_config(&level.editor_layout);
-                                editor_state.load_level(level, path.clone());
-                                editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
-                                println!("Loaded level from {}", path.display());
-                            }
-                            Err(e) => {
-                                editor_state.set_status(&format!("Load failed: {}", e), 5.0);
-                                eprintln!("Failed to load {}: {}", path.display(), e);
-                            }
-                        }
-                    }
-                    EditorAction::Exit => {
-                        mode = AppMode::XMB;
-                        println!("Returned to XMB");
-                    }
-                    EditorAction::None => {}
-                }
+            Tool::Game => {
+                draw_placeholder(content_rect, "Game Preview", Color::from_rgba(20, 20, 25, 255));
             }
         }
 
+        // Draw tooltips last (on top of everything)
+        ui_ctx.draw_tooltip();
+
         next_frame().await;
+    }
+}
+
+fn draw_placeholder(rect: Rect, name: &str, bg_color: Color) {
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, bg_color);
+    let text = format!("{} - Coming Soon", name);
+    let text_width = measure_text(&text, None, 24, 1.0).width;
+    draw_text(
+        &text,
+        rect.x + (rect.w - text_width) * 0.5,
+        rect.y + rect.h * 0.5,
+        24.0,
+        Color::from_rgba(100, 100, 100, 255),
+    );
+}
+
+fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
+    match action {
+        EditorAction::Play => {
+            ws.editor_state.set_status("Game preview coming soon", 2.0);
+        }
+        EditorAction::New => {
+            let new_level = create_empty_level();
+            ws.editor_state = editor::EditorState::new(new_level);
+            ws.editor_layout.apply_config(&ws.editor_state.level.editor_layout);
+            ws.editor_state.set_status("Created new level", 3.0);
+        }
+        EditorAction::Save => {
+            ws.editor_state.level.editor_layout = ws.editor_layout.to_config();
+
+            if let Some(path) = &ws.editor_state.current_file.clone() {
+                match save_level(&ws.editor_state.level, path) {
+                    Ok(()) => {
+                        ws.editor_state.dirty = false;
+                        ws.editor_state.set_status(&format!("Saved to {}", path.display()), 3.0);
+                    }
+                    Err(e) => {
+                        ws.editor_state.set_status(&format!("Save failed: {}", e), 5.0);
+                    }
+                }
+            } else {
+                let default_path = PathBuf::from("assets/levels/untitled.ron");
+                if let Some(parent) = default_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match save_level(&ws.editor_state.level, &default_path) {
+                    Ok(()) => {
+                        ws.editor_state.current_file = Some(default_path.clone());
+                        ws.editor_state.dirty = false;
+                        ws.editor_state.set_status(&format!("Saved to {}", default_path.display()), 3.0);
+                    }
+                    Err(e) => {
+                        ws.editor_state.set_status(&format!("Save failed: {}", e), 5.0);
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        EditorAction::SaveAs => {
+            ws.editor_state.level.editor_layout = ws.editor_layout.to_config();
+            let default_dir = PathBuf::from("assets/levels");
+            let _ = std::fs::create_dir_all(&default_dir);
+
+            let dialog = rfd::FileDialog::new()
+                .add_filter("RON Level", &["ron"])
+                .set_directory(&default_dir)
+                .set_file_name("level.ron");
+
+            if let Some(save_path) = dialog.save_file() {
+                match save_level(&ws.editor_state.level, &save_path) {
+                    Ok(()) => {
+                        ws.editor_state.current_file = Some(save_path.clone());
+                        ws.editor_state.dirty = false;
+                        ws.editor_state.set_status(&format!("Saved as {}", save_path.display()), 3.0);
+                    }
+                    Err(e) => {
+                        ws.editor_state.set_status(&format!("Save failed: {}", e), 5.0);
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        EditorAction::SaveAs => {
+            ws.editor_state.set_status("Save As not available in browser", 3.0);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        EditorAction::PromptLoad => {
+            let default_dir = PathBuf::from("assets/levels");
+            let _ = std::fs::create_dir_all(&default_dir);
+
+            let dialog = rfd::FileDialog::new()
+                .add_filter("RON Level", &["ron"])
+                .set_directory(&default_dir);
+
+            if let Some(path) = dialog.pick_file() {
+                match load_level(&path) {
+                    Ok(level) => {
+                        ws.editor_layout.apply_config(&level.editor_layout);
+                        ws.editor_state.load_level(level, path.clone());
+                        ws.editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
+                    }
+                    Err(e) => {
+                        ws.editor_state.set_status(&format!("Load failed: {}", e), 5.0);
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        EditorAction::PromptLoad => {
+            ws.editor_state.set_status("Open not available in browser - use Upload", 3.0);
+        }
+        #[cfg(target_arch = "wasm32")]
+        EditorAction::Export => {
+            ws.editor_state.level.editor_layout = ws.editor_layout.to_config();
+
+            match ron::ser::to_string_pretty(&ws.editor_state.level, ron::ser::PrettyConfig::default()) {
+                Ok(ron_str) => {
+                    let filename = ws.editor_state.current_file
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "level.ron".to_string());
+
+                    extern "C" {
+                        fn bonnie_set_export_data(ptr: *const u8, len: usize);
+                        fn bonnie_set_export_filename(ptr: *const u8, len: usize);
+                        fn bonnie_trigger_download();
+                    }
+                    unsafe {
+                        bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
+                        bonnie_set_export_filename(filename.as_ptr(), filename.len());
+                        bonnie_trigger_download();
+                    }
+
+                    ws.editor_state.dirty = false;
+                    ws.editor_state.set_status(&format!("Downloaded {}", filename), 3.0);
+                }
+                Err(e) => {
+                    ws.editor_state.set_status(&format!("Export failed: {}", e), 5.0);
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        EditorAction::Export => {
+            ws.editor_state.set_status("Export is for browser - use Save As", 3.0);
+        }
+        #[cfg(target_arch = "wasm32")]
+        EditorAction::Import => {
+            extern "C" {
+                fn bonnie_import_file();
+            }
+            unsafe {
+                bonnie_import_file();
+            }
+            ws.editor_state.set_status("Select a .ron file to import...", 3.0);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        EditorAction::Import => {
+            ws.editor_state.set_status("Import is for browser - use Open", 3.0);
+        }
+        EditorAction::Load(path_str) => {
+            let path = PathBuf::from(&path_str);
+            match load_level(&path) {
+                Ok(level) => {
+                    ws.editor_layout.apply_config(&level.editor_layout);
+                    ws.editor_state.load_level(level, path.clone());
+                    ws.editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
+                }
+                Err(e) => {
+                    ws.editor_state.set_status(&format!("Load failed: {}", e), 5.0);
+                }
+            }
+        }
+        EditorAction::Exit | EditorAction::None => {}
     }
 }

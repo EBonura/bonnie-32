@@ -1,7 +1,7 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, RasterSettings};
 use super::{EditorState, EditorTool};
 use super::grid_view::draw_grid_view;
@@ -20,7 +20,7 @@ pub enum EditorAction {
     PromptLoad,   // Show file prompt
     Export,       // Browser: download as file
     Import,       // Browser: upload file
-    Exit,         // Return to XMB menu
+    Exit,         // Close/quit
 }
 
 /// Editor layout state (split panel ratios)
@@ -72,29 +72,23 @@ pub fn draw_editor(
     textures: &[RasterTexture],
     fb: &mut Framebuffer,
     settings: &RasterSettings,
+    bounds: Rect,
+    icon_font: Option<&Font>,
 ) -> EditorAction {
-    let screen = Rect::screen(screen_width(), screen_height());
+    let screen = bounds;
 
-    // Menu bar at top
-    let menu_height = 24.0;
-    let menu_rect = screen.slice_top(menu_height);
-    let content_rect = screen.remaining_after_top(menu_height);
-
-    // Toolbar below menu
-    let toolbar_height = 28.0;
-    let toolbar_rect = content_rect.slice_top(toolbar_height);
-    let main_rect = content_rect.remaining_after_top(toolbar_height);
+    // Single unified toolbar at top
+    let toolbar_height = 36.0;
+    let toolbar_rect = screen.slice_top(toolbar_height);
+    let main_rect = screen.remaining_after_top(toolbar_height);
 
     // Status bar at bottom
     let status_height = 22.0;
     let status_rect = main_rect.slice_bottom(status_height);
     let panels_rect = main_rect.remaining_after_bottom(status_height);
 
-    // Draw menu bar and get action
-    let action = draw_menu_bar(ctx, menu_rect, state);
-
-    // Draw toolbar
-    draw_toolbar(ctx, toolbar_rect, state);
+    // Draw unified toolbar
+    let action = draw_unified_toolbar(ctx, toolbar_rect, state, icon_font);
 
     // Main split: left panels | rest
     let (left_rect, rest_rect) = layout.main_split.update(ctx, panels_rect);
@@ -119,7 +113,7 @@ pub fn draw_editor(
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, settings);
 
     draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
-    draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state);
+    draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
 
     draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
     draw_properties(ctx, panel_content_rect(props_rect, true), state);
@@ -130,40 +124,33 @@ pub fn draw_editor(
     action
 }
 
-fn draw_menu_bar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) -> EditorAction {
-    use macroquad::prelude::*;
-
-    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(45, 45, 50, 255));
+fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) -> EditorAction {
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
     let mut action = EditorAction::None;
     let mut toolbar = Toolbar::new(rect);
 
-    // File operations - platform-specific buttons
-    if toolbar.button(ctx, "New", 35.0) {
+    // File operations
+    if toolbar.icon_button(ctx, icon::FILE_PLUS, icon_font, "New") {
         action = EditorAction::New;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // Desktop: native file dialogs
-        if toolbar.button(ctx, "Open", 40.0) {
+        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Open") {
             action = EditorAction::PromptLoad;
         }
-        if toolbar.button(ctx, "Save", 40.0) {
+        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Save") {
             action = EditorAction::Save;
-        }
-        if toolbar.button(ctx, "Save As", 55.0) {
-            action = EditorAction::SaveAs;
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     {
-        // Browser: upload/download via JS
-        if toolbar.button(ctx, "Upload", 50.0) {
+        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Upload") {
             action = EditorAction::Import;
         }
-        if toolbar.button(ctx, "Download", 60.0) {
+        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Download") {
             action = EditorAction::Export;
         }
     }
@@ -171,28 +158,94 @@ fn draw_menu_bar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) -> Ed
     toolbar.separator();
 
     // Edit operations
-    if toolbar.button(ctx, "Undo", 40.0) {
+    if toolbar.icon_button(ctx, icon::UNDO, icon_font, "Undo") {
         state.undo();
     }
-    if toolbar.button(ctx, "Redo", 40.0) {
+    if toolbar.icon_button(ctx, icon::REDO, icon_font, "Redo") {
         state.redo();
     }
 
     toolbar.separator();
 
     // Play button
-    if toolbar.button(ctx, "Play", 50.0) {
+    if toolbar.icon_button(ctx, icon::PLAY, icon_font, "Play") {
         action = EditorAction::Play;
     }
 
     toolbar.separator();
 
-    // Exit button (return to XMB)
-    if toolbar.button(ctx, "Exit", 40.0) {
-        action = EditorAction::Exit;
+    // Tool buttons
+    let tools = [
+        (icon::MOVE, "Select", EditorTool::Select),
+        (icon::SQUARE, "Floor", EditorTool::DrawFloor),
+        (icon::LAYERS, "Wall", EditorTool::DrawWall),
+        (icon::BOX, "Ceiling", EditorTool::DrawCeiling),
+        (icon::GRID, "Portal", EditorTool::PlacePortal),
+    ];
+
+    for (icon_char, tooltip, tool) in tools {
+        let is_active = state.tool == tool;
+        if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_active) {
+            state.tool = tool;
+        }
     }
 
-    // Check keyboard shortcuts (Ctrl/Cmd + key)
+    toolbar.separator();
+
+    // Vertex mode toggle
+    let link_icon = if state.link_coincident_vertices { icon::LINK } else { icon::UNLINK };
+    let link_tooltip = if state.link_coincident_vertices { "Vertices Linked" } else { "Vertices Independent" };
+    if toolbar.icon_button_active(ctx, link_icon, icon_font, link_tooltip, state.link_coincident_vertices) {
+        state.link_coincident_vertices = !state.link_coincident_vertices;
+        let mode = if state.link_coincident_vertices { "Linked" } else { "Independent" };
+        state.set_status(&format!("Vertex mode: {}", mode), 2.0);
+    }
+
+    toolbar.separator();
+
+    // Room navigation
+    toolbar.label(&format!("Room: {}", state.current_room));
+
+    if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_LEFT, icon_font, "Previous Room") {
+        if state.current_room > 0 {
+            state.current_room -= 1;
+        }
+    }
+    if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_RIGHT, icon_font, "Next Room") {
+        if state.current_room + 1 < state.level.rooms.len() {
+            state.current_room += 1;
+        }
+    }
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Add Room") {
+        // TODO: Add new room
+        println!("Add room clicked");
+    }
+
+    toolbar.separator();
+
+    // Current file label
+    let file_label = match &state.current_file {
+        Some(path) => {
+            let name = path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "untitled".to_string());
+            if state.dirty {
+                format!("{}*", name)
+            } else {
+                name
+            }
+        }
+        None => {
+            if state.dirty {
+                "untitled*".to_string()
+            } else {
+                "untitled".to_string()
+            }
+        }
+    };
+    toolbar.label(&file_label);
+
+    // Keyboard shortcuts
     let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
              || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
     let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
@@ -228,91 +281,7 @@ fn draw_menu_bar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) -> Ed
         }
     }
 
-    // Show current file in menu bar
-    toolbar.separator();
-    let file_label = match &state.current_file {
-        Some(path) => {
-            let name = path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "untitled".to_string());
-            if state.dirty {
-                format!("{}*", name)
-            } else {
-                name
-            }
-        }
-        None => {
-            if state.dirty {
-                "untitled*".to_string()
-            } else {
-                "untitled".to_string()
-            }
-        }
-    };
-    toolbar.label(&file_label);
-
     action
-}
-
-fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
-    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(50, 50, 55, 255));
-
-    let mut toolbar = Toolbar::new(rect);
-
-    // Tool buttons
-    let tools = [
-        ("Select", EditorTool::Select),
-        ("Floor", EditorTool::DrawFloor),
-        ("Wall", EditorTool::DrawWall),
-        ("Ceil", EditorTool::DrawCeiling),
-        ("Portal", EditorTool::PlacePortal),
-    ];
-
-    for (label, tool) in tools {
-        let is_active = state.tool == tool;
-        if toolbar.button_with_active(ctx, label, 50.0, is_active) {
-            state.tool = tool;
-        }
-    }
-
-    toolbar.separator();
-
-    // Vertex mode toggle
-    let link_label = if state.link_coincident_vertices { "Link: ON" } else { "Link: OFF" };
-    let link_color = if state.link_coincident_vertices {
-        Color::from_rgba(100, 200, 100, 255)
-    } else {
-        Color::from_rgba(200, 100, 100, 255)
-    };
-    // Draw colored background for the button
-    let btn_rect = Rect::new(toolbar.cursor_x(), rect.y + 2.0, 65.0, rect.h - 4.0);
-    draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h,
-        Color::new(link_color.r as f32 / 255.0, link_color.g as f32 / 255.0, link_color.b as f32 / 255.0, 0.4));
-    if toolbar.button(ctx, link_label, 65.0) {
-        state.link_coincident_vertices = !state.link_coincident_vertices;
-        let mode = if state.link_coincident_vertices { "Linked" } else { "Independent" };
-        state.set_status(&format!("Vertex mode: {}", mode), 2.0);
-    }
-
-    toolbar.separator();
-
-    // Room navigation
-    toolbar.label(&format!("Room: {}", state.current_room));
-
-    if toolbar.button(ctx, "<", 24.0) {
-        if state.current_room > 0 {
-            state.current_room -= 1;
-        }
-    }
-    if toolbar.button(ctx, ">", 24.0) {
-        if state.current_room + 1 < state.level.rooms.len() {
-            state.current_room += 1;
-        }
-    }
-    if toolbar.button(ctx, "+", 24.0) {
-        // TODO: Add new room
-        println!("Add room clicked");
-    }
 }
 
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {

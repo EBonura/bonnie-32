@@ -1,6 +1,7 @@
 //! Input state for UI interaction
 
 use super::Rect;
+use macroquad::prelude::*;
 
 /// Mouse button state
 #[derive(Debug, Clone, Copy, Default)]
@@ -12,6 +13,14 @@ pub struct MouseState {
     pub left_pressed: bool,  // Just pressed this frame
     pub left_released: bool, // Just released this frame
     pub scroll: f32,         // Scroll wheel delta
+}
+
+/// Pending tooltip to be drawn at end of frame
+#[derive(Clone)]
+pub struct PendingTooltip {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
 }
 
 impl MouseState {
@@ -40,6 +49,8 @@ pub struct UiContext {
     pub hot: Option<u64>,
     /// Counter for generating unique IDs
     id_counter: u64,
+    /// Tooltip to show this frame (set by widgets, drawn at end)
+    pub tooltip: Option<PendingTooltip>,
 }
 
 impl UiContext {
@@ -49,6 +60,7 @@ impl UiContext {
             dragging: None,
             hot: None,
             id_counter: 0,
+            tooltip: None,
         }
     }
 
@@ -63,10 +75,58 @@ impl UiContext {
         self.mouse = mouse;
         self.hot = None;
         self.id_counter = 0;
+        self.tooltip = None;
 
         // Clear dragging if mouse released
         if !self.mouse.left_down {
             self.dragging = None;
+        }
+    }
+
+    /// Set tooltip to show (call from widget when hovered)
+    pub fn set_tooltip(&mut self, text: &str, x: f32, y: f32) {
+        self.tooltip = Some(PendingTooltip {
+            text: text.to_string(),
+            x,
+            y,
+        });
+    }
+
+    /// Draw the tooltip if one is pending (call at end of frame)
+    pub fn draw_tooltip(&self) {
+        if let Some(tip) = &self.tooltip {
+            let padding = 6.0;
+            let font_size = 13.0;
+            let dims = measure_text(&tip.text, None, font_size as u16, 1.0);
+
+            let box_w = dims.width + padding * 2.0;
+            let box_h = dims.height + padding * 2.0;
+
+            // Position below and to the right of cursor, but keep on screen
+            let screen_w = screen_width();
+            let screen_h = screen_height();
+            let mut x = tip.x + 12.0;
+            let mut y = tip.y + 20.0;
+
+            if x + box_w > screen_w {
+                x = screen_w - box_w - 4.0;
+            }
+            if y + box_h > screen_h {
+                y = tip.y - box_h - 4.0;
+            }
+
+            // Draw background
+            draw_rectangle(x, y, box_w, box_h, Color::from_rgba(30, 30, 35, 240));
+            draw_rectangle_lines(x, y, box_w, box_h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+            // Draw text
+            draw_text(
+                &tip.text,
+                x + padding,
+                y + padding + dims.height - 2.0,
+                font_size,
+                Color::from_rgba(220, 220, 220, 255),
+            );
         }
     }
 

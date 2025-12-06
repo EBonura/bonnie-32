@@ -1,7 +1,7 @@
 //! Texture Palette - Grid of available textures with folder selection
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext};
+use crate::ui::{Rect, UiContext, icon, draw_icon_centered};
 use crate::rasterizer::Texture as RasterTexture;
 use super::EditorState;
 
@@ -15,13 +15,14 @@ pub fn draw_texture_palette(
     ctx: &mut UiContext,
     rect: Rect,
     state: &mut EditorState,
+    icon_font: Option<&Font>,
 ) {
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(25, 25, 30, 255));
 
     // Draw folder selector header
     let header_rect = Rect::new(rect.x, rect.y, rect.w, HEADER_HEIGHT);
-    draw_folder_selector(ctx, header_rect, state);
+    draw_folder_selector(ctx, header_rect, state, icon_font);
 
     // Content area (below header)
     let content_rect = Rect::new(rect.x, rect.y + HEADER_HEIGHT, rect.w, rect.h - HEADER_HEIGHT);
@@ -208,7 +209,7 @@ pub fn draw_texture_palette(
 }
 
 /// Draw the folder selector dropdown
-fn draw_folder_selector(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
+fn draw_folder_selector(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
     // Background
     draw_rectangle(rect.x.floor(), rect.y.floor(), rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
@@ -217,55 +218,45 @@ fn draw_folder_selector(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         return;
     }
 
-    // Previous button
-    let prev_rect = Rect::new((rect.x + 4.0).floor(), (rect.y + 4.0).floor(), 20.0, rect.h - 8.0);
+    let btn_size = (rect.h - 8.0).round();
+
+    // Previous button - flat icon style
+    let prev_rect = Rect::new((rect.x + 4.0).round(), (rect.y + 4.0).round(), btn_size, btn_size);
     let prev_hovered = ctx.mouse.inside(&prev_rect);
-    draw_rectangle(
-        prev_rect.x,
-        prev_rect.y,
-        prev_rect.w,
-        prev_rect.h,
-        if prev_hovered {
-            Color::from_rgba(70, 70, 80, 255)
-        } else {
-            Color::from_rgba(50, 50, 60, 255)
-        },
-    );
-    draw_text("<", (prev_rect.x + 6.0).floor(), (prev_rect.y + 14.0).floor(), 16.0, WHITE);
+    if prev_hovered {
+        draw_rectangle(prev_rect.x, prev_rect.y, prev_rect.w, prev_rect.h, Color::from_rgba(60, 60, 70, 255));
+    }
+    let prev_color = if prev_hovered { WHITE } else { Color::from_rgba(180, 180, 180, 255) };
+    draw_icon_centered(icon_font, icon::CIRCLE_CHEVRON_LEFT, &prev_rect, 14.0, prev_color);
     if ctx.mouse.clicked(&prev_rect) && state.selected_pack > 0 {
         state.selected_pack -= 1;
         state.selected_texture = crate::world::TextureRef::none();
         state.texture_scroll = 0.0;
     }
 
-    // Next button
-    let next_rect = Rect::new((rect.right() - 24.0).floor(), (rect.y + 4.0).floor(), 20.0, rect.h - 8.0);
+    // Next button - flat icon style
+    let next_rect = Rect::new((rect.right() - btn_size - 4.0).round(), (rect.y + 4.0).round(), btn_size, btn_size);
     let next_hovered = ctx.mouse.inside(&next_rect);
-    draw_rectangle(
-        next_rect.x,
-        next_rect.y,
-        next_rect.w,
-        next_rect.h,
-        if next_hovered {
-            Color::from_rgba(70, 70, 80, 255)
-        } else {
-            Color::from_rgba(50, 50, 60, 255)
-        },
-    );
-    draw_text(">", (next_rect.x + 6.0).floor(), (next_rect.y + 14.0).floor(), 16.0, WHITE);
+    if next_hovered {
+        draw_rectangle(next_rect.x, next_rect.y, next_rect.w, next_rect.h, Color::from_rgba(60, 60, 70, 255));
+    }
+    let next_color = if next_hovered { WHITE } else { Color::from_rgba(180, 180, 180, 255) };
+    draw_icon_centered(icon_font, icon::CIRCLE_CHEVRON_RIGHT, &next_rect, 14.0, next_color);
     if ctx.mouse.clicked(&next_rect) && state.selected_pack < state.texture_packs.len() - 1 {
         state.selected_pack += 1;
         state.selected_texture = crate::world::TextureRef::none();
         state.texture_scroll = 0.0;
     }
 
-    // Pack name in center
+    // Pack name in center - properly centered vertically
     let name = state.current_pack_name();
     let pack_count = state.texture_packs.len();
     let label = format!("{} ({}/{})", name, state.selected_pack + 1, pack_count);
-    let text_width = label.len() as f32 * 8.0; // Approximate for 16pt font
-    let text_x = (rect.x + (rect.w - text_width) * 0.5).floor();
-    draw_text(&label, text_x, (rect.y + 19.0).floor(), 16.0, WHITE);
+    let font_size = 14.0;
+    let text_dims = measure_text(&label, None, font_size as u16, 1.0);
+    let text_x = (rect.x + (rect.w - text_dims.width) * 0.5).round();
+    let text_y = (rect.y + (rect.h + text_dims.height) * 0.5).round();
+    draw_text(&label, text_x, text_y, font_size, WHITE);
 }
 
 /// Convert a raster texture to a macroquad texture

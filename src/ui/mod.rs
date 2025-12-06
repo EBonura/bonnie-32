@@ -14,8 +14,12 @@ mod rect;
 mod panel;
 mod widgets;
 mod input;
+mod tabbar;
+mod icons;
 
 pub use rect::*;
 pub use panel::*;
 pub use widgets::*;
 pub use input::*;
+pub use tabbar::*;
+pub use icons::*;
