@@ -89,6 +89,14 @@ async fn main() {
     };
     let mut app = AppState::new(level, initial_file, icon_font);
 
+    // Load textures from manifest (WASM needs async loading)
+    #[cfg(target_arch = "wasm32")]
+    {
+        use editor::TexturePack;
+        app.world_editor.editor_state.texture_packs = TexturePack::load_from_manifest().await;
+        println!("WASM: Loaded {} texture packs", app.world_editor.editor_state.texture_packs.len());
+    }
+
     println!("=== Bonnie Engine ===");
     println!("Click tabs to switch between tools");
 

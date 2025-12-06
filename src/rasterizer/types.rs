@@ -181,6 +181,29 @@ impl Texture {
         textures
     }
 
+    /// Load texture from raw PNG bytes
+    pub fn from_bytes(bytes: &[u8], name: String) -> Result<Self, String> {
+        use image::GenericImageView;
+
+        let img = image::load_from_memory(bytes)
+            .map_err(|e| format!("Failed to decode image: {}", e))?;
+
+        let (width, height) = img.dimensions();
+        let rgba = img.to_rgba8();
+
+        let pixels: Vec<Color> = rgba
+            .pixels()
+            .map(|p| Color::with_alpha(p[0], p[1], p[2], p[3]))
+            .collect();
+
+        Ok(Self {
+            width: width as usize,
+            height: height as usize,
+            pixels,
+            name,
+        })
+    }
+
     /// Create a checkerboard test texture
     pub fn checkerboard(width: usize, height: usize, color1: Color, color2: Color) -> Self {
         let mut pixels = Vec::with_capacity(width * height);

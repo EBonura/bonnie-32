@@ -18,7 +18,8 @@ pub struct TexturePack {
 }
 
 impl TexturePack {
-    /// Load a texture pack from a directory
+    /// Load a texture pack from a directory (native only)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_directory(path: PathBuf) -> Option<Self> {
         let name = path.file_name()?.to_string_lossy().to_string();
         let textures = Texture::load_directory(&path);
@@ -42,7 +43,8 @@ impl TexturePack {
         }
     }
 
-    /// Discover all texture packs in the assets/textures directory
+    /// Discover all texture packs in the assets/textures directory (native only)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn discover_all() -> Vec<Self> {
         let mut packs = Vec::new();
         let textures_dir = PathBuf::from("assets/textures");
@@ -60,6 +62,83 @@ impl TexturePack {
 
         // Sort by name
         packs.sort_by(|a, b| a.name.cmp(&b.name));
+        packs
+    }
+
+    /// Discover all texture packs from manifest (WASM)
+    #[cfg(target_arch = "wasm32")]
+    pub fn discover_all() -> Vec<Self> {
+        // Return empty - will be loaded async
+        Vec::new()
+    }
+
+    /// Load texture packs from manifest asynchronously (for WASM)
+    pub async fn load_from_manifest() -> Vec<Self> {
+        use macroquad::prelude::*;
+
+        let manifest_path = "assets/textures/manifest.txt";
+        let manifest = match load_string(manifest_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to load texture manifest: {}", e);
+                return Vec::new();
+            }
+        };
+
+        let mut packs = Vec::new();
+        let mut current_pack: Option<(String, Vec<Texture>)> = None;
+
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if line.starts_with('[') && line.ends_with(']') {
+                // Save previous pack if any
+                if let Some((name, textures)) = current_pack.take() {
+                    if !textures.is_empty() {
+                        packs.push(TexturePack {
+                            name: name.clone(),
+                            path: PathBuf::from(format!("assets/textures/{}", name)),
+                            textures,
+                        });
+                    }
+                }
+                // Start new pack
+                let pack_name = line[1..line.len()-1].to_string();
+                current_pack = Some((pack_name, Vec::new()));
+            } else if let Some((ref pack_name, ref mut textures)) = current_pack {
+                // Load texture file
+                let tex_path = format!("assets/textures/{}/{}", pack_name, line);
+                match load_file(&tex_path).await {
+                    Ok(bytes) => {
+                        let tex_name = line.strip_suffix(".png")
+                            .or_else(|| line.strip_suffix(".PNG"))
+                            .unwrap_or(line)
+                            .to_string();
+                        match Texture::from_bytes(&bytes, tex_name) {
+                            Ok(tex) => textures.push(tex),
+                            Err(e) => eprintln!("Failed to decode {}: {}", tex_path, e),
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to load {}: {}", tex_path, e),
+                }
+            }
+        }
+
+        // Don't forget the last pack
+        if let Some((name, textures)) = current_pack {
+            if !textures.is_empty() {
+                packs.push(TexturePack {
+                    name: name.clone(),
+                    path: PathBuf::from(format!("assets/textures/{}", name)),
+                    textures,
+                });
+            }
+        }
+
+        println!("Loaded {} texture packs from manifest", packs.len());
         packs
     }
 }
