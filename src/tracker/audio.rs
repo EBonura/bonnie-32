@@ -146,6 +146,9 @@ pub struct AudioEngine {
     left_buffer: Vec<f32>,
     #[cfg(target_arch = "wasm32")]
     right_buffer: Vec<f32>,
+    /// Accumulated fractional samples (WASM only - for timing accuracy)
+    #[cfg(target_arch = "wasm32")]
+    sample_accumulator: f64,
 }
 
 impl AudioEngine {
@@ -174,6 +177,7 @@ impl AudioEngine {
                 soundfont_name: None,
                 left_buffer: vec![0.0; 2048],
                 right_buffer: vec![0.0; 2048],
+                sample_accumulator: 0.0,
             }
         }
     }
@@ -226,14 +230,27 @@ impl AudioEngine {
         self.soundfont_name.as_deref()
     }
 
-    /// Render and output audio (WASM only - must be called each frame)
+    /// Render and output audio (WASM only - must be called each frame with delta time)
     #[cfg(target_arch = "wasm32")]
-    pub fn render_audio(&mut self) {
+    pub fn render_audio(&mut self, delta: f64) {
         let mut state = self.state.lock().unwrap();
         if let Some(ref mut synth) = state.synth {
-            // At 60fps, we need 44100/60 ≈ 735 samples per frame
-            // Use 736 to be slightly over (avoids buffer underrun)
-            let samples = 736;
+            // Calculate exact samples needed based on actual elapsed time
+            // delta is in seconds, sample_rate is 44100 samples/sec
+            self.sample_accumulator += delta * SAMPLE_RATE as f64;
+
+            // Only render whole samples
+            let samples = self.sample_accumulator as usize;
+            if samples == 0 {
+                return;
+            }
+
+            // Keep fractional part for next frame
+            self.sample_accumulator -= samples as f64;
+
+            // Cap to reasonable max (prevents runaway if tab was backgrounded)
+            let samples = samples.min(4096);
+
             if self.left_buffer.len() < samples {
                 self.left_buffer.resize(samples, 0.0);
                 self.right_buffer.resize(samples, 0.0);

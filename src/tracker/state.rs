@@ -519,7 +519,7 @@ impl TrackerState {
         // On WASM, we need to render audio each frame to push samples to Web Audio
         #[cfg(target_arch = "wasm32")]
         {
-            self.audio.render_audio();
+            self.audio.render_audio(delta);
         }
 
         if !self.playing {
