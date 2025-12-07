@@ -45,6 +45,7 @@ pub mod icon {
     pub const MAGNET: char = '\u{e2b5}';      // Vertex snapping (jitter)
     pub const MONITOR: char = '\u{e11d}';     // Low resolution mode
     pub const SUN: char = '\u{e178}';         // Lighting/shading
+    pub const BLEND: char = '\u{e59c}';       // Dithering (color blending)
 
     // Music editor
     pub const MUSIC: char = '\u{e122}';       // Music/notes

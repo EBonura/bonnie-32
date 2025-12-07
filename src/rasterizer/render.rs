@@ -259,6 +259,35 @@ fn shade_intensity(normal: Vec3, light_dir: Vec3, ambient: f32) -> f32 {
     (ambient + (1.0 - ambient) * diffuse).clamp(0.0, 1.0)
 }
 
+/// PS1 4x4 ordered dithering matrix (Bayer pattern)
+/// Raw values 0-15, same pattern used by PlayStation hardware
+const BAYER_4X4: [[i32; 4]; 4] = [
+    [ 0,  8,  2, 10],
+    [12,  4, 14,  6],
+    [ 3, 11,  1,  9],
+    [15,  7, 13,  5],
+];
+
+/// Apply PS1-style ordered dithering to a color
+/// The PS1 used 15-bit color (5 bits per channel = 32 levels)
+/// Dithering adds spatial noise to hide color banding in gradients
+fn apply_dither(color: Color, x: usize, y: usize) -> Color {
+    // Get dither value from matrix based on pixel position (0-15)
+    let dither = BAYER_4X4[y & 3][x & 3];
+
+    // PS1 offset formula: (dither / 2.0 - 4.0) gives range -4 to +3.5
+    // We use integer math: (dither - 8) / 2 gives range -4 to +3
+    let offset = (dither - 8) / 2;
+
+    // Apply offset to each channel and quantize to 5-bit (32 levels)
+    // PS1 used 0xF8 mask to truncate to 5 bits (keeps top 5 bits)
+    let r = ((color.r as i32 + offset).clamp(0, 255) as u8) & 0xF8;
+    let g = ((color.g as i32 + offset).clamp(0, 255) as u8) & 0xF8;
+    let b = ((color.b as i32 + offset).clamp(0, 255) as u8) & 0xF8;
+
+    Color::with_alpha(r, g, b, color.a)
+}
+
 /// Rasterize a single triangle
 fn rasterize_triangle(
     fb: &mut Framebuffer,
@@ -342,6 +371,11 @@ fn rasterize_triangle(
                 };
 
                 color = color.shade(shade);
+
+                // Apply PS1-style ordered dithering
+                if settings.dithering {
+                    color = apply_dither(color, x, y);
+                }
 
                 // Write pixel
                 fb.set_pixel_with_depth(x, y, z, color);

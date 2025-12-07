@@ -248,6 +248,11 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let mode = if state.raster_settings.low_resolution { "320x240" } else { "High-res" };
         state.set_status(&format!("Resolution: {}", mode), 2.0);
     }
+    if toolbar.icon_button_active(ctx, icon::BLEND, icon_font, "Dithering (PS1 color banding)", state.raster_settings.dithering) {
+        state.raster_settings.dithering = !state.raster_settings.dithering;
+        let mode = if state.raster_settings.dithering { "ON" } else { "OFF" };
+        state.set_status(&format!("Dithering: {}", mode), 2.0);
+    }
 
     toolbar.separator();
 

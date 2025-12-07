@@ -261,6 +261,8 @@ pub struct RasterSettings {
     pub ambient: f32,
     /// Use PS1 low resolution (320x240) instead of high resolution
     pub low_resolution: bool,
+    /// Enable PS1-style ordered dithering (4x4 Bayer matrix)
+    pub dithering: bool,
 }
 
 impl Default for RasterSettings {
@@ -274,6 +276,7 @@ impl Default for RasterSettings {
             light_dir: Vec3::new(-1.0, -1.0, -1.0).normalize(),
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240
+            dithering: true,        // PS1 default: ordered dithering enabled
         }
     }
 }
