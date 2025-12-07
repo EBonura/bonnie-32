@@ -177,7 +177,7 @@ This project uses the following free texture packs:
 - [x] **Implement PS1 dithering**: The baseline library (tipsy) does NOT include dithering. Add ordered dithering (4x4 Bayer matrix) to the rasterizer. Should be toggleable in `RasterSettings`. Classic PS1 used this to hide color banding with 15-bit color (5 bits per RGB channel)
 
 #### High Priority
-- [ ] Fix doubled edge lines: In 3D viewport, edges appear as 2 parallel lines instead of 1
+- [x] Fix doubled edge lines: In 3D viewport, edges appear as 2 parallel lines instead of 1
 
 #### Medium Priority
 - [ ] Add aspect ratio toggle: Currently locked to PS1 4:3 (320x240), add icon to toggle full available space (affects World Editor and Modeler)

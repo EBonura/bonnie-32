@@ -115,14 +115,14 @@ impl Framebuffer {
         }
     }
 
-    /// Draw a thick line by drawing multiple parallel lines
+    /// Draw a thick line as a filled quad
     pub fn draw_thick_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, thickness: i32, color: Color) {
         if thickness <= 1 {
             self.draw_line(x0, y0, x1, y1, color);
             return;
         }
 
-        // Calculate perpendicular offset
+        // Calculate perpendicular offset vector
         let dx = (x1 - x0) as f32;
         let dy = (y1 - y0) as f32;
         let len = (dx * dx + dy * dy).sqrt();
@@ -130,18 +130,45 @@ impl Framebuffer {
             return;
         }
 
-        let px = -dy / len;
-        let py = dx / len;
+        let half = thickness as f32 * 0.5;
+        let px = -dy / len * half;
+        let py = dx / len * half;
 
-        // Draw multiple offset lines
-        let half_thickness = thickness / 2;
-        for i in -half_thickness..=half_thickness {
-            let offset = i as f32;
-            let ox0 = (x0 as f32 + px * offset) as i32;
-            let oy0 = (y0 as f32 + py * offset) as i32;
-            let ox1 = (x1 as f32 + px * offset) as i32;
-            let oy1 = (y1 as f32 + py * offset) as i32;
-            self.draw_line(ox0, oy0, ox1, oy1, color);
+        // Four corners of the thick line quad
+        let corners = [
+            (x0 as f32 + px, y0 as f32 + py),
+            (x0 as f32 - px, y0 as f32 - py),
+            (x1 as f32 - px, y1 as f32 - py),
+            (x1 as f32 + px, y1 as f32 + py),
+        ];
+
+        // Find bounding box
+        let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min) as i32;
+        let max_x = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max) as i32;
+        let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min) as i32;
+        let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max) as i32;
+
+        // Rasterize quad using scanline - test each pixel in bounding box
+        for py in min_y..=max_y {
+            for px in min_x..=max_x {
+                if px >= 0 && px < self.width as i32 && py >= 0 && py < self.height as i32 {
+                    // Point-in-quad test using cross products (convex quad)
+                    let p = (px as f32 + 0.5, py as f32 + 0.5);
+                    let mut inside = true;
+                    for i in 0..4 {
+                        let a = corners[i];
+                        let b = corners[(i + 1) % 4];
+                        let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+                        if cross < 0.0 {
+                            inside = false;
+                            break;
+                        }
+                    }
+                    if inside {
+                        self.set_pixel(px as usize, py as usize, color);
+                    }
+                }
+            }
         }
     }
 
@@ -520,11 +547,36 @@ pub fn render_mesh(
     // Draw wireframes for back-faces (visible but not solid)
     // Only draw if backface culling is enabled (otherwise they're rendered solid above)
     if settings.backface_cull {
-        let wireframe_color = Color::new(80, 80, 100);
+        // Deduplicate edges to avoid drawing shared edges twice (which causes double-line artifacts)
+        // Use a Vec to collect unique edges - compare by rounded screen coordinates
+        let mut unique_edges: Vec<(i32, i32, i32, i32)> = Vec::new();
+
         for (v1, v2, v3) in &backface_wireframes {
-            fb.draw_line(v1.x as i32, v1.y as i32, v2.x as i32, v2.y as i32, wireframe_color);
-            fb.draw_line(v2.x as i32, v2.y as i32, v3.x as i32, v3.y as i32, wireframe_color);
-            fb.draw_line(v3.x as i32, v3.y as i32, v1.x as i32, v1.y as i32, wireframe_color);
+            let edges = [
+                (v1.x as i32, v1.y as i32, v2.x as i32, v2.y as i32),
+                (v2.x as i32, v2.y as i32, v3.x as i32, v3.y as i32),
+                (v3.x as i32, v3.y as i32, v1.x as i32, v1.y as i32),
+            ];
+
+            for (x0, y0, x1, y1) in edges {
+                // Normalize edge direction so (a,b)-(c,d) and (c,d)-(a,b) are the same
+                let edge = if (x0, y0) < (x1, y1) {
+                    (x0, y0, x1, y1)
+                } else {
+                    (x1, y1, x0, y0)
+                };
+
+                // Only add if not already present
+                if !unique_edges.contains(&edge) {
+                    unique_edges.push(edge);
+                }
+            }
+        }
+
+        // Draw each unique edge once
+        let wireframe_color = Color::new(80, 80, 100);
+        for (x0, y0, x1, y1) in unique_edges {
+            fb.draw_line(x0, y0, x1, y1, wireframe_color);
         }
     }
 }
