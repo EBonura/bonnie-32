@@ -378,41 +378,222 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     }
 }
 
-fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
-    let mut y = rect.y.floor();
-    let x = rect.x.floor();
-    let line_height = 20.0;
+/// Container configuration
+const CONTAINER_PADDING: f32 = 8.0;
+const CONTAINER_MARGIN: f32 = 6.0;
+
+/// Draw a container box with a colored header
+fn draw_container_start(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    header_text: &str,
+    header_color: Color,
+) {
+    let header_height = 22.0;
+
+    // Container background
+    draw_rectangle(
+        x.floor(), y.floor(),
+        width, height,
+        Color::from_rgba(30, 30, 35, 255)
+    );
+
+    // Container border
+    draw_rectangle_lines(
+        x.floor(), y.floor(),
+        width, height,
+        1.0,
+        Color::from_rgba(60, 60, 70, 255)
+    );
+
+    // Header background
+    draw_rectangle(
+        x.floor(), y.floor(),
+        width, header_height,
+        Color::from_rgba(header_color.r as u8 / 4, header_color.g as u8 / 4, header_color.b as u8 / 4, 200)
+    );
+
+    // Header text
+    draw_text(header_text, (x + CONTAINER_PADDING).floor(), (y + 15.0).floor(), 14.0, header_color);
+}
+
+/// Calculate height needed for a horizontal face container
+fn horizontal_face_container_height(face: &crate::world::HorizontalFace) -> f32 {
+    let line_height = 18.0;
+    let header_height = 22.0;
+    let mut lines = 3; // texture, height, walkable
+    if !face.is_flat() {
+        lines += 1; // extra line for individual heights
+    }
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height
+}
+
+/// Calculate height needed for a wall face container
+fn wall_face_container_height(_wall: &crate::world::VerticalFace) -> f32 {
+    let line_height = 18.0;
+    let header_height = 22.0;
+    let lines = 3; // texture, y range, blend
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height
+}
+
+/// Draw properties for a horizontal face inside a container
+fn draw_horizontal_face_container(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    face: &crate::world::HorizontalFace,
+    label: &str,
+    label_color: Color,
+    room_idx: usize,
+    gx: usize,
+    gz: usize,
+    is_floor: bool,
+    state: &mut EditorState,
+) -> f32 {
+    let line_height = 18.0;
+    let header_height = 22.0;
     let checkbox_size = 14.0;
-    let indent = 10.0;
+    let container_height = horizontal_face_container_height(face);
 
-    // Helper to draw a checkbox toggle
-    let draw_checkbox = |ctx: &mut UiContext, cx: f32, cy: f32, checked: bool, label: &str| -> bool {
-        let box_rect = Rect::new(cx, cy, checkbox_size, checkbox_size);
-        let hovered = ctx.mouse.inside(&box_rect);
-        let clicked = ctx.mouse.clicked(&box_rect);
+    // Draw container
+    draw_container_start(x, y, width, container_height, label, label_color);
 
-        // Draw checkbox box
-        let box_color = if hovered {
-            Color::from_rgba(80, 80, 90, 255)
-        } else {
-            Color::from_rgba(50, 50, 60, 255)
-        };
-        draw_rectangle(cx.floor(), cy.floor(), checkbox_size, checkbox_size, box_color);
-        draw_rectangle_lines(cx.floor(), cy.floor(), checkbox_size, checkbox_size, 1.0, Color::from_rgba(100, 100, 110, 255));
+    // Content starts after header
+    let content_x = x + CONTAINER_PADDING;
+    let mut content_y = y + header_height + CONTAINER_PADDING;
 
-        // Draw checkmark if checked
-        if checked {
-            draw_text("✓", (cx + 2.0).floor(), (cy + 12.0).floor(), 14.0, Color::from_rgba(100, 255, 100, 255));
-        }
-
-        // Draw label
-        draw_text(label, (cx + checkbox_size + 5.0).floor(), (cy + 12.0).floor(), 14.0, WHITE);
-
-        clicked
+    // Texture
+    let tex_display = if face.texture.is_valid() {
+        format!("Texture: {}", face.texture.name)
+    } else {
+        String::from("Texture: (none)")
     };
+    draw_text(&tex_display, content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+    content_y += line_height;
+
+    // Heights
+    if !face.is_flat() {
+        draw_text(&format!("Heights: [{:.0}, {:.0}, {:.0}, {:.0}]",
+            face.heights[0], face.heights[1], face.heights[2], face.heights[3]),
+            content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+        content_y += line_height;
+    }
+    draw_text(&format!("Base: {:.0}", face.heights[0]), content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+    content_y += line_height;
+
+    // Walkable checkbox
+    let walkable = face.walkable;
+    let box_rect = Rect::new(content_x, content_y, checkbox_size, checkbox_size);
+    let hovered = ctx.mouse.inside(&box_rect);
+    let clicked = ctx.mouse.clicked(&box_rect);
+
+    let box_color = if hovered {
+        Color::from_rgba(80, 80, 90, 255)
+    } else {
+        Color::from_rgba(50, 50, 60, 255)
+    };
+    draw_rectangle(content_x.floor(), content_y.floor(), checkbox_size, checkbox_size, box_color);
+    draw_rectangle_lines(content_x.floor(), content_y.floor(), checkbox_size, checkbox_size, 1.0, Color::from_rgba(100, 100, 110, 255));
+    if walkable {
+        draw_text("✓", (content_x + 2.0).floor(), (content_y + 11.0).floor(), 13.0, Color::from_rgba(100, 255, 100, 255));
+    }
+    draw_text("Walkable", (content_x + checkbox_size + 5.0).floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+
+    if clicked {
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if is_floor {
+                    if let Some(f) = &mut s.floor {
+                        f.walkable = !f.walkable;
+                    }
+                } else if let Some(c) = &mut s.ceiling {
+                    c.walkable = !c.walkable;
+                }
+            }
+        }
+    }
+
+    container_height
+}
+
+/// Draw properties for a wall face inside a container
+fn draw_wall_face_container(
+    x: f32,
+    y: f32,
+    width: f32,
+    wall: &crate::world::VerticalFace,
+    label: &str,
+    label_color: Color,
+) -> f32 {
+    let line_height = 18.0;
+    let header_height = 22.0;
+    let container_height = wall_face_container_height(wall);
+
+    // Draw container
+    draw_container_start(x, y, width, container_height, label, label_color);
+
+    // Content starts after header
+    let content_x = x + CONTAINER_PADDING;
+    let mut content_y = y + header_height + CONTAINER_PADDING;
+
+    // Texture
+    let tex_display = if wall.texture.is_valid() {
+        format!("Texture: {}", wall.texture.name)
+    } else {
+        String::from("Texture: (none)")
+    };
+    draw_text(&tex_display, content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+    content_y += line_height;
+
+    // Height range
+    draw_text(&format!("Y Range: {:.0} - {:.0}", wall.y_bottom, wall.y_top), content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+    content_y += line_height;
+
+    // Blend mode
+    draw_text(&format!("Blend: {:?}", wall.blend_mode), content_x.floor(), (content_y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+
+    container_height
+}
+
+fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
+    let x = rect.x.floor();
+    let container_width = rect.w - 4.0;
+
+    // Handle scroll input
+    let inside = ctx.mouse.inside(&rect);
+    if inside && ctx.mouse.scroll != 0.0 {
+        state.properties_scroll -= ctx.mouse.scroll * 30.0;
+    }
 
     // Clone selection to avoid borrow issues
     let selection = state.selection.clone();
+
+    // Calculate total content height first
+    let total_height = calculate_properties_content_height(&selection, state);
+
+    // Clamp scroll
+    let max_scroll = (total_height - rect.h + 20.0).max(0.0);
+    state.properties_scroll = state.properties_scroll.clamp(0.0, max_scroll);
+
+    // Enable scissor for clipping
+    let dpi = screen_dpi_scale();
+    gl_use_default_material();
+    unsafe {
+        get_internal_gl().quad_gl.scissor(
+            Some((
+                (rect.x * dpi) as i32,
+                (rect.y * dpi) as i32,
+                (rect.w * dpi) as i32,
+                (rect.h * dpi) as i32
+            ))
+        );
+    }
+
+    // Start Y position with scroll offset
+    let mut y = rect.y.floor() - state.properties_scroll;
 
     match &selection {
         super::Selection::None => {
@@ -421,10 +602,75 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
         super::Selection::Room(idx) => {
             draw_text(&format!("Room {}", idx), x, (y + 14.0).floor(), 16.0, WHITE);
         }
-        super::Selection::Sector { room, x: gx, z: gz } | super::Selection::SectorFace { room, x: gx, z: gz, .. } => {
-            // Header
+        super::Selection::SectorFace { room, x: gx, z: gz, face } => {
+            // Single face selected (from 3D view click)
+            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 14.0).floor(), 14.0, Color::from_rgba(150, 150, 150, 255));
+            y += 24.0;
+
+            // Get sector data
+            let sector_data = state.level.rooms.get(*room)
+                .and_then(|r| r.get_sector(*gx, *gz))
+                .cloned();
+
+            if let Some(sector) = sector_data {
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(floor) = &sector.floor {
+                            let h = draw_horizontal_face_container(
+                                ctx, x, y, container_width, floor, "Floor",
+                                Color::from_rgba(150, 200, 255, 255),
+                                *room, *gx, *gz, true, state
+                            );
+                            y += h + CONTAINER_MARGIN;
+                        } else {
+                            draw_text("(no floor)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(ceiling) = &sector.ceiling {
+                            let h = draw_horizontal_face_container(
+                                ctx, x, y, container_width, ceiling, "Ceiling",
+                                Color::from_rgba(200, 150, 255, 255),
+                                *room, *gx, *gz, false, state
+                            );
+                            y += h + CONTAINER_MARGIN;
+                        } else {
+                            draw_text("(no ceiling)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(wall) = sector.walls_north.get(*i) {
+                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (North)", Color::from_rgba(255, 180, 120, 255));
+                            y += h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(wall) = sector.walls_east.get(*i) {
+                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (East)", Color::from_rgba(255, 180, 120, 255));
+                            y += h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(wall) = sector.walls_south.get(*i) {
+                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (South)", Color::from_rgba(255, 180, 120, 255));
+                            y += h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(wall) = sector.walls_west.get(*i) {
+                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (West)", Color::from_rgba(255, 180, 120, 255));
+                            y += h + CONTAINER_MARGIN;
+                        }
+                    }
+                }
+            } else {
+                draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+            }
+        }
+        super::Selection::Sector { room, x: gx, z: gz } => {
+            // Whole sector selected (from 2D view click) - show all faces in containers
             draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 14.0).floor(), 16.0, Color::from_rgba(255, 200, 80, 255));
-            y += line_height;
+            y += 24.0;
 
             // Get sector data
             let sector_data = state.level.rooms.get(*room)
@@ -433,133 +679,148 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
 
             if let Some(sector) = sector_data {
                 // === FLOOR ===
-                y += 5.0; // spacing
-                draw_text("Floor", x, (y + 14.0).floor(), 14.0, Color::from_rgba(150, 200, 255, 255));
-                y += line_height;
-
                 if let Some(floor) = &sector.floor {
-                    // Texture
-                    let tex_display = if floor.texture.is_valid() {
-                        format!("{}", floor.texture.name)
-                    } else {
-                        String::from("(none)")
-                    };
-                    draw_text(&format!("  Tex: {}", tex_display), x, (y + 14.0).floor(), 14.0, WHITE);
-                    y += line_height;
-
-                    // Heights (show if sloped)
-                    if !floor.is_flat() {
-                        draw_text(&format!("  Heights: [{:.0}, {:.0}, {:.0}, {:.0}]",
-                            floor.heights[0], floor.heights[1], floor.heights[2], floor.heights[3]),
-                            x, (y + 14.0).floor(), 14.0, WHITE);
-                        y += line_height;
-                    } else {
-                        draw_text(&format!("  Height: {:.0}", floor.heights[0]), x, (y + 14.0).floor(), 14.0, WHITE);
-                        y += line_height;
-                    }
-
-                    // Walkable toggle
-                    let walkable = floor.walkable;
-                    if draw_checkbox(ctx, x + indent, y, walkable, "Walkable") {
-                        if let Some(r) = state.level.rooms.get_mut(*room) {
-                            if let Some(s) = r.get_sector_mut(*gx, *gz) {
-                                if let Some(f) = &mut s.floor {
-                                    f.walkable = !f.walkable;
-                                }
-                            }
-                        }
-                    }
-                    y += line_height;
-
-                    // Blend mode
-                    draw_text(&format!("  Blend: {:?}", floor.blend_mode), x, (y + 14.0).floor(), 14.0, Color::from_rgba(150, 150, 150, 255));
-                    y += line_height;
-                } else {
-                    draw_text("  (no floor)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
-                    y += line_height;
+                    let h = draw_horizontal_face_container(
+                        ctx, x, y, container_width, floor, "Floor",
+                        Color::from_rgba(150, 200, 255, 255),
+                        *room, *gx, *gz, true, state
+                    );
+                    y += h + CONTAINER_MARGIN;
                 }
 
                 // === CEILING ===
-                y += 5.0;
-                draw_text("Ceiling", x, (y + 14.0).floor(), 14.0, Color::from_rgba(200, 150, 255, 255));
-                y += line_height;
-
                 if let Some(ceiling) = &sector.ceiling {
-                    // Texture
-                    let tex_display = if ceiling.texture.is_valid() {
-                        format!("{}", ceiling.texture.name)
-                    } else {
-                        String::from("(none)")
-                    };
-                    draw_text(&format!("  Tex: {}", tex_display), x, (y + 14.0).floor(), 14.0, WHITE);
-                    y += line_height;
-
-                    // Height
-                    if !ceiling.is_flat() {
-                        draw_text(&format!("  Heights: [{:.0}, {:.0}, {:.0}, {:.0}]",
-                            ceiling.heights[0], ceiling.heights[1], ceiling.heights[2], ceiling.heights[3]),
-                            x, (y + 14.0).floor(), 14.0, WHITE);
-                    } else {
-                        draw_text(&format!("  Height: {:.0}", ceiling.heights[0]), x, (y + 14.0).floor(), 14.0, WHITE);
-                    }
-                    y += line_height;
-
-                    // Walkable toggle (for ceiling, usually false)
-                    let walkable = ceiling.walkable;
-                    if draw_checkbox(ctx, x + indent, y, walkable, "Walkable") {
-                        if let Some(r) = state.level.rooms.get_mut(*room) {
-                            if let Some(s) = r.get_sector_mut(*gx, *gz) {
-                                if let Some(c) = &mut s.ceiling {
-                                    c.walkable = !c.walkable;
-                                }
-                            }
-                        }
-                    }
-                    y += line_height;
-                } else {
-                    draw_text("  (no ceiling)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
-                    y += line_height;
+                    let h = draw_horizontal_face_container(
+                        ctx, x, y, container_width, ceiling, "Ceiling",
+                        Color::from_rgba(200, 150, 255, 255),
+                        *room, *gx, *gz, false, state
+                    );
+                    y += h + CONTAINER_MARGIN;
                 }
 
                 // === WALLS ===
-                y += 5.0;
-                let wall_count = sector.walls_north.len() + sector.walls_east.len()
-                    + sector.walls_south.len() + sector.walls_west.len();
-                draw_text(&format!("Walls ({})", wall_count), x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 180, 120, 255));
-                y += line_height;
-
-                // Show wall details per direction
-                let wall_dirs = [
-                    ("N", &sector.walls_north),
-                    ("E", &sector.walls_east),
-                    ("S", &sector.walls_south),
-                    ("W", &sector.walls_west),
+                let wall_dirs: [(&str, &Vec<crate::world::VerticalFace>); 4] = [
+                    ("North", &sector.walls_north),
+                    ("East", &sector.walls_east),
+                    ("South", &sector.walls_south),
+                    ("West", &sector.walls_west),
                 ];
 
                 for (dir_name, walls) in wall_dirs {
-                    if !walls.is_empty() {
-                        for (i, wall) in walls.iter().enumerate() {
-                            let label = if walls.len() == 1 {
-                                format!("  {}: {:.0}-{:.0}", dir_name, wall.y_bottom, wall.y_top)
-                            } else {
-                                format!("  {}[{}]: {:.0}-{:.0}", dir_name, i, wall.y_bottom, wall.y_top)
-                            };
-                            draw_text(&label, x, (y + 14.0).floor(), 14.0, WHITE);
-                            y += line_height;
-
-                            if y > rect.bottom() - line_height * 2.0 {
-                                draw_text("  ...", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
-                                return; // Out of space
-                            }
-                        }
+                    for (i, wall) in walls.iter().enumerate() {
+                        let label = if walls.len() == 1 {
+                            format!("Wall ({})", dir_name)
+                        } else {
+                            format!("Wall ({}) [{}]", dir_name, i)
+                        };
+                        let h = draw_wall_face_container(x, y, container_width, wall, &label, Color::from_rgba(255, 180, 120, 255));
+                        y += h + CONTAINER_MARGIN;
                     }
                 }
             } else {
-                draw_text("  Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+                draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
             }
         }
         super::Selection::Portal { room, portal } => {
             draw_text(&format!("Portal {} in Room {}", portal, room), x, (y + 14.0).floor(), 16.0, WHITE);
+        }
+    }
+
+    // Disable scissor
+    unsafe {
+        get_internal_gl().quad_gl.scissor(None);
+    }
+
+    // Draw scroll indicator if content overflows
+    if total_height > rect.h {
+        let scrollbar_height = (rect.h / total_height) * rect.h;
+        let scrollbar_y = rect.y + (state.properties_scroll / max_scroll) * (rect.h - scrollbar_height);
+        let scrollbar_x = rect.right() - 4.0;
+
+        // Track background
+        draw_rectangle(scrollbar_x - 1.0, rect.y, 5.0, rect.h, Color::from_rgba(20, 20, 25, 255));
+        // Scrollbar thumb
+        draw_rectangle(scrollbar_x, scrollbar_y, 3.0, scrollbar_height, Color::from_rgba(80, 80, 90, 255));
+    }
+}
+
+/// Calculate total content height for properties panel (for scroll bounds)
+fn calculate_properties_content_height(selection: &super::Selection, state: &EditorState) -> f32 {
+    let header_height = 24.0;
+
+    match selection {
+        super::Selection::None | super::Selection::Room(_) | super::Selection::Portal { .. } => 30.0,
+
+        super::Selection::SectorFace { room, x: gx, z: gz, face } => {
+            let sector_data = state.level.rooms.get(*room)
+                .and_then(|r| r.get_sector(*gx, *gz));
+
+            let mut height = header_height;
+
+            if let Some(sector) = sector_data {
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(floor) = &sector.floor {
+                            height += horizontal_face_container_height(floor) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(ceiling) = &sector.ceiling {
+                            height += horizontal_face_container_height(ceiling) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(wall) = sector.walls_north.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(wall) = sector.walls_east.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(wall) = sector.walls_south.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(wall) = sector.walls_west.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                }
+            }
+            height
+        }
+
+        super::Selection::Sector { room, x: gx, z: gz } => {
+            let sector_data = state.level.rooms.get(*room)
+                .and_then(|r| r.get_sector(*gx, *gz));
+
+            let mut height = header_height;
+
+            if let Some(sector) = sector_data {
+                if let Some(floor) = &sector.floor {
+                    height += horizontal_face_container_height(floor) + CONTAINER_MARGIN;
+                }
+                if let Some(ceiling) = &sector.ceiling {
+                    height += horizontal_face_container_height(ceiling) + CONTAINER_MARGIN;
+                }
+                for wall in &sector.walls_north {
+                    height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                }
+                for wall in &sector.walls_east {
+                    height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                }
+                for wall in &sector.walls_south {
+                    height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                }
+                for wall in &sector.walls_west {
+                    height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                }
+            }
+            height
         }
     }
 }

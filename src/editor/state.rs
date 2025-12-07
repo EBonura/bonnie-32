@@ -161,6 +161,9 @@ pub struct EditorState {
     pub selected_pack: usize,
     pub texture_scroll: f32,
 
+    /// Properties panel scroll offset
+    pub properties_scroll: f32,
+
     /// Rasterizer settings (PS1 effects)
     pub raster_settings: RasterSettings,
 }
@@ -220,6 +223,7 @@ impl EditorState {
             texture_packs,
             selected_pack: 0,
             texture_scroll: 0.0,
+            properties_scroll: 0.0,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
         }
     }
