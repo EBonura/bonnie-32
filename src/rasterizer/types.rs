@@ -47,6 +47,49 @@ impl Color {
     pub fn to_bytes(self) -> [u8; 4] {
         [self.r, self.g, self.b, self.a]
     }
+
+    /// PS1-style blend: combine this color (front) with back color using blend mode
+    pub fn blend(self, back: Color, mode: BlendMode) -> Color {
+        match mode {
+            BlendMode::Opaque => self,
+            BlendMode::Average => {
+                // Mode 0: 0.5*B + 0.5*F
+                Color::with_alpha(
+                    ((back.r as u16 + self.r as u16) / 2) as u8,
+                    ((back.g as u16 + self.g as u16) / 2) as u8,
+                    ((back.b as u16 + self.b as u16) / 2) as u8,
+                    self.a,
+                )
+            }
+            BlendMode::Add => {
+                // Mode 1: B + F (clamped to 255)
+                Color::with_alpha(
+                    (back.r as u16 + self.r as u16).min(255) as u8,
+                    (back.g as u16 + self.g as u16).min(255) as u8,
+                    (back.b as u16 + self.b as u16).min(255) as u8,
+                    self.a,
+                )
+            }
+            BlendMode::Subtract => {
+                // Mode 2: B - F (clamped to 0)
+                Color::with_alpha(
+                    (back.r as i16 - self.r as i16).max(0) as u8,
+                    (back.g as i16 - self.g as i16).max(0) as u8,
+                    (back.b as i16 - self.b as i16).max(0) as u8,
+                    self.a,
+                )
+            }
+            BlendMode::AddQuarter => {
+                // Mode 3: B + 0.25*F (clamped to 255)
+                Color::with_alpha(
+                    (back.r as u16 + self.r as u16 / 4).min(255) as u8,
+                    (back.g as u16 + self.g as u16 / 4).min(255) as u8,
+                    (back.b as u16 + self.b as u16 / 4).min(255) as u8,
+                    self.a,
+                )
+            }
+        }
+    }
 }
 
 /// A vertex with position, texture coordinate, and normal
@@ -240,6 +283,18 @@ pub enum ShadingMode {
     None,     // No shading, raw texture/vertex colors
     Flat,     // One light calculation per face
     Gouraud,  // Interpolate vertex colors (PS1 style)
+}
+
+/// PS1 semi-transparency blend modes
+/// B = Back pixel (existing framebuffer), F = Front pixel (new pixel)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Opaque,    // No blending, overwrite pixel
+    Average,   // Mode 0: 0.5*B + 0.5*F (50/50 mix, water/glass)
+    Add,       // Mode 1: B + F (additive glow, clamped to 255)
+    Subtract,  // Mode 2: B - F (shadows, clamped to 0)
+    AddQuarter,// Mode 3: B + 0.25*F (subtle glow)
 }
 
 /// Rasterizer settings

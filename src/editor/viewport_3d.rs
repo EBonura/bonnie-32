@@ -676,8 +676,10 @@ pub fn draw_viewport_3d(
     // Clear framebuffer
     fb.clear(RasterColor::new(30, 30, 40));
 
-    // Draw grid on floor if enabled
+    // Draw main floor grid (large, fixed extent)
     if state.show_grid {
+        use super::SECTOR_SIZE;
+
         let grid_color = RasterColor::new(50, 50, 60);
         let grid_size = state.grid_size;
         let grid_extent = 10240.0; // Cover approximately 10 sectors in each direction
@@ -698,7 +700,7 @@ pub fn draw_viewport_3d(
         }
 
         // Draw grid lines - use shorter segments for better clipping behavior
-        let segment_length: f32 = 1024.0; // One sector per segment
+        let segment_length: f32 = SECTOR_SIZE;
 
         // X-parallel lines (varying X, fixed Z)
         let mut z: f32 = -grid_extent;
@@ -736,7 +738,7 @@ pub fn draw_viewport_3d(
             x += grid_size;
         }
 
-        // Draw origin axes (slightly brighter) - also segmented
+        // Draw origin axes (slightly brighter)
         let mut x = -grid_extent;
         while x < grid_extent {
             let x_end = (x + segment_length).min(grid_extent);
@@ -751,41 +753,119 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Draw small 3x3 ceiling grid centered on hovered tile when in ceiling placement mode
+    // Draw hovering floor grid centered on hovered tile when in floor placement mode
+    // Uses cyan/teal color to distinguish from main grey grid
+    // Inner 3x3: Full brightness, Outer ring (5x5): Dimmer
+    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+        if state.tool == EditorTool::DrawFloor {
+            use super::SECTOR_SIZE;
+
+            let inner_color = RasterColor::new(80, 180, 160); // Teal (bright)
+            let outer_color = RasterColor::new(40, 90, 80);   // Teal (dim)
+
+            // Calculate grid Y position (same as main grid)
+            let mut grid_y = 0.0;
+            if !state.level.rooms.is_empty() {
+                let mut min_y = f32::MAX;
+                for room in &state.level.rooms {
+                    for vert in &room.vertices {
+                        let world_y = vert.y + room.position.y;
+                        min_y = min_y.min(world_y);
+                    }
+                }
+                if min_y != f32::MAX {
+                    grid_y = min_y;
+                }
+            }
+
+            // Center of the hovered sector (snap to grid)
+            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+
+            let inner_half = SECTOR_SIZE * 1.5; // Inner 3x3
+            let outer_half = SECTOR_SIZE * 2.5; // Outer 5x5
+
+            // Draw grid lines - 6 lines in each direction for 5x5 grid
+            for i in 0..=5 {
+                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
+                let dist_from_center = offset.abs();
+
+                // Use different colors for inner vs outer (fading effect)
+                let color = if dist_from_center <= inner_half {
+                    inner_color
+                } else {
+                    outer_color
+                };
+
+                // X-parallel line (horizontal in Z)
+                let z = center_z + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(center_x - outer_half, grid_y, z),
+                    Vec3::new(center_x + outer_half, grid_y, z),
+                    &state.camera_3d,
+                    color,
+                );
+
+                // Z-parallel line (horizontal in X)
+                let x = center_x + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(x, grid_y, center_z - outer_half),
+                    Vec3::new(x, grid_y, center_z + outer_half),
+                    &state.camera_3d,
+                    color,
+                );
+            }
+        }
+    }
+
+    // Draw hovering ceiling grid centered on hovered tile when in ceiling placement mode
+    // Uses purple color, Inner 3x3: Full brightness, Outer ring (5x5): Dimmer
     if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
         if state.tool == EditorTool::DrawCeiling {
             use super::{CEILING_HEIGHT, SECTOR_SIZE};
 
-            let ceiling_grid_color = RasterColor::new(80, 60, 100); // Purple tint
+            let inner_color = RasterColor::new(140, 100, 180); // Purple (bright)
+            let outer_color = RasterColor::new(70, 50, 90);    // Purple (dim)
 
-            // Center of the hovered sector
-            let center_x = snapped_x + SECTOR_SIZE * 0.5;
-            let center_z = snapped_z + SECTOR_SIZE * 0.5;
+            // Center of the hovered sector (snap to grid)
+            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
 
-            // 3x3 grid = 9 cells, so 4 lines in each direction
-            let half_extent = SECTOR_SIZE * 1.5; // 1.5 sectors each side = 3 sectors total
+            let inner_half = SECTOR_SIZE * 1.5; // Inner 3x3
+            let outer_half = SECTOR_SIZE * 2.5; // Outer 5x5
 
-            // X-parallel lines (4 lines for 3x3 grid)
-            for i in 0..=3 {
-                let z = center_z - half_extent + (i as f32 * SECTOR_SIZE);
+            // Draw grid lines - 6 lines in each direction for 5x5 grid
+            for i in 0..=5 {
+                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
+                let dist_from_center = offset.abs();
+
+                // Use different colors for inner vs outer (fading effect)
+                let color = if dist_from_center <= inner_half {
+                    inner_color
+                } else {
+                    outer_color
+                };
+
+                // X-parallel line (horizontal in Z)
+                let z = center_z + offset;
                 draw_3d_line(
                     fb,
-                    Vec3::new(center_x - half_extent, CEILING_HEIGHT, z),
-                    Vec3::new(center_x + half_extent, CEILING_HEIGHT, z),
+                    Vec3::new(center_x - outer_half, CEILING_HEIGHT, z),
+                    Vec3::new(center_x + outer_half, CEILING_HEIGHT, z),
                     &state.camera_3d,
-                    ceiling_grid_color,
+                    color,
                 );
-            }
 
-            // Z-parallel lines (4 lines for 3x3 grid)
-            for i in 0..=3 {
-                let x = center_x - half_extent + (i as f32 * SECTOR_SIZE);
+                // Z-parallel line (horizontal in X)
+                let x = center_x + offset;
                 draw_3d_line(
                     fb,
-                    Vec3::new(x, CEILING_HEIGHT, center_z - half_extent),
-                    Vec3::new(x, CEILING_HEIGHT, center_z + half_extent),
+                    Vec3::new(x, CEILING_HEIGHT, center_z - outer_half),
+                    Vec3::new(x, CEILING_HEIGHT, center_z + outer_half),
                     &state.camera_3d,
-                    ceiling_grid_color,
+                    color,
                 );
             }
         }
@@ -1109,6 +1189,18 @@ fn draw_3d_line(
     camera: &crate::rasterizer::Camera,
     color: RasterColor,
 ) {
+    draw_3d_line_blended(fb, p0, p1, camera, color, crate::rasterizer::BlendMode::Opaque);
+}
+
+/// Draw a 3D line with PS1-style blending
+fn draw_3d_line_blended(
+    fb: &mut Framebuffer,
+    p0: Vec3,
+    p1: Vec3,
+    camera: &crate::rasterizer::Camera,
+    color: RasterColor,
+    blend_mode: crate::rasterizer::BlendMode,
+) {
     const NEAR_PLANE: f32 = 0.1;
 
     // Transform to camera space
@@ -1164,7 +1256,11 @@ fn draw_3d_line(
 
     loop {
         if x0 >= 0 && x0 < w && y0 >= 0 && y0 < h {
-            fb.set_pixel(x0 as usize, y0 as usize, color);
+            if blend_mode == crate::rasterizer::BlendMode::Opaque {
+                fb.set_pixel(x0 as usize, y0 as usize, color);
+            } else {
+                fb.set_pixel_blended(x0 as usize, y0 as usize, color, blend_mode);
+            }
         }
 
         if x0 == x1 && y0 == y1 {

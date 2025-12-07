@@ -2,7 +2,7 @@
 //! Triangle rasterization with PS1-style effects
 
 use super::math::{barycentric, perspective_transform, project, Vec3};
-use super::types::{Color, Face, RasterSettings, ShadingMode, Texture, Vertex};
+use super::types::{BlendMode, Color, Face, RasterSettings, ShadingMode, Texture, Vertex};
 
 /// Framebuffer for software rendering
 pub struct Framebuffer {
@@ -53,6 +53,29 @@ impl Framebuffer {
         }
     }
 
+    /// Set pixel with PS1-style blending
+    pub fn set_pixel_blended(&mut self, x: usize, y: usize, color: Color, mode: BlendMode) {
+        if x < self.width && y < self.height {
+            let idx = (y * self.width + x) * 4;
+
+            // Read existing pixel (back)
+            let back = Color::with_alpha(
+                self.pixels[idx],
+                self.pixels[idx + 1],
+                self.pixels[idx + 2],
+                self.pixels[idx + 3],
+            );
+
+            // Blend and write
+            let blended = color.blend(back, mode);
+            let bytes = blended.to_bytes();
+            self.pixels[idx] = bytes[0];
+            self.pixels[idx + 1] = bytes[1];
+            self.pixels[idx + 2] = bytes[2];
+            self.pixels[idx + 3] = bytes[3];
+        }
+    }
+
     pub fn set_pixel_with_depth(&mut self, x: usize, y: usize, z: f32, color: Color) -> bool {
         if x < self.width && y < self.height {
             let idx = y * self.width + x;
@@ -86,6 +109,11 @@ impl Framebuffer {
 
     /// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm
     pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+        self.draw_line_blended(x0, y0, x1, y1, color, BlendMode::Opaque);
+    }
+
+    /// Draw a line with PS1-style blending
+    pub fn draw_line_blended(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, mode: BlendMode) {
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -96,7 +124,11 @@ impl Framebuffer {
 
         loop {
             if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
-                self.set_pixel(x as usize, y as usize, color);
+                if mode == BlendMode::Opaque {
+                    self.set_pixel(x as usize, y as usize, color);
+                } else {
+                    self.set_pixel_blended(x as usize, y as usize, color, mode);
+                }
             }
 
             if x == x1 && y == y1 {
