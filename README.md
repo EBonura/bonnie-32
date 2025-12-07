@@ -61,11 +61,12 @@ The editor features a MuseScore-inspired interface design:
 
 #### Editing Tools
 - **Select Mode** - Pick and manipulate vertices, edges, and faces
-- **Floor Tool** - Place 1024x1024 floor sectors
-- **Ceiling Tool** - Place ceiling sectors at standard height
-- **Wall Tool** - (Planned) Connect vertices to create walls
+- **Floor Tool** - Place 1024x1024 floor sectors with Shift+drag height adjustment
+- **Ceiling Tool** - Place ceiling sectors with Shift+drag height adjustment
+- **Wall Tool** - Click sector edges to create walls (auto-faces camera)
 - **Texture Painting** - Click faces to apply selected texture
 - **Vertex Linking** - Move coincident vertices together or independently
+- **Face Deletion** - Delete/Backspace removes selected floors, ceilings, and walls
 
 #### Texture Management
 - Browse multiple texture packs with chevron navigation
@@ -92,8 +93,10 @@ The editor features a MuseScore-inspired interface design:
 - Right-click + drag: Rotate camera
 - WASD: Move horizontally
 - Q/E: Move up/down
-- Left-click: Select geometry (Select mode only)
-- Drag: Move vertex heights
+- Left-click: Select geometry / Place walls on edges
+- Drag vertices: Adjust heights (floors, ceilings, walls)
+- Shift + drag: Adjust placement height (Floor/Ceiling/Wall modes)
+- Delete/Backspace: Remove selected face
 
 #### 2D Grid View
 - Left-click: Place floors/ceilings or select geometry
@@ -103,11 +106,12 @@ The editor features a MuseScore-inspired interface design:
 
 #### Toolbar
 - **Select**: Choose and drag geometry
-- **Floor**: Place floor sectors
-- **Wall**: (WIP) Create walls
-- **Ceil**: Place ceiling sectors
+- **Floor**: Place floor sectors (Shift+drag to adjust height)
+- **Wall**: Create walls on sector edges (faces toward camera)
+- **Ceil**: Place ceiling sectors (Shift+drag to adjust height)
 - **Portal**: (WIP) Connect rooms
 - **Link ON/OFF**: Toggle vertex linking mode
+- **Delete/Backspace**: Remove selected faces
 
 ### Game Mode
 - Press **Esc** to return to editor
@@ -155,16 +159,6 @@ This project uses the following free texture packs:
 
 ### Overall / Meta
 
-#### High Priority
-- [x] Add author credit: "Created by Emanuele Bonura" with links to [GitHub](https://github.com/EBonura/bonnie-engine), [itch.io](https://bonnie-games.itch.io/), [Buy Me a Coffee](https://buymeacoffee.com/bonniegames)
-- [x] Expand Home page vision: clarify this could expand beyond Souls-like to RPG mechanics (FF Tactics style) or platformers
-- [x] Add "will always be open source" note: users can always build locally even if Steam version exists
-
-#### Medium Priority
-- [x] Add "Where to Start" section to Home page: guide users to the tabs with brief tool descriptions
-- [x] Rename tabs consistently: Home / World / Assets / Music
-
-#### Low Priority / Future
 - [ ] Remove AI/Claude mentions from git history (use `git filter-branch` or BFG Repo Cleaner - backup first!)
 - [ ] Built-in example browser: open browser window showing bundled maps/models with 3D preview (list left, 3D view right, info bottom)
 - [ ] Update itch.io page to reflect the new engine project
@@ -173,31 +167,19 @@ This project uses the following free texture packs:
 
 ### Rendering Pipeline
 
-#### Critical
-- [x] **Implement PS1 dithering**: The baseline library (tipsy) does NOT include dithering. Add ordered dithering (4x4 Bayer matrix) to the rasterizer. Should be toggleable in `RasterSettings`. Classic PS1 used this to hide color banding with 15-bit color (5 bits per RGB channel)
-
-#### High Priority
-- [x] Fix doubled edge lines: In 3D viewport, edges appear as 2 parallel lines instead of 1
-
-#### Medium Priority
 - [ ] Add aspect ratio toggle: Currently locked to PS1 4:3 (320x240), add icon to toggle full available space (affects World Editor and Modeler)
-- [x] **PS1 semi-transparency**: Implemented all 4 PS1 blend modes (Average, Add, Subtract, AddQuarter). Used for editor overlays like ceiling grid.
 
 ---
 
 ### World Editor - 3D Viewport
 
-#### High Priority (Bugs/Polish)
-- [x] Show wireframe preview for tile placement: In floor/ceiling mode, display colored wireframe where tile will be placed
-- [x] Show sector wireframe on hover: Display vertical lines showing sector boundaries when hovering
-- [ ] Add raise/lower for floor/ceiling: Way to adjust Y position when placing tiles
+#### Bugs/Polish
 - [ ] Fix texture showing as "(none)": Info pane shows `(none)` even when texture is visible in 3D view
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
 - [ ] Unify floor/ceiling as single "horizontal face": Same object, just different spawn height and normal direction
 - [ ] Remove "is triangle" display for floors/ceilings: Only relevant for walls
 
-#### Major Features (Missing)
-- [ ] **Implement walls functionality**: Currently completely missing
+#### Major Features
 - [ ] **Implement portals**: Create and visualize room connections (Portal struct exists in geometry.rs)
 - [ ] **Room boundary wireframe**: Display room size/boundaries as wireframe
 
@@ -268,7 +250,6 @@ For implementing authentic PS1 constraints:
 
 ### Priority: Map Creation & Basic Gameplay
 - [ ] Fix 2D grid placement precision (sectors not aligning to clicks)
-- [ ] Wall tool implementation
 - [ ] Portal creation and room connectivity
 - [ ] Multi-room support
 - [ ] Slope/ramp tools
@@ -307,7 +288,6 @@ For implementing authentic PS1 constraints:
 - [ ] Grid snapping toggles
 - [ ] Vertex welding/merging tool
 - [ ] Face splitting/subdividing
-- [ ] Delete tool for faces/vertices
 - [ ] Selection box (drag to select multiple)
 
 ### Level Design Features

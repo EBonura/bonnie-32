@@ -105,10 +105,8 @@ impl HorizontalFace {
 /// A vertical face (wall) on a sector edge
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerticalFace {
-    /// Bottom Y position
-    pub y_bottom: f32,
-    /// Top Y position
-    pub y_top: f32,
+    /// Corner heights: [bottom-left, bottom-right, top-right, top-left]
+    pub heights: [f32; 4],
     /// Texture reference
     pub texture: TextureRef,
     /// Custom UV coordinates (None = use default)
@@ -123,11 +121,10 @@ pub struct VerticalFace {
 }
 
 impl VerticalFace {
-    /// Create a wall from bottom to top
+    /// Create a wall from bottom to top (all corners at same heights)
     pub fn new(y_bottom: f32, y_top: f32, texture: TextureRef) -> Self {
         Self {
-            y_bottom,
-            y_top,
+            heights: [y_bottom, y_bottom, y_top, y_top],
             texture,
             uv: None,
             solid: true,
@@ -135,9 +132,28 @@ impl VerticalFace {
         }
     }
 
-    /// Get the height of this wall
+    /// Get the average height of this wall
     pub fn height(&self) -> f32 {
-        self.y_top - self.y_bottom
+        let bottom = (self.heights[0] + self.heights[1]) / 2.0;
+        let top = (self.heights[2] + self.heights[3]) / 2.0;
+        top - bottom
+    }
+
+    /// Get the bottom Y (average of bottom corners)
+    pub fn y_bottom(&self) -> f32 {
+        (self.heights[0] + self.heights[1]) / 2.0
+    }
+
+    /// Get the top Y (average of top corners)
+    pub fn y_top(&self) -> f32 {
+        (self.heights[2] + self.heights[3]) / 2.0
+    }
+
+    /// Check if wall has uniform heights (all bottom same, all top same)
+    pub fn is_flat(&self) -> bool {
+        let bottom_same = (self.heights[0] - self.heights[1]).abs() < 0.001;
+        let top_same = (self.heights[2] - self.heights[3]).abs() < 0.001;
+        bottom_same && top_same
     }
 }
 
@@ -666,44 +682,45 @@ impl Room {
 
         // Wall corners based on direction
         // Each wall has 4 corners: bottom-left, bottom-right, top-right, top-left (from inside room)
+        // wall.heights = [bottom-left, bottom-right, top-right, top-left]
         let (corners, normal) = match direction {
             Direction::North => {
                 // Wall at -Z edge, facing +Z (into room)
                 let corners = [
-                    Vec3::new(base_x, wall.y_bottom, base_z),                    // bottom-left
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_bottom, base_z),      // bottom-right
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_top, base_z),         // top-right
-                    Vec3::new(base_x, wall.y_top, base_z),                       // top-left
+                    Vec3::new(base_x, wall.heights[0], base_z),                    // bottom-left
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[1], base_z),      // bottom-right
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[2], base_z),      // top-right
+                    Vec3::new(base_x, wall.heights[3], base_z),                    // top-left
                 ];
                 (corners, Vec3::new(0.0, 0.0, 1.0))
             }
             Direction::East => {
                 // Wall at +X edge, facing -X (into room)
                 let corners = [
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_bottom, base_z),
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_bottom, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_top, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_top, base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[0], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[1], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[2], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[3], base_z),
                 ];
                 (corners, Vec3::new(-1.0, 0.0, 0.0))
             }
             Direction::South => {
                 // Wall at +Z edge, facing -Z (into room)
                 let corners = [
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_bottom, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, wall.y_bottom, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, wall.y_top, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x + SECTOR_SIZE, wall.y_top, base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[0], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, wall.heights[1], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, wall.heights[2], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, wall.heights[3], base_z + SECTOR_SIZE),
                 ];
                 (corners, Vec3::new(0.0, 0.0, -1.0))
             }
             Direction::West => {
                 // Wall at -X edge, facing +X (into room)
                 let corners = [
-                    Vec3::new(base_x, wall.y_bottom, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, wall.y_bottom, base_z),
-                    Vec3::new(base_x, wall.y_top, base_z),
-                    Vec3::new(base_x, wall.y_top, base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, wall.heights[0], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, wall.heights[1], base_z),
+                    Vec3::new(base_x, wall.heights[2], base_z),
+                    Vec3::new(base_x, wall.heights[3], base_z + SECTOR_SIZE),
                 ];
                 (corners, Vec3::new(1.0, 0.0, 0.0))
             }
@@ -723,9 +740,9 @@ impl Room {
 
         let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
 
-        // Two triangles for the quad
-        faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
-        faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
+        // Two triangles for the quad (CCW winding when viewed from inside room)
+        faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
+        faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
     }
 }
 

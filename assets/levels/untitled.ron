@@ -3,15 +3,17 @@
     (
       id: 0,
       position: (
-        x: 0.0,
+        x: -2048.0,
         y: 0.0,
-        z: 0.0,
+        z: -3072.0,
       ),
-      width: 2,
-      depth: 2,
+      width: 4,
+      depth: 4,
       sectors: [
-        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "sanaart-tiles", name: "grass_green"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "sanaart-tiles", name: "grass_green"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: []))],
-        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "sanaart-tiles", name: "grass_green"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "sanaart-tiles", name: "grass_green"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: []))],
+        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (0.0, 0.0, 2048.0, 2048.0), texture: (pack: "", name: ""), uv: None, solid: true, blend_mode: Opaque)])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 256.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (256.0, 0.0, 2048.0, 2048.0), texture: (pack: "", name: ""), uv: None, solid: true, blend_mode: Opaque)])), Some((floor: Some((heights: (256.0, 0.0, 0.0, 512.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (512.0, 256.0, 2048.0, 1792.0), texture: (pack: "", name: ""), uv: None, solid: true, blend_mode: Opaque)])), Some((floor: Some((heights: (512.0, 0.0, 0.0, 512.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (1792.0, 2048.0, 2048.0, 1792.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (512.0, 512.0, 1792.0, 1792.0), texture: (pack: "", name: ""), uv: None, solid: true, blend_mode: Opaque)]))],
+        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: []))],
+        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "retro-texture-pack", name: "FLOOR_1A"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: []))],
+        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "", name: ""), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: []))],
       ],
       portals: [],
       ambient: 0.5,
@@ -20,7 +22,7 @@
   editor_layout: (
     main_split: 0.25,
     right_split: 0.75,
-    left_split: 0.6,
+    left_split: 0.116959065,
     right_panel_split: 0.6,
   ),
 )

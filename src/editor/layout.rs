@@ -537,7 +537,7 @@ fn draw_wall_face_container(
     content_y += line_height;
 
     // Height range
-    draw_text(&format!("Y Range: {:.0} - {:.0}", wall.y_bottom, wall.y_top), content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+    draw_text(&format!("Y Range: {:.0} - {:.0}", wall.y_bottom(), wall.y_top()), content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
     content_y += line_height;
 
     // Blend mode
