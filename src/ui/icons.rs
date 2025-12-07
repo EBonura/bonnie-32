@@ -57,6 +57,9 @@ pub mod icon {
     pub const HOUSE: char = '\u{e0f5}';           // Home tab
     pub const GLOBE: char = '\u{e0e8}';           // World tab
     pub const PERSON_STANDING: char = '\u{e21e}'; // Assets tab
+
+    // Properties panel icons
+    pub const FOOTPRINTS: char = '\u{e3b9}';      // Walkable surface
 }
 
 /// Draw a Lucide icon centered in a rect

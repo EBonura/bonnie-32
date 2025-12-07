@@ -115,7 +115,7 @@ pub fn draw_editor(
     draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
 
     draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
-    draw_properties(ctx, panel_content_rect(props_rect, true), state);
+    draw_properties(ctx, panel_content_rect(props_rect, true), state, icon_font);
 
     // Draw status bar
     draw_status_bar(status_rect, state);
@@ -452,10 +452,10 @@ fn draw_horizontal_face_container(
     gz: usize,
     is_floor: bool,
     state: &mut EditorState,
+    icon_font: Option<&Font>,
 ) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
-    let checkbox_size = 14.0;
     let container_height = horizontal_face_container_height(face);
 
     // Draw container
@@ -484,23 +484,11 @@ fn draw_horizontal_face_container(
     draw_text(&format!("Base: {:.0}", face.heights[0]), content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
     content_y += line_height;
 
-    // Walkable checkbox
+    // Walkable icon button
     let walkable = face.walkable;
-    let box_rect = Rect::new(content_x, content_y, checkbox_size, checkbox_size);
-    let hovered = ctx.mouse.inside(&box_rect);
-    let clicked = ctx.mouse.clicked(&box_rect);
-
-    let box_color = if hovered {
-        Color::from_rgba(80, 80, 90, 255)
-    } else {
-        Color::from_rgba(50, 50, 60, 255)
-    };
-    draw_rectangle(content_x.floor(), content_y.floor(), checkbox_size, checkbox_size, box_color);
-    draw_rectangle_lines(content_x.floor(), content_y.floor(), checkbox_size, checkbox_size, 1.0, Color::from_rgba(100, 100, 110, 255));
-    if walkable {
-        draw_text("✓", (content_x + 2.0).floor(), (content_y + 11.0).floor(), 13.0, Color::from_rgba(100, 255, 100, 255));
-    }
-    draw_text("Walkable", (content_x + checkbox_size + 5.0).floor(), (content_y + 12.0).floor(), 13.0, WHITE);
+    let icon_size = 18.0;
+    let btn_rect = Rect::new(content_x, content_y - 2.0, icon_size, icon_size);
+    let clicked = crate::ui::icon_button_active(ctx, btn_rect, icon::FOOTPRINTS, icon_font, "Walkable", walkable);
 
     if clicked {
         if let Some(r) = state.level.rooms.get_mut(room_idx) {
@@ -558,7 +546,7 @@ fn draw_wall_face_container(
     container_height
 }
 
-fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
+fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
     let x = rect.x.floor();
     let container_width = rect.w - 4.0;
 
@@ -619,7 +607,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
                             let h = draw_horizontal_face_container(
                                 ctx, x, y, container_width, floor, "Floor",
                                 Color::from_rgba(150, 200, 255, 255),
-                                *room, *gx, *gz, true, state
+                                *room, *gx, *gz, true, state, icon_font
                             );
                             y += h + CONTAINER_MARGIN;
                         } else {
@@ -631,7 +619,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
                             let h = draw_horizontal_face_container(
                                 ctx, x, y, container_width, ceiling, "Ceiling",
                                 Color::from_rgba(200, 150, 255, 255),
-                                *room, *gx, *gz, false, state
+                                *room, *gx, *gz, false, state, icon_font
                             );
                             y += h + CONTAINER_MARGIN;
                         } else {
@@ -683,7 +671,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
                     let h = draw_horizontal_face_container(
                         ctx, x, y, container_width, floor, "Floor",
                         Color::from_rgba(150, 200, 255, 255),
-                        *room, *gx, *gz, true, state
+                        *room, *gx, *gz, true, state, icon_font
                     );
                     y += h + CONTAINER_MARGIN;
                 }
@@ -693,7 +681,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
                     let h = draw_horizontal_face_container(
                         ctx, x, y, container_width, ceiling, "Ceiling",
                         Color::from_rgba(200, 150, 255, 255),
-                        *room, *gx, *gz, false, state
+                        *room, *gx, *gz, false, state, icon_font
                     );
                     y += h + CONTAINER_MARGIN;
                 }
