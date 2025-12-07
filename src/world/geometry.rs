@@ -507,6 +507,28 @@ impl Room {
                             self.bounds.expand(Vec3::new(base_x + dx, h, base_z + dz));
                         }
                     }
+
+                    // Expand bounds for wall corners (walls can extend beyond floor/ceiling)
+                    for wall in &sector.walls_north {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x, h, base_z));
+                        }
+                    }
+                    for wall in &sector.walls_east {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z));
+                        }
+                    }
+                    for wall in &sector.walls_south {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x, h, base_z + SECTOR_SIZE));
+                        }
+                    }
+                    for wall in &sector.walls_west {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x, h, base_z));
+                        }
+                    }
                 }
             }
         }

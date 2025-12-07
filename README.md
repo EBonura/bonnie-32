@@ -174,14 +174,10 @@ This project uses the following free texture packs:
 ### World Editor - 3D Viewport
 
 #### Bugs/Polish
-- [ ] Fix texture showing as "(none)": Info pane shows `(none)` even when texture is visible in 3D view
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
-- [ ] Unify floor/ceiling as single "horizontal face": Same object, just different spawn height and normal direction
-- [ ] Remove "is triangle" display for floors/ceilings: Only relevant for walls
 
 #### Major Features
 - [ ] **Implement portals**: Create and visualize room connections (Portal struct exists in geometry.rs)
-- [ ] **Room boundary wireframe**: Display room size/boundaries as wireframe
 
 #### Future
 - [ ] Entity system design: Research TrenchBroom and Tomb Raider Level Editor for spawn points, interactables (ladders, chests, doors), triggers, lights. Each entity type configurable in properties panel

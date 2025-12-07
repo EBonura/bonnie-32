@@ -469,7 +469,7 @@ fn draw_horizontal_face_container(
     let tex_display = if face.texture.is_valid() {
         format!("Texture: {}", face.texture.name)
     } else {
-        String::from("Texture: (none)")
+        String::from("Texture: (fallback)")
     };
     draw_text(&tex_display, content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
     content_y += line_height;
@@ -531,7 +531,7 @@ fn draw_wall_face_container(
     let tex_display = if wall.texture.is_valid() {
         format!("Texture: {}", wall.texture.name)
     } else {
-        String::from("Texture: (none)")
+        String::from("Texture: (fallback)")
     };
     draw_text(&tex_display, content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
     content_y += line_height;

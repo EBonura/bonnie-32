@@ -1258,10 +1258,21 @@ pub fn draw_viewport_3d(
                     }
                 }
             }
+
+            // Recalculate bounds while dragging so wireframe updates in real-time
+            if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                room.recalculate_bounds();
+            }
         }
 
         // End dragging on release
         if ctx.mouse.left_released {
+            // If we actually dragged geometry, recalculate room bounds
+            if state.viewport_drag_started {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    room.recalculate_bounds();
+                }
+            }
             state.dragging_sector_vertices.clear();
             state.drag_initial_heights.clear();
             state.viewport_drag_started = false;
@@ -1499,6 +1510,58 @@ pub fn draw_viewport_3d(
     for room in &state.level.rooms {
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, settings);
+    }
+
+    // Draw room boundary wireframe for the current room
+    if let Some(room) = state.level.rooms.get(state.current_room) {
+        let room_color = RasterColor::new(80, 120, 200); // Blue for room boundary
+
+        // Room grid extents in world space
+        let min_x = room.position.x;
+        let min_z = room.position.z;
+        let max_x = room.position.x + (room.width as f32) * SECTOR_SIZE;
+        let max_z = room.position.z + (room.depth as f32) * SECTOR_SIZE;
+
+        // Use Y range from room's actual geometry bounds
+        // bounds are room-relative, so add room.position.y
+        let min_y = room.position.y + room.bounds.min.y;
+        let max_y = room.position.y + room.bounds.max.y;
+
+        // 8 corners of the room bounding box
+        let corners = [
+            Vec3::new(min_x, min_y, min_z), // 0: front-bottom-left
+            Vec3::new(max_x, min_y, min_z), // 1: front-bottom-right
+            Vec3::new(max_x, min_y, max_z), // 2: back-bottom-right
+            Vec3::new(min_x, min_y, max_z), // 3: back-bottom-left
+            Vec3::new(min_x, max_y, min_z), // 4: front-top-left
+            Vec3::new(max_x, max_y, min_z), // 5: front-top-right
+            Vec3::new(max_x, max_y, max_z), // 6: back-top-right
+            Vec3::new(min_x, max_y, max_z), // 7: back-top-left
+        ];
+
+        // Project corners to screen
+        let screen_corners: Vec<Option<(i32, i32)>> = corners.iter()
+            .map(|c| world_to_screen(*c, state.camera_3d.position,
+                state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                fb.width, fb.height)
+                .map(|(x, y)| (x as i32, y as i32)))
+            .collect();
+
+        // Draw 12 edges of the bounding box
+        let edges = [
+            // Bottom face
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            // Top face
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            // Vertical edges
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
+
+        for (i, j) in edges {
+            if let (Some((x0, y0)), Some((x1, y1))) = (screen_corners[i], screen_corners[j]) {
+                fb.draw_line(x0, y0, x1, y1, room_color);
+            }
+        }
     }
 
     // Draw vertex overlays directly into framebuffer (only in Select mode)

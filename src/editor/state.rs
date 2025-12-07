@@ -193,6 +193,13 @@ impl EditorState {
             println!("  - {} ({} textures)", pack.name, pack.textures.len());
         }
 
+        // Auto-select first texture from first pack (if available)
+        let selected_texture = texture_packs.first()
+            .and_then(|pack| pack.textures.first().map(|tex| {
+                crate::world::TextureRef::new(&pack.name, &tex.name)
+            }))
+            .unwrap_or_else(crate::world::TextureRef::none);
+
         Self {
             level,
             current_file: None,
@@ -202,7 +209,7 @@ impl EditorState {
             selection_rect_start: None,
             selection_rect_end: None,
             current_room: 0,
-            selected_texture: crate::world::TextureRef::none(),
+            selected_texture,
             camera_3d,
             grid_offset_x: 0.0,
             grid_offset_y: 0.0,
