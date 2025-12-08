@@ -8,7 +8,7 @@ use macroquad::prelude::*;
 pub mod icon {
     // File operations
     pub const SAVE: char = '\u{e14d}';
-    pub const SAVE_AS: char = '\u{e0c8}';  // file-output (Save As)
+    pub const SAVE_AS: char = '\u{e40f}';  // save-all (Save As)
     pub const FOLDER_OPEN: char = '\u{e247}';
     pub const FILE_PLUS: char = '\u{e0c9}';
 
