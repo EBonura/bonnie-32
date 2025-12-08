@@ -712,6 +712,110 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
         super::Selection::Portal { room, portal } => {
             draw_text(&format!("Portal {} in Room {}", portal, room), x, (y + 14.0).floor(), 16.0, WHITE);
         }
+        super::Selection::Edge { room, x: gx, z: gz, face_idx, edge_idx, wall_face } => {
+            // Determine face name based on type
+            let face_name = if *face_idx == 0 {
+                "Floor".to_string()
+            } else if *face_idx == 1 {
+                "Ceiling".to_string()
+            } else if let Some(wf) = wall_face {
+                match wf {
+                    super::SectorFace::WallNorth(_) => "Wall North".to_string(),
+                    super::SectorFace::WallEast(_) => "Wall East".to_string(),
+                    super::SectorFace::WallSouth(_) => "Wall South".to_string(),
+                    super::SectorFace::WallWest(_) => "Wall West".to_string(),
+                    _ => "Wall".to_string(),
+                }
+            } else {
+                "Wall".to_string()
+            };
+
+            // Edge names differ for walls vs floor/ceiling
+            let edge_name = if *face_idx == 2 {
+                // Wall edges: bottom, right, top, left
+                match edge_idx {
+                    0 => "Bottom",
+                    1 => "Right",
+                    2 => "Top",
+                    _ => "Left",
+                }
+            } else {
+                // Floor/ceiling edges: north, east, south, west
+                match edge_idx {
+                    0 => "North",
+                    1 => "East",
+                    2 => "South",
+                    _ => "West",
+                }
+            };
+            draw_text(&format!("{} Edge ({})", face_name, edge_name), x, (y + 14.0).floor(), 16.0, WHITE);
+            y += 24.0;
+
+            // Get vertex coordinates
+            if let Some(room_data) = state.level.rooms.get(*room) {
+                if let Some(sector) = room_data.get_sector(*gx, *gz) {
+                    let base_x = room_data.position.x + (*gx as f32) * crate::world::SECTOR_SIZE;
+                    let base_z = room_data.position.z + (*gz as f32) * crate::world::SECTOR_SIZE;
+
+                    // Get heights based on face type
+                    let heights = if *face_idx == 0 {
+                        sector.floor.as_ref().map(|f| f.heights)
+                    } else if *face_idx == 1 {
+                        sector.ceiling.as_ref().map(|c| c.heights)
+                    } else if let Some(wf) = wall_face {
+                        // Get wall heights
+                        match wf {
+                            super::SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.heights),
+                            super::SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.heights),
+                            super::SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.heights),
+                            super::SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.heights),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(h) = heights {
+                        let corner0 = *edge_idx;
+                        let corner1 = (*edge_idx + 1) % 4;
+
+                        // Get corner positions - for walls these are different
+                        if *face_idx == 2 {
+                            // Wall corners: heights are [bottom-left, bottom-right, top-right, top-left]
+                            draw_text("Vertex 1:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                            y += 18.0;
+                            draw_text(&format!("  Height: {:.0}", h[corner0]),
+                                x, (y + 12.0).floor(), 13.0, WHITE);
+                            y += 18.0;
+
+                            draw_text("Vertex 2:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                            y += 18.0;
+                            draw_text(&format!("  Height: {:.0}", h[corner1]),
+                                x, (y + 12.0).floor(), 13.0, WHITE);
+                        } else {
+                            // Floor/ceiling corners
+                            let corners = [
+                                (base_x, base_z),                                           // NW - 0
+                                (base_x + crate::world::SECTOR_SIZE, base_z),               // NE - 1
+                                (base_x + crate::world::SECTOR_SIZE, base_z + crate::world::SECTOR_SIZE), // SE - 2
+                                (base_x, base_z + crate::world::SECTOR_SIZE),               // SW - 3
+                            ];
+
+                            draw_text("Vertex 1:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                            y += 18.0;
+                            draw_text(&format!("  X: {:.0}  Z: {:.0}  Y: {:.0}", corners[corner0].0, corners[corner0].1, h[corner0]),
+                                x, (y + 12.0).floor(), 13.0, WHITE);
+                            y += 18.0;
+
+                            draw_text("Vertex 2:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                            y += 18.0;
+                            draw_text(&format!("  X: {:.0}  Z: {:.0}  Y: {:.0}", corners[corner1].0, corners[corner1].1, h[corner1]),
+                                x, (y + 12.0).floor(), 13.0, WHITE);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Disable scissor
@@ -738,6 +842,8 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
 
     match selection {
         super::Selection::None | super::Selection::Room(_) | super::Selection::Portal { .. } => 30.0,
+
+        super::Selection::Edge { .. } => 120.0, // Edge header + 2 vertex coords
 
         super::Selection::SectorFace { room, x: gx, z: gz, face } => {
             let sector_data = state.level.rooms.get(*room)

@@ -61,9 +61,11 @@ The editor features a MuseScore-inspired interface design:
 
 #### Editing Tools
 - **Select Mode** - Pick and manipulate vertices, edges, and faces
+- **Multi-select** - Shift+click to select multiple faces, edges, or vertices
 - **Floor Tool** - Place 1024x1024 floor sectors with Shift+drag height adjustment
 - **Ceiling Tool** - Place ceiling sectors with Shift+drag height adjustment
 - **Wall Tool** - Click sector edges to create walls (auto-faces camera)
+- **Edge Dragging** - Select and drag edges on floors, ceilings, and walls to adjust heights
 - **Texture Painting** - Click faces to apply selected texture
 - **Vertex Linking** - Move coincident vertices together or independently
 - **Face Deletion** - Delete/Backspace removes selected floors, ceilings, and walls
@@ -94,12 +96,14 @@ The editor features a MuseScore-inspired interface design:
 - WASD: Move horizontally
 - Q/E: Move up/down
 - Left-click: Select geometry / Place walls on edges
-- Drag vertices: Adjust heights (floors, ceilings, walls)
+- Shift + left-click: Add to multi-selection
+- Drag vertices/edges: Adjust heights (floors, ceilings, walls)
 - Shift + drag: Adjust placement height (Floor/Ceiling/Wall modes)
 - Delete/Backspace: Remove selected face
 
 #### 2D Grid View
 - Left-click: Place floors/ceilings or select geometry
+- Shift + left-click: Add sectors to multi-selection
 - Right-click + drag: Pan view
 - Scroll wheel: Zoom in/out
 - Drag vertices: Reposition on X/Z plane
@@ -122,6 +126,17 @@ The editor features a MuseScore-inspired interface design:
 - **P**: Toggle perspective correction
 - **J**: Toggle vertex jitter
 - **Z**: Toggle Z-buffer
+
+### Music Editor
+- **Z to /**: Piano keys (bottom row, C to E)
+- **Q to ]**: Piano keys (top row, F to C - continues from bottom)
+- **Numpad +/-**: Octave up/down
+- **Space**: Play/Pause
+- **Esc**: Stop playback
+- **F9/F10**: Edit step down/up
+- **Apostrophe (`)**: Note off
+- **Arrow keys**: Navigate pattern
+- **Home/End**: Jump to start/end of pattern
 
 ## Building
 
@@ -161,7 +176,6 @@ This project uses the following free texture packs:
 
 - [ ] Remove AI/Claude mentions from git history (use `git filter-branch` or BFG Repo Cleaner - backup first!)
 - [ ] Built-in example browser: open browser window showing bundled maps/models with 3D preview (list left, 3D view right, info bottom)
-- [ ] Update itch.io page to reflect the new engine project
 
 ---
 
@@ -186,10 +200,16 @@ This project uses the following free texture packs:
 
 ### Music Editor
 
+#### Piano Keyboard
+- **3-octave continuous layout** across two keyboard rows
+- **Bottom row (Z to /)**: C to E (~1.5 octaves)
+- **Top row (Q to ])**: F to C (continues seamlessly from bottom row)
+- **Octave control**: Numpad +/- only (regular keys are piano keys)
+- **Note-off**: Apostrophe key (`)
+
 #### High Priority (Bugs)
 - [ ] Fix left-side knob reset bug: Knobs reset to max value when dragged on left side
 - [ ] Thicken knob perimeter: Circle outline too thin for easy reading
-- [ ] Fix piano key highlighting: Clicking works but doesn't show visual feedback
 - [ ] Configurable pattern length: Currently hardcoded to 64 rows - should be adjustable
 - [ ] Fix Pause icon: Currently shows pen icon instead of pause
 - [ ] Fix Arrangement icon: Shows lock instead of arrangement-related icon

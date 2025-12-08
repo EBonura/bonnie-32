@@ -159,6 +159,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
         let is_hovered = hovered_sector == Some((gx, gz));
         let is_selected = matches!(state.selection, Selection::Sector { x, z, .. } if x == gx && z == gz);
+        let is_multi_selected = state.multi_selection.iter().any(|sel| {
+            matches!(sel, Selection::Sector { x, z, .. } if *x == gx && *z == gz)
+        });
 
         // Determine fill color based on sector contents
         let has_floor = sector.floor.is_some();
@@ -166,7 +169,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         let has_walls = !sector.walls_north.is_empty() || !sector.walls_east.is_empty()
             || !sector.walls_south.is_empty() || !sector.walls_west.is_empty();
 
-        let fill_color = if is_selected {
+        let fill_color = if is_selected || is_multi_selected {
             Color::from_rgba(255, 200, 100, 150)
         } else if is_hovered {
             Color::from_rgba(150, 200, 255, 120)
@@ -195,7 +198,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         );
 
         // Draw sector edges
-        let edge_color = if is_selected || is_hovered {
+        let edge_color = if is_selected || is_multi_selected || is_hovered {
             Color::from_rgba(200, 200, 220, 255)
         } else {
             Color::from_rgba(100, 100, 110, 255)
@@ -265,12 +268,26 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         if ctx.mouse.left_pressed {
             use super::EditorTool;
 
+            // Detect Shift key for multi-select
+            let shift_down = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
             match state.tool {
                 EditorTool::Select => {
                     if let Some((gx, gz)) = hovered_sector {
-                        state.selection = Selection::Sector { room: current_room_idx, x: gx, z: gz };
+                        let new_selection = Selection::Sector { room: current_room_idx, x: gx, z: gz };
+                        if shift_down {
+                            state.toggle_multi_selection(new_selection.clone());
+                            state.selection = new_selection;
+                        } else {
+                            state.clear_multi_selection();
+                            state.selection = new_selection;
+                        }
                     } else {
-                        state.selection = Selection::None;
+                        // Clicked on nothing - clear selection (unless Shift is held)
+                        if !shift_down {
+                            state.selection = Selection::None;
+                            state.clear_multi_selection();
+                        }
                     }
                 }
 

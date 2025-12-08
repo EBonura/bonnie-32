@@ -44,6 +44,12 @@ pub enum Selection {
     Sector { room: usize, x: usize, z: usize },
     /// Specific face within a sector
     SectorFace { room: usize, x: usize, z: usize, face: SectorFace },
+    /// Edge of a face (two vertices)
+    /// face_idx: 0=floor, 1=ceiling, 2=wall
+    /// edge_idx: 0-3 for floor/ceiling (north, east, south, west)
+    ///           0-3 for wall (bottom, right, top, left)
+    /// wall_face: Some(SectorFace::WallXxx) when face_idx=2
+    Edge { room: usize, x: usize, z: usize, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace> },
     Portal { room: usize, portal: usize },
 }
 
