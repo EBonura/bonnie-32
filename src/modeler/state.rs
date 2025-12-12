@@ -271,25 +271,28 @@ impl ModelerState {
 
     /// Update camera position and orientation from orbit parameters
     fn update_camera_from_orbit(camera: &mut Camera, target: Vec3, distance: f32, azimuth: f32, elevation: f32) {
-        // Spherical to Cartesian conversion
-        // azimuth: angle around Y axis (0 = looking from +Z toward origin)
-        // elevation: angle above horizontal plane
-        let cos_elev = elevation.cos();
-        let sin_elev = elevation.sin();
-        let cos_az = azimuth.cos();
-        let sin_az = azimuth.sin();
+        // Match camera's basis calculation from render.rs:
+        // basis_z.x = cos(rotation_x) * sin(rotation_y)
+        // basis_z.y = -sin(rotation_x)
+        // basis_z.z = cos(rotation_x) * cos(rotation_y)
+        //
+        // Camera looks along +basis_z, so position = target - basis_z * distance
+        // For orbit: rotation_x = elevation (pitch), rotation_y = azimuth (yaw)
 
-        // Camera position relative to target
-        let offset = Vec3::new(
-            distance * cos_elev * sin_az,
-            distance * sin_elev,
-            distance * cos_elev * cos_az,
+        let pitch = elevation;
+        let yaw = azimuth;
+
+        // Forward direction (what camera looks at)
+        let forward = Vec3::new(
+            pitch.cos() * yaw.sin(),
+            -pitch.sin(),
+            pitch.cos() * yaw.cos(),
         );
-        camera.position = target + offset;
 
-        // Point camera at target
-        camera.rotation_x = -elevation;
-        camera.rotation_y = azimuth + std::f32::consts::PI;
+        // Camera sits behind the target along the forward direction
+        camera.position = target - forward * distance;
+        camera.rotation_x = pitch;
+        camera.rotation_y = yaw;
         camera.update_basis();
     }
 

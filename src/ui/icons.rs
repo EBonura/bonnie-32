@@ -42,6 +42,16 @@ pub mod icon {
     pub const GRID: char = '\u{e0e9}';
     pub const DOOR_CLOSED: char = '\u{e09a}';  // Portal (doorway between rooms)
 
+    // Transform tools (Assets editor)
+    pub const POINTER: char = '\u{e1e8}';      // Select tool
+    pub const ROTATE_3D: char = '\u{e2ea}';    // Rotate tool
+    pub const SCALE_3D: char = '\u{e2eb}';     // Scale tool
+    pub const MAXIMIZE_2: char = '\u{e113}';   // UV editor (expand/maximize)
+    pub const BRUSH: char = '\u{e1d3}';        // Paint mode
+    pub const GIT_BRANCH: char = '\u{e1f4}';   // Hierarchy
+    pub const SCAN: char = '\u{e257}';         // Face selection
+    pub const CIRCLE_DOT: char = '\u{e345}';   // Vertex selection
+
     // PS1 effect toggles
     pub const WAVES: char = '\u{e283}';       // Affine texture mapping (warpy)
     pub const MAGNET: char = '\u{e2b5}';      // Vertex snapping (jitter)

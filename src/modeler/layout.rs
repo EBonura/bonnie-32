@@ -167,10 +167,10 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 
     // Tool buttons
     let tools = [
-        (icon::MOVE, "Select", TransformTool::Select),
+        (icon::POINTER, "Select", TransformTool::Select),
         (icon::MOVE, "Move (G)", TransformTool::Move),
-        (icon::MOVE, "Rotate (R)", TransformTool::Rotate),  // TODO: proper rotate icon
-        (icon::MOVE, "Scale (S)", TransformTool::Scale),    // TODO: proper scale icon
+        (icon::ROTATE_3D, "Rotate (R)", TransformTool::Rotate),
+        (icon::SCALE_3D, "Scale (S)", TransformTool::Scale),
     ];
 
     for (icon_char, tooltip, tool) in tools {
@@ -186,12 +186,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     toolbar.label("Mode:");
     for view in ModelerView::ALL {
         let is_active = state.view == view;
-        // Use different icons per view (placeholder for now)
         let icon_char = match view {
             ModelerView::Model => icon::BOX,
-            ModelerView::UV => icon::GRID,
-            ModelerView::Paint => icon::LAYERS, // TODO: brush icon
-            ModelerView::Hierarchy => icon::LAYERS,
+            ModelerView::UV => icon::MAXIMIZE_2,
+            ModelerView::Paint => icon::BRUSH,
+            ModelerView::Hierarchy => icon::GIT_BRANCH,
             ModelerView::Animate => icon::PLAY,
         };
         if toolbar.icon_button_active(ctx, icon_char, icon_font, view.label(), is_active) {
@@ -207,9 +206,9 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
             let is_active = state.select_mode == mode;
             let icon_char = match mode {
                 SelectMode::Part => icon::BOX,
-                SelectMode::Vertex => icon::PLUS, // TODO: vertex icon
-                SelectMode::Edge => icon::MINUS,  // TODO: edge icon
-                SelectMode::Face => icon::SQUARE,
+                SelectMode::Vertex => icon::CIRCLE_DOT,
+                SelectMode::Edge => icon::MINUS,
+                SelectMode::Face => icon::SCAN,
             };
             if toolbar.icon_button_active(ctx, icon_char, icon_font, mode.label(), is_active) {
                 state.select_mode = mode;

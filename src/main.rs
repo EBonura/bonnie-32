@@ -154,6 +154,11 @@ async fn main() {
                 // Check for pending import from browser (WASM only)
                 #[cfg(target_arch = "wasm32")]
                 {
+                    /// Maximum import file size (10 MB) to prevent memory exhaustion
+                    const MAX_IMPORT_SIZE: usize = 10 * 1024 * 1024;
+                    /// Maximum filename length
+                    const MAX_FILENAME_LEN: usize = 256;
+
                     extern "C" {
                         fn bonnie_check_import() -> i32;
                         fn bonnie_get_import_data_len() -> usize;
@@ -169,26 +174,36 @@ async fn main() {
                         let data_len = unsafe { bonnie_get_import_data_len() };
                         let filename_len = unsafe { bonnie_get_import_filename_len() };
 
-                        let mut data_buf = vec![0u8; data_len];
-                        let mut filename_buf = vec![0u8; filename_len];
+                        // Security: Check sizes before allocation to prevent memory exhaustion
+                        if data_len > MAX_IMPORT_SIZE {
+                            unsafe { bonnie_clear_import(); }
+                            ws.editor_state.set_status("Import failed: file too large (max 10MB)", 5.0);
+                        } else if filename_len > MAX_FILENAME_LEN {
+                            unsafe { bonnie_clear_import(); }
+                            ws.editor_state.set_status("Import failed: filename too long", 5.0);
+                        } else {
+                            let mut data_buf = vec![0u8; data_len];
+                            let mut filename_buf = vec![0u8; filename_len];
 
-                        unsafe {
-                            bonnie_copy_import_data(data_buf.as_mut_ptr(), data_len);
-                            bonnie_copy_import_filename(filename_buf.as_mut_ptr(), filename_len);
-                            bonnie_clear_import();
-                        }
-
-                        let data = String::from_utf8_lossy(&data_buf).to_string();
-                        let filename = String::from_utf8_lossy(&filename_buf).to_string();
-
-                        match ron::from_str::<world::Level>(&data) {
-                            Ok(level) => {
-                                ws.editor_layout.apply_config(&level.editor_layout);
-                                ws.editor_state.load_level(level, PathBuf::from(&filename));
-                                ws.editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
+                            unsafe {
+                                bonnie_copy_import_data(data_buf.as_mut_ptr(), data_len);
+                                bonnie_copy_import_filename(filename_buf.as_mut_ptr(), filename_len);
+                                bonnie_clear_import();
                             }
-                            Err(e) => {
-                                ws.editor_state.set_status(&format!("Upload failed: {}", e), 5.0);
+
+                            let data = String::from_utf8_lossy(&data_buf).to_string();
+                            let filename = String::from_utf8_lossy(&filename_buf).to_string();
+
+                            // Use load_level_from_str which includes validation
+                            match world::load_level_from_str(&data) {
+                                Ok(level) => {
+                                    ws.editor_layout.apply_config(&level.editor_layout);
+                                    ws.editor_state.load_level(level, PathBuf::from(&filename));
+                                    ws.editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
+                                }
+                                Err(e) => {
+                                    ws.editor_state.set_status(&format!("Upload failed: {}", e), 5.0);
+                                }
                             }
                         }
                     }
