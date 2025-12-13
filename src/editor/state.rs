@@ -13,6 +13,13 @@ pub const CLICK_HEIGHT: f32 = 256.0;
 /// Default ceiling height (2x sector size)
 pub const CEILING_HEIGHT: f32 = 2048.0;
 
+/// Camera mode for 3D viewport
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraMode {
+    Free,   // WASD + mouse look (FPS style)
+    Orbit,  // Rotate around target point
+}
+
 /// Current editor tool
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EditorTool {
@@ -116,6 +123,16 @@ pub struct EditorState {
     /// 3D viewport camera
     pub camera_3d: Camera,
 
+    /// Camera mode (free or orbit)
+    pub camera_mode: CameraMode,
+
+    /// Orbit camera state
+    pub orbit_target: Vec3,      // Point the camera orbits around
+    pub orbit_distance: f32,     // Distance from target
+    pub orbit_azimuth: f32,      // Horizontal angle (radians)
+    pub orbit_elevation: f32,    // Vertical angle (radians)
+    pub last_orbit_target: Vec3, // Last orbit target (for when nothing is selected)
+
     /// 2D grid view camera (pan and zoom)
     pub grid_offset_x: f32,
     pub grid_offset_y: f32,
@@ -206,6 +223,12 @@ impl EditorState {
             }))
             .unwrap_or_else(crate::world::TextureRef::none);
 
+        // Default orbit target at center of first sector
+        let orbit_target = Vec3::new(512.0, 512.0, 512.0);
+        let orbit_distance = 4000.0;
+        let orbit_azimuth = 0.8;     // ~45 degrees
+        let orbit_elevation = 0.4;   // ~23 degrees up
+
         Self {
             level,
             current_file: None,
@@ -217,6 +240,12 @@ impl EditorState {
             current_room: 0,
             selected_texture,
             camera_3d,
+            camera_mode: CameraMode::Free,
+            orbit_target,
+            orbit_distance,
+            orbit_azimuth,
+            orbit_elevation,
+            last_orbit_target: orbit_target,
             grid_offset_x: 0.0,
             grid_offset_y: 0.0,
             grid_zoom: 0.1, // Pixels per world unit (very zoomed out for TRLE 1024-unit sectors)
@@ -378,6 +407,91 @@ impl EditorState {
             self.multi_selection.remove(pos);
         } else if !matches!(selection, Selection::None) {
             self.multi_selection.push(selection);
+        }
+    }
+
+    /// Update camera position from orbit parameters
+    pub fn sync_camera_from_orbit(&mut self) {
+        let pitch = self.orbit_elevation;
+        let yaw = self.orbit_azimuth;
+
+        // Forward direction (what camera looks at)
+        let forward = Vec3::new(
+            pitch.cos() * yaw.sin(),
+            -pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+
+        // Camera sits behind the target along the forward direction
+        self.camera_3d.position = self.orbit_target - forward * self.orbit_distance;
+        self.camera_3d.rotation_x = pitch;
+        self.camera_3d.rotation_y = yaw;
+        self.camera_3d.update_basis();
+    }
+
+    /// Get the center point of the current selection (for orbit target)
+    pub fn get_selection_center(&self) -> Option<Vec3> {
+        match &self.selection {
+            Selection::None => None,
+            Selection::Room(room_idx) => {
+                self.level.rooms.get(*room_idx).map(|room| {
+                    let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+                    let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+                    let center_y = room.position.y + 512.0; // Approximate middle height
+                    Vec3::new(center_x, center_y, center_z)
+                })
+            }
+            Selection::Sector { room, x, z } | Selection::SectorFace { room, x, z, .. } => {
+                self.level.rooms.get(*room).and_then(|r| {
+                    r.get_sector(*x, *z).map(|sector| {
+                        let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;
+                        let base_z = r.position.z + (*z as f32) * SECTOR_SIZE;
+                        let center_x = base_x + SECTOR_SIZE / 2.0;
+                        let center_z = base_z + SECTOR_SIZE / 2.0;
+                        // Calculate average height from floor/ceiling
+                        let floor_y = sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
+                        let ceiling_y = sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(2048.0);
+                        let center_y = (floor_y + ceiling_y) / 2.0;
+                        Vec3::new(center_x, center_y, center_z)
+                    })
+                })
+            }
+            Selection::Edge { room, x, z, .. } => {
+                // Same as sector for now
+                self.level.rooms.get(*room).and_then(|r| {
+                    r.get_sector(*x, *z).map(|sector| {
+                        let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;
+                        let base_z = r.position.z + (*z as f32) * SECTOR_SIZE;
+                        let center_x = base_x + SECTOR_SIZE / 2.0;
+                        let center_z = base_z + SECTOR_SIZE / 2.0;
+                        let floor_y = sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
+                        let ceiling_y = sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(2048.0);
+                        let center_y = (floor_y + ceiling_y) / 2.0;
+                        Vec3::new(center_x, center_y, center_z)
+                    })
+                })
+            }
+            Selection::Portal { room, portal } => {
+                self.level.rooms.get(*room).and_then(|r| {
+                    r.portals.get(*portal).map(|p| {
+                        // Average of portal vertices
+                        let sum = p.vertices.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
+                        let count = p.vertices.len() as f32;
+                        Vec3::new(sum.x / count, sum.y / count, sum.z / count)
+                    })
+                })
+            }
+        }
+    }
+
+    /// Update orbit target based on current selection
+    pub fn update_orbit_target(&mut self) {
+        if let Some(center) = self.get_selection_center() {
+            self.orbit_target = center;
+            self.last_orbit_target = center;
+        } else {
+            // Use last known target if nothing selected
+            self.orbit_target = self.last_orbit_target;
         }
     }
 }

@@ -81,6 +81,10 @@ pub mod icon {
     pub const FLIP_VERTICAL: char = '\u{e21a}';   // flip-vertical-2
     pub const ROTATE_CW: char = '\u{e147}';       // rotate-cw
     pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
+
+    // Camera modes
+    pub const EYE: char = '\u{e0b4}';             // Free camera (eye)
+    pub const ORBIT: char = '\u{e12e}';           // Orbit camera (orbit icon)
 }
 
 /// Draw a Lucide icon centered in a rect

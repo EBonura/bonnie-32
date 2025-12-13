@@ -146,42 +146,88 @@ pub fn draw_viewport_3d(
         }
     };
 
-    // Camera rotation with right mouse button (same as game mode)
-    // Only rotate camera when not dragging a vertex
-    if ctx.mouse.right_down && inside_viewport && state.dragging_sector_vertices.is_empty() {
-        if state.viewport_mouse_captured {
-            // Inverted to match Y-down coordinate system
-            let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
-            let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
-            state.camera_3d.rotate(dx, dy);
+    // Camera controls - depend on camera mode
+    use super::CameraMode;
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+    match state.camera_mode {
+        CameraMode::Free => {
+            // Free camera: right-drag to look around, WASD to move
+            if ctx.mouse.right_down && inside_viewport && state.dragging_sector_vertices.is_empty() {
+                if state.viewport_mouse_captured {
+                    // Inverted to match Y-down coordinate system
+                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
+                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
+                    state.camera_3d.rotate(dx, dy);
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
+            let move_speed = 100.0; // Scaled for TRLE units (1024 per sector)
+            if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
+                if is_key_down(KeyCode::W) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::S) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::A) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::D) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::Q) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
+                }
+                if is_key_down(KeyCode::E) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
+                }
+            }
         }
-        state.viewport_mouse_captured = true;
-    } else if !ctx.mouse.right_down {
-        state.viewport_mouse_captured = false;
+
+        CameraMode::Orbit => {
+            // Orbit camera: right-drag rotates around target (or pans with Shift)
+            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
+                if state.viewport_mouse_captured {
+                    let dx = mouse_pos.0 - state.viewport_last_mouse.0;
+                    let dy = mouse_pos.1 - state.viewport_last_mouse.1;
+
+                    if shift_held {
+                        // Shift+Right drag: pan the orbit target
+                        let pan_speed = state.orbit_distance * 0.002;
+                        state.orbit_target = state.orbit_target - state.camera_3d.basis_x * dx * pan_speed;
+                        state.orbit_target = state.orbit_target + state.camera_3d.basis_y * dy * pan_speed;
+                        state.last_orbit_target = state.orbit_target;
+                    } else {
+                        // Right drag: rotate around target
+                        state.orbit_azimuth += dx * 0.005;
+                        state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+                    }
+                    state.sync_camera_from_orbit();
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Mouse wheel: zoom in/out (change orbit distance)
+            if inside_viewport {
+                let scroll = mouse_wheel().1;
+                if scroll != 0.0 {
+                    let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
+                    state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(100.0, 20000.0);
+                    state.sync_camera_from_orbit();
+                }
+            }
+        }
     }
 
-    // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
-    let move_speed = 100.0; // Scaled for TRLE units (1024 per sector)
-    if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
-        if is_key_down(KeyCode::W) {
-            state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::S) {
-            state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::A) {
-            state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::D) {
-            state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::Q) {
-            state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
-        }
-        if is_key_down(KeyCode::E) {
-            state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
-        }
-    }
+    // Track if we should update orbit target (selection might change during click handling below)
+    let should_update_orbit_target = state.camera_mode == CameraMode::Orbit && ctx.mouse.left_pressed && inside_viewport;
 
     // Toggle link coincident vertices mode with L key
     if inside_viewport && is_key_pressed(KeyCode::L) {
@@ -1425,6 +1471,12 @@ pub fn draw_viewport_3d(
 
     // Update mouse position for next frame
     state.viewport_last_mouse = mouse_pos;
+
+    // Update orbit target after selection changes (in orbit mode)
+    if should_update_orbit_target {
+        state.update_orbit_target();
+        state.sync_camera_from_orbit();
+    }
 
     // Clear framebuffer
     fb.clear(RasterColor::new(30, 30, 40));
