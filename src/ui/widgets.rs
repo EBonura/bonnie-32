@@ -400,9 +400,9 @@ pub fn draw_knob(
     let text_color = Color::new(0.8, 0.8, 0.8, 1.0);
     let label_color = Color::new(0.6, 0.6, 0.6, 1.0);
 
-    // Draw knob body (outer ring)
+    // Draw knob body (outer ring) - thicker perimeter
     draw_circle(center_x, center_y, radius, ring_color);
-    draw_circle(center_x, center_y, radius - 3.0, bg_color);
+    draw_circle(center_x, center_y, radius - 5.0, bg_color);
 
     // Knob rotation: map 0-127 to angle range
     // Start at 225° (bottom-left), end at -45° (bottom-right) = 270° sweep
@@ -414,7 +414,7 @@ pub fn draw_knob(
     let angle = start_angle - normalized * angle_range;
 
     // Draw arc showing value (using line segments)
-    let arc_radius = radius - 1.5;
+    let arc_radius = radius - 2.5; // Center of the 5px ring
     let segments = 32;
 
     if is_bipolar {
@@ -438,7 +438,7 @@ pub fn draw_knob(
                 let y1 = center_y - arc_radius * a1.sin();
                 let x2 = center_x + arc_radius * a2.cos();
                 let y2 = center_y - arc_radius * a2.sin();
-                draw_line(x1, y1, x2, y2, 3.0, indicator_color);
+                draw_line(x1, y1, x2, y2, 5.0, indicator_color);
             }
         }
     } else {
@@ -453,7 +453,7 @@ pub fn draw_knob(
             let y1 = center_y - arc_radius * a1.sin();
             let x2 = center_x + arc_radius * a2.cos();
             let y2 = center_y - arc_radius * a2.sin();
-            draw_line(x1, y1, x2, y2, 3.0, indicator_color);
+            draw_line(x1, y1, x2, y2, 5.0, indicator_color);
         }
     }
 
@@ -521,10 +521,34 @@ pub fn draw_knob(
         // Calculate angle from mouse position to center
         let dx = ctx.mouse.x - center_x;
         let dy = center_y - ctx.mouse.y; // Flip Y for standard math coords
-        let mouse_angle = dy.atan2(dx);
+        let mouse_angle = dx.atan2(dy); // atan2(x,y) gives angle from vertical (12 o'clock)
 
-        // Map angle back to value (with wrapping protection)
-        let mut norm = (start_angle - mouse_angle) / angle_range;
+        // The knob sweeps from 225° to -45° (or equivalently, from -135° to 45° from 12 o'clock)
+        // Convert to a 0-1 range where:
+        // - Leftmost position (225° = -135° from vertical) = 0
+        // - Rightmost position (-45° = 45° from vertical) = 1
+        // atan2(x,y) returns: 0 at top, positive going clockwise, -π to π range
+
+        // mouse_angle: -π to π, where 0 is up, positive is right/clockwise
+        // We want: -135° (-3π/4) = 0.0, +45° (π/4) = 1.0
+        // Linear mapping: norm = (mouse_angle - (-3π/4)) / (π/4 - (-3π/4))
+        //                      = (mouse_angle + 3π/4) / π
+
+        let min_angle = -135.0_f32.to_radians(); // -3π/4
+        let max_angle = 45.0_f32.to_radians();   // π/4
+
+        // Handle the dead zone at the bottom (between 135° and 180°, and -180° and -135°)
+        let mut norm = (mouse_angle - min_angle) / (max_angle - min_angle);
+
+        // Clamp to valid range - if in the dead zone at bottom, snap to nearest end
+        if mouse_angle > max_angle && mouse_angle <= std::f32::consts::PI {
+            // Bottom-right dead zone - snap to max
+            norm = 1.0;
+        } else if mouse_angle < min_angle && mouse_angle >= -std::f32::consts::PI {
+            // Bottom-left dead zone - snap to min
+            norm = 0.0;
+        }
+
         norm = norm.clamp(0.0, 1.0);
         new_value = Some((norm * 127.0).round() as u8);
     }
