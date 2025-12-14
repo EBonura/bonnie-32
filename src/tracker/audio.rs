@@ -602,7 +602,10 @@ impl AudioEngine {
     }
 
     /// Get list of preset names from the loaded soundfont
+    /// Returns (bank, program, name) tuples for all 128 GM melodic instruments
+    /// Note: Drums require MIDI channel 10 and bank select - not yet supported
     pub fn get_preset_names(&self) -> Vec<(u8, u8, String)> {
+        // Standard GM melodic instruments (bank 0, programs 0-127)
         let gm_names = [
             "Acoustic Grand Piano", "Bright Acoustic Piano", "Electric Grand Piano",
             "Honky-tonk Piano", "Electric Piano 1", "Electric Piano 2", "Harpsichord",
