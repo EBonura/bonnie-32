@@ -11,6 +11,7 @@ use crate::ui::{
 };
 use super::state::{TrackerState, TrackerView};
 use super::psx_reverb::ReverbType;
+use super::audio::OutputSampleRate;
 
 // Layout constants
 const ROW_HEIGHT: f32 = 18.0;
@@ -684,8 +685,44 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     draw_text(&format!("Current: {:03} - {}", current_inst, current_name),
               piano_x, info_y, 16.0, INST_COLOR);
 
+    // === SAMPLE RATE TOGGLE ===
+    let sample_rate_y = info_y + 25.0;
+    draw_text("Sample Rate", piano_x, sample_rate_y, 14.0, TEXT_COLOR);
+
+    let sr_btn_w = 60.0;
+    let sr_btn_h = 22.0;
+    let sr_spacing = 4.0;
+
+    let current_sample_rate = state.audio.output_sample_rate();
+
+    for (i, rate) in OutputSampleRate::ALL.iter().enumerate() {
+        let btn_x = piano_x + i as f32 * (sr_btn_w + sr_spacing);
+        let btn_y = sample_rate_y + 10.0;
+
+        let btn_rect = Rect::new(btn_x, btn_y, sr_btn_w, sr_btn_h);
+        let is_active = *rate == current_sample_rate;
+        let is_hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            Color::new(0.2, 0.4, 0.5, 1.0) // Cyan-ish for active
+        } else if is_hovered {
+            Color::new(0.25, 0.25, 0.3, 1.0)
+        } else {
+            Color::new(0.15, 0.15, 0.18, 1.0)
+        };
+
+        draw_rectangle(btn_x, btn_y, sr_btn_w, sr_btn_h, bg);
+        let text_color = if is_active { WHITE } else { TEXT_COLOR };
+        draw_text(rate.name(), btn_x + 12.0, btn_y + 15.0, 12.0, text_color);
+
+        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+            state.audio.set_output_sample_rate(*rate);
+            state.set_status(&format!("Sample rate: {}", rate.name()), 1.0);
+        }
+    }
+
     // === PS1 REVERB PRESETS ===
-    let reverb_y = info_y + 30.0;
+    let reverb_y = sample_rate_y + 45.0;
     draw_text("PS1 Reverb", piano_x, reverb_y, 14.0, TEXT_COLOR);
 
     let preset_btn_w = 80.0;

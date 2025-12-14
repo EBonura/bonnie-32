@@ -19,7 +19,7 @@ mod psx_reverb;
 // Some of these aren't used externally yet but are part of the intended public API
 pub use state::TrackerState;
 #[allow(unused_imports)]
-pub use audio::AudioEngine;
+pub use audio::{AudioEngine, OutputSampleRate};
 #[allow(unused_imports)]
 pub use pattern::*;
 pub use layout::draw_tracker;

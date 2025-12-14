@@ -17,6 +17,67 @@ use super::psx_reverb::{PsxReverb, ReverbType};
 /// Sample rate for audio output
 pub const SAMPLE_RATE: u32 = 44100;
 
+/// Output sample rate mode for PS1-style audio degradation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputSampleRate {
+    /// Native 44.1kHz (clean, modern)
+    #[default]
+    Native,
+    /// 22kHz (typical PS1 sample rate)
+    Ps1High,
+    /// 11kHz (crunchy, low-fi PS1)
+    Ps1Low,
+}
+
+impl OutputSampleRate {
+    pub const ALL: [OutputSampleRate; 3] = [
+        OutputSampleRate::Native,
+        OutputSampleRate::Ps1High,
+        OutputSampleRate::Ps1Low,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            OutputSampleRate::Native => "44kHz",
+            OutputSampleRate::Ps1High => "22kHz",
+            OutputSampleRate::Ps1Low => "11kHz",
+        }
+    }
+
+    /// Get the downsampling factor (1 = no downsampling)
+    pub fn factor(&self) -> usize {
+        match self {
+            OutputSampleRate::Native => 1,
+            OutputSampleRate::Ps1High => 2,
+            OutputSampleRate::Ps1Low => 4,
+        }
+    }
+}
+
+/// Apply sample rate reduction by averaging and duplicating samples
+fn apply_sample_rate_reduction(samples: &mut [f32], factor: usize) {
+    if factor <= 1 {
+        return;
+    }
+
+    let len = samples.len();
+    let mut i = 0;
+    while i < len {
+        // Average `factor` samples together
+        let end = (i + factor).min(len);
+        let count = end - i;
+        let sum: f32 = samples[i..end].iter().sum();
+        let avg = sum / count as f32;
+
+        // Write the average back to all samples in this block
+        for sample in samples[i..end].iter_mut() {
+            *sample = avg;
+        }
+
+        i += factor;
+    }
+}
+
 /// Audio engine state shared between main thread and audio callback
 struct AudioState {
     /// The synthesizer
@@ -25,6 +86,8 @@ struct AudioState {
     playing: bool,
     /// PS1 SPU reverb processor
     reverb: PsxReverb,
+    /// Output sample rate mode
+    output_sample_rate: OutputSampleRate,
 }
 
 // =============================================================================
@@ -66,6 +129,11 @@ mod native {
 
                     // Apply PS1 reverb
                     state.reverb.process(&mut left_buffer[..samples_needed], &mut right_buffer[..samples_needed]);
+
+                    // Apply sample rate reduction (PS1-style lo-fi)
+                    let factor = state.output_sample_rate.factor();
+                    apply_sample_rate_reduction(&mut left_buffer[..samples_needed], factor);
+                    apply_sample_rate_reduction(&mut right_buffer[..samples_needed], factor);
 
                     for i in 0..samples_needed {
                         data[i * 2] = left_buffer[i];
@@ -166,6 +234,7 @@ impl AudioEngine {
             synth: None,
             playing: false,
             reverb: PsxReverb::new(SAMPLE_RATE),
+            output_sample_rate: OutputSampleRate::default(),
         }));
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -217,6 +286,17 @@ impl AudioEngine {
     pub fn clear_reverb(&self) {
         let mut state = self.state.lock().unwrap();
         state.reverb.clear();
+    }
+
+    /// Set output sample rate mode
+    pub fn set_output_sample_rate(&self, rate: OutputSampleRate) {
+        let mut state = self.state.lock().unwrap();
+        state.output_sample_rate = rate;
+    }
+
+    /// Get current output sample rate mode
+    pub fn output_sample_rate(&self) -> OutputSampleRate {
+        self.state.lock().unwrap().output_sample_rate
     }
 
     /// Load a soundfont from file (native only)
@@ -295,6 +375,11 @@ impl AudioEngine {
 
             // Apply PS1 reverb
             state.reverb.process(&mut self.left_buffer[..samples], &mut self.right_buffer[..samples]);
+
+            // Apply sample rate reduction (PS1-style lo-fi)
+            let factor = state.output_sample_rate.factor();
+            apply_sample_rate_reduction(&mut self.left_buffer[..samples], factor);
+            apply_sample_rate_reduction(&mut self.right_buffer[..samples], factor);
 
             wasm::write_audio(&self.left_buffer[..samples], &self.right_buffer[..samples]);
         }
