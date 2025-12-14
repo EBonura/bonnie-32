@@ -4,6 +4,10 @@
 //! Inspired by Picotron's tracker design.
 //!
 //! Features authentic PS1 SPU reverb emulation based on the nocash specifications.
+//!
+//! Note: Some pattern/state API not yet fully used by the editor UI.
+
+#![allow(dead_code)]
 
 mod state;
 mod audio;
@@ -11,8 +15,13 @@ mod pattern;
 mod layout;
 mod psx_reverb;
 
+// Re-export public API
+// Some of these aren't used externally yet but are part of the intended public API
 pub use state::TrackerState;
-pub use audio::AudioEngine;
+#[allow(unused_imports)]
+pub use audio::{AudioEngine, OutputSampleRate};
+#[allow(unused_imports)]
 pub use pattern::*;
 pub use layout::draw_tracker;
+#[allow(unused_imports)]
 pub use psx_reverb::{PsxReverb, ReverbType};

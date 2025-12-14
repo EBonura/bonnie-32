@@ -1,25 +1,17 @@
 //! Tracker UI layout and rendering
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, Toolbar, icon, draw_knob};
+use crate::ui::{
+    Rect, UiContext, Toolbar, icon, draw_knob,
+    // Theme colors
+    BG_COLOR, HEADER_COLOR, TEXT_COLOR, TEXT_DIM,
+    ROW_EVEN, ROW_ODD, ROW_BEAT, ROW_HIGHLIGHT,
+    CURSOR_COLOR, PLAYBACK_ROW_COLOR,
+    NOTE_COLOR, INST_COLOR, VOL_COLOR, FX_COLOR,
+};
 use super::state::{TrackerState, TrackerView};
 use super::psx_reverb::ReverbType;
-
-// Colors
-const BG_COLOR: Color = Color::new(0.11, 0.11, 0.13, 1.0);
-const HEADER_COLOR: Color = Color::new(0.15, 0.15, 0.18, 1.0);
-const ROW_EVEN: Color = Color::new(0.13, 0.13, 0.15, 1.0);
-const ROW_ODD: Color = Color::new(0.11, 0.11, 0.13, 1.0);
-const ROW_BEAT: Color = Color::new(0.16, 0.14, 0.12, 1.0);
-const ROW_HIGHLIGHT: Color = Color::new(0.2, 0.25, 0.3, 1.0);
-const CURSOR_COLOR: Color = Color::new(0.3, 0.5, 0.8, 0.8);
-const PLAYBACK_ROW_COLOR: Color = Color::new(0.4, 0.2, 0.2, 0.6);
-const TEXT_COLOR: Color = Color::new(0.8, 0.8, 0.85, 1.0);
-const TEXT_DIM: Color = Color::new(0.4, 0.4, 0.45, 1.0);
-const NOTE_COLOR: Color = Color::new(0.9, 0.85, 0.5, 1.0);
-const INST_COLOR: Color = Color::new(0.5, 0.8, 0.5, 1.0);
-const VOL_COLOR: Color = Color::new(0.5, 0.7, 0.9, 1.0);
-const FX_COLOR: Color = Color::new(0.9, 0.5, 0.7, 1.0);
+use super::audio::OutputSampleRate;
 
 // Layout constants
 const ROW_HEIGHT: f32 = 18.0;
@@ -693,8 +685,44 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     draw_text(&format!("Current: {:03} - {}", current_inst, current_name),
               piano_x, info_y, 16.0, INST_COLOR);
 
+    // === SAMPLE RATE TOGGLE ===
+    let sample_rate_y = info_y + 25.0;
+    draw_text("Sample Rate", piano_x, sample_rate_y, 14.0, TEXT_COLOR);
+
+    let sr_btn_w = 52.0;
+    let sr_btn_h = 22.0;
+    let sr_spacing = 4.0;
+
+    let current_sample_rate = state.audio.output_sample_rate();
+
+    for (i, rate) in OutputSampleRate::ALL.iter().enumerate() {
+        let btn_x = piano_x + i as f32 * (sr_btn_w + sr_spacing);
+        let btn_y = sample_rate_y + 10.0;
+
+        let btn_rect = Rect::new(btn_x, btn_y, sr_btn_w, sr_btn_h);
+        let is_active = *rate == current_sample_rate;
+        let is_hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            Color::new(0.2, 0.4, 0.5, 1.0) // Cyan-ish for active
+        } else if is_hovered {
+            Color::new(0.25, 0.25, 0.3, 1.0)
+        } else {
+            Color::new(0.15, 0.15, 0.18, 1.0)
+        };
+
+        draw_rectangle(btn_x, btn_y, sr_btn_w, sr_btn_h, bg);
+        let text_color = if is_active { WHITE } else { TEXT_COLOR };
+        draw_text(rate.name(), btn_x + 12.0, btn_y + 15.0, 12.0, text_color);
+
+        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+            state.audio.set_output_sample_rate(*rate);
+            state.set_status(&format!("Sample rate: {}", rate.name()), 1.0);
+        }
+    }
+
     // === PS1 REVERB PRESETS ===
-    let reverb_y = info_y + 30.0;
+    let reverb_y = sample_rate_y + 45.0;
     draw_text("PS1 Reverb", piano_x, reverb_y, 14.0, TEXT_COLOR);
 
     let preset_btn_w = 80.0;

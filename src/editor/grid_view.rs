@@ -166,7 +166,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         // Determine fill color based on sector contents
         let has_floor = sector.floor.is_some();
         let has_ceiling = sector.ceiling.is_some();
-        let has_walls = !sector.walls_north.is_empty() || !sector.walls_east.is_empty()
+        let _has_walls = !sector.walls_north.is_empty() || !sector.walls_east.is_empty()
             || !sector.walls_south.is_empty() || !sector.walls_west.is_empty();
 
         let fill_color = if is_selected || is_multi_selected {

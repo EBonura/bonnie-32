@@ -28,6 +28,8 @@ impl Tool {
         Tool::Tracker,
     ];
 
+    /// Get the display label for this tool
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Tool::Home => "Home",
@@ -37,6 +39,8 @@ impl Tool {
         }
     }
 
+    /// Get all tool labels (for tab bar)
+    #[allow(dead_code)]
     pub fn labels() -> [&'static str; 4] {
         [
             Tool::Home.label(),

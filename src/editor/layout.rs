@@ -1432,7 +1432,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 Color::from_rgba(150, 200, 255, 255),
                                 *room, *gx, *gz, true, state, icon_font
                             );
-                            y += h + CONTAINER_MARGIN;
+                            let _ = h + CONTAINER_MARGIN; // Layout positioning for potential future faces
                         } else {
                             draw_text("(no floor)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
                         }
@@ -1444,7 +1444,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 Color::from_rgba(200, 150, 255, 255),
                                 *room, *gx, *gz, false, state, icon_font
                             );
-                            y += h + CONTAINER_MARGIN;
+                            let _ = h + CONTAINER_MARGIN;
                         } else {
                             draw_text("(no ceiling)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
                         }
@@ -1456,7 +1456,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 Color::from_rgba(255, 180, 120, 255),
                                 *room, *gx, *gz, crate::world::Direction::North, *i, state, icon_font
                             );
-                            y += h + CONTAINER_MARGIN;
+                            let _ = h + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::WallEast(i) => {
@@ -1466,7 +1466,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 Color::from_rgba(255, 180, 120, 255),
                                 *room, *gx, *gz, crate::world::Direction::East, *i, state, icon_font
                             );
-                            y += h + CONTAINER_MARGIN;
+                            let _ = h + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::WallSouth(i) => {
@@ -1476,7 +1476,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 Color::from_rgba(255, 180, 120, 255),
                                 *room, *gx, *gz, crate::world::Direction::South, *i, state, icon_font
                             );
-                            y += h + CONTAINER_MARGIN;
+                            let _ = h + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::WallWest(i) => {
@@ -1486,7 +1486,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 Color::from_rgba(255, 180, 120, 255),
                                 *room, *gx, *gz, crate::world::Direction::West, *i, state, icon_font
                             );
-                            y += h + CONTAINER_MARGIN;
+                            let _ = h + CONTAINER_MARGIN;
                         }
                     }
                 }

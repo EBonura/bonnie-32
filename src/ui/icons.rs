@@ -5,6 +5,8 @@
 use macroquad::prelude::*;
 
 /// Lucide icon codepoints
+/// Note: Not all icons are currently used - this is a library of available icons
+#[allow(dead_code)]
 pub mod icon {
     // File operations
     pub const SAVE: char = '\u{e14d}';

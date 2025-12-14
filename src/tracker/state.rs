@@ -684,13 +684,13 @@ impl TrackerState {
     pub fn key_to_note(key: macroquad::prelude::KeyCode, octave: u8) -> Option<u8> {
         use macroquad::prelude::KeyCode;
 
-        // Piano keyboard layout:
-        // Bottom row: Z S X D C V G B H N J M (C to B)
-        // Top row: Q 2 W 3 E R 5 T 6 Y 7 U (C+1 octave to B+1)
+        // Piano keyboard layout (3 octaves, 37 keys):
+        // Bottom row: Z S X D C V G B H N J M , L . ; / (semitones 0-16)
+        // Top row: Q 2 W 3 E 4 R T 5 Y 6 U I 8 O 9 P 0 [ ] (semitones 17-36)
         let base_note = octave * 12;
 
         let note_offset = match key {
-            // Bottom row - lower octave
+            // Bottom row (semitones 0-16)
             KeyCode::Z => Some(0),  // C
             KeyCode::S => Some(1),  // C#
             KeyCode::X => Some(2),  // D
@@ -703,20 +703,33 @@ impl TrackerState {
             KeyCode::N => Some(9),  // A
             KeyCode::J => Some(10), // A#
             KeyCode::M => Some(11), // B
+            KeyCode::Comma => Some(12), // C+1
+            KeyCode::L => Some(13), // C#+1
+            KeyCode::Period => Some(14), // D+1
+            KeyCode::Semicolon => Some(15), // D#+1
+            KeyCode::Slash => Some(16), // E+1
 
-            // Top row - upper octave
-            KeyCode::Q => Some(12), // C
-            KeyCode::Key2 => Some(13), // C#
-            KeyCode::W => Some(14), // D
-            KeyCode::Key3 => Some(15), // D#
-            KeyCode::E => Some(16), // E
-            KeyCode::R => Some(17), // F
-            KeyCode::Key5 => Some(18), // F#
-            KeyCode::T => Some(19), // G
-            KeyCode::Key6 => Some(20), // G#
-            KeyCode::Y => Some(21), // A
-            KeyCode::Key7 => Some(22), // A#
-            KeyCode::U => Some(23), // B
+            // Top row (semitones 17-36)
+            KeyCode::Q => Some(17), // F+1
+            KeyCode::Key2 => Some(18), // F#+1
+            KeyCode::W => Some(19), // G+1
+            KeyCode::Key3 => Some(20), // G#+1
+            KeyCode::E => Some(21), // A+1
+            KeyCode::Key4 => Some(22), // A#+1
+            KeyCode::R => Some(23), // B+1
+            KeyCode::T => Some(24), // C+2
+            KeyCode::Key5 => Some(25), // C#+2
+            KeyCode::Y => Some(26), // G+2
+            KeyCode::Key6 => Some(27), // G#+2
+            KeyCode::U => Some(28), // A+2
+            KeyCode::I => Some(29), // A#+2
+            KeyCode::Key8 => Some(30), // B+2
+            KeyCode::O => Some(31), // C+3
+            KeyCode::Key9 => Some(32), // C#+3
+            KeyCode::P => Some(33), // D+3
+            KeyCode::Key0 => Some(34), // D#+3
+            KeyCode::LeftBracket => Some(35), // E+3
+            KeyCode::RightBracket => Some(36), // F+3
 
             _ => None,
         };

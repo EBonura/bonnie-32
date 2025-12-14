@@ -1,141 +1,25 @@
 //! 3D Viewport - Software rendered preview
 //!
 //! Sector-based geometry system - selection works on faces within sectors.
+//!
+//! This module is split into logical sections:
+//! - Camera input handling
+//! - Hover detection (vertex > edge > face priority)
+//! - Click/drag handling for selection and placement
+//! - Grid and preview drawing
+//! - Geometry rendering
+//! - Overlay drawing (selection highlights, etc.)
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext};
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
-    perspective_transform,
+    world_to_screen, world_to_screen_with_depth,
+    point_to_segment_distance, point_in_triangle_2d,
 };
 use crate::world::SECTOR_SIZE;
-use super::{EditorState, EditorTool, Selection, SectorFace};
-
-/// Project a world-space point to framebuffer coordinates
-fn world_to_screen(
-    world_pos: Vec3,
-    camera_pos: Vec3,
-    basis_x: Vec3,
-    basis_y: Vec3,
-    basis_z: Vec3,
-    fb_width: usize,
-    fb_height: usize,
-) -> Option<(f32, f32)> {
-    let rel = world_pos - camera_pos;
-    let cam_z = rel.dot(basis_z);
-
-    // Behind camera
-    if cam_z <= 0.1 {
-        return None;
-    }
-
-    let cam_x = rel.dot(basis_x);
-    let cam_y = rel.dot(basis_y);
-
-    // Same projection as the rasterizer
-    const SCALE: f32 = 0.75;
-    let vs = (fb_width.min(fb_height) as f32 / 2.0) * SCALE;
-    let ud = 5.0;
-    let us = ud - 1.0;
-
-    let denom = cam_z + ud;
-    let sx = (cam_x * us / denom) * vs + (fb_width as f32 / 2.0);
-    let sy = (cam_y * us / denom) * vs + (fb_height as f32 / 2.0);
-
-    Some((sx, sy))
-}
-
-/// Project a world-space point to framebuffer coordinates with depth
-/// Returns (screen_x, screen_y, depth) where depth is camera-space Z for z-buffer testing
-fn world_to_screen_with_depth(
-    world_pos: Vec3,
-    camera_pos: Vec3,
-    basis_x: Vec3,
-    basis_y: Vec3,
-    basis_z: Vec3,
-    fb_width: usize,
-    fb_height: usize,
-) -> Option<(f32, f32, f32)> {
-    let rel = world_pos - camera_pos;
-    let cam_z = rel.dot(basis_z);
-
-    // Behind camera
-    if cam_z <= 0.1 {
-        return None;
-    }
-
-    let cam_x = rel.dot(basis_x);
-    let cam_y = rel.dot(basis_y);
-
-    // Same projection as the rasterizer
-    const SCALE: f32 = 0.75;
-    let vs = (fb_width.min(fb_height) as f32 / 2.0) * SCALE;
-    let ud = 5.0;
-    let us = ud - 1.0;
-
-    let denom = cam_z + ud;
-    let sx = (cam_x * us / denom) * vs + (fb_width as f32 / 2.0);
-    let sy = (cam_y * us / denom) * vs + (fb_height as f32 / 2.0);
-
-    // Return cam_z as depth (matches rasterizer's z-buffer values)
-    Some((sx, sy, cam_z))
-}
-
-/// Calculate distance from point to line segment in 2D screen space
-fn point_to_segment_distance(
-    px: f32, py: f32,      // Point
-    x1: f32, y1: f32,      // Segment start
-    x2: f32, y2: f32,      // Segment end
-) -> f32 {
-    let dx = x2 - x1;
-    let dy = y2 - y1;
-    let len_sq = dx * dx + dy * dy;
-
-    if len_sq < 1e-6 {
-        // Segment is essentially a point
-        let pdx = px - x1;
-        let pdy = py - y1;
-        return (pdx * pdx + pdy * pdy).sqrt();
-    }
-
-    // Project point onto line segment
-    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
-    let t = t.clamp(0.0, 1.0);
-
-    // Find closest point on segment
-    let closest_x = x1 + t * dx;
-    let closest_y = y1 + t * dy;
-
-    // Distance from point to closest point
-    let dist_x = px - closest_x;
-    let dist_y = py - closest_y;
-    (dist_x * dist_x + dist_y * dist_y).sqrt()
-}
-
-/// Test if point is inside 2D triangle using sign-based edge test
-/// This works regardless of triangle winding order
-fn point_in_triangle_2d(
-    px: f32, py: f32,      // Point
-    x1: f32, y1: f32,      // Triangle v1
-    x2: f32, y2: f32,      // Triangle v2
-    x3: f32, y3: f32,      // Triangle v3
-) -> bool {
-    // Calculate signed areas using cross product
-    fn sign(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
-        (px - bx) * (ay - by) - (ax - bx) * (py - by)
-    }
-
-    let d1 = sign(px, py, x1, y1, x2, y2);
-    let d2 = sign(px, py, x2, y2, x3, y3);
-    let d3 = sign(px, py, x3, y3, x1, y1);
-
-    let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
-    let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
-
-    // Point is inside if all signs are same (all positive or all negative)
-    !(has_neg && has_pos)
-}
+use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode};
 
 /// Draw the 3D viewport using the software rasterizer
 pub fn draw_viewport_3d(
@@ -195,89 +79,7 @@ pub fn draw_viewport_3d(
     };
 
     // Camera controls - depend on camera mode
-    use super::CameraMode;
-    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-
-    match state.camera_mode {
-        CameraMode::Free => {
-            // Free camera: right-drag to look around, WASD to move
-            if ctx.mouse.right_down && inside_viewport && state.dragging_sector_vertices.is_empty() {
-                if state.viewport_mouse_captured {
-                    // Inverted to match Y-down coordinate system
-                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
-                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
-                    state.camera_3d.rotate(dx, dy);
-                }
-                state.viewport_mouse_captured = true;
-            } else if !ctx.mouse.right_down {
-                state.viewport_mouse_captured = false;
-            }
-
-            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
-            // Hold Shift for faster movement
-            let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
-            let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
-                if is_key_down(KeyCode::W) {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
-                }
-                if is_key_down(KeyCode::S) {
-                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
-                }
-                if is_key_down(KeyCode::A) {
-                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
-                }
-                if is_key_down(KeyCode::D) {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
-                }
-                if is_key_down(KeyCode::Q) {
-                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
-                }
-                if is_key_down(KeyCode::E) {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
-                }
-            }
-        }
-
-        CameraMode::Orbit => {
-            // Orbit camera: right-drag rotates around target (or pans with Shift)
-            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
-                if state.viewport_mouse_captured {
-                    let dx = mouse_pos.0 - state.viewport_last_mouse.0;
-                    let dy = mouse_pos.1 - state.viewport_last_mouse.1;
-
-                    if shift_held {
-                        // Shift+Right drag: pan the orbit target
-                        let pan_speed = state.orbit_distance * 0.002;
-                        state.orbit_target = state.orbit_target - state.camera_3d.basis_x * dx * pan_speed;
-                        state.orbit_target = state.orbit_target + state.camera_3d.basis_y * dy * pan_speed;
-                        state.last_orbit_target = state.orbit_target;
-                    } else {
-                        // Right drag: rotate around target
-                        state.orbit_azimuth += dx * 0.005;
-                        state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
-                    }
-                    state.sync_camera_from_orbit();
-                }
-                state.viewport_mouse_captured = true;
-            } else if !ctx.mouse.right_down {
-                state.viewport_mouse_captured = false;
-            }
-
-            // Mouse wheel: zoom in/out (change orbit distance)
-            if inside_viewport {
-                let scroll = mouse_wheel().1;
-                if scroll != 0.0 {
-                    let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
-                    state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(100.0, 20000.0);
-                    state.sync_camera_from_orbit();
-                }
-            }
-        }
-    }
-
-    // Track if we should update orbit target (selection might change during click handling below)
-    let should_update_orbit_target = state.camera_mode == CameraMode::Orbit && ctx.mouse.left_pressed && inside_viewport;
+    let should_update_orbit_target = handle_camera_input(ctx, state, inside_viewport, mouse_pos);
 
     // Toggle link coincident vertices mode with L key
     if inside_viewport && is_key_pressed(KeyCode::L) {
@@ -395,290 +197,25 @@ pub fn draw_viewport_3d(
         }
     }
 
+    // Collect all vertex positions for the current room (for drawing and selection)
+    let all_vertices = collect_room_vertices(state);
+
     // Find hovered elements using 2D screen-space projection
     // Priority: vertex > edge > face
-    let mut hovered_vertex: Option<(usize, usize, usize, usize, SectorFace, f32)> = None; // (room_idx, gx, gz, corner_idx, face, screen_dist)
-    let mut hovered_edge: Option<(usize, usize, usize, usize, usize, Option<SectorFace>, f32)> = None; // (room_idx, gx, gz, face_idx, edge_idx, wall_face, dist)
-    let mut hovered_face: Option<(usize, usize, usize, SectorFace)> = None; // (room_idx, gx, gz, face)
     let mut preview_sector: Option<(f32, f32, f32, bool)> = None; // (x, z, target_y, is_occupied)
     let mut preview_wall: Option<(f32, f32, crate::world::Direction, f32, f32, bool)> = None; // (x, z, direction, y_bottom, y_top, is_occupied)
 
-    // Collect all vertex positions for the current room (for drawing and selection)
-    // Each vertex is (world_pos, room_idx, gx, gz, corner_idx, face_type)
-    // corner_idx: 0=NW, 1=NE, 2=SE, 3=SW for horizontal faces
-    let mut all_vertices: Vec<(Vec3, usize, usize, usize, usize, SectorFace)> = Vec::new();
+    let hover = if inside_viewport && !ctx.mouse.right_down && state.tool == EditorTool::Select {
+        screen_to_fb(mouse_pos.0, mouse_pos.1)
+            .map(|mouse_fb| find_hovered_elements(state, mouse_fb, fb_width, fb_height, &all_vertices))
+            .unwrap_or_default()
+    } else {
+        HoverResult::default()
+    };
 
-    if let Some(room) = state.level.rooms.get(state.current_room) {
-        for (gx, gz, sector) in room.iter_sectors() {
-            let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-            let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
-
-            // Floor vertices
-            if let Some(floor) = &sector.floor {
-                all_vertices.push((Vec3::new(base_x, floor.heights[0], base_z), state.current_room, gx, gz, 0, SectorFace::Floor));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z), state.current_room, gx, gz, 1, SectorFace::Floor));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE), state.current_room, gx, gz, 2, SectorFace::Floor));
-                all_vertices.push((Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE), state.current_room, gx, gz, 3, SectorFace::Floor));
-            }
-
-            // Ceiling vertices
-            if let Some(ceiling) = &sector.ceiling {
-                all_vertices.push((Vec3::new(base_x, ceiling.heights[0], base_z), state.current_room, gx, gz, 0, SectorFace::Ceiling));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z), state.current_room, gx, gz, 1, SectorFace::Ceiling));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE), state.current_room, gx, gz, 2, SectorFace::Ceiling));
-                all_vertices.push((Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE), state.current_room, gx, gz, 3, SectorFace::Ceiling));
-            }
-
-            // Wall vertices
-            let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-                (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-                (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-                (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-                (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
-            ];
-
-            for (walls, x0, z0, x1, z1, make_face) in wall_configs {
-                for (i, wall) in walls.iter().enumerate() {
-                    // 4 corners of wall: bottom-left, bottom-right, top-right, top-left
-                    // wall.heights = [bottom-left, bottom-right, top-right, top-left]
-                    all_vertices.push((Vec3::new(x0, wall.heights[0], z0), state.current_room, gx, gz, 0, make_face(i)));
-                    all_vertices.push((Vec3::new(x1, wall.heights[1], z1), state.current_room, gx, gz, 1, make_face(i)));
-                    all_vertices.push((Vec3::new(x1, wall.heights[2], z1), state.current_room, gx, gz, 2, make_face(i)));
-                    all_vertices.push((Vec3::new(x0, wall.heights[3], z0), state.current_room, gx, gz, 3, make_face(i)));
-                }
-            }
-        }
-    }
-
-    // In Select mode, find hovered vertex/edge/face using 2D screen projection
-    if inside_viewport && !ctx.mouse.right_down && state.tool == EditorTool::Select {
-        if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
-            const VERTEX_THRESHOLD: f32 = 10.0;
-            const EDGE_THRESHOLD: f32 = 8.0;
-
-            // Check vertices first (highest priority)
-            for (world_pos, room_idx, gx, gz, corner_idx, face) in &all_vertices {
-                if let Some((sx, sy)) = world_to_screen(
-                    *world_pos,
-                    state.camera_3d.position,
-                    state.camera_3d.basis_x,
-                    state.camera_3d.basis_y,
-                    state.camera_3d.basis_z,
-                    fb.width,
-                    fb.height,
-                ) {
-                    let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                    if dist < VERTEX_THRESHOLD {
-                        if hovered_vertex.map_or(true, |(_, _, _, _, _, best_dist)| dist < best_dist) {
-                            hovered_vertex = Some((*room_idx, *gx, *gz, *corner_idx, *face, dist));
-                        }
-                    }
-                }
-            }
-
-            // Check edges if no vertex hovered
-            if hovered_vertex.is_none() {
-                if let Some(room) = state.level.rooms.get(state.current_room) {
-                    for (gx, gz, sector) in room.iter_sectors() {
-                        let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-                        let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
-
-                        // Check floor edges
-                        if let Some(floor) = &sector.floor {
-                            let corners = [
-                                Vec3::new(base_x, floor.heights[0], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE),
-                                Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE),
-                            ];
-                            for edge_idx in 0..4 {
-                                let v0 = corners[edge_idx];
-                                let v1 = corners[(edge_idx + 1) % 4];
-                                if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                                    world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                    world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height)
-                                ) {
-                                    let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
-                                    if dist < EDGE_THRESHOLD {
-                                        if hovered_edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
-                                            hovered_edge = Some((state.current_room, gx, gz, 0, edge_idx, None, dist)); // face_idx=0 for floor
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Check ceiling edges
-                        if let Some(ceiling) = &sector.ceiling {
-                            let corners = [
-                                Vec3::new(base_x, ceiling.heights[0], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE),
-                                Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE),
-                            ];
-                            for edge_idx in 0..4 {
-                                let v0 = corners[edge_idx];
-                                let v1 = corners[(edge_idx + 1) % 4];
-                                if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                                    world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                    world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height)
-                                ) {
-                                    let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
-                                    if dist < EDGE_THRESHOLD {
-                                        if hovered_edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
-                                            hovered_edge = Some((state.current_room, gx, gz, 1, edge_idx, None, dist)); // face_idx=1 for ceiling
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Check wall edges
-                        let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-                            (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-                            (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-                            (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-                            (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
-                        ];
-
-                        for (walls, x0, z0, x1, z1, make_face) in wall_configs {
-                            for (i, wall) in walls.iter().enumerate() {
-                                let wall_corners = [
-                                    Vec3::new(x0, wall.heights[0], z0),
-                                    Vec3::new(x1, wall.heights[1], z1),
-                                    Vec3::new(x1, wall.heights[2], z1),
-                                    Vec3::new(x0, wall.heights[3], z0),
-                                ];
-                                for edge_idx in 0..4 {
-                                    let v0 = wall_corners[edge_idx];
-                                    let v1 = wall_corners[(edge_idx + 1) % 4];
-                                    if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                                        world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
-                                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                        world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
-                                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height)
-                                    ) {
-                                        let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
-                                        if dist < EDGE_THRESHOLD {
-                                            if hovered_edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
-                                                let wall_face = make_face(i);
-                                                hovered_edge = Some((state.current_room, gx, gz, 2, edge_idx, Some(wall_face), dist)); // face_idx=2 for walls
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check faces if no vertex or edge hovered
-            if hovered_vertex.is_none() && hovered_edge.is_none() {
-                if let Some(room) = state.level.rooms.get(state.current_room) {
-                    'face_loop: for (gx, gz, sector) in room.iter_sectors() {
-                        let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-                        let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
-
-                        // Check floor (no backface culling - always selectable)
-                        if let Some(floor) = &sector.floor {
-                            let corners = [
-                                Vec3::new(base_x, floor.heights[0], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE),
-                                Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE),
-                            ];
-
-                            if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
-                                world_to_screen(corners[0], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                world_to_screen(corners[1], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                world_to_screen(corners[2], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                world_to_screen(corners[3], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                            ) {
-                                // Test both triangles that make up the quad (0-1-2 and 0-2-3)
-                                if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
-                                   point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
-                                    hovered_face = Some((state.current_room, gx, gz, SectorFace::Floor));
-                                    break 'face_loop;
-                                }
-                            }
-                        }
-
-                        // Check ceiling
-                        if let Some(ceiling) = &sector.ceiling {
-                            let corners = [
-                                Vec3::new(base_x, ceiling.heights[0], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z),
-                                Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE),
-                                Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE),
-                            ];
-
-                            if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
-                                world_to_screen(corners[0], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                world_to_screen(corners[1], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                world_to_screen(corners[2], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                world_to_screen(corners[3], state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                            ) {
-                                if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
-                                   point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
-                                    hovered_face = Some((state.current_room, gx, gz, SectorFace::Ceiling));
-                                    break 'face_loop;
-                                }
-                            }
-                        }
-
-                        // Check walls
-                        let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-                            (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-                            (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-                            (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-                            (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
-                        ];
-
-                        for (walls, x0, z0, x1, z1, make_face) in wall_configs {
-                            for (i, wall) in walls.iter().enumerate() {
-                                let wall_corners = [
-                                    Vec3::new(x0, wall.heights[0], z0),
-                                    Vec3::new(x1, wall.heights[1], z1),
-                                    Vec3::new(x1, wall.heights[2], z1),
-                                    Vec3::new(x0, wall.heights[3], z0),
-                                ];
-
-                                if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
-                                    world_to_screen(wall_corners[0], state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                    world_to_screen(wall_corners[1], state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                    world_to_screen(wall_corners[2], state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                    world_to_screen(wall_corners[3], state.camera_3d.position, state.camera_3d.basis_x,
-                                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                                ) {
-                                    if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
-                                       point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
-                                        hovered_face = Some((state.current_room, gx, gz, make_face(i)));
-                                        break 'face_loop;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let hovered_vertex = hover.vertex;
+    let hovered_edge = hover.edge;
+    let hovered_face = hover.face;
 
     // In drawing modes, find preview sector position
     if inside_viewport && (state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling) {
@@ -800,7 +337,7 @@ pub fn draw_viewport_3d(
     // In DrawWall mode, find preview wall edge
     if inside_viewport && state.tool == EditorTool::DrawWall {
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
-            use super::{CEILING_HEIGHT, CLICK_HEIGHT};
+            use super::CEILING_HEIGHT;
             use crate::world::Direction;
 
             // Find the closest sector edge to the mouse cursor
@@ -2496,4 +2033,414 @@ fn draw_3d_line(
             y0 += sy;
         }
     }
+}
+
+// =============================================================================
+// Camera Input Handling
+// =============================================================================
+
+/// Handle camera input for both Free and Orbit modes.
+/// Returns true if orbit target should be updated after selection changes.
+fn handle_camera_input(
+    ctx: &UiContext,
+    state: &mut EditorState,
+    inside_viewport: bool,
+    mouse_pos: (f32, f32),
+) -> bool {
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+    match state.camera_mode {
+        CameraMode::Free => {
+            // Free camera: right-drag to look around, WASD to move
+            if ctx.mouse.right_down && inside_viewport && state.dragging_sector_vertices.is_empty() {
+                if state.viewport_mouse_captured {
+                    // Inverted to match Y-down coordinate system
+                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
+                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
+                    state.camera_3d.rotate(dx, dy);
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
+            // Hold Shift for faster movement
+            let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
+            let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
+            if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
+                if is_key_down(KeyCode::W) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::S) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::A) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::D) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::Q) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
+                }
+                if is_key_down(KeyCode::E) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
+                }
+            }
+        }
+
+        CameraMode::Orbit => {
+            // Orbit camera: right-drag rotates around target (or pans with Shift)
+            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
+                if state.viewport_mouse_captured {
+                    let dx = mouse_pos.0 - state.viewport_last_mouse.0;
+                    let dy = mouse_pos.1 - state.viewport_last_mouse.1;
+
+                    if shift_held {
+                        // Shift+Right drag: pan the orbit target
+                        let pan_speed = state.orbit_distance * 0.002;
+                        state.orbit_target = state.orbit_target - state.camera_3d.basis_x * dx * pan_speed;
+                        state.orbit_target = state.orbit_target + state.camera_3d.basis_y * dy * pan_speed;
+                        state.last_orbit_target = state.orbit_target;
+                    } else {
+                        // Right drag: rotate around target
+                        state.orbit_azimuth += dx * 0.005;
+                        state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+                    }
+                    state.sync_camera_from_orbit();
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Mouse wheel: zoom in/out (change orbit distance)
+            if inside_viewport {
+                let scroll = mouse_wheel().1;
+                if scroll != 0.0 {
+                    let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
+                    state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(100.0, 20000.0);
+                    state.sync_camera_from_orbit();
+                }
+            }
+        }
+    }
+
+    // Return whether orbit target should be updated
+    state.camera_mode == CameraMode::Orbit && ctx.mouse.left_pressed && inside_viewport
+}
+
+// =============================================================================
+// Hover Detection Types and Helpers
+// =============================================================================
+
+/// Result of hover detection in the viewport
+pub struct HoverResult {
+    /// Hovered vertex: (room_idx, gx, gz, corner_idx, face, screen_dist)
+    pub vertex: Option<(usize, usize, usize, usize, SectorFace, f32)>,
+    /// Hovered edge: (room_idx, gx, gz, face_idx, edge_idx, wall_face, dist)
+    pub edge: Option<(usize, usize, usize, usize, usize, Option<SectorFace>, f32)>,
+    /// Hovered face: (room_idx, gx, gz, face)
+    pub face: Option<(usize, usize, usize, SectorFace)>,
+}
+
+impl Default for HoverResult {
+    fn default() -> Self {
+        Self {
+            vertex: None,
+            edge: None,
+            face: None,
+        }
+    }
+}
+
+/// Collected vertex data for hover detection and rendering
+/// (world_pos, room_idx, gx, gz, corner_idx, face_type)
+pub type VertexData = Vec<(Vec3, usize, usize, usize, usize, SectorFace)>;
+
+/// Collect all vertex positions for the current room
+fn collect_room_vertices(state: &EditorState) -> VertexData {
+    let mut all_vertices = Vec::new();
+
+    if let Some(room) = state.level.rooms.get(state.current_room) {
+        for (gx, gz, sector) in room.iter_sectors() {
+            let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+            let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+
+            // Floor vertices
+            if let Some(floor) = &sector.floor {
+                all_vertices.push((Vec3::new(base_x, floor.heights[0], base_z), state.current_room, gx, gz, 0, SectorFace::Floor));
+                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z), state.current_room, gx, gz, 1, SectorFace::Floor));
+                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE), state.current_room, gx, gz, 2, SectorFace::Floor));
+                all_vertices.push((Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE), state.current_room, gx, gz, 3, SectorFace::Floor));
+            }
+
+            // Ceiling vertices
+            if let Some(ceiling) = &sector.ceiling {
+                all_vertices.push((Vec3::new(base_x, ceiling.heights[0], base_z), state.current_room, gx, gz, 0, SectorFace::Ceiling));
+                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z), state.current_room, gx, gz, 1, SectorFace::Ceiling));
+                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE), state.current_room, gx, gz, 2, SectorFace::Ceiling));
+                all_vertices.push((Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE), state.current_room, gx, gz, 3, SectorFace::Ceiling));
+            }
+
+            // Wall vertices
+            let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
+                (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
+                (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
+                (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
+                (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+            ];
+
+            for (walls, x0, z0, x1, z1, make_face) in wall_configs {
+                for (i, wall) in walls.iter().enumerate() {
+                    // 4 corners of wall: bottom-left, bottom-right, top-right, top-left
+                    all_vertices.push((Vec3::new(x0, wall.heights[0], z0), state.current_room, gx, gz, 0, make_face(i)));
+                    all_vertices.push((Vec3::new(x1, wall.heights[1], z1), state.current_room, gx, gz, 1, make_face(i)));
+                    all_vertices.push((Vec3::new(x1, wall.heights[2], z1), state.current_room, gx, gz, 2, make_face(i)));
+                    all_vertices.push((Vec3::new(x0, wall.heights[3], z0), state.current_room, gx, gz, 3, make_face(i)));
+                }
+            }
+        }
+    }
+
+    all_vertices
+}
+
+/// Find hovered elements in Select mode (vertex > edge > face priority)
+fn find_hovered_elements(
+    state: &EditorState,
+    mouse_fb: (f32, f32),
+    fb_width: usize,
+    fb_height: usize,
+    all_vertices: &VertexData,
+) -> HoverResult {
+    let mut result = HoverResult::default();
+    let (mouse_fb_x, mouse_fb_y) = mouse_fb;
+
+    const VERTEX_THRESHOLD: f32 = 10.0;
+    const EDGE_THRESHOLD: f32 = 8.0;
+
+    // Check vertices first (highest priority)
+    for (world_pos, room_idx, gx, gz, corner_idx, face) in all_vertices {
+        if let Some((sx, sy)) = world_to_screen(
+            *world_pos,
+            state.camera_3d.position,
+            state.camera_3d.basis_x,
+            state.camera_3d.basis_y,
+            state.camera_3d.basis_z,
+            fb_width,
+            fb_height,
+        ) {
+            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+            if dist < VERTEX_THRESHOLD {
+                if result.vertex.map_or(true, |(_, _, _, _, _, best_dist)| dist < best_dist) {
+                    result.vertex = Some((*room_idx, *gx, *gz, *corner_idx, *face, dist));
+                }
+            }
+        }
+    }
+
+    // Check edges if no vertex hovered
+    if result.vertex.is_none() {
+        if let Some(room) = state.level.rooms.get(state.current_room) {
+            for (gx, gz, sector) in room.iter_sectors() {
+                let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+                let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+
+                // Check floor edges
+                if let Some(floor) = &sector.floor {
+                    let corners = [
+                        Vec3::new(base_x, floor.heights[0], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE),
+                        Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE),
+                    ];
+                    for edge_idx in 0..4 {
+                        let v0 = corners[edge_idx];
+                        let v1 = corners[(edge_idx + 1) % 4];
+                        if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
+                            world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                            world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height)
+                        ) {
+                            let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
+                            if dist < EDGE_THRESHOLD {
+                                if result.edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
+                                    result.edge = Some((state.current_room, gx, gz, 0, edge_idx, None, dist));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check ceiling edges
+                if let Some(ceiling) = &sector.ceiling {
+                    let corners = [
+                        Vec3::new(base_x, ceiling.heights[0], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE),
+                        Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE),
+                    ];
+                    for edge_idx in 0..4 {
+                        let v0 = corners[edge_idx];
+                        let v1 = corners[(edge_idx + 1) % 4];
+                        if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
+                            world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                            world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height)
+                        ) {
+                            let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
+                            if dist < EDGE_THRESHOLD {
+                                if result.edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
+                                    result.edge = Some((state.current_room, gx, gz, 1, edge_idx, None, dist));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check wall edges
+                let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
+                    (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
+                    (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
+                    (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
+                    (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+                ];
+
+                for (walls, x0, z0, x1, z1, make_face) in wall_configs {
+                    for (i, wall) in walls.iter().enumerate() {
+                        let wall_corners = [
+                            Vec3::new(x0, wall.heights[0], z0),
+                            Vec3::new(x1, wall.heights[1], z1),
+                            Vec3::new(x1, wall.heights[2], z1),
+                            Vec3::new(x0, wall.heights[3], z0),
+                        ];
+                        for edge_idx in 0..4 {
+                            let v0 = wall_corners[edge_idx];
+                            let v1 = wall_corners[(edge_idx + 1) % 4];
+                            if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
+                                world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
+                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                                world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
+                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height)
+                            ) {
+                                let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
+                                if dist < EDGE_THRESHOLD {
+                                    if result.edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
+                                        let wall_face = make_face(i);
+                                        result.edge = Some((state.current_room, gx, gz, 2, edge_idx, Some(wall_face), dist));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check faces if no vertex or edge hovered
+    if result.vertex.is_none() && result.edge.is_none() {
+        if let Some(room) = state.level.rooms.get(state.current_room) {
+            'face_loop: for (gx, gz, sector) in room.iter_sectors() {
+                let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+                let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+
+                // Check floor
+                if let Some(floor) = &sector.floor {
+                    let corners = [
+                        Vec3::new(base_x, floor.heights[0], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE),
+                        Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE),
+                    ];
+
+                    if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
+                        world_to_screen(corners[0], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        world_to_screen(corners[1], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        world_to_screen(corners[2], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        world_to_screen(corners[3], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                    ) {
+                        if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
+                           point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
+                            result.face = Some((state.current_room, gx, gz, SectorFace::Floor));
+                            break 'face_loop;
+                        }
+                    }
+                }
+
+                // Check ceiling
+                if let Some(ceiling) = &sector.ceiling {
+                    let corners = [
+                        Vec3::new(base_x, ceiling.heights[0], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE),
+                        Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE),
+                    ];
+
+                    if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
+                        world_to_screen(corners[0], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        world_to_screen(corners[1], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        world_to_screen(corners[2], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        world_to_screen(corners[3], state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                    ) {
+                        if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
+                           point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
+                            result.face = Some((state.current_room, gx, gz, SectorFace::Ceiling));
+                            break 'face_loop;
+                        }
+                    }
+                }
+
+                // Check walls
+                let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
+                    (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
+                    (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
+                    (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
+                    (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+                ];
+
+                for (walls, x0, z0, x1, z1, make_face) in wall_configs {
+                    for (i, wall) in walls.iter().enumerate() {
+                        let wall_corners = [
+                            Vec3::new(x0, wall.heights[0], z0),
+                            Vec3::new(x1, wall.heights[1], z1),
+                            Vec3::new(x1, wall.heights[2], z1),
+                            Vec3::new(x0, wall.heights[3], z0),
+                        ];
+
+                        if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
+                            world_to_screen(wall_corners[0], state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                            world_to_screen(wall_corners[1], state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                            world_to_screen(wall_corners[2], state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                            world_to_screen(wall_corners[3], state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        ) {
+                            if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
+                               point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
+                                result.face = Some((state.current_room, gx, gz, make_face(i)));
+                                break 'face_loop;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }

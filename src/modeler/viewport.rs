@@ -5,118 +5,23 @@ use crate::ui::{Rect, UiContext};
 use crate::rasterizer::{
     Framebuffer, render_mesh, Color as RasterColor, Vec3, Vec2 as RasterVec2,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
+    world_to_screen, Mat4,
+    mat4_identity, mat4_mul, mat4_transform_point, mat4_from_position_rotation,
+    mat4_rotation, mat4_translation,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, TransformTool, Axis};
 use super::model::{Model, PartTransform};
 
-/// Project a world-space point to framebuffer coordinates
-fn world_to_screen(
-    world_pos: Vec3,
-    camera_pos: Vec3,
-    basis_x: Vec3,
-    basis_y: Vec3,
-    basis_z: Vec3,
-    fb_width: usize,
-    fb_height: usize,
-) -> Option<(f32, f32)> {
-    let rel = world_pos - camera_pos;
-    let cam_z = rel.dot(basis_z);
-
-    // Behind camera
-    if cam_z <= 0.1 {
-        return None;
-    }
-
-    let cam_x = rel.dot(basis_x);
-    let cam_y = rel.dot(basis_y);
-
-    // Same projection as the rasterizer
-    const SCALE: f32 = 0.75;
-    let vs = (fb_width.min(fb_height) as f32 / 2.0) * SCALE;
-    let ud = 5.0;
-    let us = ud - 1.0;
-
-    let denom = cam_z + ud;
-    let sx = (cam_x * us / denom) * vs + (fb_width as f32 / 2.0);
-    let sy = (cam_y * us / denom) * vs + (fb_height as f32 / 2.0);
-
-    Some((sx, sy))
-}
-
-/// Build a 4x4 rotation matrix from euler angles (degrees)
-fn rotation_matrix(rot: Vec3) -> [[f32; 4]; 4] {
-    let (sx, cx) = rot.x.to_radians().sin_cos();
-    let (sy, cy) = rot.y.to_radians().sin_cos();
-    let (sz, cz) = rot.z.to_radians().sin_cos();
-
-    // Rotation order: Z * Y * X (matches Blender default)
-    [
-        [cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz, 0.0],
-        [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz, 0.0],
-        [-sy, sx * cy, cx * cy, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
-/// Transform a point by a 4x4 matrix
-fn transform_point(m: &[[f32; 4]; 4], p: Vec3) -> Vec3 {
-    Vec3::new(
-        m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3],
-        m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3],
-        m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3],
-    )
-}
-
-/// Multiply two 4x4 matrices
-fn mat_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut result = [[0.0; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            for k in 0..4 {
-                result[i][j] += a[i][k] * b[k][j];
-            }
-        }
-    }
-    result
-}
-
-/// Create translation matrix
-fn translation_matrix(t: Vec3) -> [[f32; 4]; 4] {
-    [
-        [1.0, 0.0, 0.0, t.x],
-        [0.0, 1.0, 0.0, t.y],
-        [0.0, 0.0, 1.0, t.z],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
-/// Identity matrix
-fn identity_matrix() -> [[f32; 4]; 4] {
-    [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
-/// Build a combined transform matrix from position and rotation
-fn build_transform_matrix(position: Vec3, rotation: Vec3) -> [[f32; 4]; 4] {
-    let rot_mat = rotation_matrix(rotation);
-    let trans_mat = translation_matrix(position);
-    mat_mul(&trans_mat, &rot_mat)
-}
-
 /// Compute world matrices for all bones in the skeleton hierarchy
-fn compute_bone_world_transforms(model: &Model) -> Vec<[[f32; 4]; 4]> {
-    let mut matrices = vec![identity_matrix(); model.bones.len()];
+fn compute_bone_world_transforms(model: &Model) -> Vec<Mat4> {
+    let mut matrices = vec![mat4_identity(); model.bones.len()];
 
     for (i, bone) in model.bones.iter().enumerate() {
-        let local = build_transform_matrix(bone.local_position, bone.local_rotation);
+        let local = mat4_from_position_rotation(bone.local_position, bone.local_rotation);
 
         let world = if let Some(parent_idx) = bone.parent {
             if parent_idx < i {
-                mat_mul(&matrices[parent_idx], &local)
+                mat4_mul(&matrices[parent_idx], &local)
             } else {
                 local
             }
@@ -276,22 +181,22 @@ fn handle_bone_transforms(
 }
 
 /// Compute world matrices for all parts given animation pose
-fn compute_world_matrices(model: &Model, pose: &[PartTransform]) -> Vec<[[f32; 4]; 4]> {
+fn compute_world_matrices(model: &Model, pose: &[PartTransform]) -> Vec<Mat4> {
     let mut matrices = Vec::with_capacity(model.parts.len());
 
     for (i, part) in model.parts.iter().enumerate() {
         let transform = pose.get(i).copied().unwrap_or_default();
 
         // Build local matrix: translate by position offset, then rotate
-        let rot_mat = rotation_matrix(transform.rotation);
-        let trans_mat = translation_matrix(transform.position + part.pivot);
+        let rot_mat = mat4_rotation(transform.rotation);
+        let trans_mat = mat4_translation(transform.position + part.pivot);
 
-        let local = mat_mul(&trans_mat, &rot_mat);
+        let local = mat4_mul(&trans_mat, &rot_mat);
 
         // Multiply by parent's world matrix
         let world = if let Some(parent_idx) = part.parent {
             if parent_idx < matrices.len() {
-                mat_mul(&matrices[parent_idx], &local)
+                mat4_mul(&matrices[parent_idx], &local)
             } else {
                 local
             }
@@ -429,7 +334,7 @@ pub fn draw_modeler_viewport(
 
         // Transform vertices
         for vert in &part.vertices {
-            let world_pos = transform_point(world_mat, vert.position);
+            let world_pos = mat4_transform_point(world_mat, vert.position);
 
             // Calculate normal (simplified - just use up vector for now)
             let normal = Vec3::new(0.0, 1.0, 0.0);
@@ -532,7 +437,7 @@ fn draw_bones(
 
         // Bone tip position (extends along local Y axis by bone length)
         let tip_local = Vec3::new(0.0, bone.length, 0.0);
-        let tip_pos = transform_point(world_mat, tip_local);
+        let tip_pos = mat4_transform_point(world_mat, tip_local);
 
         // Choose color based on selection
         let color = if selected_bones.contains(&bone_idx) {
@@ -651,7 +556,7 @@ fn draw_selection_overlays<F>(
             let world_mat = &world_matrices[part_idx];
 
             for (vert_idx, vert) in part.vertices.iter().enumerate() {
-                let world_pos = transform_point(world_mat, vert.position);
+                let world_pos = mat4_transform_point(world_mat, vert.position);
 
                 if let Some((sx, sy)) = world_to_screen(
                     world_pos,
@@ -703,8 +608,8 @@ fn draw_selection_overlays<F>(
                     let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
 
                     if drawn_edges.insert(edge) {
-                        let p0 = transform_point(world_mat, part.vertices[v0].position);
-                        let p1 = transform_point(world_mat, part.vertices[v1].position);
+                        let p0 = mat4_transform_point(world_mat, part.vertices[v0].position);
+                        let p1 = mat4_transform_point(world_mat, part.vertices[v1].position);
 
                         let is_selected = match &state.selection {
                             ModelerSelection::Edges { part, edges } => {
@@ -742,8 +647,8 @@ fn draw_selection_overlays<F>(
                         let v0 = face.indices[i];
                         let v1 = face.indices[(i + 1) % 3];
 
-                        let p0 = transform_point(world_mat, part.vertices[v0].position);
-                        let p1 = transform_point(world_mat, part.vertices[v1].position);
+                        let p0 = mat4_transform_point(world_mat, part.vertices[v0].position);
+                        let p1 = mat4_transform_point(world_mat, part.vertices[v1].position);
 
                         draw_3d_line(fb, p0, p1, &state.camera, RasterColor::new(255, 200, 50));
                     }
@@ -815,7 +720,7 @@ fn handle_selection_click<F>(
                 let world_mat = &world_matrices[part_idx];
 
                 for vert in &part.vertices {
-                    let world_pos = transform_point(world_mat, vert.position);
+                    let world_pos = mat4_transform_point(world_mat, vert.position);
 
                     if let Some((sx, sy)) = world_to_screen(
                         world_pos,
@@ -856,7 +761,7 @@ fn handle_selection_click<F>(
                 let world_mat = &world_matrices[part_idx];
 
                 for (vert_idx, vert) in part.vertices.iter().enumerate() {
-                    let world_pos = transform_point(world_mat, vert.position);
+                    let world_pos = mat4_transform_point(world_mat, vert.position);
 
                     if let Some((sx, sy)) = world_to_screen(
                         world_pos,

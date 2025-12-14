@@ -167,6 +167,8 @@ pub fn barycentric(p: Vec3, v1: Vec3, v2: Vec3, v3: Vec3) -> Vec3 {
 /// ray_origin: starting point of ray
 /// ray_dir: normalized direction of ray
 /// v0, v1, v2: triangle vertices
+/// Note: Currently unused but reserved for future 3D picking feature
+#[allow(dead_code)]
 pub fn ray_triangle_intersect(
     ray_origin: Vec3,
     ray_dir: Vec3,
@@ -215,6 +217,8 @@ pub fn ray_triangle_intersect(
 /// screen_x, screen_y: pixel coordinates
 /// screen_width, screen_height: framebuffer dimensions
 /// camera: the camera to cast from
+/// Note: Currently unused but reserved for future 3D picking feature
+#[allow(dead_code)]
 pub fn screen_to_ray(
     screen_x: f32,
     screen_y: f32,
@@ -247,6 +251,205 @@ pub fn screen_to_ray(
     ).normalize();
 
     (cam_pos, world_dir)
+}
+
+// =============================================================================
+// Viewport projection helpers
+// =============================================================================
+
+/// Project a world-space point to framebuffer coordinates.
+/// Used by both editor and modeler viewports for UI overlay rendering.
+pub fn world_to_screen(
+    world_pos: Vec3,
+    camera_pos: Vec3,
+    basis_x: Vec3,
+    basis_y: Vec3,
+    basis_z: Vec3,
+    fb_width: usize,
+    fb_height: usize,
+) -> Option<(f32, f32)> {
+    let rel = world_pos - camera_pos;
+    let cam_z = rel.dot(basis_z);
+
+    // Behind camera
+    if cam_z <= 0.1 {
+        return None;
+    }
+
+    let cam_x = rel.dot(basis_x);
+    let cam_y = rel.dot(basis_y);
+
+    // Same projection as the rasterizer
+    const SCALE: f32 = 0.75;
+    let vs = (fb_width.min(fb_height) as f32 / 2.0) * SCALE;
+    let ud = 5.0;
+    let us = ud - 1.0;
+
+    let denom = cam_z + ud;
+    let sx = (cam_x * us / denom) * vs + (fb_width as f32 / 2.0);
+    let sy = (cam_y * us / denom) * vs + (fb_height as f32 / 2.0);
+
+    Some((sx, sy))
+}
+
+/// Project a world-space point to framebuffer coordinates with depth.
+/// Returns (screen_x, screen_y, depth) where depth is camera-space Z.
+pub fn world_to_screen_with_depth(
+    world_pos: Vec3,
+    camera_pos: Vec3,
+    basis_x: Vec3,
+    basis_y: Vec3,
+    basis_z: Vec3,
+    fb_width: usize,
+    fb_height: usize,
+) -> Option<(f32, f32, f32)> {
+    let rel = world_pos - camera_pos;
+    let cam_z = rel.dot(basis_z);
+
+    // Behind camera
+    if cam_z <= 0.1 {
+        return None;
+    }
+
+    let cam_x = rel.dot(basis_x);
+    let cam_y = rel.dot(basis_y);
+
+    // Same projection as the rasterizer
+    const SCALE: f32 = 0.75;
+    let vs = (fb_width.min(fb_height) as f32 / 2.0) * SCALE;
+    let ud = 5.0;
+    let us = ud - 1.0;
+
+    let denom = cam_z + ud;
+    let sx = (cam_x * us / denom) * vs + (fb_width as f32 / 2.0);
+    let sy = (cam_y * us / denom) * vs + (fb_height as f32 / 2.0);
+
+    Some((sx, sy, cam_z))
+}
+
+/// Calculate distance from point to line segment in 2D screen space.
+pub fn point_to_segment_distance(
+    px: f32, py: f32,      // Point
+    x1: f32, y1: f32,      // Segment start
+    x2: f32, y2: f32,      // Segment end
+) -> f32 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len_sq = dx * dx + dy * dy;
+
+    if len_sq < 1e-6 {
+        // Segment is essentially a point
+        let pdx = px - x1;
+        let pdy = py - y1;
+        return (pdx * pdx + pdy * pdy).sqrt();
+    }
+
+    // Project point onto line segment
+    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    // Find closest point on segment
+    let closest_x = x1 + t * dx;
+    let closest_y = y1 + t * dy;
+
+    // Distance from point to closest point
+    let dist_x = px - closest_x;
+    let dist_y = py - closest_y;
+    (dist_x * dist_x + dist_y * dist_y).sqrt()
+}
+
+/// Test if point is inside 2D triangle using sign-based edge test.
+/// Works regardless of triangle winding order.
+pub fn point_in_triangle_2d(
+    px: f32, py: f32,      // Point
+    x1: f32, y1: f32,      // Triangle v1
+    x2: f32, y2: f32,      // Triangle v2
+    x3: f32, y3: f32,      // Triangle v3
+) -> bool {
+    fn sign(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+        (px - bx) * (ay - by) - (ax - bx) * (py - by)
+    }
+
+    let d1 = sign(px, py, x1, y1, x2, y2);
+    let d2 = sign(px, py, x2, y2, x3, y3);
+    let d3 = sign(px, py, x3, y3, x1, y1);
+
+    let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+
+    // Point is inside if all signs are same (all positive or all negative)
+    !(has_neg && has_pos)
+}
+
+// =============================================================================
+// 4x4 Matrix operations (for transforms)
+// =============================================================================
+
+/// 4x4 transformation matrix type
+pub type Mat4 = [[f32; 4]; 4];
+
+/// Identity matrix
+pub fn mat4_identity() -> Mat4 {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+/// Create translation matrix
+pub fn mat4_translation(t: Vec3) -> Mat4 {
+    [
+        [1.0, 0.0, 0.0, t.x],
+        [0.0, 1.0, 0.0, t.y],
+        [0.0, 0.0, 1.0, t.z],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+/// Build a rotation matrix from euler angles (degrees).
+/// Rotation order: Z * Y * X (matches Blender default).
+pub fn mat4_rotation(rot: Vec3) -> Mat4 {
+    let (sx, cx) = rot.x.to_radians().sin_cos();
+    let (sy, cy) = rot.y.to_radians().sin_cos();
+    let (sz, cz) = rot.z.to_radians().sin_cos();
+
+    [
+        [cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz, 0.0],
+        [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz, 0.0],
+        [-sy, sx * cy, cx * cy, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+/// Multiply two 4x4 matrices
+pub fn mat4_mul(a: &Mat4, b: &Mat4) -> Mat4 {
+    let mut result = [[0.0; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            for k in 0..4 {
+                result[i][j] += a[i][k] * b[k][j];
+            }
+        }
+    }
+    result
+}
+
+/// Transform a point by a 4x4 matrix
+pub fn mat4_transform_point(m: &Mat4, p: Vec3) -> Vec3 {
+    Vec3::new(
+        m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3],
+        m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3],
+        m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3],
+    )
+}
+
+/// Build a combined transform matrix from position and rotation
+pub fn mat4_from_position_rotation(position: Vec3, rotation: Vec3) -> Mat4 {
+    let rot_mat = mat4_rotation(rotation);
+    let trans_mat = mat4_translation(position);
+    mat4_mul(&trans_mat, &rot_mat)
 }
 
 #[cfg(test)]

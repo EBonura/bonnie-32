@@ -5,6 +5,10 @@
 //! - 3D viewport (software rendered preview)
 //! - Texture palette
 //! - Properties panel
+//!
+//! Note: Some editor state/selection API is not yet fully used.
+
+#![allow(dead_code)]
 
 mod state;
 mod layout;

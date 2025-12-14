@@ -29,7 +29,6 @@ Mud.png
 OreVein.png
 Planks.png
 Sand.png
-Screen.png
 SmoothStone.png
 Stone.png
 TilledSoil.png
