@@ -685,22 +685,47 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     draw_text(&format!("Current: {:03} - {}", current_inst, current_name),
               piano_x, info_y, 16.0, INST_COLOR);
 
-    // === SAMPLE RATE TOGGLE ===
+    // === SPU SAMPLE RATE (with toggle) ===
     let sample_rate_y = info_y + 25.0;
-    draw_text("Sample Rate", piano_x, sample_rate_y, 14.0, TEXT_COLOR);
+    let spu_enabled = state.audio.is_spu_resampling_enabled();
+
+    draw_text("SPU Sample Rate", piano_x, sample_rate_y, 14.0, TEXT_COLOR);
 
     let sr_btn_w = 52.0;
     let sr_btn_h = 22.0;
     let sr_spacing = 4.0;
+    let btn_y = sample_rate_y + 10.0;
 
+    // OFF button (first button)
+    let off_btn_x = piano_x;
+    let off_rect = Rect::new(off_btn_x, btn_y, sr_btn_w, sr_btn_h);
+    let off_hovered = ctx.mouse.inside(&off_rect);
+    let off_active = !spu_enabled;
+
+    let off_bg = if off_active {
+        Color::new(0.2, 0.4, 0.5, 1.0) // Cyan-ish for active
+    } else if off_hovered {
+        Color::new(0.25, 0.25, 0.3, 1.0)
+    } else {
+        Color::new(0.15, 0.15, 0.18, 1.0)
+    };
+    draw_rectangle(off_btn_x, btn_y, sr_btn_w, sr_btn_h, off_bg);
+    let off_text_color = if off_active { WHITE } else { TEXT_COLOR };
+    draw_text("OFF", off_btn_x + 16.0, btn_y + 15.0, 12.0, off_text_color);
+
+    if off_hovered && is_mouse_button_pressed(MouseButton::Left) && spu_enabled {
+        state.audio.set_spu_resampling_enabled(false);
+        state.set_status("SPU resampling disabled", 1.0);
+    }
+
+    // Sample rate buttons (shifted by 1 to make room for OFF)
     let current_sample_rate = state.audio.output_sample_rate();
 
     for (i, rate) in OutputSampleRate::ALL.iter().enumerate() {
-        let btn_x = piano_x + i as f32 * (sr_btn_w + sr_spacing);
-        let btn_y = sample_rate_y + 10.0;
+        let btn_x = piano_x + (i + 1) as f32 * (sr_btn_w + sr_spacing);
 
         let btn_rect = Rect::new(btn_x, btn_y, sr_btn_w, sr_btn_h);
-        let is_active = *rate == current_sample_rate;
+        let is_active = spu_enabled && *rate == current_sample_rate;
         let is_hovered = ctx.mouse.inside(&btn_rect);
 
         let bg = if is_active {
@@ -716,8 +741,12 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         draw_text(rate.name(), btn_x + 12.0, btn_y + 15.0, 12.0, text_color);
 
         if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+            // Enable SPU and set sample rate
+            if !spu_enabled {
+                state.audio.set_spu_resampling_enabled(true);
+            }
             state.audio.set_output_sample_rate(*rate);
-            state.set_status(&format!("Sample rate: {}", rate.name()), 1.0);
+            state.set_status(&format!("SPU sample rate: {}", rate.name()), 1.0);
         }
     }
 
