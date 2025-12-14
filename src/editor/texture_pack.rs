@@ -69,6 +69,8 @@ impl TexturePack {
     /// Load texture packs from manifest asynchronously.
     /// On WASM: JavaScript prefetches and decodes PNGs in parallel, Rust just copies raw RGBA.
     /// On native: Falls back to load_file + PNG decoding.
+    /// Note: Primarily used in WASM builds, may appear unused in native builds
+    #[allow(dead_code)]
     pub async fn load_from_manifest() -> Vec<Self> {
         use macroquad::prelude::*;
 
@@ -111,6 +113,7 @@ impl TexturePack {
 }
 
 /// Parse manifest file into (pack_name, filenames) pairs
+#[allow(dead_code)]
 fn parse_manifest(manifest: &str) -> Vec<(String, Vec<String>)> {
     let mut result = Vec::new();
     let mut current_pack: Option<String> = None;
@@ -146,6 +149,7 @@ fn parse_manifest(manifest: &str) -> Vec<(String, Vec<String>)> {
 }
 
 /// Load a single texture from pack
+#[allow(dead_code)]
 async fn load_single_texture(pack_name: &str, filename: &str) -> Option<Texture> {
     let tex_path = format!("assets/textures/{}/{}", pack_name, filename);
     let tex_name = filename

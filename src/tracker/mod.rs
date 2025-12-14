@@ -4,6 +4,10 @@
 //! Inspired by Picotron's tracker design.
 //!
 //! Features authentic PS1 SPU reverb emulation based on the nocash specifications.
+//!
+//! Note: Some pattern/state API not yet fully used by the editor UI.
+
+#![allow(dead_code)]
 
 mod state;
 mod audio;

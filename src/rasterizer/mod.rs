@@ -6,6 +6,10 @@
 //! - Vertex snapping (integer coords = PS1 jitter)
 //! - Flat and Gouraud shading
 //! - Z-buffer or painter's algorithm
+//!
+//! Note: Some utility functions are not yet used but are part of the rendering API.
+
+#![allow(dead_code)]
 
 mod math;
 mod types;

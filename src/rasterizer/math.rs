@@ -167,6 +167,8 @@ pub fn barycentric(p: Vec3, v1: Vec3, v2: Vec3, v3: Vec3) -> Vec3 {
 /// ray_origin: starting point of ray
 /// ray_dir: normalized direction of ray
 /// v0, v1, v2: triangle vertices
+/// Note: Currently unused but reserved for future 3D picking feature
+#[allow(dead_code)]
 pub fn ray_triangle_intersect(
     ray_origin: Vec3,
     ray_dir: Vec3,
@@ -215,6 +217,8 @@ pub fn ray_triangle_intersect(
 /// screen_x, screen_y: pixel coordinates
 /// screen_width, screen_height: framebuffer dimensions
 /// camera: the camera to cast from
+/// Note: Currently unused but reserved for future 3D picking feature
+#[allow(dead_code)]
 pub fn screen_to_ray(
     screen_x: f32,
     screen_y: f32,

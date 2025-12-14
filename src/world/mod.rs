@@ -4,6 +4,11 @@
 //! - Room-based geometry with portal connectivity
 //! - Visibility culling through portals
 //! - Tile-based collision detection
+//!
+//! Note: Many API items are not yet used by the editor but are part of the
+//! intended game runtime API.
+
+#![allow(dead_code)]
 
 mod geometry;
 mod level;

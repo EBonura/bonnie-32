@@ -9,6 +9,10 @@
 //! - Immediate mode (no retained state, rebuilt each frame)
 //! - Simple rectangle-based layout
 //! - Macroquad integration for rendering
+//!
+//! Note: Some widget state fields are tracked for future features.
+
+#![allow(dead_code)]
 
 mod rect;
 mod panel;
