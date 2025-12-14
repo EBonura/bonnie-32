@@ -337,7 +337,7 @@ pub fn draw_viewport_3d(
     // In DrawWall mode, find preview wall edge
     if inside_viewport && state.tool == EditorTool::DrawWall {
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
-            use super::{CEILING_HEIGHT, CLICK_HEIGHT};
+            use super::CEILING_HEIGHT;
             use crate::world::Direction;
 
             // Find the closest sector edge to the mouse cursor

@@ -182,7 +182,7 @@ pub fn draw_example_browser(
     let dialog_h = (screen_height() * 0.8).min(600.0);
     let dialog_x = (screen_width() - dialog_w) / 2.0;
     let dialog_y = (screen_height() - dialog_h) / 2.0;
-    let dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+    let _dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
     // Draw dialog background
     draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(35, 35, 40, 255));

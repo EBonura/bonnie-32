@@ -11,8 +11,13 @@ mod pattern;
 mod layout;
 mod psx_reverb;
 
+// Re-export public API
+// Some of these aren't used externally yet but are part of the intended public API
 pub use state::TrackerState;
+#[allow(unused_imports)]
 pub use audio::AudioEngine;
+#[allow(unused_imports)]
 pub use pattern::*;
 pub use layout::draw_tracker;
+#[allow(unused_imports)]
 pub use psx_reverb::{PsxReverb, ReverbType};

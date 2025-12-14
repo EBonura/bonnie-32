@@ -10,7 +10,11 @@ mod state;
 mod layout;
 mod viewport;
 
+// Re-export public API
+// Some of these aren't used externally yet but are part of the intended public API
+#[allow(unused_imports)]
 pub use model::*;
 pub use state::*;
 pub use layout::*;
+#[allow(unused_imports)]
 pub use viewport::*;

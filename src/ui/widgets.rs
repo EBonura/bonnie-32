@@ -623,7 +623,7 @@ pub fn draw_drag_value_compact_editable(
 
     if is_editing {
         // Text input mode
-        if let Some((buffer, field_id)) = edit_state {
+        if let Some((buffer, _field_id)) = edit_state {
             if let Some(ef) = editing_field {
                 // Draw text buffer
                 let text_y = rect.y + rect.h * 0.5 + 4.0;
