@@ -30,9 +30,11 @@ Answer the question: **"How would a Souls-like have looked on a PS1?"**
 - **Vertex snapping** - Jittery vertices at low precision
 - **Gouraud shading** - Smooth per-vertex lighting interpolation
 - **Per-vertex colors** - PS1-style texture modulation (Wipeout track tinting)
-- **Low resolution** - Native 320x240 rendering
+- **Low resolution** - Native 320x240 rendering (toggleable)
 - **No perspective correction** - True to PS1 hardware limitations
 - **Z-sorted room boundaries** - Depth-tested wireframe overlays
+- **PS1 SPU reverb** - Authentic reverb emulation with 10 PsyQ SDK presets (Room, Studio, Hall, Space, Echo, etc.)
+- **Aspect ratio toggle** - Switch between 4:3 and stretch-to-fill viewport
 
 ### TR1-Style Level System
 - **Room-based architecture** - Levels divided into connected rooms
@@ -52,7 +54,8 @@ The editor features a MuseScore-inspired interface design:
 
 #### Dual Viewport System
 - **3D Viewport** - Real-time preview with authentic PS1 rendering
-  - Camera controls (WASD + Q/E for height)
+  - Free camera (WASD + Q/E for height)
+  - Orbit camera mode for focused editing
   - Vertex height editing (Y-axis only)
   - Face/edge/vertex selection with hover feedback
 
@@ -68,9 +71,10 @@ The editor features a MuseScore-inspired interface design:
 - **Ceiling Tool** - Place ceiling sectors with Shift+drag height adjustment
 - **Wall Tool** - Click sector edges to create walls (auto-faces camera)
 - **Edge Dragging** - Select and drag edges on floors, ceilings, and walls to adjust heights
-- **Texture Painting** - Click faces to apply selected texture
+- **Texture Painting** - Click faces to apply selected texture (applies to all multi-selected faces)
 - **Vertex Linking** - Move coincident vertices together or independently
 - **Face Deletion** - Delete/Backspace removes selected floors, ceilings, and walls
+- **UV Mapping Controls** - Offset, scale, and rotation controls for texture alignment
 
 #### Texture Management
 - Browse multiple texture packs with chevron navigation
@@ -84,6 +88,7 @@ The editor features a MuseScore-inspired interface design:
 - **Cross-platform save/load**
   - Desktop: Native file dialogs
   - Browser: Import/Export via download/upload
+- **Level browser** - Browse and load example levels with modal overlay
 - **Live preview** - Test levels with Play button
 - **Status messages** - Contextual feedback for all operations
 
@@ -130,8 +135,9 @@ The editor features a MuseScore-inspired interface design:
 - **Z**: Toggle Z-buffer
 
 ### Music Editor
-- **Z to /**: Piano keys (bottom row, C to E)
-- **Q to ]**: Piano keys (top row, F to C - continues from bottom)
+- **37-key piano** - 3 octaves with full keyboard mapping
+- **Z to /**: Piano keys (bottom row)
+- **Q to ]**: Piano keys (top row, continues seamlessly)
 - **Numpad +/-**: Octave up/down
 - **Space**: Play/Pause
 - **Esc**: Stop playback
@@ -139,6 +145,7 @@ The editor features a MuseScore-inspired interface design:
 - **Apostrophe (`)**: Note off
 - **Arrow keys**: Navigate pattern
 - **Home/End**: Jump to start/end of pattern
+- **PS1 reverb knob** - 10 authentic PsyQ SDK presets with wet/dry mix control
 
 ## Building
 
@@ -177,15 +184,15 @@ This project uses the following free texture packs:
 ### Overall / Meta
 
 - [ ] Remove AI/Claude mentions from git history (use `git filter-branch` or BFG Repo Cleaner - backup first!)
-- [ ] Built-in example browser: open browser window showing bundled maps/models with 3D preview (list left, 3D view right, info bottom)
 
 ---
 
 ### Rendering Pipeline
 
-- [x] **Per-vertex colors with texture modulation**: RGB color per vertex that multiplies texture: `final = (texel * vertex_color) / 128`. Enables Wipeout 2097-style track tinting. Values > 128 brighten, < 128 darken. UI shows 4-vertex swatch grid with preset colors.
-- [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights (like Tomb Raider flares). CPU calculates distance/angle to light, updates vertex colors, GPU interpolates via Gouraud.
-- [ ] Add aspect ratio toggle: Currently locked to PS1 4:3 (320x240), add icon to toggle full available space (affects World Editor and Modeler)
+- [x] **Per-vertex colors with texture modulation**: RGB color per vertex that multiplies texture
+- [x] **Aspect ratio toggle**: Switch between 4:3 and stretch-to-fill viewport
+- [x] **PS1 SPU reverb**: Authentic reverb emulation with 10 PsyQ SDK presets
+- [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights
 
 ---
 
@@ -198,50 +205,41 @@ This project uses the following free texture packs:
 - [ ] **Implement portals**: Create and visualize room connections (Portal struct exists in geometry.rs)
 
 #### Future
-- [ ] Entity system design: Research TrenchBroom and Tomb Raider Level Editor for spawn points, interactables (ladders, chests, doors), triggers, lights. Each entity type configurable in properties panel
+- [ ] Entity system design: Research TrenchBroom and TRLE for spawn points, interactables, triggers, lights
 
 ---
 
 ### Music Editor
 
-#### Piano Keyboard
-- **3-octave continuous layout** across two keyboard rows
-- **Bottom row (Z to /)**: C to E (~1.5 octaves)
-- **Top row (Q to ])**: F to C (continues seamlessly from bottom row)
-- **Octave control**: Numpad +/- only (regular keys are piano keys)
-- **Note-off**: Apostrophe key (`)
+#### Completed
+- [x] **37-key piano keyboard** - 3 octaves with full keyboard mapping
+- [x] **PS1 SPU reverb** - 10 authentic PsyQ SDK presets with wet/dry mix
+- [x] **Knob widget fixes** - Thicker borders, correct drag direction
 
-#### High Priority (Bugs)
-- [ ] Fix left-side knob reset bug: Knobs reset to max value when dragged on left side
-- [ ] Thicken knob perimeter: Circle outline too thin for easy reading
+#### Remaining
 - [ ] Configurable pattern length: Currently hardcoded to 64 rows - should be adjustable
-- [ ] Fix Pause icon: Currently shows pen icon instead of pause
-- [ ] Fix Arrangement icon: Shows lock instead of arrangement-related icon
-- [ ] Fix Instruments icon: Shows rotating arrow - need better icon (piano/synth?)
-
-#### Medium Priority
-- [ ] Add per-note vs channel FX toggle: At top of each channel, toggle between per-note FX or channel-wide FX (with greyed-out section when not active)
-- [ ] Add bottom status bar: Same as World Editor, context-sensitive shortcuts/suggestions
+- [ ] Per-note vs channel FX toggle
+- [ ] Bottom status bar with context-sensitive shortcuts
 
 #### Future
 - [ ] Custom instrument editor: Tab for building custom instruments beyond SF2 soundfonts
 
 ---
 
-### Assets
+### Assets (Modeler)
 
-#### High Priority
+#### Completed
+- [x] **Bone selection mode** - Added to modeler toolbar
+- [x] **Aspect ratio toggle** - Same feature as World Editor
+
+#### Remaining
 - [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
-
-#### Medium Priority
-- [ ] Add PS1 aspect ratio toggle: Same feature as World Editor
 
 #### Future
 - [ ] Pixel art painting tools: Built-in tools specific for texture painting
 - [ ] PS1 color depth constraints: Limit to PS1 palette (toggleable)
-- [ ] VRAM usage counter: PS1 had 1MB VRAM (~700-900KB available after screen buffer). Display usage with warning when exceeded
+- [ ] VRAM usage counter: Display usage with warning when exceeded
 - [ ] Polygon count indicator: Green/yellow/red based on PS1-realistic counts
-- [ ] Multi-object animation: Design system for animations where 2 objects interact (e.g., player pulling lever)
 
 ---
 
@@ -278,8 +276,9 @@ For implementing authentic PS1 constraints:
 - [ ] Camera system (third-person, lock-on)
 
 ### UI & Settings
+- [x] Editor toolbar: PS1 effects toggles (vertex jitter, affine mapping, dithering, etc.)
+- [x] Level browser with example levels
 - [ ] Options menu in-game (resolution, PS1 effects toggles)
-- [ ] Editor toolbar: PS1 effects toggles (vertex jitter, affine mapping, etc.)
 - [ ] Resolution selector (240p, 480p, native)
 - [ ] HUD system (health, stamina bars)
 
@@ -303,6 +302,10 @@ For implementing authentic PS1 constraints:
 - [ ] Estus flask / healing system
 
 ### Editor QoL
+- [x] Multi-selection (Shift+click)
+- [x] Texture applies to all multi-selected faces
+- [x] UV mapping controls (offset, scale, rotation)
+- [x] Orbit camera mode
 - [ ] Copy/paste sectors
 - [ ] Grid snapping toggles
 - [ ] Vertex welding/merging tool
@@ -337,11 +340,13 @@ For implementing authentic PS1 constraints:
 
 - **Engine**: Custom software rasterizer in Rust
 - **UI Framework**: Macroquad for windowing and input
+- **Audio**: rustysynth for SF2 soundfont playback, cpal for native audio output
 - **Icon Font**: [Lucide](https://lucide.dev/) for toolbar icons
 - **Level Format**: RON (Rust Object Notation)
-- **Resolution**: 320x240 (4:3 aspect ratio)
+- **Resolution**: 320x240 (4:3 aspect ratio) or stretch-to-fill
 - **Coordinate System**: Y-up, right-handed
 - **Sector Size**: 1024 units (TRLE standard)
+- **Reverb**: PS1 SPU emulation based on nocash PSX specifications
 
 ### WASM Texture Loading
 

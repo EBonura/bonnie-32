@@ -1,25 +1,16 @@
 //! Tracker UI layout and rendering
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, Toolbar, icon, draw_knob};
+use crate::ui::{
+    Rect, UiContext, Toolbar, icon, draw_knob,
+    // Theme colors
+    BG_COLOR, HEADER_COLOR, TEXT_COLOR, TEXT_DIM,
+    ROW_EVEN, ROW_ODD, ROW_BEAT, ROW_HIGHLIGHT,
+    CURSOR_COLOR, PLAYBACK_ROW_COLOR,
+    NOTE_COLOR, INST_COLOR, VOL_COLOR, FX_COLOR,
+};
 use super::state::{TrackerState, TrackerView};
 use super::psx_reverb::ReverbType;
-
-// Colors
-const BG_COLOR: Color = Color::new(0.11, 0.11, 0.13, 1.0);
-const HEADER_COLOR: Color = Color::new(0.15, 0.15, 0.18, 1.0);
-const ROW_EVEN: Color = Color::new(0.13, 0.13, 0.15, 1.0);
-const ROW_ODD: Color = Color::new(0.11, 0.11, 0.13, 1.0);
-const ROW_BEAT: Color = Color::new(0.16, 0.14, 0.12, 1.0);
-const ROW_HIGHLIGHT: Color = Color::new(0.2, 0.25, 0.3, 1.0);
-const CURSOR_COLOR: Color = Color::new(0.3, 0.5, 0.8, 0.8);
-const PLAYBACK_ROW_COLOR: Color = Color::new(0.4, 0.2, 0.2, 0.6);
-const TEXT_COLOR: Color = Color::new(0.8, 0.8, 0.85, 1.0);
-const TEXT_DIM: Color = Color::new(0.4, 0.4, 0.45, 1.0);
-const NOTE_COLOR: Color = Color::new(0.9, 0.85, 0.5, 1.0);
-const INST_COLOR: Color = Color::new(0.5, 0.8, 0.5, 1.0);
-const VOL_COLOR: Color = Color::new(0.5, 0.7, 0.9, 1.0);
-const FX_COLOR: Color = Color::new(0.9, 0.5, 0.7, 1.0);
 
 // Layout constants
 const ROW_HEIGHT: f32 = 18.0;

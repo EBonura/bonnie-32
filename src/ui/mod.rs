@@ -16,6 +16,7 @@ mod widgets;
 mod input;
 mod tabbar;
 mod icons;
+mod theme;
 
 pub use rect::*;
 pub use panel::*;
@@ -23,3 +24,4 @@ pub use widgets::*;
 pub use input::*;
 pub use tabbar::*;
 pub use icons::*;
+pub use theme::*;
