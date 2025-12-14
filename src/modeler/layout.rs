@@ -251,6 +251,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         };
         state.set_status(&format!("Shading: {}", mode), 1.5);
     }
+    if toolbar.icon_button_active(ctx, icon::PROPORTIONS, icon_font, "Aspect Ratio (4:3 / Stretch)", !state.raster_settings.stretch_to_fill) {
+        state.raster_settings.stretch_to_fill = !state.raster_settings.stretch_to_fill;
+        let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
+        state.set_status(&format!("Aspect Ratio: {}", mode), 1.5);
+    }
 
     toolbar.separator();
 

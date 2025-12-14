@@ -313,7 +313,13 @@ pub fn draw_modeler_viewport(
     fb: &mut Framebuffer,
 ) {
     // Resize framebuffer based on resolution setting
-    let (target_w, target_h) = if state.raster_settings.low_resolution {
+    let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
+        // Keep horizontal resolution fixed, scale vertical to match viewport aspect ratio
+        let base_w = if state.raster_settings.low_resolution { WIDTH } else { crate::rasterizer::WIDTH_HI };
+        let viewport_aspect = rect.h / rect.w;
+        let scaled_h = (base_w as f32 * viewport_aspect) as usize;
+        (base_w, scaled_h.max(1))
+    } else if state.raster_settings.low_resolution {
         (WIDTH, HEIGHT) // 320x240
     } else {
         (crate::rasterizer::WIDTH_HI, crate::rasterizer::HEIGHT_HI) // 640x480
@@ -326,16 +332,22 @@ pub fn draw_modeler_viewport(
     // Calculate viewport scaling
     let fb_width = fb.width;
     let fb_height = fb.height;
-    let fb_aspect = fb_width as f32 / fb_height as f32;
-    let rect_aspect = rect.w / rect.h;
-    let (draw_w, draw_h, draw_x, draw_y) = if fb_aspect > rect_aspect {
-        let w = rect.w;
-        let h = rect.w / fb_aspect;
-        (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+    let (draw_w, draw_h, draw_x, draw_y) = if state.raster_settings.stretch_to_fill {
+        // Framebuffer matches viewport, no scaling needed
+        (rect.w, rect.h, rect.x, rect.y)
     } else {
-        let h = rect.h;
-        let w = rect.h * fb_aspect;
-        (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        // Maintain aspect ratio (4:3 for PS1)
+        let fb_aspect = fb_width as f32 / fb_height as f32;
+        let rect_aspect = rect.w / rect.h;
+        if fb_aspect > rect_aspect {
+            let w = rect.w;
+            let h = rect.w / fb_aspect;
+            (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+        } else {
+            let h = rect.h;
+            let w = rect.h * fb_aspect;
+            (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        }
     };
 
     // Helper to convert screen mouse to framebuffer coordinates

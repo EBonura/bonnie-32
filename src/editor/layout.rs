@@ -288,6 +288,11 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let mode = if state.raster_settings.dithering { "ON" } else { "OFF" };
         state.set_status(&format!("Dithering: {}", mode), 2.0);
     }
+    if toolbar.icon_button_active(ctx, icon::PROPORTIONS, icon_font, "Aspect Ratio (4:3 / Stretch)", !state.raster_settings.stretch_to_fill) {
+        state.raster_settings.stretch_to_fill = !state.raster_settings.stretch_to_fill;
+        let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
+        state.set_status(&format!("Aspect Ratio: {}", mode), 2.0);
+    }
 
     toolbar.separator();
 

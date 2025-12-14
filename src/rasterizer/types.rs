@@ -403,6 +403,8 @@ pub struct RasterSettings {
     pub low_resolution: bool,
     /// Enable PS1-style ordered dithering (4x4 Bayer matrix)
     pub dithering: bool,
+    /// Stretch to fill viewport (false = maintain 4:3 aspect ratio)
+    pub stretch_to_fill: bool,
 }
 
 impl Default for RasterSettings {
@@ -417,6 +419,7 @@ impl Default for RasterSettings {
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240
             dithering: true,        // PS1 default: ordered dithering enabled
+            stretch_to_fill: false, // PS1 default: maintain 4:3 aspect ratio
         }
     }
 }

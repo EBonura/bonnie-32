@@ -61,6 +61,7 @@ pub mod icon {
     pub const MONITOR: char = '\u{e11d}';     // Low resolution mode
     pub const SUN: char = '\u{e178}';         // Lighting/shading
     pub const BLEND: char = '\u{e59c}';       // Dithering (color blending)
+    pub const PROPORTIONS: char = '\u{e5cf}'; // Aspect ratio toggle (4:3 vs stretch)
 
     // Music editor
     pub const MUSIC: char = '\u{e122}';       // Music/notes
