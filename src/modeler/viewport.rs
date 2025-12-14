@@ -6,7 +6,7 @@ use crate::rasterizer::{
     Framebuffer, render_mesh, Color as RasterColor, Vec3, Vec2 as RasterVec2,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode};
+use super::state::{ModelerState, ModelerSelection, SelectMode, TransformTool, Axis};
 use super::model::{Model, PartTransform};
 
 /// Project a world-space point to framebuffer coordinates
@@ -100,6 +100,181 @@ fn identity_matrix() -> [[f32; 4]; 4] {
     ]
 }
 
+/// Build a combined transform matrix from position and rotation
+fn build_transform_matrix(position: Vec3, rotation: Vec3) -> [[f32; 4]; 4] {
+    let rot_mat = rotation_matrix(rotation);
+    let trans_mat = translation_matrix(position);
+    mat_mul(&trans_mat, &rot_mat)
+}
+
+/// Compute world matrices for all bones in the skeleton hierarchy
+fn compute_bone_world_transforms(model: &Model) -> Vec<[[f32; 4]; 4]> {
+    let mut matrices = vec![identity_matrix(); model.bones.len()];
+
+    for (i, bone) in model.bones.iter().enumerate() {
+        let local = build_transform_matrix(bone.local_position, bone.local_rotation);
+
+        let world = if let Some(parent_idx) = bone.parent {
+            if parent_idx < i {
+                mat_mul(&matrices[parent_idx], &local)
+            } else {
+                local
+            }
+        } else {
+            local
+        };
+
+        matrices[i] = world;
+    }
+
+    matrices
+}
+
+/// Handle bone transform interactions (left-drag to move/rotate based on tool)
+fn handle_bone_transforms(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    inside_viewport: bool,
+    mouse_pos: (f32, f32),
+) {
+    // Only handle if we have bones selected
+    let selected_bones = match &state.selection {
+        ModelerSelection::Bones(bones) if !bones.is_empty() => bones.clone(),
+        _ => {
+            // No bones selected, ensure transform is not active
+            state.transform_active = false;
+            return;
+        }
+    };
+
+    // Start transform on left mouse down (when Move or Rotate tool is active)
+    if inside_viewport && !state.transform_active && ctx.mouse.left_down && !ctx.mouse.right_down {
+        let can_transform = matches!(state.tool, TransformTool::Move | TransformTool::Rotate);
+
+        if can_transform {
+            // Save undo state
+            state.save_undo();
+
+            // Store starting values
+            state.transform_active = true;
+            state.transform_start_mouse = mouse_pos;
+            state.axis_lock = None;
+
+            // Store original bone positions and rotations
+            state.transform_start_positions = selected_bones
+                .iter()
+                .map(|&idx| state.model.bones.get(idx).map(|b| b.local_position).unwrap_or(Vec3::ZERO))
+                .collect();
+            state.transform_start_rotations = selected_bones
+                .iter()
+                .map(|&idx| state.model.bones.get(idx).map(|b| b.local_rotation).unwrap_or(Vec3::ZERO))
+                .collect();
+
+            let tool_name = match state.tool {
+                TransformTool::Move => "Move",
+                TransformTool::Rotate => "Rotate",
+                _ => "Transform",
+            };
+            state.set_status(&format!("{} bone - drag to transform, X/Y/Z to constrain", tool_name), 3.0);
+        }
+    }
+
+    // Handle active transform (while dragging)
+    if state.transform_active {
+        // Check for axis lock
+        if is_key_pressed(KeyCode::X) {
+            state.axis_lock = Some(Axis::X);
+            state.set_status("Constrained to X axis", 2.0);
+        }
+        if is_key_pressed(KeyCode::Y) {
+            state.axis_lock = Some(Axis::Y);
+            state.set_status("Constrained to Y axis", 2.0);
+        }
+        if is_key_pressed(KeyCode::Z) {
+            state.axis_lock = Some(Axis::Z);
+            state.set_status("Constrained to Z axis", 2.0);
+        }
+
+        // Calculate delta from start position
+        let dx = mouse_pos.0 - state.transform_start_mouse.0;
+        let dy = mouse_pos.1 - state.transform_start_mouse.1;
+
+        // Apply transform based on tool
+        match state.tool {
+            TransformTool::Move => {
+                let move_scale = 0.5; // Pixels to world units
+
+                for (i, &bone_idx) in selected_bones.iter().enumerate() {
+                    if let Some(bone) = state.model.bones.get_mut(bone_idx) {
+                        let start_pos = state.transform_start_positions.get(i).copied().unwrap_or(Vec3::ZERO);
+
+                        // Calculate movement in camera space then convert to world
+                        let move_x = dx * move_scale;
+                        let move_y = -dy * move_scale; // Invert Y for screen coords
+
+                        // Apply axis constraint
+                        let delta = match state.axis_lock {
+                            Some(Axis::X) => Vec3::new(move_x, 0.0, 0.0),
+                            Some(Axis::Y) => Vec3::new(0.0, move_y, 0.0),
+                            Some(Axis::Z) => Vec3::new(0.0, 0.0, move_x),
+                            None => Vec3::new(move_x, move_y, 0.0),
+                        };
+
+                        bone.local_position = start_pos + delta;
+                    }
+                }
+            }
+            TransformTool::Rotate => {
+                let rotate_scale = 0.5; // Pixels to degrees
+
+                for (i, &bone_idx) in selected_bones.iter().enumerate() {
+                    if let Some(bone) = state.model.bones.get_mut(bone_idx) {
+                        let start_rot = state.transform_start_rotations.get(i).copied().unwrap_or(Vec3::ZERO);
+
+                        // Calculate rotation based on mouse movement
+                        let rot_amount = dx * rotate_scale;
+
+                        // Apply axis constraint (default to Z for bone rotation)
+                        let delta = match state.axis_lock {
+                            Some(Axis::X) => Vec3::new(rot_amount, 0.0, 0.0),
+                            Some(Axis::Y) => Vec3::new(0.0, rot_amount, 0.0),
+                            Some(Axis::Z) | None => Vec3::new(0.0, 0.0, rot_amount),
+                        };
+
+                        bone.local_rotation = start_rot + delta;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Finish transform on mouse release
+        if !ctx.mouse.left_down {
+            state.transform_active = false;
+            state.dirty = true;
+            state.set_status("Transform applied", 1.0);
+        }
+
+        // Cancel transform on Escape
+        if is_key_pressed(KeyCode::Escape) {
+            // Restore original values
+            for (i, &bone_idx) in selected_bones.iter().enumerate() {
+                if let Some(bone) = state.model.bones.get_mut(bone_idx) {
+                    if let Some(&pos) = state.transform_start_positions.get(i) {
+                        bone.local_position = pos;
+                    }
+                    if let Some(&rot) = state.transform_start_rotations.get(i) {
+                        bone.local_rotation = rot;
+                    }
+                }
+            }
+            state.transform_active = false;
+            state.undo(); // Pop the undo we saved
+            state.set_status("Transform cancelled", 1.0);
+        }
+    }
+}
+
 /// Compute world matrices for all parts given animation pose
 fn compute_world_matrices(model: &Model, pose: &[PartTransform]) -> Vec<[[f32; 4]; 4]> {
     let mut matrices = Vec::with_capacity(model.parts.len());
@@ -138,7 +313,13 @@ pub fn draw_modeler_viewport(
     fb: &mut Framebuffer,
 ) {
     // Resize framebuffer based on resolution setting
-    let (target_w, target_h) = if state.raster_settings.low_resolution {
+    let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
+        // Keep horizontal resolution fixed, scale vertical to match viewport aspect ratio
+        let base_w = if state.raster_settings.low_resolution { WIDTH } else { crate::rasterizer::WIDTH_HI };
+        let viewport_aspect = rect.h / rect.w;
+        let scaled_h = (base_w as f32 * viewport_aspect) as usize;
+        (base_w, scaled_h.max(1))
+    } else if state.raster_settings.low_resolution {
         (WIDTH, HEIGHT) // 320x240
     } else {
         (crate::rasterizer::WIDTH_HI, crate::rasterizer::HEIGHT_HI) // 640x480
@@ -151,16 +332,22 @@ pub fn draw_modeler_viewport(
     // Calculate viewport scaling
     let fb_width = fb.width;
     let fb_height = fb.height;
-    let fb_aspect = fb_width as f32 / fb_height as f32;
-    let rect_aspect = rect.w / rect.h;
-    let (draw_w, draw_h, draw_x, draw_y) = if fb_aspect > rect_aspect {
-        let w = rect.w;
-        let h = rect.w / fb_aspect;
-        (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+    let (draw_w, draw_h, draw_x, draw_y) = if state.raster_settings.stretch_to_fill {
+        // Framebuffer matches viewport, no scaling needed
+        (rect.w, rect.h, rect.x, rect.y)
     } else {
-        let h = rect.h;
-        let w = rect.h * fb_aspect;
-        (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        // Maintain aspect ratio (4:3 for PS1)
+        let fb_aspect = fb_width as f32 / fb_height as f32;
+        let rect_aspect = rect.w / rect.h;
+        if fb_aspect > rect_aspect {
+            let w = rect.w;
+            let h = rect.w / fb_aspect;
+            (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+        } else {
+            let h = rect.h;
+            let w = rect.h * fb_aspect;
+            (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        }
     };
 
     // Helper to convert screen mouse to framebuffer coordinates
@@ -174,53 +361,47 @@ pub fn draw_modeler_viewport(
         }
     };
 
-    // Camera rotation with right mouse button (orbit)
-    if ctx.mouse.right_down && inside_viewport {
+    // Orbit camera controls
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+    // Right mouse drag: rotate around target (or pan if Shift held)
+    if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) {
         if state.viewport_mouse_captured {
-            let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
-            let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
-            state.camera.rotate(dx, dy);
+            let dx = mouse_pos.0 - state.viewport_last_mouse.0;
+            let dy = mouse_pos.1 - state.viewport_last_mouse.1;
+
+            if shift_held {
+                // Shift+Right drag: pan the orbit target
+                let pan_speed = state.orbit_distance * 0.002; // Scale with distance
+                state.orbit_target = state.orbit_target - state.camera.basis_x * dx * pan_speed;
+                state.orbit_target = state.orbit_target + state.camera.basis_y * dy * pan_speed;
+            } else {
+                // Right drag: rotate around target
+                state.orbit_azimuth += dx * 0.005;
+                state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+            }
+            state.sync_camera_from_orbit();
         }
         state.viewport_mouse_captured = true;
     } else if !ctx.mouse.right_down {
         state.viewport_mouse_captured = false;
     }
 
-    // Keyboard camera movement (WASD + Q/E)
-    let move_speed = 10.0; // Smaller scale for models
-    if inside_viewport || state.viewport_mouse_captured {
-        if is_key_down(KeyCode::W) {
-            state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::S) && !is_key_down(KeyCode::LeftControl) && !is_key_down(KeyCode::RightControl) {
-            state.camera.position = state.camera.position - state.camera.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::A) {
-            state.camera.position = state.camera.position - state.camera.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::D) {
-            state.camera.position = state.camera.position + state.camera.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::Q) {
-            state.camera.position = state.camera.position - state.camera.basis_y * move_speed;
-        }
-        if is_key_down(KeyCode::E) {
-            state.camera.position = state.camera.position + state.camera.basis_y * move_speed;
-        }
-    }
-
-    // Mouse wheel zoom
+    // Mouse wheel: zoom in/out (change orbit distance)
     if inside_viewport {
         let scroll = mouse_wheel().1;
         if scroll != 0.0 {
-            let zoom_speed = 20.0;
-            let zoom_dir = if scroll > 0.0 { 1.0 } else { -1.0 };
-            state.camera.position = state.camera.position + state.camera.basis_z * zoom_speed * zoom_dir;
+            let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
+            state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(50.0, 2000.0);
+            state.sync_camera_from_orbit();
         }
     }
 
     // Update mouse position for next frame
     state.viewport_last_mouse = mouse_pos;
+
+    // Handle bone transforms (G=move, R=rotate)
+    handle_bone_transforms(ctx, state, inside_viewport, mouse_pos);
 
     // Clear framebuffer
     fb.clear(RasterColor::new(40, 40, 50));
@@ -257,6 +438,7 @@ pub fn draw_modeler_viewport(
                 pos: world_pos,
                 uv: RasterVec2::new(vert.uv.x, vert.uv.y),
                 normal,
+                color: RasterColor::NEUTRAL,
             });
         }
 
@@ -275,11 +457,25 @@ pub fn draw_modeler_viewport(
     let empty_textures: Vec<crate::rasterizer::Texture> = Vec::new();
     render_mesh(fb, &all_vertices, &all_faces, &empty_textures, &state.camera, &state.raster_settings);
 
+    // Draw bones (skeleton visualization)
+    if !state.model.bones.is_empty() {
+        let bone_transforms = compute_bone_world_transforms(&state.model);
+        let selected_bones = match &state.selection {
+            ModelerSelection::Bones(bones) => bones.as_slice(),
+            _ => &[],
+        };
+        draw_bones(fb, &state.model, &state.camera, &bone_transforms, selected_bones);
+    }
+
     // Draw part/vertex/edge/face overlays based on selection mode
     draw_selection_overlays(ctx, fb, state, &world_matrices, screen_to_fb);
 
-    // Handle click selection
-    if inside_viewport && ctx.mouse.left_pressed && !ctx.mouse.right_down {
+    // Handle click selection (but not if we're transforming or if a transform tool is active with selection)
+    let has_bone_selection = matches!(&state.selection, ModelerSelection::Bones(b) if !b.is_empty());
+    let is_transform_tool = matches!(state.tool, TransformTool::Move | TransformTool::Rotate);
+    let should_select = !state.transform_active && !(has_bone_selection && is_transform_tool && state.select_mode == SelectMode::Bone);
+
+    if inside_viewport && ctx.mouse.left_pressed && !ctx.mouse.right_down && should_select {
         handle_selection_click(ctx, state, &world_matrices, screen_to_fb, fb.width, fb.height);
     }
 
@@ -314,6 +510,62 @@ pub fn draw_modeler_viewport(
         12.0,
         Color::from_rgba(180, 180, 180, 255),
     );
+}
+
+/// Draw the skeleton bones
+fn draw_bones(
+    fb: &mut Framebuffer,
+    model: &Model,
+    camera: &crate::rasterizer::Camera,
+    bone_transforms: &[[[f32; 4]; 4]],
+    selected_bones: &[usize],
+) {
+    let bone_color = RasterColor::new(220, 200, 50); // Yellow
+    let selected_color = RasterColor::new(50, 255, 100); // Bright green
+    let joint_color = RasterColor::new(255, 150, 50); // Orange
+
+    for (bone_idx, bone) in model.bones.iter().enumerate() {
+        let world_mat = &bone_transforms[bone_idx];
+
+        // Joint position (origin of bone in world space)
+        let joint_pos = Vec3::new(world_mat[0][3], world_mat[1][3], world_mat[2][3]);
+
+        // Bone tip position (extends along local Y axis by bone length)
+        let tip_local = Vec3::new(0.0, bone.length, 0.0);
+        let tip_pos = transform_point(world_mat, tip_local);
+
+        // Choose color based on selection
+        let color = if selected_bones.contains(&bone_idx) {
+            selected_color
+        } else {
+            bone_color
+        };
+
+        // Draw bone line from joint to tip
+        draw_3d_line(fb, joint_pos, tip_pos, camera, color);
+
+        // Draw joint marker (small cross)
+        if let Some((sx, sy)) = world_to_screen(
+            joint_pos,
+            camera.position,
+            camera.basis_x,
+            camera.basis_y,
+            camera.basis_z,
+            fb.width,
+            fb.height,
+        ) {
+            let marker_color = if selected_bones.contains(&bone_idx) {
+                selected_color
+            } else {
+                joint_color
+            };
+            let size = if selected_bones.contains(&bone_idx) { 5 } else { 3 };
+            let sx = sx as i32;
+            let sy = sy as i32;
+            fb.draw_line(sx - size, sy, sx + size, sy, marker_color);
+            fb.draw_line(sx, sy - size, sx, sy + size, marker_color);
+        }
+    }
 }
 
 /// Draw floor grid
@@ -516,6 +768,41 @@ fn handle_selection_click<F>(
     };
 
     match state.select_mode {
+        SelectMode::Bone => {
+            // Find closest bone (check joint positions)
+            let bone_transforms = compute_bone_world_transforms(&state.model);
+            let mut closest: Option<(usize, f32)> = None;
+
+            for (bone_idx, _bone) in state.model.bones.iter().enumerate() {
+                let world_mat = &bone_transforms[bone_idx];
+                let joint_pos = Vec3::new(world_mat[0][3], world_mat[1][3], world_mat[2][3]);
+
+                if let Some((sx, sy)) = world_to_screen(
+                    joint_pos,
+                    state.camera.position,
+                    state.camera.basis_x,
+                    state.camera.basis_y,
+                    state.camera.basis_z,
+                    fb_width,
+                    fb_height,
+                ) {
+                    let dist = ((fb_x - sx).powi(2) + (fb_y - sy).powi(2)).sqrt();
+                    if dist < 15.0 {
+                        if closest.map_or(true, |(_, best_dist)| dist < best_dist) {
+                            closest = Some((bone_idx, dist));
+                        }
+                    }
+                }
+            }
+
+            if let Some((bone_idx, _)) = closest {
+                state.selection = ModelerSelection::Bones(vec![bone_idx]);
+                state.set_status(&format!("Selected bone: {}", state.model.bones[bone_idx].name), 1.5);
+            } else {
+                state.selection = ModelerSelection::None;
+            }
+        }
+
         SelectMode::Part => {
             // Find closest part (check all vertices, pick part with closest vertex)
             let mut closest: Option<(usize, f32)> = None;

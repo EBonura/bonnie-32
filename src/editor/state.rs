@@ -13,6 +13,13 @@ pub const CLICK_HEIGHT: f32 = 256.0;
 /// Default ceiling height (2x sector size)
 pub const CEILING_HEIGHT: f32 = 2048.0;
 
+/// Camera mode for 3D viewport
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraMode {
+    Free,   // WASD + mouse look (FPS style)
+    Orbit,  // Rotate around target point
+}
+
 /// Current editor tool
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EditorTool {
@@ -116,6 +123,16 @@ pub struct EditorState {
     /// 3D viewport camera
     pub camera_3d: Camera,
 
+    /// Camera mode (free or orbit)
+    pub camera_mode: CameraMode,
+
+    /// Orbit camera state
+    pub orbit_target: Vec3,      // Point the camera orbits around
+    pub orbit_distance: f32,     // Distance from target
+    pub orbit_azimuth: f32,      // Horizontal angle (radians)
+    pub orbit_elevation: f32,    // Vertical angle (radians)
+    pub last_orbit_target: Vec3, // Last orbit target (for when nothing is selected)
+
     /// 2D grid view camera (pan and zoom)
     pub grid_offset_x: f32,
     pub grid_offset_y: f32,
@@ -124,6 +141,9 @@ pub struct EditorState {
     /// Grid settings
     pub grid_size: f32, // World units per grid cell
     pub show_grid: bool,
+
+    /// 3D viewport settings
+    pub show_room_bounds: bool, // Show room boundary wireframes
 
     /// Vertex editing mode
     pub link_coincident_vertices: bool, // When true, moving a vertex moves all vertices at same position
@@ -170,6 +190,19 @@ pub struct EditorState {
     /// Properties panel scroll offset
     pub properties_scroll: f32,
 
+    /// UV editing drag state (for drag-value widgets)
+    pub uv_drag_active: [bool; 5],      // [x_offset, y_offset, x_scale, y_scale, angle]
+    pub uv_drag_start_value: [f32; 5],
+    pub uv_drag_start_x: [f32; 5],
+
+    /// UV editing link state (when true, dragging X also changes Y)
+    pub uv_offset_linked: bool,
+    pub uv_scale_linked: bool,
+
+    /// UV editing text input state (for double-click manual entry)
+    pub uv_editing_field: Option<usize>,  // Which field is being edited (0-4 = offset x/y, scale x/y, angle)
+    pub uv_edit_buffer: String,           // Text input buffer
+
     /// Placement height adjustment (for DrawFloor/DrawCeiling/DrawWall modes)
     pub placement_target_y: f32,           // Current Y height for new placements
     pub height_adjust_mode: bool,          // True when Shift is held for height adjustment
@@ -179,6 +212,9 @@ pub struct EditorState {
 
     /// Rasterizer settings (PS1 effects)
     pub raster_settings: RasterSettings,
+
+    /// Selected vertex indices for color editing (0-3 for face corners)
+    pub selected_vertex_indices: Vec<usize>,
 }
 
 impl EditorState {
@@ -206,6 +242,12 @@ impl EditorState {
             }))
             .unwrap_or_else(crate::world::TextureRef::none);
 
+        // Default orbit target at center of first sector
+        let orbit_target = Vec3::new(512.0, 512.0, 512.0);
+        let orbit_distance = 4000.0;
+        let orbit_azimuth = 0.8;     // ~45 degrees
+        let orbit_elevation = 0.4;   // ~23 degrees up
+
         Self {
             level,
             current_file: None,
@@ -217,11 +259,18 @@ impl EditorState {
             current_room: 0,
             selected_texture,
             camera_3d,
+            camera_mode: CameraMode::Free,
+            orbit_target,
+            orbit_distance,
+            orbit_azimuth,
+            orbit_elevation,
+            last_orbit_target: orbit_target,
             grid_offset_x: 0.0,
             grid_offset_y: 0.0,
             grid_zoom: 0.1, // Pixels per world unit (very zoomed out for TRLE 1024-unit sectors)
             grid_size: SECTOR_SIZE, // TRLE sector size
             show_grid: true,
+            show_room_bounds: true, // Show room boundaries by default
             link_coincident_vertices: true, // Default to linked mode
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -244,12 +293,20 @@ impl EditorState {
             selected_pack: 0,
             texture_scroll: 0.0,
             properties_scroll: 0.0,
+            uv_drag_active: [false; 5],
+            uv_drag_start_value: [0.0; 5],
+            uv_drag_start_x: [0.0; 5],
+            uv_offset_linked: true,  // Default to linked
+            uv_scale_linked: true,   // Default to linked
+            uv_editing_field: None,
+            uv_edit_buffer: String::new(),
             placement_target_y: 0.0,
             height_adjust_mode: false,
             height_adjust_start_mouse_y: 0.0,
             height_adjust_start_y: 0.0,
             height_adjust_locked_pos: None,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
+            selected_vertex_indices: Vec::new(),
         }
     }
 
@@ -268,10 +325,17 @@ impl EditorState {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.selection = Selection::None;
+        self.selected_vertex_indices.clear();
         // Clamp current_room to valid range
         if self.current_room >= self.level.rooms.len() {
             self.current_room = 0;
         }
+    }
+
+    /// Set the current selection and clear vertex color selection
+    pub fn set_selection(&mut self, selection: Selection) {
+        self.selection = selection;
+        self.selected_vertex_indices.clear();
     }
 
     /// Set a status message that will be displayed for a duration
@@ -378,6 +442,91 @@ impl EditorState {
             self.multi_selection.remove(pos);
         } else if !matches!(selection, Selection::None) {
             self.multi_selection.push(selection);
+        }
+    }
+
+    /// Update camera position from orbit parameters
+    pub fn sync_camera_from_orbit(&mut self) {
+        let pitch = self.orbit_elevation;
+        let yaw = self.orbit_azimuth;
+
+        // Forward direction (what camera looks at)
+        let forward = Vec3::new(
+            pitch.cos() * yaw.sin(),
+            -pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+
+        // Camera sits behind the target along the forward direction
+        self.camera_3d.position = self.orbit_target - forward * self.orbit_distance;
+        self.camera_3d.rotation_x = pitch;
+        self.camera_3d.rotation_y = yaw;
+        self.camera_3d.update_basis();
+    }
+
+    /// Get the center point of the current selection (for orbit target)
+    pub fn get_selection_center(&self) -> Option<Vec3> {
+        match &self.selection {
+            Selection::None => None,
+            Selection::Room(room_idx) => {
+                self.level.rooms.get(*room_idx).map(|room| {
+                    let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+                    let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+                    let center_y = room.position.y + 512.0; // Approximate middle height
+                    Vec3::new(center_x, center_y, center_z)
+                })
+            }
+            Selection::Sector { room, x, z } | Selection::SectorFace { room, x, z, .. } => {
+                self.level.rooms.get(*room).and_then(|r| {
+                    r.get_sector(*x, *z).map(|sector| {
+                        let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;
+                        let base_z = r.position.z + (*z as f32) * SECTOR_SIZE;
+                        let center_x = base_x + SECTOR_SIZE / 2.0;
+                        let center_z = base_z + SECTOR_SIZE / 2.0;
+                        // Calculate average height from floor/ceiling
+                        let floor_y = sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
+                        let ceiling_y = sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(2048.0);
+                        let center_y = (floor_y + ceiling_y) / 2.0;
+                        Vec3::new(center_x, center_y, center_z)
+                    })
+                })
+            }
+            Selection::Edge { room, x, z, .. } => {
+                // Same as sector for now
+                self.level.rooms.get(*room).and_then(|r| {
+                    r.get_sector(*x, *z).map(|sector| {
+                        let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;
+                        let base_z = r.position.z + (*z as f32) * SECTOR_SIZE;
+                        let center_x = base_x + SECTOR_SIZE / 2.0;
+                        let center_z = base_z + SECTOR_SIZE / 2.0;
+                        let floor_y = sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
+                        let ceiling_y = sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(2048.0);
+                        let center_y = (floor_y + ceiling_y) / 2.0;
+                        Vec3::new(center_x, center_y, center_z)
+                    })
+                })
+            }
+            Selection::Portal { room, portal } => {
+                self.level.rooms.get(*room).and_then(|r| {
+                    r.portals.get(*portal).map(|p| {
+                        // Average of portal vertices
+                        let sum = p.vertices.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
+                        let count = p.vertices.len() as f32;
+                        Vec3::new(sum.x / count, sum.y / count, sum.z / count)
+                    })
+                })
+            }
+        }
+    }
+
+    /// Update orbit target based on current selection
+    pub fn update_orbit_target(&mut self) {
+        if let Some(center) = self.get_selection_center() {
+            self.orbit_target = center;
+            self.last_orbit_target = center;
+        } else {
+            // Use last known target if nothing selected
+            self.orbit_target = self.last_orbit_target;
         }
     }
 }

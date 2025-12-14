@@ -3,6 +3,8 @@
 //! Platform-specific audio output:
 //! - Native: cpal for direct audio device access
 //! - WASM: Web Audio API via JavaScript FFI
+//!
+//! Features authentic PS1 SPU reverb emulation.
 
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
@@ -10,6 +12,7 @@ use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
+use super::psx_reverb::{PsxReverb, ReverbType};
 
 /// Sample rate for audio output
 pub const SAMPLE_RATE: u32 = 44100;
@@ -20,6 +23,8 @@ struct AudioState {
     synth: Option<Synthesizer>,
     /// Whether audio is playing
     playing: bool,
+    /// PS1 SPU reverb processor
+    reverb: PsxReverb,
 }
 
 // =============================================================================
@@ -58,6 +63,9 @@ mod native {
                     }
 
                     synth.render(&mut left_buffer[..samples_needed], &mut right_buffer[..samples_needed]);
+
+                    // Apply PS1 reverb
+                    state.reverb.process(&mut left_buffer[..samples_needed], &mut right_buffer[..samples_needed]);
 
                     for i in 0..samples_needed {
                         data[i * 2] = left_buffer[i];
@@ -157,6 +165,7 @@ impl AudioEngine {
         let state = Arc::new(Mutex::new(AudioState {
             synth: None,
             playing: false,
+            reverb: PsxReverb::new(SAMPLE_RATE),
         }));
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -180,6 +189,34 @@ impl AudioEngine {
                 sample_accumulator: 0.0,
             }
         }
+    }
+
+    /// Set the PS1 reverb preset
+    pub fn set_reverb_preset(&self, reverb_type: ReverbType) {
+        let mut state = self.state.lock().unwrap();
+        state.reverb.set_preset(reverb_type);
+    }
+
+    /// Get current reverb type
+    pub fn reverb_type(&self) -> ReverbType {
+        self.state.lock().unwrap().reverb.reverb_type()
+    }
+
+    /// Set reverb wet/dry mix (0.0 = dry, 1.0 = wet)
+    pub fn set_reverb_wet_level(&self, level: f32) {
+        let mut state = self.state.lock().unwrap();
+        state.reverb.set_wet_level(level);
+    }
+
+    /// Get reverb wet level
+    pub fn reverb_wet_level(&self) -> f32 {
+        self.state.lock().unwrap().reverb.wet_level()
+    }
+
+    /// Clear reverb buffers (call when stopping playback)
+    pub fn clear_reverb(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.reverb.clear();
     }
 
     /// Load a soundfont from file (native only)
@@ -255,6 +292,10 @@ impl AudioEngine {
                 self.right_buffer.resize(samples, 0.0);
             }
             synth.render(&mut self.left_buffer[..samples], &mut self.right_buffer[..samples]);
+
+            // Apply PS1 reverb
+            state.reverb.process(&mut self.left_buffer[..samples], &mut self.right_buffer[..samples]);
+
             wasm::write_audio(&self.left_buffer[..samples], &self.right_buffer[..samples]);
         }
     }
@@ -338,21 +379,6 @@ impl AudioEngine {
         }
     }
 
-    /// Set reverb send (CC 91)
-    pub fn set_reverb(&self, channel: i32, value: i32) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(ref mut synth) = state.synth {
-            synth.process_midi_message(channel, 0xB0, 91, value.clamp(0, 127));
-        }
-    }
-
-    /// Set chorus send (CC 93)
-    pub fn set_chorus(&self, channel: i32, value: i32) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(ref mut synth) = state.synth {
-            synth.process_midi_message(channel, 0xB0, 93, value.clamp(0, 127));
-        }
-    }
 
     /// Reset all controllers on a channel
     pub fn reset_controllers(&self, channel: i32) {

@@ -211,6 +211,32 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
+    // Camera mode toggle
+    use super::CameraMode;
+    let is_free = state.camera_mode == CameraMode::Free;
+    let is_orbit = state.camera_mode == CameraMode::Orbit;
+
+    if toolbar.icon_button_active(ctx, icon::EYE, icon_font, "Free Camera (WASD)", is_free) {
+        state.camera_mode = CameraMode::Free;
+        state.set_status("Camera: Free (WASD + mouse)", 2.0);
+    }
+    if toolbar.icon_button_active(ctx, icon::ORBIT, icon_font, "Orbit Camera", is_orbit) {
+        state.camera_mode = CameraMode::Orbit;
+        // Update orbit target based on current selection
+        state.update_orbit_target();
+        state.sync_camera_from_orbit();
+        state.set_status("Camera: Orbit (drag to rotate)", 2.0);
+    }
+
+    // Room boundaries toggle
+    if toolbar.icon_button_active(ctx, icon::BOX, icon_font, "Show Room Bounds", state.show_room_bounds) {
+        state.show_room_bounds = !state.show_room_bounds;
+        let mode = if state.show_room_bounds { "visible" } else { "hidden" };
+        state.set_status(&format!("Room boundaries: {}", mode), 2.0);
+    }
+
+    toolbar.separator();
+
     // Room navigation
     toolbar.label(&format!("Room: {}", state.current_room));
 
@@ -261,6 +287,11 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.raster_settings.dithering = !state.raster_settings.dithering;
         let mode = if state.raster_settings.dithering { "ON" } else { "OFF" };
         state.set_status(&format!("Dithering: {}", mode), 2.0);
+    }
+    if toolbar.icon_button_active(ctx, icon::PROPORTIONS, icon_font, "Aspect Ratio (4:3 / Stretch)", !state.raster_settings.stretch_to_fill) {
+        state.raster_settings.stretch_to_fill = !state.raster_settings.stretch_to_fill;
+        let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
+        state.set_status(&format!("Aspect Ratio: {}", mode), 2.0);
     }
 
     toolbar.separator();
@@ -432,19 +463,29 @@ fn draw_container_start(
 fn horizontal_face_container_height(face: &crate::world::HorizontalFace) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
+    let button_row_height = 24.0;
+    let color_row_height = 20.0; // Color preview + label
+    let uv_controls_height = 54.0; // offset row + scale row + angle row
     let mut lines = 3; // texture, height, walkable
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height
+    // Add space for UV info, controls, buttons, and color
+    let uv_lines = if face.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height
 }
 
 /// Calculate height needed for a wall face container
-fn wall_face_container_height(_wall: &crate::world::VerticalFace) -> f32 {
+fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
+    let button_row_height = 24.0;
+    let color_row_height = 20.0; // Color preview + label
+    let uv_controls_height = 54.0; // offset row + scale row + angle row
     let lines = 3; // texture, y range, blend
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height
+    // Add space for UV info, controls, buttons, and color
+    let uv_lines = if wall.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height
 }
 
 /// Draw properties for a horizontal face inside a container
@@ -512,18 +553,548 @@ fn draw_horizontal_face_container(
             }
         }
     }
+    content_y += line_height;
+
+    // UV coordinates display
+    let uv_label_color = Color::from_rgba(150, 150, 150, 255);
+    if let Some(uv) = &face.uv {
+        draw_text("UV: Custom", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
+        content_y += line_height;
+        // Show UV coordinates compactly
+        draw_text(&format!("  [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+            content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
+        content_y += line_height;
+    } else {
+        draw_text("UV: Default", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
+        content_y += line_height;
+    }
+
+    // UV parameter editing controls
+    let controls_width = width - CONTAINER_PADDING * 2.0;
+    if let Some(new_uv) = draw_uv_controls(ctx, content_x, content_y, controls_width, &face.uv, state, icon_font) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if is_floor {
+                    if let Some(f) = &mut s.floor { f.uv = Some(new_uv); }
+                } else if let Some(c) = &mut s.ceiling { c.uv = Some(new_uv); }
+            }
+        }
+    }
+    content_y += 54.0; // Height of UV controls (3 rows * 18px)
+
+    // UV manipulation buttons
+    let btn_size = 20.0;
+    let btn_spacing = 4.0;
+    let mut btn_x = content_x;
+
+    // Reset UV button
+    let reset_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, reset_rect, icon::REFRESH_CW, icon_font, "Reset UV") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if is_floor {
+                    if let Some(f) = &mut s.floor { f.uv = None; }
+                } else if let Some(c) = &mut s.ceiling { c.uv = None; }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // Flip Horizontal button
+    let flip_h_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, flip_h_rect, icon::FLIP_HORIZONTAL, icon_font, "Flip UV Horizontal") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if is_floor {
+                    if let Some(f) = &mut s.floor { flip_uv_horizontal(&mut f.uv); }
+                } else if let Some(c) = &mut s.ceiling { flip_uv_horizontal(&mut c.uv); }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // Flip Vertical button
+    let flip_v_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, flip_v_rect, icon::FLIP_VERTICAL, icon_font, "Flip UV Vertical") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if is_floor {
+                    if let Some(f) = &mut s.floor { flip_uv_vertical(&mut f.uv); }
+                } else if let Some(c) = &mut s.ceiling { flip_uv_vertical(&mut c.uv); }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // Rotate 90° CW button
+    let rotate_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, rotate_rect, icon::ROTATE_CW, icon_font, "Rotate UV 90° CW") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if is_floor {
+                    if let Some(f) = &mut s.floor { rotate_uv_cw(&mut f.uv); }
+                } else if let Some(c) = &mut s.ceiling { rotate_uv_cw(&mut c.uv); }
+            }
+        }
+    }
+    content_y += btn_size + 4.0;
+
+    // Face vertex colors (PS1-style texture modulation)
+    // Show 4 vertex color swatches in a 2x2 grid matching the face corners
+    let swatch_size = 14.0;
+    let swatch_spacing = 2.0;
+
+    // Label
+    let is_uniform = face.has_uniform_color();
+    let color_text = if is_uniform {
+        let c = face.colors[0];
+        if c.r == 128 && c.g == 128 && c.b == 128 {
+            String::from("Tint: Neutral")
+        } else {
+            format!("Tint: ({}, {}, {})", c.r, c.g, c.b)
+        }
+    } else {
+        String::from("Tint: Per-vertex")
+    };
+    draw_text(&color_text, content_x.floor(), (content_y + 12.0).floor(), 12.0,
+        macroquad::color::Color::from_rgba(180, 180, 180, 255));
+
+    // Draw 4 vertex color swatches in 2x2 grid (NW, NE / SW, SE layout)
+    let grid_x = content_x + 90.0;
+    let vertex_labels = ["NW", "NE", "SW", "SE"];
+    let grid_positions = [(0, 0), (1, 0), (0, 1), (1, 1)]; // (col, row)
+    let vertex_indices = [0, 1, 3, 2]; // Map grid to corner indices: NW=0, NE=1, SE=2, SW=3
+
+    for (grid_idx, &(col, row)) in grid_positions.iter().enumerate() {
+        let vert_idx = vertex_indices[grid_idx];
+        let vert_color = face.colors[vert_idx];
+        let sx = grid_x + (col as f32) * (swatch_size + swatch_spacing);
+        let sy = content_y + (row as f32) * (swatch_size + swatch_spacing);
+        let swatch_rect = Rect::new(sx, sy, swatch_size, swatch_size);
+
+        // Draw swatch
+        draw_rectangle(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
+            macroquad::color::Color::new(
+                vert_color.r as f32 / 255.0,
+                vert_color.g as f32 / 255.0,
+                vert_color.b as f32 / 255.0,
+                1.0
+            ));
+
+        // Check if this vertex is selected
+        let is_selected = state.selected_vertex_indices.contains(&vert_idx);
+        let hovered = ctx.mouse.inside(&swatch_rect);
+        let border_color = if is_selected {
+            macroquad::color::Color::from_rgba(0, 255, 255, 255) // Cyan for selected
+        } else if hovered {
+            macroquad::color::Color::from_rgba(255, 255, 0, 255) // Yellow for hover
+        } else {
+            macroquad::color::Color::from_rgba(80, 80, 80, 255)
+        };
+        draw_rectangle_lines(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
+            if is_selected { 2.0 } else { 1.0 }, border_color);
+
+        // Handle click - toggle selection of this vertex
+        if hovered && ctx.mouse.left_pressed {
+            if is_selected {
+                state.selected_vertex_indices.retain(|&v| v != vert_idx);
+            } else {
+                state.selected_vertex_indices.push(vert_idx);
+            }
+        }
+
+        // Tooltip
+        if hovered {
+            let status = if is_selected { "selected" } else { "click to select" };
+            ctx.tooltip = Some(crate::ui::PendingTooltip {
+                text: format!("{}: ({}, {}, {}) - {}", vertex_labels[grid_idx], vert_color.r, vert_color.g, vert_color.b, status),
+                x: ctx.mouse.x,
+                y: ctx.mouse.y,
+            });
+        }
+    }
+
+    // Color preset buttons (apply to all vertices)
+    let preset_x = grid_x + 2.0 * (swatch_size + swatch_spacing) + 8.0;
+    let preset_size = 14.0;
+    let preset_spacing = 2.0;
+
+    // Preset colors: Neutral, Red tint, Blue tint, Green tint, Warm, Cool
+    let presets: [(crate::rasterizer::Color, &str); 6] = [
+        (crate::rasterizer::Color::NEUTRAL, "Neutral (no tint)"),
+        (crate::rasterizer::Color::new(160, 120, 120), "Red tint"),
+        (crate::rasterizer::Color::new(120, 120, 160), "Blue tint"),
+        (crate::rasterizer::Color::new(120, 160, 120), "Green tint"),
+        (crate::rasterizer::Color::new(150, 130, 110), "Warm tint"),
+        (crate::rasterizer::Color::new(110, 130, 150), "Cool tint"),
+    ];
+
+    for (i, (preset_color, tooltip)) in presets.iter().enumerate() {
+        let px = preset_x + (i as f32) * (preset_size + preset_spacing);
+        let preset_rect = Rect::new(px, content_y + 8.0, preset_size, preset_size);
+
+        // Draw preset swatch
+        draw_rectangle(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h,
+            macroquad::color::Color::new(
+                preset_color.r as f32 / 255.0,
+                preset_color.g as f32 / 255.0,
+                preset_color.b as f32 / 255.0,
+                1.0
+            ));
+
+        // Highlight if hovered or all vertices match
+        let all_match = is_uniform && face.colors[0].r == preset_color.r &&
+            face.colors[0].g == preset_color.g && face.colors[0].b == preset_color.b;
+        let hovered = ctx.mouse.inside(&preset_rect);
+        let border_color = if all_match {
+            macroquad::color::Color::from_rgba(0, 200, 200, 255)
+        } else if hovered {
+            macroquad::color::Color::from_rgba(200, 200, 200, 255)
+        } else {
+            macroquad::color::Color::from_rgba(80, 80, 80, 255)
+        };
+        draw_rectangle_lines(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h, 1.0, border_color);
+
+        // Handle click - apply to selected vertices (or all if none selected)
+        if hovered && ctx.mouse.left_pressed {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        if state.selected_vertex_indices.is_empty() {
+                            // No vertices selected - apply to all
+                            f.set_uniform_color(*preset_color);
+                        } else {
+                            // Apply only to selected vertices
+                            for &idx in &state.selected_vertex_indices {
+                                if idx < 4 {
+                                    f.colors[idx] = *preset_color;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tooltip
+        let target = if state.selected_vertex_indices.is_empty() {
+            "all vertices"
+        } else {
+            "selected vertices"
+        };
+        if hovered {
+            ctx.tooltip = Some(crate::ui::PendingTooltip {
+                text: format!("{} (apply to {})", tooltip, target),
+                x: ctx.mouse.x,
+                y: ctx.mouse.y,
+            });
+        }
+    }
 
     container_height
 }
 
+/// Helper: Flip UV coordinates horizontally
+fn flip_uv_horizontal(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
+    use crate::rasterizer::Vec2;
+    let current = uv.unwrap_or([
+        Vec2::new(0.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(0.0, 1.0),
+    ]);
+    // Flip X: swap left and right
+    *uv = Some([
+        Vec2::new(1.0 - current[0].x, current[0].y),
+        Vec2::new(1.0 - current[1].x, current[1].y),
+        Vec2::new(1.0 - current[2].x, current[2].y),
+        Vec2::new(1.0 - current[3].x, current[3].y),
+    ]);
+}
+
+/// Helper: Flip UV coordinates vertically
+fn flip_uv_vertical(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
+    use crate::rasterizer::Vec2;
+    let current = uv.unwrap_or([
+        Vec2::new(0.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(0.0, 1.0),
+    ]);
+    // Flip Y: swap top and bottom
+    *uv = Some([
+        Vec2::new(current[0].x, 1.0 - current[0].y),
+        Vec2::new(current[1].x, 1.0 - current[1].y),
+        Vec2::new(current[2].x, 1.0 - current[2].y),
+        Vec2::new(current[3].x, 1.0 - current[3].y),
+    ]);
+}
+
+/// Helper: Rotate UV coordinates 90° clockwise
+/// This rotates the texture appearance by shifting which UV goes to which corner
+fn rotate_uv_cw(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
+    use crate::rasterizer::Vec2;
+    let current = uv.unwrap_or([
+        Vec2::new(0.0, 0.0),  // corner 0: NW
+        Vec2::new(1.0, 0.0),  // corner 1: NE
+        Vec2::new(1.0, 1.0),  // corner 2: SE
+        Vec2::new(0.0, 1.0),  // corner 3: SW
+    ]);
+    // To rotate the texture 90° CW, each corner gets the UV from the previous corner
+    // (i.e., shift the array by 1 position backwards)
+    // corner 0 gets corner 3's UV, corner 1 gets corner 0's UV, etc.
+    *uv = Some([
+        current[3],  // corner 0 now shows what was at corner 3
+        current[0],  // corner 1 now shows what was at corner 0
+        current[1],  // corner 2 now shows what was at corner 1
+        current[2],  // corner 3 now shows what was at corner 2
+    ]);
+}
+
+/// UV parameters extracted from raw UV coordinates
+#[derive(Debug, Clone, Copy)]
+struct UvParams {
+    x_offset: f32,
+    y_offset: f32,
+    x_scale: f32,
+    y_scale: f32,
+    angle: f32, // in degrees
+}
+
+impl Default for UvParams {
+    fn default() -> Self {
+        Self {
+            x_offset: 0.0,
+            y_offset: 0.0,
+            x_scale: 1.0,
+            y_scale: 1.0,
+            angle: 0.0,
+        }
+    }
+}
+
+/// Extract UV parameters from 4-corner UV coordinates
+/// Assumes default UV is [(0,0), (1,0), (1,1), (0,1)] for NW, NE, SE, SW
+fn extract_uv_params(uv: &Option<[crate::rasterizer::Vec2; 4]>) -> UvParams {
+    use crate::rasterizer::Vec2;
+    let coords = uv.unwrap_or([
+        Vec2::new(0.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(0.0, 1.0),
+    ]);
+
+    // Calculate center (average of all corners)
+    let center_x = (coords[0].x + coords[1].x + coords[2].x + coords[3].x) / 4.0;
+    let center_y = (coords[0].y + coords[1].y + coords[2].y + coords[3].y) / 4.0;
+
+    // Offset is how much the center has moved from default (0.5, 0.5)
+    let x_offset = center_x - 0.5;
+    let y_offset = center_y - 0.5;
+
+    // Scale: measure the width and height of the UV quad
+    // Width = distance from NW to NE (along X), Height = distance from NW to SW (along Y)
+    let width = ((coords[1].x - coords[0].x).powi(2) + (coords[1].y - coords[0].y).powi(2)).sqrt();
+    let height = ((coords[3].x - coords[0].x).powi(2) + (coords[3].y - coords[0].y).powi(2)).sqrt();
+
+    // Angle: angle of the NW->NE edge from horizontal
+    let dx = coords[1].x - coords[0].x;
+    let dy = coords[1].y - coords[0].y;
+    let angle = dy.atan2(dx).to_degrees();
+
+    UvParams {
+        x_offset,
+        y_offset,
+        x_scale: width,
+        y_scale: height,
+        angle,
+    }
+}
+
+/// Apply UV parameters to generate 4-corner UV coordinates
+fn apply_uv_params(params: &UvParams) -> [crate::rasterizer::Vec2; 4] {
+    use crate::rasterizer::Vec2;
+
+    // Start with unit square centered at origin
+    let half_w = params.x_scale / 2.0;
+    let half_h = params.y_scale / 2.0;
+
+    // Corners before rotation (centered at origin)
+    let corners = [
+        Vec2::new(-half_w, -half_h), // NW
+        Vec2::new(half_w, -half_h),  // NE
+        Vec2::new(half_w, half_h),   // SE
+        Vec2::new(-half_w, half_h),  // SW
+    ];
+
+    // Rotate around center
+    let rad = params.angle.to_radians();
+    let cos_a = rad.cos();
+    let sin_a = rad.sin();
+
+    let rotated: Vec<Vec2> = corners.iter().map(|c| {
+        Vec2::new(
+            c.x * cos_a - c.y * sin_a,
+            c.x * sin_a + c.y * cos_a,
+        )
+    }).collect();
+
+    // Translate to final position (center at 0.5 + offset)
+    let center_x = 0.5 + params.x_offset;
+    let center_y = 0.5 + params.y_offset;
+
+    [
+        Vec2::new(rotated[0].x + center_x, rotated[0].y + center_y),
+        Vec2::new(rotated[1].x + center_x, rotated[1].y + center_y),
+        Vec2::new(rotated[2].x + center_x, rotated[2].y + center_y),
+        Vec2::new(rotated[3].x + center_x, rotated[3].y + center_y),
+    ]
+}
+
+/// Draw UV editing controls and return if any value changed
+fn draw_uv_controls(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    uv: &Option<[crate::rasterizer::Vec2; 4]>,
+    state: &mut EditorState,
+    icon_font: Option<&Font>,
+) -> Option<[crate::rasterizer::Vec2; 4]> {
+    use crate::ui::{draw_drag_value_compact_editable, icon_button_active, Rect, icon};
+
+    let mut params = extract_uv_params(uv);
+    let mut changed = false;
+    let row_height = 18.0;
+    let link_btn_size = 16.0;
+    let label_width = 42.0;
+    let value_width = (width - label_width - link_btn_size - 12.0) / 2.0;
+    let label_color = Color::from_rgba(150, 150, 150, 255);
+
+    let mut current_y = y;
+
+    // Row 1: Offset - [Link] Label [X] [Y]
+    let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
+    let link_icon = if state.uv_offset_linked { icon::LINK } else { icon::UNLINK };
+    if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_offset_linked) {
+        state.uv_offset_linked = !state.uv_offset_linked;
+    }
+
+    draw_text("Offset", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
+    let value_start = x + link_btn_size + 4.0 + label_width;
+    let ox_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
+    let result = draw_drag_value_compact_editable(
+        ctx, ox_rect, params.x_offset, 0.1, 1001,
+        &mut state.uv_drag_active[0], &mut state.uv_drag_start_value[0], &mut state.uv_drag_start_x[0],
+        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 0)),
+    );
+    if let Some(v) = result.value {
+        let delta = v - params.x_offset;
+        params.x_offset = v;
+        if state.uv_offset_linked {
+            params.y_offset += delta;
+        }
+        changed = true;
+    }
+    let oy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
+    let result = draw_drag_value_compact_editable(
+        ctx, oy_rect, params.y_offset, 0.1, 1002,
+        &mut state.uv_drag_active[1], &mut state.uv_drag_start_value[1], &mut state.uv_drag_start_x[1],
+        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 1)),
+    );
+    if let Some(v) = result.value {
+        let delta = v - params.y_offset;
+        params.y_offset = v;
+        if state.uv_offset_linked {
+            params.x_offset += delta;
+        }
+        changed = true;
+    }
+    current_y += row_height;
+
+    // Row 2: Scale - [Link] Label [X] [Y]
+    let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
+    let link_icon = if state.uv_scale_linked { icon::LINK } else { icon::UNLINK };
+    if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_scale_linked) {
+        state.uv_scale_linked = !state.uv_scale_linked;
+    }
+
+    draw_text("Scale", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
+    let sx_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
+    let result = draw_drag_value_compact_editable(
+        ctx, sx_rect, params.x_scale, 0.1, 1003,
+        &mut state.uv_drag_active[2], &mut state.uv_drag_start_value[2], &mut state.uv_drag_start_x[2],
+        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 2)),
+    );
+    if let Some(v) = result.value {
+        let old_scale = params.x_scale;
+        params.x_scale = v.max(0.01_f32); // Prevent zero/negative scale
+        if state.uv_scale_linked && old_scale > 0.001 {
+            let ratio = params.x_scale / old_scale;
+            params.y_scale = (params.y_scale * ratio).max(0.01);
+        }
+        changed = true;
+    }
+    let sy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
+    let result = draw_drag_value_compact_editable(
+        ctx, sy_rect, params.y_scale, 0.1, 1004,
+        &mut state.uv_drag_active[3], &mut state.uv_drag_start_value[3], &mut state.uv_drag_start_x[3],
+        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 3)),
+    );
+    if let Some(v) = result.value {
+        let old_scale = params.y_scale;
+        params.y_scale = v.max(0.01_f32);
+        if state.uv_scale_linked && old_scale > 0.001 {
+            let ratio = params.y_scale / old_scale;
+            params.x_scale = (params.x_scale * ratio).max(0.01);
+        }
+        changed = true;
+    }
+    current_y += row_height;
+
+    // Row 3: Angle (no link button, full width)
+    draw_text("Angle", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
+    let angle_rect = Rect::new(value_start, current_y, width - value_start + x - 4.0, row_height);
+    let result = draw_drag_value_compact_editable(
+        ctx, angle_rect, params.angle, 1.0, 1005,
+        &mut state.uv_drag_active[4], &mut state.uv_drag_start_value[4], &mut state.uv_drag_start_x[4],
+        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 4)),
+    );
+    if let Some(v) = result.value {
+        params.angle = v;
+        changed = true;
+    }
+
+    if changed {
+        Some(apply_uv_params(&params))
+    } else {
+        None
+    }
+}
+
 /// Draw properties for a wall face inside a container
 fn draw_wall_face_container(
+    ctx: &mut UiContext,
     x: f32,
     y: f32,
     width: f32,
     wall: &crate::world::VerticalFace,
     label: &str,
     label_color: Color,
+    room_idx: usize,
+    gx: usize,
+    gz: usize,
+    wall_dir: crate::world::Direction,
+    wall_idx: usize,
+    state: &mut EditorState,
+    icon_font: Option<&Font>,
 ) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
@@ -551,6 +1122,249 @@ fn draw_wall_face_container(
 
     // Blend mode
     draw_text(&format!("Blend: {:?}", wall.blend_mode), content_x.floor(), (content_y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+    content_y += line_height;
+
+    // UV coordinates display
+    let uv_label_color = Color::from_rgba(150, 150, 150, 255);
+    if let Some(uv) = &wall.uv {
+        draw_text("UV: Custom", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
+        content_y += line_height;
+        // Show UV coordinates compactly
+        draw_text(&format!("  [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+            content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
+        content_y += line_height;
+    } else {
+        draw_text("UV: Default", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
+        content_y += line_height;
+    }
+
+    // UV parameter editing controls
+    let controls_width = width - CONTAINER_PADDING * 2.0;
+    if let Some(new_uv) = draw_uv_controls(ctx, content_x, content_y, controls_width, &wall.uv, state, icon_font) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    w.uv = Some(new_uv);
+                }
+            }
+        }
+    }
+    content_y += 54.0; // Height of UV controls (3 rows * 18px)
+
+    // UV manipulation buttons
+    let btn_size = 20.0;
+    let btn_spacing = 4.0;
+    let mut btn_x = content_x;
+
+    // Reset UV button
+    let reset_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, reset_rect, icon::REFRESH_CW, icon_font, "Reset UV") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    w.uv = None;
+                }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // Flip Horizontal button
+    let flip_h_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, flip_h_rect, icon::FLIP_HORIZONTAL, icon_font, "Flip UV Horizontal") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    flip_uv_horizontal(&mut w.uv);
+                }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // Flip Vertical button
+    let flip_v_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, flip_v_rect, icon::FLIP_VERTICAL, icon_font, "Flip UV Vertical") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    flip_uv_vertical(&mut w.uv);
+                }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // Rotate 90° CW button
+    let rotate_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, rotate_rect, icon::ROTATE_CW, icon_font, "Rotate UV 90° CW") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    rotate_uv_cw(&mut w.uv);
+                }
+            }
+        }
+    }
+    content_y += btn_size + 4.0;
+
+    // Wall vertex colors (PS1-style texture modulation)
+    // Show 4 vertex color swatches in a 2x2 grid (BL, BR / TL, TR layout)
+    let swatch_size = 14.0;
+    let swatch_spacing = 2.0;
+
+    // Label
+    let is_uniform = wall.has_uniform_color();
+    let color_text = if is_uniform {
+        let c = wall.colors[0];
+        if c.r == 128 && c.g == 128 && c.b == 128 {
+            String::from("Tint: Neutral")
+        } else {
+            format!("Tint: ({}, {}, {})", c.r, c.g, c.b)
+        }
+    } else {
+        String::from("Tint: Per-vertex")
+    };
+    draw_text(&color_text, content_x.floor(), (content_y + 12.0).floor(), 12.0,
+        macroquad::color::Color::from_rgba(180, 180, 180, 255));
+
+    // Draw 4 vertex color swatches in 2x2 grid (TL, TR / BL, BR layout - visual matches wall)
+    let grid_x = content_x + 90.0;
+    let vertex_labels = ["TL", "TR", "BL", "BR"];
+    let grid_positions = [(0, 0), (1, 0), (0, 1), (1, 1)]; // (col, row)
+    let vertex_indices = [3, 2, 0, 1]; // Map grid to corner indices: BL=0, BR=1, TR=2, TL=3
+
+    for (grid_idx, &(col, row)) in grid_positions.iter().enumerate() {
+        let vert_idx = vertex_indices[grid_idx];
+        let vert_color = wall.colors[vert_idx];
+        let sx = grid_x + (col as f32) * (swatch_size + swatch_spacing);
+        let sy = content_y + (row as f32) * (swatch_size + swatch_spacing);
+        let swatch_rect = Rect::new(sx, sy, swatch_size, swatch_size);
+
+        // Draw swatch
+        draw_rectangle(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
+            macroquad::color::Color::new(
+                vert_color.r as f32 / 255.0,
+                vert_color.g as f32 / 255.0,
+                vert_color.b as f32 / 255.0,
+                1.0
+            ));
+
+        // Check if this vertex is selected
+        let is_selected = state.selected_vertex_indices.contains(&vert_idx);
+        let hovered = ctx.mouse.inside(&swatch_rect);
+        let border_color = if is_selected {
+            macroquad::color::Color::from_rgba(0, 255, 255, 255) // Cyan for selected
+        } else if hovered {
+            macroquad::color::Color::from_rgba(255, 255, 0, 255) // Yellow for hover
+        } else {
+            macroquad::color::Color::from_rgba(80, 80, 80, 255)
+        };
+        draw_rectangle_lines(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
+            if is_selected { 2.0 } else { 1.0 }, border_color);
+
+        // Handle click - toggle selection of this vertex
+        if hovered && ctx.mouse.left_pressed {
+            if is_selected {
+                state.selected_vertex_indices.retain(|&v| v != vert_idx);
+            } else {
+                state.selected_vertex_indices.push(vert_idx);
+            }
+        }
+
+        // Tooltip
+        if hovered {
+            let status = if is_selected { "selected" } else { "click to select" };
+            ctx.tooltip = Some(crate::ui::PendingTooltip {
+                text: format!("{}: ({}, {}, {}) - {}", vertex_labels[grid_idx], vert_color.r, vert_color.g, vert_color.b, status),
+                x: ctx.mouse.x,
+                y: ctx.mouse.y,
+            });
+        }
+    }
+
+    // Color preset buttons (apply to selected vertices or all)
+    let preset_x = grid_x + 2.0 * (swatch_size + swatch_spacing) + 8.0;
+    let preset_size = 14.0;
+    let preset_spacing = 2.0;
+
+    // Preset colors: Neutral, Red tint, Blue tint, Green tint, Warm, Cool
+    let presets: [(crate::rasterizer::Color, &str); 6] = [
+        (crate::rasterizer::Color::NEUTRAL, "Neutral (no tint)"),
+        (crate::rasterizer::Color::new(160, 120, 120), "Red tint"),
+        (crate::rasterizer::Color::new(120, 120, 160), "Blue tint"),
+        (crate::rasterizer::Color::new(120, 160, 120), "Green tint"),
+        (crate::rasterizer::Color::new(150, 130, 110), "Warm tint"),
+        (crate::rasterizer::Color::new(110, 130, 150), "Cool tint"),
+    ];
+
+    for (i, (preset_color, tooltip)) in presets.iter().enumerate() {
+        let px = preset_x + (i as f32) * (preset_size + preset_spacing);
+        let preset_rect = Rect::new(px, content_y + 8.0, preset_size, preset_size);
+
+        // Draw preset swatch
+        draw_rectangle(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h,
+            macroquad::color::Color::new(
+                preset_color.r as f32 / 255.0,
+                preset_color.g as f32 / 255.0,
+                preset_color.b as f32 / 255.0,
+                1.0
+            ));
+
+        // Highlight if hovered or all vertices match
+        let all_match = is_uniform && wall.colors[0].r == preset_color.r &&
+            wall.colors[0].g == preset_color.g && wall.colors[0].b == preset_color.b;
+        let hovered = ctx.mouse.inside(&preset_rect);
+        let border_color = if all_match {
+            macroquad::color::Color::from_rgba(0, 200, 200, 255)
+        } else if hovered {
+            macroquad::color::Color::from_rgba(200, 200, 200, 255)
+        } else {
+            macroquad::color::Color::from_rgba(80, 80, 80, 255)
+        };
+        draw_rectangle_lines(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h, 1.0, border_color);
+
+        // Handle click - apply to selected vertices (or all if none selected)
+        if hovered && ctx.mouse.left_pressed {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                        if state.selected_vertex_indices.is_empty() {
+                            // No vertices selected - apply to all
+                            w.set_uniform_color(*preset_color);
+                        } else {
+                            // Apply only to selected vertices
+                            for &idx in &state.selected_vertex_indices {
+                                if idx < 4 {
+                                    w.colors[idx] = *preset_color;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tooltip
+        let target = if state.selected_vertex_indices.is_empty() {
+            "all vertices"
+        } else {
+            "selected vertices"
+        };
+        if hovered {
+            ctx.tooltip = Some(crate::ui::PendingTooltip {
+                text: format!("{} (apply to {})", tooltip, target),
+                x: ctx.mouse.x,
+                y: ctx.mouse.y,
+            });
+        }
+    }
 
     container_height
 }
@@ -637,25 +1451,41 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     }
                     super::SectorFace::WallNorth(i) => {
                         if let Some(wall) = sector.walls_north.get(*i) {
-                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (North)", Color::from_rgba(255, 180, 120, 255));
+                            let h = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (North)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, crate::world::Direction::North, *i, state, icon_font
+                            );
                             y += h + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::WallEast(i) => {
                         if let Some(wall) = sector.walls_east.get(*i) {
-                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (East)", Color::from_rgba(255, 180, 120, 255));
+                            let h = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (East)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, crate::world::Direction::East, *i, state, icon_font
+                            );
                             y += h + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::WallSouth(i) => {
                         if let Some(wall) = sector.walls_south.get(*i) {
-                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (South)", Color::from_rgba(255, 180, 120, 255));
+                            let h = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (South)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, crate::world::Direction::South, *i, state, icon_font
+                            );
                             y += h + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::WallWest(i) => {
                         if let Some(wall) = sector.walls_west.get(*i) {
-                            let h = draw_wall_face_container(x, y, container_width, wall, "Wall (West)", Color::from_rgba(255, 180, 120, 255));
+                            let h = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (West)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, crate::world::Direction::West, *i, state, icon_font
+                            );
                             y += h + CONTAINER_MARGIN;
                         }
                     }
@@ -696,21 +1526,26 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 }
 
                 // === WALLS ===
-                let wall_dirs: [(&str, &Vec<crate::world::VerticalFace>); 4] = [
-                    ("North", &sector.walls_north),
-                    ("East", &sector.walls_east),
-                    ("South", &sector.walls_south),
-                    ("West", &sector.walls_west),
+                use crate::world::Direction;
+                let wall_dirs: [(&str, &Vec<crate::world::VerticalFace>, Direction); 4] = [
+                    ("North", &sector.walls_north, Direction::North),
+                    ("East", &sector.walls_east, Direction::East),
+                    ("South", &sector.walls_south, Direction::South),
+                    ("West", &sector.walls_west, Direction::West),
                 ];
 
-                for (dir_name, walls) in wall_dirs {
+                for (dir_name, walls, dir) in wall_dirs {
                     for (i, wall) in walls.iter().enumerate() {
                         let label = if walls.len() == 1 {
                             format!("Wall ({})", dir_name)
                         } else {
                             format!("Wall ({}) [{}]", dir_name, i)
                         };
-                        let h = draw_wall_face_container(x, y, container_width, wall, &label, Color::from_rgba(255, 180, 120, 255));
+                        let h = draw_wall_face_container(
+                            ctx, x, y, container_width, wall, &label,
+                            Color::from_rgba(255, 180, 120, 255),
+                            *room, *gx, *gz, dir, i, state, icon_font
+                        );
                         y += h + CONTAINER_MARGIN;
                     }
                 }

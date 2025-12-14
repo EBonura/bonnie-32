@@ -167,10 +167,10 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 
     // Tool buttons
     let tools = [
-        (icon::MOVE, "Select", TransformTool::Select),
+        (icon::POINTER, "Select", TransformTool::Select),
         (icon::MOVE, "Move (G)", TransformTool::Move),
-        (icon::MOVE, "Rotate (R)", TransformTool::Rotate),  // TODO: proper rotate icon
-        (icon::MOVE, "Scale (S)", TransformTool::Scale),    // TODO: proper scale icon
+        (icon::ROTATE_3D, "Rotate (R)", TransformTool::Rotate),
+        (icon::SCALE_3D, "Scale (S)", TransformTool::Scale),
     ];
 
     for (icon_char, tooltip, tool) in tools {
@@ -186,12 +186,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     toolbar.label("Mode:");
     for view in ModelerView::ALL {
         let is_active = state.view == view;
-        // Use different icons per view (placeholder for now)
         let icon_char = match view {
             ModelerView::Model => icon::BOX,
-            ModelerView::UV => icon::GRID,
-            ModelerView::Paint => icon::LAYERS, // TODO: brush icon
-            ModelerView::Hierarchy => icon::LAYERS,
+            ModelerView::UV => icon::MAXIMIZE_2,
+            ModelerView::Paint => icon::BRUSH,
+            ModelerView::Hierarchy => icon::GIT_BRANCH,
             ModelerView::Animate => icon::PLAY,
         };
         if toolbar.icon_button_active(ctx, icon_char, icon_font, view.label(), is_active) {
@@ -206,10 +205,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         for mode in SelectMode::ALL {
             let is_active = state.select_mode == mode;
             let icon_char = match mode {
+                SelectMode::Bone => icon::BONE,
                 SelectMode::Part => icon::BOX,
-                SelectMode::Vertex => icon::PLUS, // TODO: vertex icon
-                SelectMode::Edge => icon::MINUS,  // TODO: edge icon
-                SelectMode::Face => icon::SQUARE,
+                SelectMode::Vertex => icon::CIRCLE_DOT,
+                SelectMode::Edge => icon::MINUS,
+                SelectMode::Face => icon::SCAN,
             };
             if toolbar.icon_button_active(ctx, icon_char, icon_font, mode.label(), is_active) {
                 state.select_mode = mode;
@@ -250,6 +250,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
             ShadingMode::Gouraud => "Gouraud",
         };
         state.set_status(&format!("Shading: {}", mode), 1.5);
+    }
+    if toolbar.icon_button_active(ctx, icon::PROPORTIONS, icon_font, "Aspect Ratio (4:3 / Stretch)", !state.raster_settings.stretch_to_fill) {
+        state.raster_settings.stretch_to_fill = !state.raster_settings.stretch_to_fill;
+        let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
+        state.set_status(&format!("Aspect Ratio: {}", mode), 1.5);
     }
 
     toolbar.separator();
@@ -403,6 +408,9 @@ fn draw_properties_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState)
     match &state.selection {
         super::state::ModelerSelection::None => {
             draw_text("Nothing selected", rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::Bones(bones) => {
+            draw_text(&format!("{} bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
         super::state::ModelerSelection::Parts(parts) => {
             draw_text(&format!("{} part(s)", parts.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);

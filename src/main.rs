@@ -34,6 +34,9 @@ fn window_conf() -> Conf {
         window_height: HEIGHT as i32 * 3,
         window_resizable: true,
         high_dpi: true,
+        // Start fullscreen on native, windowed on WASM (browser handles sizing)
+        #[cfg(not(target_arch = "wasm32"))]
+        fullscreen: true,
         icon: Some(miniquad::conf::Icon {
             small: *include_bytes!("../assets/icons/icon16.rgba"),
             medium: *include_bytes!("../assets/icons/icon32.rgba"),
@@ -53,6 +56,9 @@ async fn main() {
 
     // Mouse state tracking
     let mut last_left_down = false;
+    let mut last_right_down = false;
+    let mut last_click_time = 0.0f64;
+    let mut last_click_pos = (0.0f32, 0.0f32);
 
     // UI context
     let mut ui_ctx = UiContext::new();
@@ -75,13 +81,19 @@ async fn main() {
     // Track if this is the first time opening World Editor (to show browser)
     let mut world_editor_first_open = true;
 
-    // Load textures from manifest (WASM needs async loading)
+    // Load textures and level list from manifest (WASM needs async loading)
     #[cfg(target_arch = "wasm32")]
-    {
+    let preloaded_levels = {
         use editor::TexturePack;
+        use editor::load_example_list;
         app.world_editor.editor_state.texture_packs = TexturePack::load_from_manifest().await;
         println!("WASM: Loaded {} texture packs", app.world_editor.editor_state.texture_packs.len());
-    }
+        let levels = load_example_list().await;
+        println!("WASM: Loaded {} example levels from manifest", levels.len());
+        levels
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let preloaded_levels = discover_examples();
 
     println!("=== Bonnie Engine ===");
 
@@ -89,16 +101,39 @@ async fn main() {
         // Update UI context with mouse state
         let mouse_pos = mouse_position();
         let left_down = is_mouse_button_down(MouseButton::Left);
+        // Detect double-click (300ms window, 10px radius)
+        let left_pressed = left_down && !last_left_down;
+        let current_time = get_time();
+        let double_click_threshold = 0.3; // 300ms
+        let double_click_radius = 10.0;
+        let double_clicked = if left_pressed {
+            let time_delta = current_time - last_click_time;
+            let dx = mouse_pos.0 - last_click_pos.0;
+            let dy = mouse_pos.1 - last_click_pos.1;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let is_double = time_delta < double_click_threshold && dist < double_click_radius;
+            last_click_time = current_time;
+            last_click_pos = mouse_pos;
+            is_double
+        } else {
+            false
+        };
+
+        let right_down = is_mouse_button_down(MouseButton::Right);
+        let right_pressed = right_down && !last_right_down;
         let mouse_state = MouseState {
             x: mouse_pos.0,
             y: mouse_pos.1,
             left_down,
-            right_down: is_mouse_button_down(MouseButton::Right),
-            left_pressed: left_down && !last_left_down,
+            right_down,
+            left_pressed,
             left_released: !left_down && last_left_down,
+            right_pressed,
             scroll: mouse_wheel().1,
+            double_clicked,
         };
         last_left_down = left_down;
+        last_right_down = right_down;
         ui_ctx.begin_frame(mouse_state);
 
         // Block background input if example browser modal is open
@@ -127,8 +162,7 @@ async fn main() {
                 // Open browser on first World Editor visit
                 if tool == Tool::WorldEditor && world_editor_first_open {
                     world_editor_first_open = false;
-                    let levels = discover_examples();
-                    app.world_editor.example_browser.open(levels);
+                    app.world_editor.example_browser.open(preloaded_levels.clone());
                 }
                 app.set_active_tool(tool);
             }
@@ -149,6 +183,11 @@ async fn main() {
                 // Check for pending import from browser (WASM only)
                 #[cfg(target_arch = "wasm32")]
                 {
+                    /// Maximum import file size (10 MB) to prevent memory exhaustion
+                    const MAX_IMPORT_SIZE: usize = 10 * 1024 * 1024;
+                    /// Maximum filename length
+                    const MAX_FILENAME_LEN: usize = 256;
+
                     extern "C" {
                         fn bonnie_check_import() -> i32;
                         fn bonnie_get_import_data_len() -> usize;
@@ -164,26 +203,36 @@ async fn main() {
                         let data_len = unsafe { bonnie_get_import_data_len() };
                         let filename_len = unsafe { bonnie_get_import_filename_len() };
 
-                        let mut data_buf = vec![0u8; data_len];
-                        let mut filename_buf = vec![0u8; filename_len];
+                        // Security: Check sizes before allocation to prevent memory exhaustion
+                        if data_len > MAX_IMPORT_SIZE {
+                            unsafe { bonnie_clear_import(); }
+                            ws.editor_state.set_status("Import failed: file too large (max 10MB)", 5.0);
+                        } else if filename_len > MAX_FILENAME_LEN {
+                            unsafe { bonnie_clear_import(); }
+                            ws.editor_state.set_status("Import failed: filename too long", 5.0);
+                        } else {
+                            let mut data_buf = vec![0u8; data_len];
+                            let mut filename_buf = vec![0u8; filename_len];
 
-                        unsafe {
-                            bonnie_copy_import_data(data_buf.as_mut_ptr(), data_len);
-                            bonnie_copy_import_filename(filename_buf.as_mut_ptr(), filename_len);
-                            bonnie_clear_import();
-                        }
-
-                        let data = String::from_utf8_lossy(&data_buf).to_string();
-                        let filename = String::from_utf8_lossy(&filename_buf).to_string();
-
-                        match ron::from_str::<world::Level>(&data) {
-                            Ok(level) => {
-                                ws.editor_layout.apply_config(&level.editor_layout);
-                                ws.editor_state.load_level(level, PathBuf::from(&filename));
-                                ws.editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
+                            unsafe {
+                                bonnie_copy_import_data(data_buf.as_mut_ptr(), data_len);
+                                bonnie_copy_import_filename(filename_buf.as_mut_ptr(), filename_len);
+                                bonnie_clear_import();
                             }
-                            Err(e) => {
-                                ws.editor_state.set_status(&format!("Upload failed: {}", e), 5.0);
+
+                            let data = String::from_utf8_lossy(&data_buf).to_string();
+                            let filename = String::from_utf8_lossy(&filename_buf).to_string();
+
+                            // Use load_level_from_str which includes validation
+                            match world::load_level_from_str(&data) {
+                                Ok(level) => {
+                                    ws.editor_layout.apply_config(&level.editor_layout);
+                                    ws.editor_state.load_level(level, PathBuf::from(&filename));
+                                    ws.editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
+                                }
+                                Err(e) => {
+                                    ws.editor_state.set_status(&format!("Upload failed: {}", e), 5.0);
+                                }
                             }
                         }
                     }
@@ -208,7 +257,7 @@ async fn main() {
                 );
 
                 // Handle editor actions (including opening example browser)
-                handle_editor_action(action, ws);
+                handle_editor_action(action, ws, &preloaded_levels);
 
                 // Draw example browser overlay if open
                 if ws.example_browser.open {
@@ -308,7 +357,7 @@ async fn main() {
 }
 
 
-fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
+fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, preloaded_levels: &[editor::ExampleLevelInfo]) {
     match action {
         EditorAction::Play => {
             ws.editor_state.set_status("Game preview coming soon", 2.0);
@@ -467,8 +516,7 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
         }
         EditorAction::BrowseExamples => {
             // Open the level browser
-            let levels = discover_examples();
-            ws.example_browser.open(levels);
+            ws.example_browser.open(preloaded_levels.to_vec());
             ws.editor_state.set_status("Browse levels", 2.0);
         }
         EditorAction::Exit | EditorAction::None => {}

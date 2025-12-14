@@ -106,8 +106,14 @@
                     if (file) {
                         var reader = new FileReader();
                         reader.onload = function(e) {
+                            // Security: Sanitize filename - remove path components, limit length
+                            var safeName = file.name.replace(/^.*[\\\/]/, '').substring(0, 255);
+                            // Ensure it ends with .ron
+                            if (!safeName.toLowerCase().endsWith('.ron')) {
+                                safeName = 'level.ron';
+                            }
                             localStorage.setItem('_bonnie_import_data', e.target.result);
-                            localStorage.setItem('_bonnie_import_filename', file.name);
+                            localStorage.setItem('_bonnie_import_filename', safeName);
                             localStorage.setItem('_bonnie_import_ready', 'true');
                         };
                         reader.readAsText(file);
@@ -515,9 +521,14 @@
                 env.bonnie_audio_init = AudioOutput.init;
                 env.bonnie_audio_write = AudioOutput.write;
 
-                // URL opening
+                // URL opening - only allow http/https protocols for security
                 env.bonnie_open_url = function(ptr, len) {
-                    window.open(readWasmString(ptr, len), '_blank');
+                    var url = readWasmString(ptr, len);
+                    if (url.startsWith('http://') || url.startsWith('https://')) {
+                        window.open(url, '_blank');
+                    } else {
+                        console.warn('Blocked non-HTTP URL:', url);
+                    }
                 };
             }
         });

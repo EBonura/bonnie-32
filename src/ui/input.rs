@@ -12,7 +12,9 @@ pub struct MouseState {
     pub right_down: bool,
     pub left_pressed: bool,  // Just pressed this frame
     pub left_released: bool, // Just released this frame
+    pub right_pressed: bool, // Right button just pressed this frame
     pub scroll: f32,         // Scroll wheel delta
+    pub double_clicked: bool, // Double-click detected this frame
 }
 
 /// Pending tooltip to be drawn at end of frame
@@ -82,6 +84,7 @@ impl UiContext {
             self.mouse.right_down = false;
             self.mouse.left_pressed = false;
             self.mouse.left_released = false;
+            self.mouse.right_pressed = false;
             self.mouse.scroll = 0.0;
         }
     }

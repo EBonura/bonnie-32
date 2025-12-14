@@ -4,7 +4,7 @@
 //! Rooms contain a 2D grid of sectors, each with floor, ceiling, and walls.
 
 use serde::{Serialize, Deserialize};
-use crate::rasterizer::{Vec3, Vec2, Vertex, Face as RasterFace, BlendMode};
+use crate::rasterizer::{Vec3, Vec2, Vertex, Face as RasterFace, BlendMode, Color};
 
 /// TRLE sector size in world units
 pub const SECTOR_SIZE: f32 = 1024.0;
@@ -47,6 +47,8 @@ impl Default for TextureRef {
 }
 
 fn default_true() -> bool { true }
+fn default_neutral_color() -> Color { Color::NEUTRAL }
+fn default_neutral_colors_4() -> [Color; 4] { [Color::NEUTRAL; 4] }
 
 /// A horizontal face (floor or ceiling)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,11 @@ pub struct HorizontalFace {
     /// Transparency/blend mode
     #[serde(default)]
     pub blend_mode: BlendMode,
+    /// PS1-style vertex colors for texture modulation [NW, NE, SE, SW]
+    /// 128 = neutral (no tint), <128 = darken, >128 = brighten
+    /// Per-vertex colors enable Gouraud-style color gradients across the face
+    #[serde(default = "default_neutral_colors_4")]
+    pub colors: [Color; 4],
 }
 
 impl HorizontalFace {
@@ -76,6 +83,7 @@ impl HorizontalFace {
             uv: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
+            colors: [Color::NEUTRAL; 4],
         }
     }
 
@@ -87,7 +95,20 @@ impl HorizontalFace {
             uv: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
+            colors: [Color::NEUTRAL; 4],
         }
+    }
+
+    /// Set all vertex colors to the same value (uniform tint)
+    pub fn set_uniform_color(&mut self, color: Color) {
+        self.colors = [color; 4];
+    }
+
+    /// Check if all vertex colors are the same
+    pub fn has_uniform_color(&self) -> bool {
+        self.colors[0].r == self.colors[1].r && self.colors[0].r == self.colors[2].r && self.colors[0].r == self.colors[3].r &&
+        self.colors[0].g == self.colors[1].g && self.colors[0].g == self.colors[2].g && self.colors[0].g == self.colors[3].g &&
+        self.colors[0].b == self.colors[1].b && self.colors[0].b == self.colors[2].b && self.colors[0].b == self.colors[3].b
     }
 
     /// Get average height of the face
@@ -118,6 +139,11 @@ pub struct VerticalFace {
     /// Transparency/blend mode
     #[serde(default)]
     pub blend_mode: BlendMode,
+    /// PS1-style vertex colors for texture modulation [bottom-left, bottom-right, top-right, top-left]
+    /// 128 = neutral (no tint), <128 = darken, >128 = brighten
+    /// Per-vertex colors enable Gouraud-style color gradients across the wall
+    #[serde(default = "default_neutral_colors_4")]
+    pub colors: [Color; 4],
 }
 
 impl VerticalFace {
@@ -129,7 +155,20 @@ impl VerticalFace {
             uv: None,
             solid: true,
             blend_mode: BlendMode::Opaque,
+            colors: [Color::NEUTRAL; 4],
         }
+    }
+
+    /// Set all vertex colors to the same value (uniform tint)
+    pub fn set_uniform_color(&mut self, color: Color) {
+        self.colors = [color; 4];
+    }
+
+    /// Check if all vertex colors are the same
+    pub fn has_uniform_color(&self) -> bool {
+        self.colors[0].r == self.colors[1].r && self.colors[0].r == self.colors[2].r && self.colors[0].r == self.colors[3].r &&
+        self.colors[0].g == self.colors[1].g && self.colors[0].g == self.colors[2].g && self.colors[0].g == self.colors[3].g &&
+        self.colors[0].b == self.colors[1].b && self.colors[0].b == self.colors[2].b && self.colors[0].b == self.colors[3].b
     }
 
     /// Get the average height of this wall
@@ -669,9 +708,9 @@ impl Room {
             Vec2::new(0.0, 1.0),
         ]);
 
-        // Add vertices
+        // Add vertices with per-vertex colors for PS1-style texture modulation
         for i in 0..4 {
-            vertices.push(Vertex::new(corners[i], uvs[i], normal));
+            vertices.push(Vertex::with_color(corners[i], uvs[i], normal, face.colors[i]));
         }
 
         let texture_id = resolve_texture(&face.texture).unwrap_or(0);
@@ -756,8 +795,9 @@ impl Room {
             Vec2::new(0.0, 0.0),  // top-left
         ]);
 
+        // Add vertices with per-vertex colors for PS1-style texture modulation
         for i in 0..4 {
-            vertices.push(Vertex::new(corners[i], uvs[i], normal));
+            vertices.push(Vertex::with_color(corners[i], uvs[i], normal, wall.colors[i]));
         }
 
         let texture_id = resolve_texture(&wall.texture).unwrap_or(0);

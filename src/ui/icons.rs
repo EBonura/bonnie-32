@@ -31,6 +31,8 @@ pub mod icon {
     pub const CIRCLE_CHEVRON_RIGHT: char = '\u{e4df}';
     pub const CHEVRON_UP: char = '\u{e071}';
     pub const CHEVRON_DOWN: char = '\u{e06e}';
+    pub const CHEVRON_LEFT: char = '\u{e06f}';
+    pub const CHEVRON_RIGHT: char = '\u{e070}';
 
     // Link/Unlink (for vertex mode)
     pub const LINK: char = '\u{e104}';
@@ -42,17 +44,30 @@ pub mod icon {
     pub const GRID: char = '\u{e0e9}';
     pub const DOOR_CLOSED: char = '\u{e09a}';  // Portal (doorway between rooms)
 
+    // Transform tools (Assets editor)
+    pub const POINTER: char = '\u{e1e8}';      // Select tool
+    pub const ROTATE_3D: char = '\u{e2ea}';    // Rotate tool
+    pub const SCALE_3D: char = '\u{e2eb}';     // Scale tool
+    pub const MAXIMIZE_2: char = '\u{e113}';   // UV editor (expand/maximize)
+    pub const BRUSH: char = '\u{e1d3}';        // Paint mode
+    pub const GIT_BRANCH: char = '\u{e1f4}';   // Hierarchy
+    pub const SCAN: char = '\u{e257}';         // Face selection
+    pub const CIRCLE_DOT: char = '\u{e345}';   // Vertex selection
+    pub const BONE: char = '\u{e358}';         // Bone selection
+
     // PS1 effect toggles
     pub const WAVES: char = '\u{e283}';       // Affine texture mapping (warpy)
     pub const MAGNET: char = '\u{e2b5}';      // Vertex snapping (jitter)
     pub const MONITOR: char = '\u{e11d}';     // Low resolution mode
     pub const SUN: char = '\u{e178}';         // Lighting/shading
     pub const BLEND: char = '\u{e59c}';       // Dithering (color blending)
+    pub const PROPORTIONS: char = '\u{e5cf}'; // Aspect ratio toggle (4:3 vs stretch)
 
     // Music editor
     pub const MUSIC: char = '\u{e122}';       // Music/notes
     pub const PIANO: char = '\u{e2ea}';       // Piano (keyboard icon)
     pub const LIST_MUSIC: char = '\u{e10b}';  // Arrangement/playlist
+    pub const NOTEBOOK_PEN: char = '\u{e596}'; // Arrangement (notebook with pen)
 
     // Tab bar icons
     pub const HOUSE: char = '\u{e0f5}';           // Home tab
@@ -64,6 +79,16 @@ pub mod icon {
 
     // Browser / Examples
     pub const BOOK_OPEN: char = '\u{e05f}';       // Examples browser
+
+    // UV editing
+    pub const FLIP_HORIZONTAL: char = '\u{e219}'; // flip-horizontal-2
+    pub const FLIP_VERTICAL: char = '\u{e21a}';   // flip-vertical-2
+    pub const ROTATE_CW: char = '\u{e147}';       // rotate-cw
+    pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
+
+    // Camera modes
+    pub const EYE: char = '\u{e0b4}';             // Free camera (eye)
+    pub const ORBIT: char = '\u{e12e}';           // Orbit camera (orbit icon)
 }
 
 /// Draw a Lucide icon centered in a rect

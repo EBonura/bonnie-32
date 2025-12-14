@@ -277,15 +277,15 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         let new_selection = Selection::Sector { room: current_room_idx, x: gx, z: gz };
                         if shift_down {
                             state.toggle_multi_selection(new_selection.clone());
-                            state.selection = new_selection;
+                            state.set_selection(new_selection);
                         } else {
                             state.clear_multi_selection();
-                            state.selection = new_selection;
+                            state.set_selection(new_selection);
                         }
                     } else {
                         // Clicked on nothing - clear selection (unless Shift is held)
                         if !shift_down {
-                            state.selection = Selection::None;
+                            state.set_selection(Selection::None);
                             state.clear_multi_selection();
                         }
                     }

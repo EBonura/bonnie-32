@@ -28,9 +28,11 @@ Answer the question: **"How would a Souls-like have looked on a PS1?"**
 ### Authentic PS1 Rendering
 - **Affine texture mapping** - Characteristic warpy textures
 - **Vertex snapping** - Jittery vertices at low precision
-- **Gouraud shading** - Smooth per-vertex lighting
+- **Gouraud shading** - Smooth per-vertex lighting interpolation
+- **Per-vertex colors** - PS1-style texture modulation (Wipeout track tinting)
 - **Low resolution** - Native 320x240 rendering
 - **No perspective correction** - True to PS1 hardware limitations
+- **Z-sorted room boundaries** - Depth-tested wireframe overlays
 
 ### TR1-Style Level System
 - **Room-based architecture** - Levels divided into connected rooms
@@ -181,6 +183,8 @@ This project uses the following free texture packs:
 
 ### Rendering Pipeline
 
+- [x] **Per-vertex colors with texture modulation**: RGB color per vertex that multiplies texture: `final = (texel * vertex_color) / 128`. Enables Wipeout 2097-style track tinting. Values > 128 brighten, < 128 darken. UI shows 4-vertex swatch grid with preset colors.
+- [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights (like Tomb Raider flares). CPU calculates distance/angle to light, updates vertex colors, GPU interpolates via Gouraud.
 - [ ] Add aspect ratio toggle: Currently locked to PS1 4:3 (320x240), add icon to toggle full available space (affects World Editor and Modeler)
 
 ---
@@ -282,7 +286,6 @@ For implementing authentic PS1 constraints:
 ### Rendering & Effects
 - [ ] Sprite/billboard rendering (classic PS1 technique for enemies, items)
 - [ ] Particle system (dust, sparks, blood splatter)
-- [ ] Lighting system (vertex colors, dynamic lights)
 - [ ] Fog system (distance-based fade)
 
 ### Core Systems

@@ -78,10 +78,6 @@ pub struct TrackerState {
     // Effect preview values (per channel, for testing in instruments view)
     /// Pan value per channel (0=left, 64=center, 127=right)
     pub preview_pan: [u8; MAX_CHANNELS],
-    /// Reverb value per channel (0-127)
-    pub preview_reverb: [u8; MAX_CHANNELS],
-    /// Chorus value per channel (0-127)
-    pub preview_chorus: [u8; MAX_CHANNELS],
     /// Modulation value per channel (0-127)
     pub preview_modulation: [u8; MAX_CHANNELS],
     /// Expression value per channel (0-127)
@@ -194,8 +190,6 @@ impl TrackerState {
 
             // Effect previews - initialize to defaults
             preview_pan: [64; MAX_CHANNELS],        // Center
-            preview_reverb: [0; MAX_CHANNELS],      // No reverb
-            preview_chorus: [0; MAX_CHANNELS],      // No chorus
             preview_modulation: [0; MAX_CHANNELS],  // No modulation
             preview_expression: [127; MAX_CHANNELS], // Full expression
             instrument_scroll: 0,
@@ -249,18 +243,6 @@ impl TrackerState {
         self.audio.set_pan(self.current_channel as i32, value as i32);
     }
 
-    /// Set preview reverb for current channel and apply to audio
-    pub fn set_preview_reverb(&mut self, value: u8) {
-        self.preview_reverb[self.current_channel] = value;
-        self.audio.set_reverb(self.current_channel as i32, value as i32);
-    }
-
-    /// Set preview chorus for current channel and apply to audio
-    pub fn set_preview_chorus(&mut self, value: u8) {
-        self.preview_chorus[self.current_channel] = value;
-        self.audio.set_chorus(self.current_channel as i32, value as i32);
-    }
-
     /// Set preview modulation for current channel and apply to audio
     pub fn set_preview_modulation(&mut self, value: u8) {
         self.preview_modulation[self.current_channel] = value;
@@ -277,8 +259,6 @@ impl TrackerState {
     pub fn reset_preview_effects(&mut self) {
         let ch = self.current_channel;
         self.preview_pan[ch] = 64;
-        self.preview_reverb[ch] = 0;
-        self.preview_chorus[ch] = 0;
         self.preview_modulation[ch] = 0;
         self.preview_expression[ch] = 127;
         self.audio.reset_controllers(ch as i32);
@@ -619,12 +599,6 @@ impl TrackerState {
             }
             Effect::SetPan(p) => {
                 self.audio.set_pan(ch, p as i32);
-            }
-            Effect::SetReverb(v) => {
-                self.audio.set_reverb(ch, v as i32);
-            }
-            Effect::SetChorus(v) => {
-                self.audio.set_chorus(ch, v as i32);
             }
             Effect::SetExpression(v) => {
                 self.audio.set_expression(ch, v as i32);

@@ -46,6 +46,42 @@ fn world_to_screen(
     Some((sx, sy))
 }
 
+/// Project a world-space point to framebuffer coordinates with depth
+/// Returns (screen_x, screen_y, depth) where depth is camera-space Z for z-buffer testing
+fn world_to_screen_with_depth(
+    world_pos: Vec3,
+    camera_pos: Vec3,
+    basis_x: Vec3,
+    basis_y: Vec3,
+    basis_z: Vec3,
+    fb_width: usize,
+    fb_height: usize,
+) -> Option<(f32, f32, f32)> {
+    let rel = world_pos - camera_pos;
+    let cam_z = rel.dot(basis_z);
+
+    // Behind camera
+    if cam_z <= 0.1 {
+        return None;
+    }
+
+    let cam_x = rel.dot(basis_x);
+    let cam_y = rel.dot(basis_y);
+
+    // Same projection as the rasterizer
+    const SCALE: f32 = 0.75;
+    let vs = (fb_width.min(fb_height) as f32 / 2.0) * SCALE;
+    let ud = 5.0;
+    let us = ud - 1.0;
+
+    let denom = cam_z + ud;
+    let sx = (cam_x * us / denom) * vs + (fb_width as f32 / 2.0);
+    let sy = (cam_y * us / denom) * vs + (fb_height as f32 / 2.0);
+
+    // Return cam_z as depth (matches rasterizer's z-buffer values)
+    Some((sx, sy, cam_z))
+}
+
 /// Calculate distance from point to line segment in 2D screen space
 fn point_to_segment_distance(
     px: f32, py: f32,      // Point
@@ -110,7 +146,13 @@ pub fn draw_viewport_3d(
     fb: &mut Framebuffer,
 ) {
     // Resize framebuffer based on resolution setting
-    let (target_w, target_h) = if state.raster_settings.low_resolution {
+    let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
+        // Keep horizontal resolution fixed, scale vertical to match viewport aspect ratio
+        let base_w = if state.raster_settings.low_resolution { WIDTH } else { WIDTH_HI };
+        let viewport_aspect = rect.h / rect.w;
+        let scaled_h = (base_w as f32 * viewport_aspect) as usize;
+        (base_w, scaled_h.max(1))
+    } else if state.raster_settings.low_resolution {
         (WIDTH, HEIGHT)
     } else {
         (WIDTH_HI, HEIGHT_HI)
@@ -123,16 +165,22 @@ pub fn draw_viewport_3d(
     // Pre-calculate viewport scaling (used multiple times)
     let fb_width = fb.width;
     let fb_height = fb.height;
-    let fb_aspect = fb_width as f32 / fb_height as f32;
-    let rect_aspect = rect.w / rect.h;
-    let (draw_w, draw_h, draw_x, draw_y) = if fb_aspect > rect_aspect {
-        let w = rect.w;
-        let h = rect.w / fb_aspect;
-        (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+    let (draw_w, draw_h, draw_x, draw_y) = if state.raster_settings.stretch_to_fill {
+        // Framebuffer matches viewport, no scaling needed
+        (rect.w, rect.h, rect.x, rect.y)
     } else {
-        let h = rect.h;
-        let w = rect.h * fb_aspect;
-        (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        // Maintain aspect ratio (4:3 for PS1)
+        let fb_aspect = fb_width as f32 / fb_height as f32;
+        let rect_aspect = rect.w / rect.h;
+        if fb_aspect > rect_aspect {
+            let w = rect.w;
+            let h = rect.w / fb_aspect;
+            (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+        } else {
+            let h = rect.h;
+            let w = rect.h * fb_aspect;
+            (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        }
     };
 
     // Helper to convert screen mouse to framebuffer coordinates
@@ -146,42 +194,90 @@ pub fn draw_viewport_3d(
         }
     };
 
-    // Camera rotation with right mouse button (same as game mode)
-    // Only rotate camera when not dragging a vertex
-    if ctx.mouse.right_down && inside_viewport && state.dragging_sector_vertices.is_empty() {
-        if state.viewport_mouse_captured {
-            // Inverted to match Y-down coordinate system
-            let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
-            let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
-            state.camera_3d.rotate(dx, dy);
+    // Camera controls - depend on camera mode
+    use super::CameraMode;
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+    match state.camera_mode {
+        CameraMode::Free => {
+            // Free camera: right-drag to look around, WASD to move
+            if ctx.mouse.right_down && inside_viewport && state.dragging_sector_vertices.is_empty() {
+                if state.viewport_mouse_captured {
+                    // Inverted to match Y-down coordinate system
+                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
+                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
+                    state.camera_3d.rotate(dx, dy);
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
+            // Hold Shift for faster movement
+            let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
+            let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
+            if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
+                if is_key_down(KeyCode::W) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::S) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::A) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::D) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::Q) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
+                }
+                if is_key_down(KeyCode::E) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
+                }
+            }
         }
-        state.viewport_mouse_captured = true;
-    } else if !ctx.mouse.right_down {
-        state.viewport_mouse_captured = false;
+
+        CameraMode::Orbit => {
+            // Orbit camera: right-drag rotates around target (or pans with Shift)
+            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
+                if state.viewport_mouse_captured {
+                    let dx = mouse_pos.0 - state.viewport_last_mouse.0;
+                    let dy = mouse_pos.1 - state.viewport_last_mouse.1;
+
+                    if shift_held {
+                        // Shift+Right drag: pan the orbit target
+                        let pan_speed = state.orbit_distance * 0.002;
+                        state.orbit_target = state.orbit_target - state.camera_3d.basis_x * dx * pan_speed;
+                        state.orbit_target = state.orbit_target + state.camera_3d.basis_y * dy * pan_speed;
+                        state.last_orbit_target = state.orbit_target;
+                    } else {
+                        // Right drag: rotate around target
+                        state.orbit_azimuth += dx * 0.005;
+                        state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+                    }
+                    state.sync_camera_from_orbit();
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Mouse wheel: zoom in/out (change orbit distance)
+            if inside_viewport {
+                let scroll = mouse_wheel().1;
+                if scroll != 0.0 {
+                    let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
+                    state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(100.0, 20000.0);
+                    state.sync_camera_from_orbit();
+                }
+            }
+        }
     }
 
-    // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
-    let move_speed = 100.0; // Scaled for TRLE units (1024 per sector)
-    if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
-        if is_key_down(KeyCode::W) {
-            state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::S) {
-            state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
-        }
-        if is_key_down(KeyCode::A) {
-            state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::D) {
-            state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
-        }
-        if is_key_down(KeyCode::Q) {
-            state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
-        }
-        if is_key_down(KeyCode::E) {
-            state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
-        }
-    }
+    // Track if we should update orbit target (selection might change during click handling below)
+    let should_update_orbit_target = state.camera_mode == CameraMode::Orbit && ctx.mouse.left_pressed && inside_viewport;
 
     // Toggle link coincident vertices mode with L key
     if inside_viewport && is_key_pressed(KeyCode::L) {
@@ -292,7 +388,7 @@ pub fn draw_viewport_3d(
                 };
 
                 if let Some(type_name) = deleted {
-                    state.selection = Selection::None;
+                    state.set_selection(Selection::None);
                     state.set_status(&format!("Deleted {}", type_name), 2.0);
                 }
             }
@@ -837,6 +933,20 @@ pub fn draw_viewport_3d(
             if state.tool == EditorTool::Select {
                 // Priority: vertex > edge > face
                 if let Some((room_idx, gx, gz, corner_idx, face, _)) = hovered_vertex {
+                    // Set selection to the face this vertex belongs to (shows properties panel)
+                    let new_selection = Selection::SectorFace { room: room_idx, x: gx, z: gz, face: face.clone() };
+                    if shift_down {
+                        state.toggle_multi_selection(new_selection.clone());
+                    } else {
+                        state.clear_multi_selection();
+                    }
+                    // Use direct assignment to preserve vertex index selection
+                    state.selection = new_selection;
+
+                    // Select this vertex index for color editing (keeps selection, just changes vertex)
+                    state.selected_vertex_indices.clear();
+                    state.selected_vertex_indices.push(corner_idx);
+
                     // Start dragging vertex
                     state.dragging_sector_vertices.clear();
                     state.drag_initial_heights.clear();
@@ -890,49 +1000,51 @@ pub fn draw_viewport_3d(
                     state.drag_initial_heights.clear();
                     state.viewport_drag_started = false;
 
-                    // Handle selection first (Shift = toggle multi-select)
-                    let new_selection = Selection::Edge {
+                    // Convert edge to face selection so properties panel shows face with edge vertices selected
+                    // face_idx: 0=floor, 1=ceiling, 2=wall
+                    let face_for_selection = match face_idx {
+                        0 => SectorFace::Floor,
+                        1 => SectorFace::Ceiling,
+                        _ => wall_face.clone().unwrap_or(SectorFace::Floor),
+                    };
+                    let new_selection = Selection::SectorFace {
                         room: room_idx,
                         x: gx,
                         z: gz,
-                        face_idx: face_idx,
-                        edge_idx: edge_idx,
-                        wall_face: wall_face.clone(),
+                        face: face_for_selection,
                     };
+
                     if shift_down {
                         state.toggle_multi_selection(new_selection.clone());
-                        state.selection = new_selection.clone();
                     } else {
-                        // If clicking on something already selected, keep multi-selection for dragging
                         let clicking_selected = state.selection == new_selection ||
                             state.multi_selection.contains(&new_selection);
                         if !clicking_selected {
                             state.clear_multi_selection();
                         }
-                        state.selection = new_selection.clone();
                     }
+                    // Use direct assignment to preserve vertex selection
+                    state.selection = new_selection;
 
-                    // Collect all edges to drag: primary selection + multi-selection
+                    // Pre-select the two vertices that make up this edge for color editing
+                    // For floor/ceiling: edges are [0:NW-NE, 1:NE-SE, 2:SE-SW, 3:SW-NW]
+                    // For walls: edges are [0:BL-BR, 1:BR-TR, 2:TR-TL, 3:TL-BL]
+                    let (v1, v2) = match edge_idx {
+                        0 => (0, 1),
+                        1 => (1, 2),
+                        2 => (2, 3),
+                        3 => (3, 0),
+                        _ => (0, 1),
+                    };
+                    state.selected_vertex_indices.clear();
+                    state.selected_vertex_indices.push(v1);
+                    state.selected_vertex_indices.push(v2);
+
+                    // Collect all edges to drag: start with the clicked edge
                     let mut edges_to_drag: Vec<(usize, usize, usize, usize, usize, Option<SectorFace>)> = Vec::new(); // (room, gx, gz, face_idx, edge_idx, wall_face)
 
-                    // Add primary selection if it's an edge
-                    if let Selection::Edge { room, x, z, face_idx, edge_idx, wall_face } = &state.selection {
-                        edges_to_drag.push((*room, *x, *z, *face_idx, *edge_idx, wall_face.clone()));
-                    }
-
-                    // Add all multi-selected edges
-                    for sel in &state.multi_selection {
-                        if let Selection::Edge { room, x, z, face_idx, edge_idx, wall_face } = sel {
-                            let key = (*room, *x, *z, *face_idx, *edge_idx, wall_face.clone());
-                            // Check if edge already exists (compare without wall_face for simplicity)
-                            let exists = edges_to_drag.iter().any(|(r, gx, gz, fi, ei, _)| {
-                                *r == *room && *gx == *x && *gz == *z && *fi == *face_idx && *ei == *edge_idx
-                            });
-                            if !exists {
-                                edges_to_drag.push(key);
-                            }
-                        }
-                    }
+                    // Add the clicked edge
+                    edges_to_drag.push((room_idx, gx, gz, face_idx, edge_idx, wall_face.clone()));
 
                     // Add vertices for all edges to drag
                     let mut avg_height = 0.0;
@@ -1060,7 +1172,7 @@ pub fn draw_viewport_3d(
                     let new_selection = Selection::SectorFace { room: room_idx, x: gx, z: gz, face };
                     if shift_down {
                         state.toggle_multi_selection(new_selection.clone());
-                        state.selection = new_selection.clone();
+                        state.set_selection(new_selection.clone());
                     } else {
                         // If clicking on something already selected, keep multi-selection for dragging
                         let clicking_selected = state.selection == new_selection ||
@@ -1068,7 +1180,7 @@ pub fn draw_viewport_3d(
                         if !clicking_selected {
                             state.clear_multi_selection();
                         }
-                        state.selection = new_selection.clone();
+                        state.set_selection(new_selection.clone());
                     }
 
                     // Collect all faces to drag: primary selection + multi-selection
@@ -1178,7 +1290,7 @@ pub fn draw_viewport_3d(
                 } else {
                     // Clicked on nothing - clear selection (unless Shift is held)
                     if !shift_down {
-                        state.selection = Selection::None;
+                        state.set_selection(Selection::None);
                         state.clear_multi_selection();
                     }
                 }
@@ -1426,6 +1538,12 @@ pub fn draw_viewport_3d(
     // Update mouse position for next frame
     state.viewport_last_mouse = mouse_pos;
 
+    // Update orbit target after selection changes (in orbit mode)
+    if should_update_orbit_target {
+        state.update_orbit_target();
+        state.sync_camera_from_orbit();
+    }
+
     // Clear framebuffer
     fb.clear(RasterColor::new(30, 30, 40));
 
@@ -1657,6 +1775,7 @@ pub fn draw_viewport_3d(
     }
 
     // Draw room boundary wireframe for the current room
+    if state.show_room_bounds {
     if let Some(room) = state.level.rooms.get(state.current_room) {
         let room_color = RasterColor::new(80, 120, 200); // Blue for room boundary
 
@@ -1683,15 +1802,15 @@ pub fn draw_viewport_3d(
             Vec3::new(min_x, max_y, max_z), // 7: back-top-left
         ];
 
-        // Project corners to screen
-        let screen_corners: Vec<Option<(i32, i32)>> = corners.iter()
-            .map(|c| world_to_screen(*c, state.camera_3d.position,
+        // Project corners to screen with depth for z-tested line drawing
+        let screen_corners: Vec<Option<(i32, i32, f32)>> = corners.iter()
+            .map(|c| world_to_screen_with_depth(*c, state.camera_3d.position,
                 state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
                 fb.width, fb.height)
-                .map(|(x, y)| (x as i32, y as i32)))
+                .map(|(x, y, z)| (x as i32, y as i32, z)))
             .collect();
 
-        // Draw 12 edges of the bounding box
+        // Draw 12 edges of the bounding box with depth testing
         let edges = [
             // Bottom face
             (0, 1), (1, 2), (2, 3), (3, 0),
@@ -1702,10 +1821,11 @@ pub fn draw_viewport_3d(
         ];
 
         for (i, j) in edges {
-            if let (Some((x0, y0)), Some((x1, y1))) = (screen_corners[i], screen_corners[j]) {
-                fb.draw_line(x0, y0, x1, y1, room_color);
+            if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_corners[i], screen_corners[j]) {
+                fb.draw_line_3d(x0, y0, z0, x1, y1, z1, room_color);
             }
         }
+    }
     }
 
     // Draw vertex overlays directly into framebuffer (only in Select mode)

@@ -45,6 +45,7 @@ impl ModelerView {
 /// Selection modes for modeling
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectMode {
+    Bone,
     Part,
     Vertex,
     Edge,
@@ -52,7 +53,8 @@ pub enum SelectMode {
 }
 
 impl SelectMode {
-    pub const ALL: [SelectMode; 4] = [
+    pub const ALL: [SelectMode; 5] = [
+        SelectMode::Bone,
         SelectMode::Part,
         SelectMode::Vertex,
         SelectMode::Edge,
@@ -61,6 +63,7 @@ impl SelectMode {
 
     pub fn label(&self) -> &'static str {
         match self {
+            SelectMode::Bone => "Bone",
             SelectMode::Part => "Part",
             SelectMode::Vertex => "Vertex",
             SelectMode::Edge => "Edge",
@@ -77,6 +80,7 @@ impl SelectMode {
 #[derive(Debug, Clone)]
 pub enum ModelerSelection {
     None,
+    Bones(Vec<usize>),
     Parts(Vec<usize>),
     Vertices { part: usize, verts: Vec<usize> },
     Edges { part: usize, edges: Vec<(usize, usize)> },
@@ -87,6 +91,7 @@ impl ModelerSelection {
     pub fn is_empty(&self) -> bool {
         match self {
             ModelerSelection::None => true,
+            ModelerSelection::Bones(v) => v.is_empty(),
             ModelerSelection::Parts(v) => v.is_empty(),
             ModelerSelection::Vertices { verts, .. } => verts.is_empty(),
             ModelerSelection::Edges { edges, .. } => edges.is_empty(),
@@ -166,9 +171,13 @@ pub struct ModelerState {
     pub tool: TransformTool,
     pub selection: ModelerSelection,
 
-    // Camera
+    // Camera (orbit mode)
     pub camera: Camera,
     pub raster_settings: RasterSettings,
+    pub orbit_target: Vec3,      // Point the camera orbits around
+    pub orbit_distance: f32,     // Distance from target
+    pub orbit_azimuth: f32,      // Horizontal angle (radians)
+    pub orbit_elevation: f32,    // Vertical angle (radians)
 
     // UV Editor state
     pub uv_zoom: f32,
@@ -200,6 +209,7 @@ pub struct ModelerState {
     pub transform_active: bool,
     pub transform_start_mouse: (f32, f32),
     pub transform_start_positions: Vec<Vec3>,
+    pub transform_start_rotations: Vec<Vec3>,
     pub axis_lock: Option<Axis>,
 
     // Viewport mouse state
@@ -209,23 +219,30 @@ pub struct ModelerState {
 
 impl ModelerState {
     pub fn new() -> Self {
+        // Orbit camera setup
+        let orbit_target = Vec3::new(0.0, 50.0, 0.0); // Center of scene, slightly elevated
+        let orbit_distance = 400.0;
+        let orbit_azimuth = 0.8;      // ~45 degrees
+        let orbit_elevation = 0.3;    // ~17 degrees up
+
         let mut camera = Camera::new();
-        camera.position = Vec3::new(200.0, 150.0, -300.0);
-        camera.rotation_x = 0.3;
-        camera.rotation_y = 0.8; // Rotated ~90 degrees right to face the cube
-        camera.update_basis();
+        Self::update_camera_from_orbit(&mut camera, orbit_target, orbit_distance, orbit_azimuth, orbit_elevation);
 
         Self {
-            model: Model::test_cube(),
+            model: Model::test_humanoid(),
             current_file: None,
 
             view: ModelerView::Model,
-            select_mode: SelectMode::Part,
+            select_mode: SelectMode::Bone,
             tool: TransformTool::Select,
             selection: ModelerSelection::None,
 
             camera,
             raster_settings: RasterSettings::default(),
+            orbit_target,
+            orbit_distance,
+            orbit_azimuth,
+            orbit_elevation,
 
             uv_zoom: 1.0,
             uv_offset: Vec2::default(),
@@ -251,11 +268,50 @@ impl ModelerState {
             transform_active: false,
             transform_start_mouse: (0.0, 0.0),
             transform_start_positions: Vec::new(),
+            transform_start_rotations: Vec::new(),
             axis_lock: None,
 
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
         }
+    }
+
+    /// Update camera position and orientation from orbit parameters
+    fn update_camera_from_orbit(camera: &mut Camera, target: Vec3, distance: f32, azimuth: f32, elevation: f32) {
+        // Match camera's basis calculation from render.rs:
+        // basis_z.x = cos(rotation_x) * sin(rotation_y)
+        // basis_z.y = -sin(rotation_x)
+        // basis_z.z = cos(rotation_x) * cos(rotation_y)
+        //
+        // Camera looks along +basis_z, so position = target - basis_z * distance
+        // For orbit: rotation_x = elevation (pitch), rotation_y = azimuth (yaw)
+
+        let pitch = elevation;
+        let yaw = azimuth;
+
+        // Forward direction (what camera looks at)
+        let forward = Vec3::new(
+            pitch.cos() * yaw.sin(),
+            -pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+
+        // Camera sits behind the target along the forward direction
+        camera.position = target - forward * distance;
+        camera.rotation_x = pitch;
+        camera.rotation_y = yaw;
+        camera.update_basis();
+    }
+
+    /// Update the camera from current orbit state
+    pub fn sync_camera_from_orbit(&mut self) {
+        Self::update_camera_from_orbit(
+            &mut self.camera,
+            self.orbit_target,
+            self.orbit_distance,
+            self.orbit_azimuth,
+            self.orbit_elevation,
+        );
     }
 
     /// Set a status message that will be displayed for a duration

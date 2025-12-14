@@ -147,6 +147,54 @@ impl Framebuffer {
         }
     }
 
+    /// Draw a line with depth testing (respects z-buffer)
+    /// z0 and z1 are the depth values at each endpoint (smaller = closer)
+    pub fn draw_line_3d(&mut self, x0: i32, y0: i32, z0: f32, x1: i32, y1: i32, z1: f32, color: Color) {
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut x = x0;
+        let mut y = y0;
+
+        // Calculate total steps for interpolation
+        let total_steps = dx.max((-dy).max(1)) as f32;
+        let mut step = 0.0f32;
+
+        loop {
+            if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                // Interpolate depth along the line
+                let t = step / total_steps;
+                let z = z0 + t * (z1 - z0);
+
+                // Use depth test (only draw if closer than existing pixel)
+                let idx = y as usize * self.width + x as usize;
+                if z < self.zbuffer[idx] {
+                    self.set_pixel(x as usize, y as usize, color);
+                }
+            }
+
+            if x == x1 && y == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+                step += 1.0;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+                if e2 < dy {
+                    step += 1.0;
+                }
+            }
+        }
+    }
+
     /// Draw a thick line as a filled quad
     pub fn draw_thick_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, thickness: i32, color: Color) {
         if thickness <= 1 {
@@ -308,6 +356,9 @@ struct Surface {
     pub uv1: super::math::Vec2,
     pub uv2: super::math::Vec2,
     pub uv3: super::math::Vec2,
+    pub vc1: Color, // Vertex color 1 (for PS1 texture modulation)
+    pub vc2: Color, // Vertex color 2
+    pub vc3: Color, // Vertex color 3
     pub normal: Vec3, // Face normal (camera space)
     pub face_idx: usize,
 }
@@ -416,12 +467,23 @@ fn rasterize_triangle(
                     Color::WHITE
                 };
 
-                // Apply shading
+                // Interpolate vertex colors (PS1-style Gouraud for color)
+                let vertex_color = Color {
+                    r: (bc.x * surface.vc1.r as f32 + bc.y * surface.vc2.r as f32 + bc.z * surface.vc3.r as f32) as u8,
+                    g: (bc.x * surface.vc1.g as f32 + bc.y * surface.vc2.g as f32 + bc.z * surface.vc3.g as f32) as u8,
+                    b: (bc.x * surface.vc1.b as f32 + bc.y * surface.vc2.b as f32 + bc.z * surface.vc3.b as f32) as u8,
+                    a: 255,
+                };
+
+                // Apply PS1-style texture modulation: (texel * vertex_color) / 128
+                color = color.modulate(vertex_color);
+
+                // Apply shading (lighting)
                 let shade = match settings.shading {
                     ShadingMode::None => 1.0,
                     ShadingMode::Flat => flat_shade,
                     ShadingMode::Gouraud => {
-                        // Interpolate per-vertex shading
+                        // Interpolate per-vertex shading from normals
                         let s1 = shade_intensity(surface.vn1, settings.light_dir, settings.ambient);
                         let s2 = shade_intensity(surface.vn2, settings.light_dir, settings.ambient);
                         let s3 = shade_intensity(surface.vn3, settings.light_dir, settings.ambient);
@@ -537,6 +599,9 @@ pub fn render_mesh(
                     uv1: vertices[face.v0].uv,
                     uv2: vertices[face.v1].uv,
                     uv3: vertices[face.v2].uv,
+                    vc1: vertices[face.v0].color,
+                    vc2: vertices[face.v1].color,
+                    vc3: vertices[face.v2].color,
                     normal: normal.scale(-1.0),
                     face_idx,
                 });
@@ -553,6 +618,9 @@ pub fn render_mesh(
                 uv1: vertices[face.v0].uv,
                 uv2: vertices[face.v1].uv,
                 uv3: vertices[face.v2].uv,
+                vc1: vertices[face.v0].color,
+                vc2: vertices[face.v1].color,
+                vc3: vertices[face.v2].color,
                 normal,
                 face_idx,
             });
@@ -680,6 +748,7 @@ pub fn create_test_cube() -> (Vec<Vertex>, Vec<Face>) {
                 pos: positions[base + i],
                 uv: uvs[i],
                 normal,
+                color: Color::NEUTRAL,
             });
         }
 

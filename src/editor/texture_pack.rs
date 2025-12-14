@@ -208,6 +208,9 @@ mod wasm {
     /// Load texture from JavaScript cache (pre-decoded RGBA)
     #[cfg(target_arch = "wasm32")]
     pub fn load_cached_texture(path: &str, name: String) -> Option<Texture> {
+        /// Maximum texture dimension to prevent memory exhaustion
+        const MAX_TEXTURE_DIM: usize = 4096;
+
         unsafe {
             let info = bonnie_get_cached_texture_info(path.as_ptr(), path.len());
             if info == 0 {
@@ -216,6 +219,13 @@ mod wasm {
 
             let width = (info >> 16) as usize;
             let height = (info & 0xFFFF) as usize;
+
+            // Security: Validate dimensions before allocation
+            if width == 0 || height == 0 || width > MAX_TEXTURE_DIM || height > MAX_TEXTURE_DIM {
+                eprintln!("Invalid texture dimensions {}x{} for {}", width, height, path);
+                return None;
+            }
+
             let rgba_size = width * height * 4;
 
             let mut rgba_buffer = vec![0u8; rgba_size];

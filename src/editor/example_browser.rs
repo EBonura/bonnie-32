@@ -428,11 +428,7 @@ fn draw_orbit_preview(
     }
 
     // Draw framebuffer to screen
-    let fb_texture = Texture2D::from_rgba8(
-        fb.width as u16,
-        fb.height as u16,
-        &fb.pixels,
-    );
+    let fb_texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
     fb_texture.set_filter(FilterMode::Nearest);
 
     draw_texture_ex(

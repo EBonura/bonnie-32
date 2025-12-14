@@ -3,6 +3,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, Toolbar, icon, draw_knob};
 use super::state::{TrackerState, TrackerView};
+use super::psx_reverb::ReverbType;
 
 // Colors
 const BG_COLOR: Color = Color::new(0.11, 0.11, 0.13, 1.0);
@@ -65,7 +66,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
     // View mode buttons
     let view_icons = [
         (TrackerView::Pattern, icon::GRID, "Pattern Editor"),
-        (TrackerView::Arrangement, icon::LIST_MUSIC, "Arrangement"),
+        (TrackerView::Arrangement, icon::NOTEBOOK_PEN, "Arrangement"),
         (TrackerView::Instruments, icon::PIANO, "Instruments"),
     ];
 
@@ -457,31 +458,47 @@ const PIANO_BLACK_KEYS: [(u8, &str, f32); 5] = [
     (1, "C#", 0.7), (3, "D#", 1.7), (6, "F#", 3.7), (8, "G#", 4.7), (10, "A#", 5.7)
 ];
 
-/// Keyboard mapping for piano: maps key offset (0-23) to keyboard key name
+/// Keyboard mapping for piano: maps semitone offset to keyboard key name
+/// Continuous layout: Bottom row Z-/ (0-16), Top row Q-] (17-36)
 fn get_key_label(offset: u8) -> Option<&'static str> {
     match offset {
+        // Bottom row: Z to / (semitones 0-16: C to E)
         0 => Some("Z"), 1 => Some("S"), 2 => Some("X"), 3 => Some("D"), 4 => Some("C"),
         5 => Some("V"), 6 => Some("G"), 7 => Some("B"), 8 => Some("H"), 9 => Some("N"),
-        10 => Some("J"), 11 => Some("M"),
-        12 => Some("Q"), 13 => Some("2"), 14 => Some("W"), 15 => Some("3"), 16 => Some("E"),
-        17 => Some("R"), 18 => Some("5"), 19 => Some("T"), 20 => Some("6"), 21 => Some("Y"),
-        22 => Some("7"), 23 => Some("U"),
+        10 => Some("J"), 11 => Some("M"), 12 => Some(","), 13 => Some("L"), 14 => Some("."),
+        15 => Some(";"), 16 => Some("/"),
+        // Top row: Q to ] (semitones 17-36: F to C)
+        // Pattern:  2  3  4     5  6  7     8  9  0
+        //          Q  W  E  R  T  Y  U  I  O  P  [  ]
+        17 => Some("Q"), 18 => Some("2"), 19 => Some("W"), 20 => Some("3"), 21 => Some("E"),
+        22 => Some("4"), 23 => Some("R"), 24 => Some("T"), 25 => Some("5"), 26 => Some("Y"),
+        27 => Some("6"), 28 => Some("U"), 29 => Some("I"), 30 => Some("8"), 31 => Some("O"),
+        32 => Some("9"), 33 => Some("P"), 34 => Some("0"), 35 => Some("["), 36 => Some("]"),
         _ => None,
     }
 }
 
-/// Check if the keyboard key for a given note offset is currently pressed
+/// Check if the keyboard key for a given semitone offset is currently pressed
+/// Continuous layout: Bottom row (0-16), Top row (17-36)
 fn is_note_key_down(offset: u8) -> bool {
     let key = match offset {
-        0 => KeyCode::Z, 1 => KeyCode::S, 2 => KeyCode::X, 3 => KeyCode::D, 4 => KeyCode::C,
-        5 => KeyCode::V, 6 => KeyCode::G, 7 => KeyCode::B, 8 => KeyCode::H, 9 => KeyCode::N,
-        10 => KeyCode::J, 11 => KeyCode::M,
-        12 => KeyCode::Q, 13 => KeyCode::Key2, 14 => KeyCode::W, 15 => KeyCode::Key3, 16 => KeyCode::E,
-        17 => KeyCode::R, 18 => KeyCode::Key5, 19 => KeyCode::T, 20 => KeyCode::Key6, 21 => KeyCode::Y,
-        22 => KeyCode::Key7, 23 => KeyCode::U,
-        _ => return false,
+        // Bottom row: Z to / (semitones 0-16)
+        0 => Some(KeyCode::Z), 1 => Some(KeyCode::S), 2 => Some(KeyCode::X), 3 => Some(KeyCode::D),
+        4 => Some(KeyCode::C), 5 => Some(KeyCode::V), 6 => Some(KeyCode::G), 7 => Some(KeyCode::B),
+        8 => Some(KeyCode::H), 9 => Some(KeyCode::N), 10 => Some(KeyCode::J), 11 => Some(KeyCode::M),
+        12 => Some(KeyCode::Comma), 13 => Some(KeyCode::L), 14 => Some(KeyCode::Period),
+        15 => Some(KeyCode::Semicolon), 16 => Some(KeyCode::Slash),
+        // Top row: Q to ] (semitones 17-36)
+        17 => Some(KeyCode::Q), 18 => Some(KeyCode::Key2), 19 => Some(KeyCode::W), 20 => Some(KeyCode::Key3),
+        21 => Some(KeyCode::E), 22 => Some(KeyCode::Key4), 23 => Some(KeyCode::R), 24 => Some(KeyCode::T),
+        25 => Some(KeyCode::Key5), 26 => Some(KeyCode::Y), 27 => Some(KeyCode::Key6), 28 => Some(KeyCode::U),
+        29 => Some(KeyCode::I), 30 => Some(KeyCode::Key8), 31 => Some(KeyCode::O), 32 => Some(KeyCode::Key9),
+        33 => Some(KeyCode::P), 34 => Some(KeyCode::Key0), 35 => Some(KeyCode::LeftBracket),
+        36 => Some(KeyCode::RightBracket),
+        _ => None,
     };
-    is_key_down(key)
+
+    key.map_or(false, is_key_down)
 }
 
 /// Draw the instruments view with piano keyboard
@@ -560,93 +577,108 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     }
 
     // === RIGHT: Piano Keyboard ===
+    // Extended piano showing 3+ octaves to match the full keyboard layout (semitones 0-36)
     let piano_x = rect.x + list_width + 20.0;
     let piano_y = rect.y + 30.0;
-    let white_key_w = 36.0;
-    let white_key_h = 120.0;
-    let black_key_w = 24.0;
-    let black_key_h = 75.0;
+    let white_key_w = 24.0;  // Narrower to fit more keys
+    let white_key_h = 100.0;
+    let black_key_w = 16.0;
+    let black_key_h = 60.0;
 
-    draw_text(&format!("Piano - Octave {} & {}", state.octave, state.octave + 1), piano_x, piano_y - 10.0, 14.0, TEXT_COLOR);
+    draw_text(&format!("Piano - Octave {}", state.octave), piano_x, piano_y - 10.0, 14.0, TEXT_COLOR);
 
-    // Draw two octaves of keys
-    for octave_offset in 0..2 {
-        let octave_x = piano_x + octave_offset as f32 * (7.0 * white_key_w);
+    // Define all white keys we need to display (semitones 0-36, ~3 octaves: C to C)
+    // semitone offset, note name
+    let all_white_keys: [(u8, &str); 22] = [
+        (0, "C"), (2, "D"), (4, "E"), (5, "F"), (7, "G"), (9, "A"), (11, "B"),  // Oct 0: C-B
+        (12, "C"), (14, "D"), (16, "E"), (17, "F"), (19, "G"), (21, "A"), (23, "B"),  // Oct 1: C-B
+        (24, "C"), (26, "D"), (28, "E"), (29, "F"), (31, "G"), (33, "A"), (35, "B"),  // Oct 2: C-B
+        (36, "C"),  // Oct 3: just the final C
+    ];
 
-        // White keys first (so black keys draw on top)
-        for (i, (semitone, note_name)) in PIANO_WHITE_KEYS.iter().enumerate() {
-            let key_x = octave_x + i as f32 * white_key_w;
-            let key_rect = Rect::new(key_x, piano_y, white_key_w - 2.0, white_key_h);
+    // Define all black keys with their x positions relative to white key index
+    // semitone offset, x position (between which white keys)
+    let all_black_keys: [(u8, f32); 15] = [
+        (1, 0.7), (3, 1.7), (6, 3.7), (8, 4.7), (10, 5.7),  // Oct 0
+        (13, 7.7), (15, 8.7), (18, 10.7), (20, 11.7), (22, 12.7),  // Oct 1
+        (25, 14.7), (27, 15.7), (30, 17.7), (32, 18.7), (34, 19.7),  // Oct 2
+    ];
 
-            let note_offset = octave_offset * 12 + *semitone;
-            let midi_note = state.octave * 12 + note_offset;
-            let is_hovered = ctx.mouse.inside(&key_rect);
-            let is_key_pressed = is_note_key_down(note_offset);
+    // Draw white keys first
+    for (i, (semitone, note_name)) in all_white_keys.iter().enumerate() {
+        let key_x = piano_x + i as f32 * white_key_w;
+        let key_rect = Rect::new(key_x, piano_y, white_key_w - 2.0, white_key_h);
 
-            // Background - cyan highlight when key pressed, gray when hovered
-            let bg = if is_key_pressed {
-                Color::new(0.0, 0.75, 0.9, 1.0) // Cyan highlight
-            } else if is_hovered {
-                Color::new(0.85, 0.85, 0.9, 1.0)
-            } else {
-                Color::new(0.95, 0.95, 0.95, 1.0)
-            };
-            draw_rectangle(key_x, piano_y, white_key_w - 2.0, white_key_h, bg);
-            draw_rectangle(key_x, piano_y, white_key_w - 2.0, white_key_h, Color::new(0.3, 0.3, 0.3, 1.0));
-            draw_rectangle(key_x + 1.0, piano_y + 1.0, white_key_w - 4.0, white_key_h - 2.0, bg);
+        let midi_note = state.octave * 12 + *semitone;
+        let is_hovered = ctx.mouse.inside(&key_rect);
+        let is_key_pressed = is_note_key_down(*semitone);
+        let is_mouse_pressed = is_hovered && is_mouse_button_down(MouseButton::Left);
 
-            // Click to play
-            if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
-                state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
-            }
-            if is_hovered && is_mouse_button_released(MouseButton::Left) {
-                state.audio.note_off(state.current_channel as i32, midi_note as i32);
-            }
+        // Background - cyan highlight when key pressed (keyboard or mouse), gray when hovered
+        let bg = if is_key_pressed || is_mouse_pressed {
+            Color::new(0.0, 0.75, 0.9, 1.0) // Cyan highlight
+        } else if is_hovered {
+            Color::new(0.85, 0.85, 0.9, 1.0)
+        } else {
+            Color::new(0.95, 0.95, 0.95, 1.0)
+        };
+        draw_rectangle(key_x, piano_y, white_key_w - 2.0, white_key_h, Color::new(0.3, 0.3, 0.3, 1.0));
+        draw_rectangle(key_x + 1.0, piano_y + 1.0, white_key_w - 4.0, white_key_h - 2.0, bg);
 
-            // Note name at bottom
-            let text_color = if is_key_pressed { WHITE } else { Color::new(0.3, 0.3, 0.3, 1.0) };
-            draw_text(note_name, key_x + 12.0, piano_y + white_key_h - 25.0, 14.0, text_color);
-
-            // Keyboard shortcut label
-            if let Some(key_label) = get_key_label(note_offset) {
-                let label_color = if is_key_pressed { WHITE } else { Color::new(0.5, 0.5, 0.5, 1.0) };
-                draw_text(key_label, key_x + 13.0, piano_y + white_key_h - 8.0, 12.0, label_color);
-            }
+        // Click to play
+        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+            state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
+        }
+        if is_hovered && is_mouse_button_released(MouseButton::Left) {
+            state.audio.note_off(state.current_channel as i32, midi_note as i32);
         }
 
-        // Black keys on top
-        for (semitone, _note_name, x_pos) in PIANO_BLACK_KEYS.iter() {
-            let key_x = octave_x + *x_pos * white_key_w;
-            let key_rect = Rect::new(key_x, piano_y, black_key_w, black_key_h);
+        // Note name at bottom (only show for C notes to reduce clutter)
+        if note_name == &"C" {
+            let octave_num = state.octave + (*semitone / 12);
+            let text_color = if is_key_pressed { WHITE } else { Color::new(0.3, 0.3, 0.3, 1.0) };
+            draw_text(&format!("C{}", octave_num), key_x + 2.0, piano_y + white_key_h - 20.0, 10.0, text_color);
+        }
 
-            let note_offset = octave_offset * 12 + *semitone;
-            let midi_note = state.octave * 12 + note_offset;
-            let is_hovered = ctx.mouse.inside(&key_rect);
-            let is_key_pressed = is_note_key_down(note_offset);
+        // Keyboard shortcut label (single label per key - continuous layout)
+        if let Some(label) = get_key_label(*semitone) {
+            let label_color = if is_key_pressed { WHITE } else { Color::new(0.5, 0.5, 0.5, 1.0) };
+            draw_text(label, key_x + 6.0, piano_y + white_key_h - 5.0, 10.0, label_color);
+        }
+    }
 
-            // Background - cyan highlight when key pressed
-            let bg = if is_key_pressed {
-                Color::new(0.0, 0.6, 0.75, 1.0) // Darker cyan for black keys
-            } else if is_hovered {
-                Color::new(0.35, 0.35, 0.4, 1.0)
-            } else {
-                Color::new(0.15, 0.15, 0.18, 1.0)
-            };
-            draw_rectangle(key_x, piano_y, black_key_w, black_key_h, bg);
+    // Draw black keys on top
+    for (semitone, x_pos) in all_black_keys.iter() {
+        let key_x = piano_x + *x_pos * white_key_w;
+        let key_rect = Rect::new(key_x, piano_y, black_key_w, black_key_h);
 
-            // Click to play
-            if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
-                state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
-            }
-            if is_hovered && is_mouse_button_released(MouseButton::Left) {
-                state.audio.note_off(state.current_channel as i32, midi_note as i32);
-            }
+        let midi_note = state.octave * 12 + *semitone;
+        let is_hovered = ctx.mouse.inside(&key_rect);
+        let is_key_pressed = is_note_key_down(*semitone);
+        let is_mouse_pressed = is_hovered && is_mouse_button_down(MouseButton::Left);
 
-            // Keyboard shortcut label
-            if let Some(key_label) = get_key_label(note_offset) {
-                let label_color = if is_key_pressed { WHITE } else { Color::new(0.6, 0.6, 0.6, 1.0) };
-                draw_text(key_label, key_x + 7.0, piano_y + black_key_h - 8.0, 10.0, label_color);
-            }
+        // Background - cyan highlight when key pressed (keyboard or mouse)
+        let bg = if is_key_pressed || is_mouse_pressed {
+            Color::new(0.0, 0.6, 0.75, 1.0) // Darker cyan for black keys
+        } else if is_hovered {
+            Color::new(0.35, 0.35, 0.4, 1.0)
+        } else {
+            Color::new(0.15, 0.15, 0.18, 1.0)
+        };
+        draw_rectangle(key_x, piano_y, black_key_w, black_key_h, bg);
+
+        // Click to play
+        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+            state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
+        }
+        if is_hovered && is_mouse_button_released(MouseButton::Left) {
+            state.audio.note_off(state.current_channel as i32, midi_note as i32);
+        }
+
+        // Keyboard shortcut label (single label per key - continuous layout)
+        if let Some(label) = get_key_label(*semitone) {
+            let label_color = if is_key_pressed { WHITE } else { Color::new(0.6, 0.6, 0.6, 1.0) };
+            draw_text(label, key_x + 3.0, piano_y + black_key_h - 5.0, 9.0, label_color);
         }
     }
 
@@ -661,23 +693,80 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     draw_text(&format!("Current: {:03} - {}", current_inst, current_name),
               piano_x, info_y, 16.0, INST_COLOR);
 
-    // === EFFECT KNOBS ===
-    let effects_y = info_y + 30.0;
+    // === PS1 REVERB PRESETS ===
+    let reverb_y = info_y + 30.0;
+    draw_text("PS1 Reverb", piano_x, reverb_y, 14.0, TEXT_COLOR);
+
+    let preset_btn_w = 80.0;
+    let preset_btn_h = 22.0;
+    let preset_spacing = 4.0;
+    let presets_per_row = 5;
+
+    let current_reverb = state.audio.reverb_type();
+
+    for (i, reverb_type) in ReverbType::ALL.iter().enumerate() {
+        let row = i / presets_per_row;
+        let col = i % presets_per_row;
+        let btn_x = piano_x + col as f32 * (preset_btn_w + preset_spacing);
+        let btn_y = reverb_y + 10.0 + row as f32 * (preset_btn_h + preset_spacing);
+
+        let btn_rect = Rect::new(btn_x, btn_y, preset_btn_w, preset_btn_h);
+        let is_active = *reverb_type == current_reverb;
+        let is_hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            Color::new(0.2, 0.5, 0.3, 1.0) // Green for active
+        } else if is_hovered {
+            Color::new(0.25, 0.25, 0.3, 1.0)
+        } else {
+            Color::new(0.15, 0.15, 0.18, 1.0)
+        };
+
+        draw_rectangle(btn_x, btn_y, preset_btn_w, preset_btn_h, bg);
+        let text_color = if is_active { WHITE } else { TEXT_COLOR };
+        draw_text(reverb_type.name(), btn_x + 5.0, btn_y + 15.0, 12.0, text_color);
+
+        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+            state.audio.set_reverb_preset(*reverb_type);
+            state.set_status(&format!("Reverb: {}", reverb_type.name()), 1.0);
+        }
+    }
+
+    // Wet/Dry knob for reverb
+    let wet_knob_x = piano_x + 5.0 * (preset_btn_w + preset_spacing) + 40.0;
+    let wet_knob_y = reverb_y + 35.0;
+    let wet_value = (state.audio.reverb_wet_level() * 127.0) as u8;
+
+    let wet_result = draw_knob(
+        ctx,
+        wet_knob_x,
+        wet_knob_y,
+        28.0,
+        wet_value,
+        "Wet",
+        false,
+        false,
+    );
+
+    if let Some(new_val) = wet_result.value {
+        state.audio.set_reverb_wet_level(new_val as f32 / 127.0);
+    }
+
+    // === CHANNEL EFFECT KNOBS ===
+    let effects_y = reverb_y + 80.0;
     let ch = state.current_channel;
 
-    draw_text("Effects Preview", piano_x, effects_y, 14.0, TEXT_COLOR);
+    draw_text("Channel Effects", piano_x, effects_y, 14.0, TEXT_COLOR);
 
     let knob_radius = 28.0;
     let knob_spacing = 70.0;
     let knob_y = effects_y + 50.0;
 
-    // Knob definitions: (index, label, value, is_bipolar)
+    // Knob definitions: (index, label, value, is_bipolar) - PS1 authentic only
     let knob_data = [
         (0, "Pan", state.preview_pan[ch], true),
-        (1, "Reverb", state.preview_reverb[ch], false),
-        (2, "Chorus", state.preview_chorus[ch], false),
-        (3, "Mod", state.preview_modulation[ch], false),
-        (4, "Expr", state.preview_expression[ch], false),
+        (1, "Mod", state.preview_modulation[ch], false),
+        (2, "Expr", state.preview_expression[ch], false),
     ];
 
     // Handle text input for knob editing
@@ -713,10 +802,8 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
                 let clamped = val.min(127);
                 match editing_idx {
                     0 => state.set_preview_pan(clamped),
-                    1 => state.set_preview_reverb(clamped),
-                    2 => state.set_preview_chorus(clamped),
-                    3 => state.set_preview_modulation(clamped),
-                    4 => state.set_preview_expression(clamped),
+                    1 => state.set_preview_modulation(clamped),
+                    2 => state.set_preview_expression(clamped),
                     _ => {}
                 }
             }
@@ -751,10 +838,8 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         if let Some(new_val) = result.value {
             match idx {
                 0 => state.set_preview_pan(new_val),
-                1 => state.set_preview_reverb(new_val),
-                2 => state.set_preview_chorus(new_val),
-                3 => state.set_preview_modulation(new_val),
-                4 => state.set_preview_expression(new_val),
+                1 => state.set_preview_modulation(new_val),
+                2 => state.set_preview_expression(new_val),
                 _ => {}
             }
         }
@@ -782,11 +867,11 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
     // Help text
     let help_y = reset_y + 35.0;
-    draw_text("Click keys to preview | Use keyboard (Z-M, Q-U) to enter notes",
+    draw_text("Click keys to preview | Keyboard: Z-/ (lower) Q-] (upper)",
               piano_x, help_y, 12.0, TEXT_DIM);
-    draw_text("[ ] = prev/next instrument | +/- = octave up/down",
+    draw_text("Numpad +/- = octave | Drag knobs to adjust effects",
               piano_x, help_y + 17.0, 12.0, TEXT_DIM);
-    draw_text("Drag knobs to adjust | Click value to type",
+    draw_text("Click value to type | Use list or channel +/- for instrument",
               piano_x, help_y + 34.0, 12.0, TEXT_DIM);
 }
 
@@ -844,27 +929,18 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         state.stop_playback();
     }
 
-    // Octave
-    if is_key_pressed(KeyCode::KpAdd) || (is_key_down(KeyCode::LeftShift) && is_key_pressed(KeyCode::Equal)) {
+    // Octave (numpad only - regular +/- are piano keys now)
+    if is_key_pressed(KeyCode::KpAdd) {
         state.octave = (state.octave + 1).min(9);
         state.set_status(&format!("Octave: {}", state.octave), 1.0);
     }
-    if is_key_pressed(KeyCode::KpSubtract) || is_key_pressed(KeyCode::Minus) {
+    if is_key_pressed(KeyCode::KpSubtract) {
         state.octave = state.octave.saturating_sub(1);
         state.set_status(&format!("Octave: {}", state.octave), 1.0);
     }
 
-    // Instrument selection (for current channel)
-    if is_key_pressed(KeyCode::LeftBracket) {
-        let new_inst = state.current_instrument().saturating_sub(1);
-        state.set_current_instrument(new_inst);
-        state.set_status(&format!("Instrument: {:02}", new_inst), 1.0);
-    }
-    if is_key_pressed(KeyCode::RightBracket) {
-        let new_inst = (state.current_instrument() + 1).min(127);
-        state.set_current_instrument(new_inst);
-        state.set_status(&format!("Instrument: {:02}", new_inst), 1.0);
-    }
+    // Instrument selection removed - [ and ] are now piano keys
+    // Use the instrument list in Instruments view or channel strip +/- buttons instead
 
     // Edit step
     if is_key_pressed(KeyCode::F9) {
@@ -883,14 +959,20 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
 
     // Note entry (only in Pattern view, when in edit mode and in note column)
     if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 0 {
-        // Check for note keys
+        // All piano keys: bottom row (Z to /) and top row (Q to ])
+        // Note: Period is a piano key now, so we use Apostrophe for note-off
         let note_keys = [
+            // Bottom row: Z S X D C V G B H N J M , L . ; /
             KeyCode::Z, KeyCode::S, KeyCode::X, KeyCode::D, KeyCode::C,
             KeyCode::V, KeyCode::G, KeyCode::B, KeyCode::H, KeyCode::N,
-            KeyCode::J, KeyCode::M,
+            KeyCode::J, KeyCode::M, KeyCode::Comma, KeyCode::L, KeyCode::Period,
+            KeyCode::Semicolon, KeyCode::Slash,
+            // Top row: Q 2 W 3 E 4 R T 5 Y 6 U I 8 O 9 P 0 [ ]
             KeyCode::Q, KeyCode::Key2, KeyCode::W, KeyCode::Key3, KeyCode::E,
-            KeyCode::R, KeyCode::Key5, KeyCode::T, KeyCode::Key6, KeyCode::Y,
-            KeyCode::Key7, KeyCode::U,
+            KeyCode::Key4, KeyCode::R, KeyCode::T, KeyCode::Key5, KeyCode::Y,
+            KeyCode::Key6, KeyCode::U, KeyCode::I, KeyCode::Key8, KeyCode::O,
+            KeyCode::Key9, KeyCode::P, KeyCode::Key0, KeyCode::LeftBracket,
+            KeyCode::RightBracket,
         ];
 
         for key in note_keys {
@@ -901,8 +983,8 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
             }
         }
 
-        // Note off with period or backtick
-        if is_key_pressed(KeyCode::Period) || is_key_pressed(KeyCode::Apostrophe) {
+        // Note off with backtick (apostrophe key) - period is now a piano key
+        if is_key_pressed(KeyCode::Apostrophe) {
             state.enter_note_off();
         }
     }
@@ -955,13 +1037,19 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
 
     // In Instruments view, allow keyboard to preview sounds without entering notes
     if state.view == TrackerView::Instruments {
+        // All piano keys: bottom row (Z to /) and top row (Q to ])
         let note_keys = [
+            // Bottom row: Z S X D C V G B H N J M , L . ; /
             KeyCode::Z, KeyCode::S, KeyCode::X, KeyCode::D, KeyCode::C,
             KeyCode::V, KeyCode::G, KeyCode::B, KeyCode::H, KeyCode::N,
-            KeyCode::J, KeyCode::M,
+            KeyCode::J, KeyCode::M, KeyCode::Comma, KeyCode::L, KeyCode::Period,
+            KeyCode::Semicolon, KeyCode::Slash,
+            // Top row: Q 2 W 3 E 4 R T 5 Y 6 U I 8 O 9 P 0 [ ]
             KeyCode::Q, KeyCode::Key2, KeyCode::W, KeyCode::Key3, KeyCode::E,
-            KeyCode::R, KeyCode::Key5, KeyCode::T, KeyCode::Key6, KeyCode::Y,
-            KeyCode::Key7, KeyCode::U,
+            KeyCode::Key4, KeyCode::R, KeyCode::T, KeyCode::Key5, KeyCode::Y,
+            KeyCode::Key6, KeyCode::U, KeyCode::I, KeyCode::Key8, KeyCode::O,
+            KeyCode::Key9, KeyCode::P, KeyCode::Key0, KeyCode::LeftBracket,
+            KeyCode::RightBracket,
         ];
 
         for key in note_keys {

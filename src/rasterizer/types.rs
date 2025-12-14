@@ -18,6 +18,9 @@ impl Color {
     pub const RED: Color = Color { r: 255, g: 0, b: 0, a: 255 };
     pub const GREEN: Color = Color { r: 0, g: 255, b: 0, a: 255 };
     pub const BLUE: Color = Color { r: 0, g: 0, b: 255, a: 255 };
+    /// Neutral color for PS1 texture modulation (128, 128, 128)
+    /// When used with modulate(), texture colors remain unchanged
+    pub const NEUTRAL: Color = Color { r: 128, g: 128, b: 128, a: 255 };
 
     pub fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 255 }
@@ -35,6 +38,30 @@ impl Color {
             g: (self.g as f32 * i) as u8,
             b: (self.b as f32 * i) as u8,
             a: self.a,
+        }
+    }
+
+    /// PS1-style texture modulation: (self * vertex_color) / 128
+    /// vertex_color of 128 = no change, >128 = brighten, <128 = darken
+    /// This is the authentic PS1 formula for combining textures with vertex colors
+    pub fn modulate(self, vertex_color: Color) -> Self {
+        Self {
+            r: ((self.r as u16 * vertex_color.r as u16) / 128).min(255) as u8,
+            g: ((self.g as u16 * vertex_color.g as u16) / 128).min(255) as u8,
+            b: ((self.b as u16 * vertex_color.b as u16) / 128).min(255) as u8,
+            a: self.a,
+        }
+    }
+
+    /// Interpolate between two colors
+    pub fn lerp(self, other: Color, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let inv_t = 1.0 - t;
+        Self {
+            r: (self.r as f32 * inv_t + other.r as f32 * t) as u8,
+            g: (self.g as f32 * inv_t + other.g as f32 * t) as u8,
+            b: (self.b as f32 * inv_t + other.b as f32 * t) as u8,
+            a: (self.a as f32 * inv_t + other.a as f32 * t) as u8,
         }
     }
 
@@ -92,17 +119,26 @@ impl Color {
     }
 }
 
-/// A vertex with position, texture coordinate, and normal
+/// A vertex with position, texture coordinate, normal, and color
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Vertex {
     pub pos: Vec3,
     pub uv: Vec2,
     pub normal: Vec3,
+    /// Per-vertex color for PS1-style texture modulation
+    /// Default is (128, 128, 128) = neutral (no change to texture)
+    /// Values > 128 brighten, < 128 darken
+    pub color: Color,
 }
 
 impl Vertex {
     pub fn new(pos: Vec3, uv: Vec2, normal: Vec3) -> Self {
-        Self { pos, uv, normal }
+        Self { pos, uv, normal, color: Color::NEUTRAL }
+    }
+
+    /// Create vertex with explicit color
+    pub fn with_color(pos: Vec3, uv: Vec2, normal: Vec3, color: Color) -> Self {
+        Self { pos, uv, normal, color }
     }
 
     pub fn from_pos(x: f32, y: f32, z: f32) -> Self {
@@ -110,6 +146,7 @@ impl Vertex {
             pos: Vec3::new(x, y, z),
             uv: Vec2::default(),
             normal: Vec3::ZERO,
+            color: Color::NEUTRAL,
         }
     }
 }
@@ -305,9 +342,13 @@ impl Texture {
     }
 
     /// Sample texture at UV coordinates (no filtering - PS1 style)
+    /// Handles negative UVs correctly using euclidean modulo for proper tiling
     pub fn sample(&self, u: f32, v: f32) -> Color {
-        let tx = ((u * self.width as f32) as usize) % self.width;
-        let ty = ((v * self.height as f32) as usize) % self.height;
+        // Use rem_euclid to handle negative UVs correctly (proper tiling)
+        let u_wrapped = u.rem_euclid(1.0);
+        let v_wrapped = v.rem_euclid(1.0);
+        let tx = ((u_wrapped * self.width as f32) as usize).min(self.width - 1);
+        let ty = ((v_wrapped * self.height as f32) as usize).min(self.height - 1);
         self.pixels[ty * self.width + tx]
     }
 
@@ -362,6 +403,8 @@ pub struct RasterSettings {
     pub low_resolution: bool,
     /// Enable PS1-style ordered dithering (4x4 Bayer matrix)
     pub dithering: bool,
+    /// Stretch to fill viewport (false = maintain 4:3 aspect ratio)
+    pub stretch_to_fill: bool,
 }
 
 impl Default for RasterSettings {
@@ -376,6 +419,7 @@ impl Default for RasterSettings {
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240
             dithering: true,        // PS1 default: ordered dithering enabled
+            stretch_to_fill: true,  // Default: use full viewport space
         }
     }
 }

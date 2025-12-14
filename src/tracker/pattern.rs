@@ -279,10 +279,6 @@ pub enum Effect {
     SetSpeed(u8),
     /// Set pan (Pxx) - 00=left, 40=center, 7F=right
     SetPan(u8),
-    /// Reverb send (Rxx) - 00-7F
-    SetReverb(u8),
-    /// Chorus send (Hxx) - 00-7F
-    SetChorus(u8),
     /// Expression (Exx) - volume expression 00-7F
     SetExpression(u8),
     /// Modulation (Mxx) - mod wheel 00-7F
@@ -303,10 +299,8 @@ impl Effect {
             'D' => Effect::PatternBreak(param),
             'E' => Effect::SetExpression(param),
             'F' => Effect::SetSpeed(param),
-            'H' => Effect::SetChorus(param),
             'M' => Effect::SetModulation(param),
             'P' => Effect::SetPan(param),
-            'R' => Effect::SetReverb(param),
             _ => Effect::None,
         }
     }
@@ -325,10 +319,8 @@ impl Effect {
             Effect::PatternBreak(_) => Some('D'),
             Effect::SetExpression(_) => Some('E'),
             Effect::SetSpeed(_) => Some('F'),
-            Effect::SetChorus(_) => Some('H'),
             Effect::SetModulation(_) => Some('M'),
             Effect::SetPan(_) => Some('P'),
-            Effect::SetReverb(_) => Some('R'),
         }
     }
 
@@ -346,10 +338,8 @@ impl Effect {
             Effect::PatternBreak(r) => *r,
             Effect::SetExpression(v) => *v,
             Effect::SetSpeed(s) => *s,
-            Effect::SetChorus(v) => *v,
             Effect::SetModulation(v) => *v,
             Effect::SetPan(p) => *p,
-            Effect::SetReverb(v) => *v,
         }
     }
 }
