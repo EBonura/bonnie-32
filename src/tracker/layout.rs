@@ -689,7 +689,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let sample_rate_y = info_y + 25.0;
     draw_text("Sample Rate", piano_x, sample_rate_y, 14.0, TEXT_COLOR);
 
-    let sr_btn_w = 60.0;
+    let sr_btn_w = 52.0;
     let sr_btn_h = 22.0;
     let sr_spacing = 4.0;
 
