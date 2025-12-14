@@ -162,17 +162,195 @@ static GAUSSIAN_TABLE: [i16; 512] = [
     0x5997, 0x599E, 0x59A4, 0x59A9, 0x59AD, 0x59B0, 0x59B2, 0x59B3,
 ];
 
-/// Apply PS1-style low-pass filter to simulate reduced sample rate
+/// PS1 SPU Gaussian Resampler
 ///
-/// The PS1 SPU's Gaussian interpolation acted as a low-pass filter when
-/// playing samples at lower rates. We simulate this effect by applying
-/// a simple moving average filter, which cuts high frequencies.
+/// Implements authentic PS1 SPU sample rate conversion by:
+/// 1. Downsampling 44.1kHz audio to the target rate (averaging)
+/// 2. Upsampling back to 44.1kHz using the real PS1 Gaussian interpolation
 ///
-/// This is more appropriate than trying to apply Gaussian interpolation
-/// as post-processing, since our synth already outputs at 44.1kHz.
+/// This creates the characteristic "warm/muffled" sound of lower sample rates
+/// on the PS1, as opposed to harsh aliasing or simple filtering.
+pub struct SpuResampler {
+    /// Sample history for Gaussian interpolation (need 4 samples)
+    history_l: [f32; 4],
+    history_r: [f32; 4],
+    /// Pitch counter (fractional position between samples)
+    /// Format: bits 12+ = integer part, bits 4-11 = Gaussian index, bits 0-3 = sub-index
+    pitch_counter: u32,
+    /// Current pitch value (0x1000 = 44.1kHz, 0x0800 = 22kHz, etc.)
+    pitch: u16,
+    /// Accumulator for downsampling (left)
+    accum_l: f32,
+    /// Accumulator for downsampling (right)
+    accum_r: f32,
+    /// Sample count for averaging during downsample
+    accum_count: u32,
+    /// Whether SPU emulation is enabled
+    enabled: bool,
+}
+
+impl Default for SpuResampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpuResampler {
+    pub fn new() -> Self {
+        Self {
+            history_l: [0.0; 4],
+            history_r: [0.0; 4],
+            pitch_counter: 0,
+            pitch: 0x1000, // Native rate
+            accum_l: 0.0,
+            accum_r: 0.0,
+            accum_count: 0,
+            enabled: true,
+        }
+    }
+
+    /// Set the target sample rate via pitch value
+    /// 0x1000 = 44.1kHz (native), 0x0800 = 22kHz, 0x0400 = 11kHz, 0x0200 = 5.5kHz
+    pub fn set_pitch(&mut self, pitch: SpuPitch) {
+        if self.pitch != pitch.0 {
+            self.pitch = pitch.0;
+            // Reset state when pitch changes to avoid artifacts
+            self.reset_state();
+        }
+    }
+
+    /// Reset all internal state (call when audio restarts or settings change)
+    pub fn reset_state(&mut self) {
+        self.history_l = [0.0; 4];
+        self.history_r = [0.0; 4];
+        self.pitch_counter = 0;
+        self.accum_l = 0.0;
+        self.accum_r = 0.0;
+        self.accum_count = 0;
+    }
+
+    /// Enable or disable SPU emulation
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        // Always reset state when toggling to avoid artifacts
+        self.reset_state();
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Perform Gaussian interpolation on 4 samples
+    /// gauss_idx is bits 4-11 of the pitch counter (0-255)
+    #[inline]
+    fn gaussian_interpolate(samples: &[f32; 4], gauss_idx: usize) -> f32 {
+        // Get the 4 Gaussian coefficients from the table
+        // Table layout matches PS1 hardware:
+        // gauss[0xFF-i], gauss[0x1FF-i], gauss[0x100+i], gauss[i]
+        let g0 = GAUSSIAN_TABLE[0xFF - gauss_idx] as f32;
+        let g1 = GAUSSIAN_TABLE[0x1FF - gauss_idx] as f32;
+        let g2 = GAUSSIAN_TABLE[0x100 + gauss_idx] as f32;
+        let g3 = GAUSSIAN_TABLE[gauss_idx] as f32;
+
+        // Apply weighted sum (coefficients are in Q15 format, so divide by 32768)
+        let result = (g0 * samples[0] + g1 * samples[1] + g2 * samples[2] + g3 * samples[3])
+            / 32768.0;
+
+        result
+    }
+
+    /// Push a new sample into the history buffer (shifts old samples out)
+    #[inline]
+    fn push_sample(history: &mut [f32; 4], sample: f32) {
+        history[0] = history[1];
+        history[1] = history[2];
+        history[2] = history[3];
+        history[3] = sample;
+    }
+
+    /// Process stereo audio through the SPU resampler
+    ///
+    /// This implements authentic PS1 sample rate conversion:
+    /// 1. Accumulate input samples for downsampling
+    /// 2. When enough samples accumulated, push averaged sample to history
+    /// 3. For each output sample, perform Gaussian interpolation
+    pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        if !self.enabled || self.pitch >= 0x1000 {
+            // Bypass - no processing needed at native rate or when disabled
+            return;
+        }
+
+        let len = left.len().min(right.len());
+        if len == 0 {
+            return;
+        }
+
+        // Calculate how many input samples per output sample
+        // pitch 0x1000 = 1:1, 0x0800 = 2:1, 0x0400 = 4:1, etc.
+        let downsample_ratio = 0x1000u32 / self.pitch.max(1) as u32;
+
+        for i in 0..len {
+            let sample_l = left[i];
+            let sample_r = right[i];
+
+            // Accumulate input samples (with denormal protection)
+            self.accum_l += sample_l;
+            self.accum_r += sample_r;
+            self.accum_count += 1;
+
+            // When we've accumulated enough samples, push to history
+            if self.accum_count >= downsample_ratio {
+                let count = self.accum_count as f32;
+                let avg_l = self.accum_l / count;
+                let avg_r = self.accum_r / count;
+
+                // Clamp to valid range to prevent drift
+                let avg_l = avg_l.clamp(-1.5, 1.5);
+                let avg_r = avg_r.clamp(-1.5, 1.5);
+
+                Self::push_sample(&mut self.history_l, avg_l);
+                Self::push_sample(&mut self.history_r, avg_r);
+
+                self.accum_l = 0.0;
+                self.accum_r = 0.0;
+                self.accum_count = 0;
+            }
+
+            // Advance pitch counter by the pitch value
+            self.pitch_counter = self.pitch_counter.wrapping_add(self.pitch as u32);
+
+            // Extract Gaussian interpolation index (bits 4-11)
+            let gauss_idx = ((self.pitch_counter >> 4) & 0xFF) as usize;
+
+            // Apply Gaussian interpolation
+            let out_l = Self::gaussian_interpolate(&self.history_l, gauss_idx);
+            let out_r = Self::gaussian_interpolate(&self.history_r, gauss_idx);
+
+            // Clamp output to prevent any runaway values
+            left[i] = out_l.clamp(-1.5, 1.5);
+            right[i] = out_r.clamp(-1.5, 1.5);
+
+            // Wrap pitch counter (keep only fractional part relevant to interpolation)
+            // Reset when we've advanced past 0x1000 (one full sample)
+            if self.pitch_counter >= 0x1000 {
+                self.pitch_counter &= 0xFFF; // Keep only lower 12 bits
+            }
+        }
+
+        // Kill denormals in accumulators to prevent CPU spikes and drift
+        if self.accum_l.abs() < 1e-20 {
+            self.accum_l = 0.0;
+        }
+        if self.accum_r.abs() < 1e-20 {
+            self.accum_r = 0.0;
+        }
+    }
+}
+
+/// Legacy function for backward compatibility
+/// Now delegates to a simple low-pass filter as fallback
 fn apply_ps1_degradation(samples: &mut [f32], pitch: SpuPitch) {
     if pitch.0 >= 0x1000 {
-        // Native rate - no processing needed
         return;
     }
 
@@ -181,26 +359,17 @@ fn apply_ps1_degradation(samples: &mut [f32], pitch: SpuPitch) {
         return;
     }
 
-    // Calculate filter window size based on pitch
-    // Lower pitch = more smoothing = larger window
-    // pitch 0x0800 (22kHz) = window 2
-    // pitch 0x0400 (11kHz) = window 4
-    // pitch 0x0200 (5kHz) = window 8
+    // Simple low-pass filter fallback
     let window = (0x1000 / pitch.0.max(1)) as usize;
-
     if window <= 1 {
         return;
     }
 
-    // Apply simple moving average low-pass filter
-    // This smooths the audio similar to how the Gaussian interpolation
-    // would smooth when upsampling from a lower rate
     let mut prev = samples[0];
     let alpha = 1.0 / window as f32;
     let one_minus_alpha = 1.0 - alpha;
 
     for sample in samples.iter_mut() {
-        // Simple exponential moving average (single-pole IIR low-pass)
         *sample = alpha * *sample + one_minus_alpha * prev;
         prev = *sample;
     }
@@ -216,6 +385,8 @@ struct AudioState {
     reverb: PsxReverb,
     /// Output sample rate mode
     output_sample_rate: OutputSampleRate,
+    /// PS1 SPU Gaussian resampler
+    resampler: SpuResampler,
 }
 
 // =============================================================================
@@ -258,10 +429,8 @@ mod native {
                     // Apply PS1 reverb
                     state.reverb.process(&mut left_buffer[..samples_needed], &mut right_buffer[..samples_needed]);
 
-                    // Apply PS1-style audio degradation (sample rate + bit depth)
-                    let pitch = state.output_sample_rate;
-                    apply_ps1_degradation(&mut left_buffer[..samples_needed], pitch);
-                    apply_ps1_degradation(&mut right_buffer[..samples_needed], pitch);
+                    // Apply PS1 SPU Gaussian resampling (authentic sample rate conversion)
+                    state.resampler.process(&mut left_buffer[..samples_needed], &mut right_buffer[..samples_needed]);
 
                     for i in 0..samples_needed {
                         data[i * 2] = left_buffer[i];
@@ -363,6 +532,7 @@ impl AudioEngine {
             playing: false,
             reverb: PsxReverb::new(SAMPLE_RATE),
             output_sample_rate: OutputSampleRate::default(),
+            resampler: SpuResampler::new(),
         }));
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -420,11 +590,23 @@ impl AudioEngine {
     pub fn set_output_sample_rate(&self, rate: OutputSampleRate) {
         let mut state = self.state.lock().unwrap();
         state.output_sample_rate = rate;
+        state.resampler.set_pitch(rate);
     }
 
     /// Get current output sample rate mode
     pub fn output_sample_rate(&self) -> OutputSampleRate {
         self.state.lock().unwrap().output_sample_rate
+    }
+
+    /// Enable or disable SPU resampling emulation
+    pub fn set_spu_resampling_enabled(&self, enabled: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.resampler.set_enabled(enabled);
+    }
+
+    /// Check if SPU resampling is enabled
+    pub fn is_spu_resampling_enabled(&self) -> bool {
+        self.state.lock().unwrap().resampler.is_enabled()
     }
 
     /// Load a soundfont from file (native only)
@@ -504,10 +686,8 @@ impl AudioEngine {
             // Apply PS1 reverb
             state.reverb.process(&mut self.left_buffer[..samples], &mut self.right_buffer[..samples]);
 
-            // Apply PS1-style audio degradation (sample rate + bit depth)
-            let pitch = state.output_sample_rate;
-            apply_ps1_degradation(&mut self.left_buffer[..samples], pitch);
-            apply_ps1_degradation(&mut self.right_buffer[..samples], pitch);
+            // Apply PS1 SPU Gaussian resampling (authentic sample rate conversion)
+            state.resampler.process(&mut self.left_buffer[..samples], &mut self.right_buffer[..samples]);
 
             wasm::write_audio(&self.left_buffer[..samples], &self.right_buffer[..samples]);
         }
