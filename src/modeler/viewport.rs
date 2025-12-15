@@ -9,8 +9,9 @@ use crate::rasterizer::{
     mat4_identity, mat4_mul, mat4_transform_point, mat4_from_position_rotation,
     mat4_rotation, mat4_translation,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, TransformTool, Axis};
+use super::state::{ModelerState, ModelerSelection, SelectMode, TransformTool, Axis, GizmoHandle};
 use super::model::{Model, PartTransform};
+use super::spine::SpineModel;
 
 /// Compute world matrices for all bones in the skeleton hierarchy
 fn compute_bone_world_transforms(model: &Model) -> Vec<Mat4> {
@@ -292,18 +293,92 @@ pub fn draw_modeler_viewport(
         state.viewport_mouse_captured = false;
     }
 
-    // Mouse wheel: zoom in/out (change orbit distance)
+    // Mouse wheel: adjust radius (if spine joint selected) OR zoom
     if inside_viewport {
         let scroll = mouse_wheel().1;
         if scroll != 0.0 {
-            let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
-            state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(50.0, 2000.0);
-            state.sync_camera_from_orbit();
+            // Check if we have a spine joint selected
+            let has_spine_selection = matches!(&state.selection, ModelerSelection::SpineJoints(j) if !j.is_empty());
+
+            if has_spine_selection {
+                // Adjust radius of selected joint(s)
+                if let ModelerSelection::SpineJoints(joints) = &state.selection {
+                    let joints = joints.clone();
+                    // Smaller delta for finer control (was 2.0, now 0.5)
+                    let delta = if scroll > 0.0 { 0.5 } else { -0.5 };
+                    let mut new_radius = 0.0;
+
+                    if let Some(spine_model) = &mut state.spine_model {
+                        for (seg_idx, joint_idx) in &joints {
+                            if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                                if let Some(joint) = segment.joints.get_mut(*joint_idx) {
+                                    joint.radius = (joint.radius + delta).max(1.0);
+                                    new_radius = joint.radius;
+                                }
+                            }
+                        }
+                    }
+
+                    // Show feedback (outside of spine_model borrow)
+                    state.set_status(&format!("Radius: {:.1}", new_radius), 0.5);
+                }
+            } else {
+                // Normal zoom behavior
+                let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
+                state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(50.0, 2000.0);
+                state.sync_camera_from_orbit();
+            }
         }
     }
 
     // Update mouse position for next frame
     state.viewport_last_mouse = mouse_pos;
+
+    // Toggle snap with 'S' key (when not dragging)
+    if inside_viewport && is_key_pressed(KeyCode::S) && !state.spine_drag_active && !state.transform_active {
+        state.snap_settings.enabled = !state.snap_settings.enabled;
+        let status = if state.snap_settings.enabled {
+            format!("Snap ON (grid: {})", state.snap_settings.grid_size)
+        } else {
+            "Snap OFF".to_string()
+        };
+        state.set_status(&status, 1.5);
+    }
+
+    // Extrude (E key) - add new joint at end of spine when end joint is selected
+    if inside_viewport && is_key_pressed(KeyCode::E) && !state.spine_drag_active && !state.transform_active {
+        handle_spine_extrude(state);
+    }
+
+    // Delete (X key) - delete selected joints or bones (not when Shift held - that's delete segment)
+    if inside_viewport && is_key_pressed(KeyCode::X) && !shift_held && !state.spine_drag_active && !state.transform_active {
+        handle_spine_delete(state);
+    }
+
+    // Subdivide (W key) - insert joint at midpoint of selected bone
+    if inside_viewport && is_key_pressed(KeyCode::W) && !state.spine_drag_active && !state.transform_active {
+        handle_spine_subdivide(state);
+    }
+
+    // Duplicate segment (D key) - copy current segment
+    if inside_viewport && is_key_pressed(KeyCode::D) && !state.spine_drag_active && !state.transform_active {
+        handle_spine_duplicate_segment(state);
+    }
+
+    // New segment (N key) - create a new segment
+    if inside_viewport && is_key_pressed(KeyCode::N) && !state.spine_drag_active && !state.transform_active {
+        handle_spine_new_segment(state);
+    }
+
+    // Delete segment (Shift+X key) - delete entire segment
+    if inside_viewport && is_key_pressed(KeyCode::X) && shift_held && !state.spine_drag_active && !state.transform_active {
+        handle_spine_delete_segment(state);
+    }
+
+    // Mirror segment (M key) - mirror on X axis
+    if inside_viewport && is_key_pressed(KeyCode::M) && !state.spine_drag_active && !state.transform_active {
+        handle_spine_mirror_segment(state);
+    }
 
     // Handle bone transforms (G=move, R=rotate)
     handle_bone_transforms(ctx, state, inside_viewport, mouse_pos);
@@ -314,47 +389,62 @@ pub fn draw_modeler_viewport(
     // Draw grid on floor
     draw_grid(fb, &state.camera, 0.0, 50.0, 10);
 
-    // Get current pose for animation
-    let pose = state.get_current_pose();
-
-    // Compute world matrices for all parts
-    let world_matrices = compute_world_matrices(&state.model, &pose);
-
-    // Build render data for all parts
+    // Build render data
     let mut all_vertices: Vec<RasterVertex> = Vec::new();
     let mut all_faces: Vec<RasterFace> = Vec::new();
 
-    for (part_idx, part) in state.model.parts.iter().enumerate() {
-        if !part.visible {
-            continue;
+    // Track whether we're using spine or old model (for selection overlays)
+    let using_spine = state.spine_model.is_some();
+
+    // Get current pose for animation (needed for old model system)
+    let pose = state.get_current_pose();
+    let world_matrices = compute_world_matrices(&state.model, &pose);
+
+    // Render spine model if present (new system)
+    if let Some(spine_model) = &state.spine_model {
+        let (spine_verts, spine_faces) = spine_model.generate_mesh();
+
+        for vert in spine_verts {
+            all_vertices.push(vert);
         }
 
-        let world_mat = &world_matrices[part_idx];
-        let vertex_offset = all_vertices.len();
-
-        // Transform vertices
-        for vert in &part.vertices {
-            let world_pos = mat4_transform_point(world_mat, vert.position);
-
-            // Calculate normal (simplified - just use up vector for now)
-            let normal = Vec3::new(0.0, 1.0, 0.0);
-
-            all_vertices.push(RasterVertex {
-                pos: world_pos,
-                uv: RasterVec2::new(vert.uv.x, vert.uv.y),
-                normal,
-                color: RasterColor::NEUTRAL,
-            });
+        for face in spine_faces {
+            all_faces.push(face);
         }
+    } else {
+        // Fallback to old model system if no spine model
+        for (part_idx, part) in state.model.parts.iter().enumerate() {
+            if !part.visible {
+                continue;
+            }
 
-        // Add faces with offset indices
-        for face in &part.faces {
-            all_faces.push(RasterFace {
-                v0: face.indices[0] + vertex_offset,
-                v1: face.indices[1] + vertex_offset,
-                v2: face.indices[2] + vertex_offset,
-                texture_id: None, // TODO: Use atlas texture
-            });
+            let world_mat = &world_matrices[part_idx];
+            let vertex_offset = all_vertices.len();
+
+            // Transform vertices
+            for vert in &part.vertices {
+                let world_pos = mat4_transform_point(world_mat, vert.position);
+
+                // Calculate normal (simplified - just use up vector for now)
+                let normal = Vec3::new(0.0, 1.0, 0.0);
+
+                all_vertices.push(RasterVertex {
+                    pos: world_pos,
+                    uv: RasterVec2::new(vert.uv.x, vert.uv.y),
+                    normal,
+                    color: RasterColor::NEUTRAL,
+                });
+            }
+
+            // Add faces with offset indices
+            for face in &part.faces {
+                all_faces.push(RasterFace {
+                    v0: face.indices[0] + vertex_offset,
+                    v1: face.indices[1] + vertex_offset,
+                    v2: face.indices[2] + vertex_offset,
+                    texture_id: None, // TODO: Use atlas texture
+                });
+            }
         }
     }
 
@@ -362,8 +452,46 @@ pub fn draw_modeler_viewport(
     let empty_textures: Vec<crate::rasterizer::Texture> = Vec::new();
     render_mesh(fb, &all_vertices, &all_faces, &empty_textures, &state.camera, &state.raster_settings);
 
-    // Draw bones (skeleton visualization)
-    if !state.model.bones.is_empty() {
+    // Draw spine joint markers (on top of mesh)
+    let mut gizmo_info: Option<GizmoScreenInfo> = None;
+    if let Some(spine_model) = &state.spine_model {
+        let selected_joints = state.selection.spine_joints().unwrap_or(&[]);
+        let selected_bones = state.selection.spine_bones().unwrap_or(&[]);
+        draw_spine_joints(fb, spine_model, &state.camera, selected_joints, selected_bones);
+
+        // Draw gizmo at first selected joint
+        if let Some(&(seg_idx, joint_idx)) = selected_joints.first() {
+            if let Some(segment) = spine_model.segments.get(seg_idx) {
+                if let Some(joint) = segment.joints.get(joint_idx) {
+                    gizmo_info = Some(draw_gizmo(
+                        fb,
+                        joint.position,
+                        &state.camera,
+                        state.gizmo_hover_handle,
+                        state.spine_drag_handle,
+                    ));
+                }
+            }
+        }
+        // Draw gizmo at midpoint of first selected bone
+        else if let Some(&(seg_idx, bone_idx)) = selected_bones.first() {
+            if let Some(segment) = spine_model.segments.get(seg_idx) {
+                if let (Some(joint_a), Some(joint_b)) = (segment.joints.get(bone_idx), segment.joints.get(bone_idx + 1)) {
+                    let midpoint = (joint_a.position + joint_b.position) * 0.5;
+                    gizmo_info = Some(draw_gizmo(
+                        fb,
+                        midpoint,
+                        &state.camera,
+                        state.gizmo_hover_handle,
+                        state.spine_drag_handle,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Draw bones (skeleton visualization) - only for old model system
+    if !using_spine && !state.model.bones.is_empty() {
         let bone_transforms = compute_bone_world_transforms(&state.model);
         let selected_bones = match &state.selection {
             ModelerSelection::Bones(bones) => bones.as_slice(),
@@ -372,16 +500,42 @@ pub fn draw_modeler_viewport(
         draw_bones(fb, &state.model, &state.camera, &bone_transforms, selected_bones);
     }
 
-    // Draw part/vertex/edge/face overlays based on selection mode
-    draw_selection_overlays(ctx, fb, state, &world_matrices, screen_to_fb);
+    // Draw part/vertex/edge/face overlays based on selection mode (old model system)
+    if !using_spine {
+        draw_selection_overlays(ctx, fb, state, &world_matrices, screen_to_fb);
+    }
 
-    // Handle click selection (but not if we're transforming or if a transform tool is active with selection)
-    let has_bone_selection = matches!(&state.selection, ModelerSelection::Bones(b) if !b.is_empty());
-    let is_transform_tool = matches!(state.tool, TransformTool::Move | TransformTool::Rotate);
-    let should_select = !state.transform_active && !(has_bone_selection && is_transform_tool && state.select_mode == SelectMode::Bone);
+    // Update gizmo hover state
+    if let (Some(gizmo), Some((fb_x, fb_y))) = (&gizmo_info, screen_to_fb(mouse_pos.0, mouse_pos.1)) {
+        if !state.spine_drag_active {
+            state.gizmo_hover_handle = gizmo.hit_test(fb_x, fb_y, 8.0);
+        }
+    } else {
+        state.gizmo_hover_handle = None;
+    }
 
-    if inside_viewport && ctx.mouse.left_pressed && !ctx.mouse.right_down && should_select {
-        handle_selection_click(ctx, state, &world_matrices, screen_to_fb, fb.width, fb.height);
+    // Handle click selection FIRST (before drag) - only if not already dragging
+    // Skip selection if clicking on gizmo
+    let clicking_gizmo = state.gizmo_hover_handle.is_some();
+    if inside_viewport && ctx.mouse.left_pressed && !ctx.mouse.right_down && !state.transform_active && !state.spine_drag_active && !clicking_gizmo {
+        if using_spine {
+            // Handle spine joint selection
+            handle_spine_selection_click(state, screen_to_fb, fb.width, fb.height);
+        } else {
+            // Handle old model selection
+            let has_bone_selection = matches!(&state.selection, ModelerSelection::Bones(b) if !b.is_empty());
+            let is_transform_tool = matches!(state.tool, TransformTool::Move | TransformTool::Rotate);
+            let should_select = !(has_bone_selection && is_transform_tool && state.select_mode == SelectMode::Bone);
+
+            if should_select {
+                handle_selection_click(ctx, state, &world_matrices, screen_to_fb, fb.width, fb.height);
+            }
+        }
+    }
+
+    // Handle spine joint dragging AFTER selection (so newly selected joint can be dragged)
+    if using_spine {
+        handle_spine_joint_drag(ctx, state, inside_viewport, mouse_pos, screen_to_fb, fb.width, fb.height);
     }
 
     // Convert framebuffer to texture and draw
@@ -415,6 +569,17 @@ pub fn draw_modeler_viewport(
         12.0,
         Color::from_rgba(180, 180, 180, 255),
     );
+
+    // Draw snap indicator
+    if state.snap_settings.enabled {
+        draw_text(
+            &format!("SNAP: {}", state.snap_settings.grid_size),
+            rect.x + 5.0,
+            rect.y + 15.0,
+            12.0,
+            Color::from_rgba(100, 255, 100, 255),
+        );
+    }
 }
 
 /// Draw the skeleton bones
@@ -471,6 +636,329 @@ fn draw_bones(
             fb.draw_line(sx, sy - size, sx, sy + size, marker_color);
         }
     }
+}
+
+/// Draw spine joints as markers (for visual feedback during editing)
+fn draw_spine_joints(
+    fb: &mut Framebuffer,
+    spine_model: &SpineModel,
+    camera: &crate::rasterizer::Camera,
+    selected_joints: &[(usize, usize)],
+    selected_bones: &[(usize, usize)],
+) {
+    let joint_color = RasterColor::new(255, 200, 50);      // Yellow/orange
+    let selected_color = RasterColor::new(50, 255, 100);   // Bright green
+    let line_color = RasterColor::new(200, 150, 50);       // Darker for spine line
+    let selected_bone_color = RasterColor::new(100, 255, 150); // Cyan-green for bones
+
+    for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+        let mut prev_pos: Option<Vec3> = None;
+
+        for (joint_idx, joint) in segment.joints.iter().enumerate() {
+            // Draw line connecting to previous joint
+            if let Some(prev) = prev_pos {
+                // Check if this bone (prev joint to current) is selected
+                let bone_idx = joint_idx - 1;
+                let is_bone_selected = selected_bones.contains(&(seg_idx, bone_idx));
+                let bone_color = if is_bone_selected { selected_bone_color } else { line_color };
+
+                draw_3d_line(fb, prev, joint.position, camera, bone_color);
+
+                // Draw thicker line for selected bones (draw adjacent parallel lines)
+                if is_bone_selected {
+                    // Get direction perpendicular to the line in screen space
+                    let screen_a = world_to_screen(prev, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+                    let screen_b = world_to_screen(joint.position, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+                    if let (Some((ax, ay)), Some((bx, by))) = (screen_a, screen_b) {
+                        // Draw offset lines to make it thicker
+                        let dx = bx - ax;
+                        let dy = by - ay;
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len > 0.001 {
+                            let nx = -dy / len;
+                            let ny = dx / len;
+                            // Draw 2 parallel lines offset by 1 pixel each side
+                            for offset in [-1.0_f32, 1.0] {
+                                let ox = nx * offset;
+                                let oy = ny * offset;
+                                fb.draw_line(
+                                    (ax + ox) as i32, (ay + oy) as i32,
+                                    (bx + ox) as i32, (by + oy) as i32,
+                                    bone_color
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            let is_selected = selected_joints.contains(&(seg_idx, joint_idx));
+
+            // Draw joint marker
+            if let Some((sx, sy)) = world_to_screen(
+                joint.position,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+            ) {
+                let sx = sx as i32;
+                let sy = sy as i32;
+
+                let color = if is_selected { selected_color } else { joint_color };
+                let radius = if is_selected { 4 } else { 2 };
+
+                // Draw small circle at each joint (like vertex markers)
+                fb.draw_circle(sx, sy, radius, color);
+            }
+
+            prev_pos = Some(joint.position);
+        }
+    }
+}
+
+/// Draw a 3D translation gizmo at the given position
+/// Returns screen-space bounding info for hit testing
+fn draw_gizmo(
+    fb: &mut Framebuffer,
+    position: Vec3,
+    camera: &crate::rasterizer::Camera,
+    hover_handle: Option<GizmoHandle>,
+    drag_handle: Option<GizmoHandle>,
+) -> GizmoScreenInfo {
+    // Gizmo size scales with distance to camera for consistent screen size
+    let to_camera = camera.position - position;
+    let distance = to_camera.len();
+    let gizmo_length = distance * 0.15; // 15% of distance to camera
+    let plane_size = gizmo_length * 0.3; // Plane squares are 30% of axis length
+    let plane_offset = gizmo_length * 0.25; // Offset from origin
+
+    // Helper to check if an axis or plane is active
+    let is_axis_active = |axis: Axis| -> bool {
+        matches!(hover_handle, Some(GizmoHandle::Axis(a)) if a == axis)
+            || matches!(drag_handle, Some(GizmoHandle::Axis(a)) if a == axis)
+    };
+    let is_plane_active = |a1: Axis, a2: Axis| -> bool {
+        matches!(hover_handle, Some(GizmoHandle::Plane { axis1, axis2 }) if (axis1 == a1 && axis2 == a2) || (axis1 == a2 && axis2 == a1))
+            || matches!(drag_handle, Some(GizmoHandle::Plane { axis1, axis2 }) if (axis1 == a1 && axis2 == a2) || (axis1 == a2 && axis2 == a1))
+    };
+
+    // Axis colors (brighter when hovered/dragged)
+    let x_color = if is_axis_active(Axis::X) {
+        RasterColor::new(255, 100, 100)
+    } else {
+        RasterColor::new(200, 60, 60)
+    };
+    let y_color = if is_axis_active(Axis::Y) {
+        RasterColor::new(100, 255, 100)
+    } else {
+        RasterColor::new(60, 200, 60)
+    };
+    let z_color = if is_axis_active(Axis::Z) {
+        RasterColor::new(100, 100, 255)
+    } else {
+        RasterColor::new(60, 60, 200)
+    };
+
+    // Plane colors (mix of the two axes, semi-transparent feel via lighter colors)
+    let xy_color = if is_plane_active(Axis::X, Axis::Y) {
+        RasterColor::new(255, 255, 100)  // Yellow (bright)
+    } else {
+        RasterColor::new(180, 180, 60)   // Yellow (dim)
+    };
+    let xz_color = if is_plane_active(Axis::X, Axis::Z) {
+        RasterColor::new(255, 100, 255)  // Magenta (bright)
+    } else {
+        RasterColor::new(180, 60, 180)   // Magenta (dim)
+    };
+    let yz_color = if is_plane_active(Axis::Y, Axis::Z) {
+        RasterColor::new(100, 255, 255)  // Cyan (bright)
+    } else {
+        RasterColor::new(60, 180, 180)   // Cyan (dim)
+    };
+
+    // Draw axis lines
+    let x_end = position + Vec3::new(gizmo_length, 0.0, 0.0);
+    let y_end = position + Vec3::new(0.0, gizmo_length, 0.0);
+    let z_end = position + Vec3::new(0.0, 0.0, gizmo_length);
+
+    draw_3d_line(fb, position, x_end, camera, x_color);
+    draw_3d_line(fb, position, y_end, camera, y_color);
+    draw_3d_line(fb, position, z_end, camera, z_color);
+
+    // Draw arrowheads (small lines at the end)
+    let arrow_size = gizmo_length * 0.15;
+
+    // X arrow
+    draw_3d_line(fb, x_end, x_end + Vec3::new(-arrow_size, arrow_size * 0.5, 0.0), camera, x_color);
+    draw_3d_line(fb, x_end, x_end + Vec3::new(-arrow_size, -arrow_size * 0.5, 0.0), camera, x_color);
+
+    // Y arrow
+    draw_3d_line(fb, y_end, y_end + Vec3::new(arrow_size * 0.5, -arrow_size, 0.0), camera, y_color);
+    draw_3d_line(fb, y_end, y_end + Vec3::new(-arrow_size * 0.5, -arrow_size, 0.0), camera, y_color);
+
+    // Z arrow
+    draw_3d_line(fb, z_end, z_end + Vec3::new(0.0, arrow_size * 0.5, -arrow_size), camera, z_color);
+    draw_3d_line(fb, z_end, z_end + Vec3::new(0.0, -arrow_size * 0.5, -arrow_size), camera, z_color);
+
+    // Draw plane squares (small squares offset from origin)
+    // XY plane square (at Z=0)
+    let xy_p1 = position + Vec3::new(plane_offset, plane_offset, 0.0);
+    let xy_p2 = position + Vec3::new(plane_offset + plane_size, plane_offset, 0.0);
+    let xy_p3 = position + Vec3::new(plane_offset + plane_size, plane_offset + plane_size, 0.0);
+    let xy_p4 = position + Vec3::new(plane_offset, plane_offset + plane_size, 0.0);
+    draw_3d_line(fb, xy_p1, xy_p2, camera, xy_color);
+    draw_3d_line(fb, xy_p2, xy_p3, camera, xy_color);
+    draw_3d_line(fb, xy_p3, xy_p4, camera, xy_color);
+    draw_3d_line(fb, xy_p4, xy_p1, camera, xy_color);
+
+    // XZ plane square (at Y=0)
+    let xz_p1 = position + Vec3::new(plane_offset, 0.0, plane_offset);
+    let xz_p2 = position + Vec3::new(plane_offset + plane_size, 0.0, plane_offset);
+    let xz_p3 = position + Vec3::new(plane_offset + plane_size, 0.0, plane_offset + plane_size);
+    let xz_p4 = position + Vec3::new(plane_offset, 0.0, plane_offset + plane_size);
+    draw_3d_line(fb, xz_p1, xz_p2, camera, xz_color);
+    draw_3d_line(fb, xz_p2, xz_p3, camera, xz_color);
+    draw_3d_line(fb, xz_p3, xz_p4, camera, xz_color);
+    draw_3d_line(fb, xz_p4, xz_p1, camera, xz_color);
+
+    // YZ plane square (at X=0)
+    let yz_p1 = position + Vec3::new(0.0, plane_offset, plane_offset);
+    let yz_p2 = position + Vec3::new(0.0, plane_offset + plane_size, plane_offset);
+    let yz_p3 = position + Vec3::new(0.0, plane_offset + plane_size, plane_offset + plane_size);
+    let yz_p4 = position + Vec3::new(0.0, plane_offset, plane_offset + plane_size);
+    draw_3d_line(fb, yz_p1, yz_p2, camera, yz_color);
+    draw_3d_line(fb, yz_p2, yz_p3, camera, yz_color);
+    draw_3d_line(fb, yz_p3, yz_p4, camera, yz_color);
+    draw_3d_line(fb, yz_p4, yz_p1, camera, yz_color);
+
+    // Calculate screen positions for hit testing
+    let origin_screen = world_to_screen(position, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    let x_screen = world_to_screen(x_end, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    let y_screen = world_to_screen(y_end, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    let z_screen = world_to_screen(z_end, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+
+    // Plane centers for hit testing
+    let xy_center = position + Vec3::new(plane_offset + plane_size * 0.5, plane_offset + plane_size * 0.5, 0.0);
+    let xz_center = position + Vec3::new(plane_offset + plane_size * 0.5, 0.0, plane_offset + plane_size * 0.5);
+    let yz_center = position + Vec3::new(0.0, plane_offset + plane_size * 0.5, plane_offset + plane_size * 0.5);
+
+    let xy_screen = world_to_screen(xy_center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    let xz_screen = world_to_screen(xz_center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    let yz_screen = world_to_screen(yz_center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+
+    GizmoScreenInfo {
+        origin: origin_screen,
+        x_end: x_screen,
+        y_end: y_screen,
+        z_end: z_screen,
+        xy_center: xy_screen,
+        xz_center: xz_screen,
+        yz_center: yz_screen,
+        plane_screen_radius: (plane_size / gizmo_length) * 30.0, // Approximate screen radius for hit testing
+    }
+}
+
+/// Screen-space info for gizmo hit testing
+struct GizmoScreenInfo {
+    origin: Option<(f32, f32)>,
+    x_end: Option<(f32, f32)>,
+    y_end: Option<(f32, f32)>,
+    z_end: Option<(f32, f32)>,
+    xy_center: Option<(f32, f32)>,
+    xz_center: Option<(f32, f32)>,
+    yz_center: Option<(f32, f32)>,
+    plane_screen_radius: f32,
+}
+
+impl GizmoScreenInfo {
+    /// Check if a screen point is near one of the gizmo handles
+    /// Returns the handle if within threshold distance
+    /// Planes are checked first (they're smaller targets), then axes
+    fn hit_test(&self, screen_x: f32, screen_y: f32, threshold: f32) -> Option<GizmoHandle> {
+        let Some(origin) = self.origin else { return None };
+
+        let mut best_handle: Option<GizmoHandle> = None;
+        let mut best_dist = threshold;
+
+        // Check plane handles first (smaller targets, higher priority when close)
+        let plane_threshold = self.plane_screen_radius.max(8.0);
+
+        if let Some(xy) = self.xy_center {
+            let dist = ((screen_x - xy.0).powi(2) + (screen_y - xy.1).powi(2)).sqrt();
+            if dist < plane_threshold && dist < best_dist {
+                best_dist = dist;
+                best_handle = Some(GizmoHandle::XY);
+            }
+        }
+
+        if let Some(xz) = self.xz_center {
+            let dist = ((screen_x - xz.0).powi(2) + (screen_y - xz.1).powi(2)).sqrt();
+            if dist < plane_threshold && dist < best_dist {
+                best_dist = dist;
+                best_handle = Some(GizmoHandle::XZ);
+            }
+        }
+
+        if let Some(yz) = self.yz_center {
+            let dist = ((screen_x - yz.0).powi(2) + (screen_y - yz.1).powi(2)).sqrt();
+            if dist < plane_threshold && dist < best_dist {
+                best_dist = dist;
+                best_handle = Some(GizmoHandle::YZ);
+            }
+        }
+
+        // If no plane was hit, check axes
+        if best_handle.is_none() {
+            if let Some(x_end) = self.x_end {
+                let dist = point_to_segment_dist(screen_x, screen_y, origin.0, origin.1, x_end.0, x_end.1);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_handle = Some(GizmoHandle::Axis(Axis::X));
+                }
+            }
+
+            if let Some(y_end) = self.y_end {
+                let dist = point_to_segment_dist(screen_x, screen_y, origin.0, origin.1, y_end.0, y_end.1);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_handle = Some(GizmoHandle::Axis(Axis::Y));
+                }
+            }
+
+            if let Some(z_end) = self.z_end {
+                let dist = point_to_segment_dist(screen_x, screen_y, origin.0, origin.1, z_end.0, z_end.1);
+                if dist < best_dist {
+                    best_handle = Some(GizmoHandle::Axis(Axis::Z));
+                }
+            }
+        }
+
+        best_handle
+    }
+}
+
+/// Calculate distance from point (px, py) to line segment (x1,y1)-(x2,y2)
+fn point_to_segment_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len_sq = dx * dx + dy * dy;
+
+    if len_sq < 0.0001 {
+        // Segment is a point
+        return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
+    }
+
+    // Project point onto line, clamped to segment
+    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    let closest_x = x1 + t * dx;
+    let closest_y = y1 + t * dy;
+
+    ((px - closest_x).powi(2) + (py - closest_y).powi(2)).sqrt()
 }
 
 /// Draw floor grid
@@ -533,7 +1021,14 @@ fn draw_3d_line(
     let s1 = world_to_screen(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
     if let (Some((x0f, y0f)), Some((x1f, y1f))) = (s0, s1) {
-        fb.draw_line(x0f as i32, y0f as i32, x1f as i32, y1f as i32, color);
+        // Recalculate z for the clipped points
+        let clipped_rel0 = clipped_p0 - camera.position;
+        let clipped_rel1 = clipped_p1 - camera.position;
+        let clipped_z0 = clipped_rel0.dot(camera.basis_z);
+        let clipped_z1 = clipped_rel1.dot(camera.basis_z);
+
+        // Use draw_line_3d which respects z-buffer
+        fb.draw_line_3d(x0f as i32, y0f as i32, clipped_z0, x1f as i32, y1f as i32, clipped_z1, color);
     }
 }
 
@@ -655,6 +1150,419 @@ fn draw_selection_overlays<F>(
                 }
             }
         }
+    }
+}
+
+/// Handle spine joint/bone dragging (move selected joints with mouse)
+fn handle_spine_joint_drag<F>(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    inside_viewport: bool,
+    mouse_pos: (f32, f32),
+    _screen_to_fb: F,
+    _fb_width: usize,
+    _fb_height: usize,
+) where F: Fn(f32, f32) -> Option<(f32, f32)>
+{
+    // Check if we have spine joints or bones selected
+    let has_joint_selection = matches!(&state.selection, ModelerSelection::SpineJoints(j) if !j.is_empty());
+    let has_bone_selection = matches!(&state.selection, ModelerSelection::SpineBones(b) if !b.is_empty());
+
+    if !has_joint_selection && !has_bone_selection {
+        state.spine_drag_active = false;
+        state.spine_drag_start_positions.clear();
+        return;
+    }
+
+    // Start drag on left mouse press (capture initial state)
+    if inside_viewport && ctx.mouse.left_pressed && !ctx.mouse.right_down {
+        // Store starting positions for joints
+        if let ModelerSelection::SpineJoints(joints) = &state.selection {
+            let mut start_positions = Vec::new();
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, joint_idx) in joints {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let Some(joint) = segment.joints.get(*joint_idx) {
+                            start_positions.push(joint.position);
+                        }
+                    }
+                }
+            }
+
+            if !start_positions.is_empty() {
+                state.spine_drag_start_mouse = mouse_pos;
+                state.spine_drag_start_positions = start_positions;
+                state.spine_drag_handle = state.gizmo_hover_handle;
+            }
+        }
+        // Store starting positions for bones (both joints of each bone)
+        else if let ModelerSelection::SpineBones(bones) = &state.selection {
+            let mut start_positions = Vec::new();
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, bone_idx) in bones {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        // Store both joints of the bone
+                        if let Some(joint_a) = segment.joints.get(*bone_idx) {
+                            start_positions.push(joint_a.position);
+                        }
+                        if let Some(joint_b) = segment.joints.get(*bone_idx + 1) {
+                            start_positions.push(joint_b.position);
+                        }
+                    }
+                }
+            }
+
+            if !start_positions.is_empty() {
+                state.spine_drag_start_mouse = mouse_pos;
+                state.spine_drag_start_positions = start_positions;
+                state.spine_drag_handle = state.gizmo_hover_handle;
+            }
+        }
+    }
+
+    // Check if we should start actual dragging (mouse moved enough from initial press)
+    if inside_viewport && ctx.mouse.left_down && !ctx.mouse.right_down && !state.spine_drag_active {
+        if !state.spine_drag_start_positions.is_empty() {
+            let dx = mouse_pos.0 - state.spine_drag_start_mouse.0;
+            let dy = mouse_pos.1 - state.spine_drag_start_mouse.1;
+            let moved = (dx * dx + dy * dy).sqrt();
+
+            if moved > 3.0 {
+                state.spine_drag_active = true;
+            }
+        }
+    }
+
+    // Update positions during drag
+    if state.spine_drag_active && ctx.mouse.left_down {
+        let dx = mouse_pos.0 - state.spine_drag_start_mouse.0;
+        let dy = mouse_pos.1 - state.spine_drag_start_mouse.1;
+        let scale = state.orbit_distance * 0.002;
+
+        // Calculate world delta based on drag handle type
+        let world_delta = match state.spine_drag_handle {
+            Some(GizmoHandle::Axis(axis)) => {
+                // Single axis movement
+                let axis_vec = axis.to_vec3();
+                let x_proj = state.camera.basis_x.dot(axis_vec);
+                let y_proj = state.camera.basis_y.dot(axis_vec);
+                let movement = (dx * x_proj + dy * y_proj) * scale;
+                axis_vec * movement
+            }
+            Some(GizmoHandle::Plane { axis1, axis2 }) => {
+                // Plane movement - project mouse onto both axes
+                let axis1_vec = axis1.to_vec3();
+                let axis2_vec = axis2.to_vec3();
+
+                // Project camera basis onto each axis
+                let x_proj1 = state.camera.basis_x.dot(axis1_vec);
+                let y_proj1 = state.camera.basis_y.dot(axis1_vec);
+                let x_proj2 = state.camera.basis_x.dot(axis2_vec);
+                let y_proj2 = state.camera.basis_y.dot(axis2_vec);
+
+                let movement1 = (dx * x_proj1 + dy * y_proj1) * scale;
+                let movement2 = (dx * x_proj2 + dy * y_proj2) * scale;
+
+                axis1_vec * movement1 + axis2_vec * movement2
+            }
+            None => {
+                // Free drag on camera plane
+                let world_dx = state.camera.basis_x * dx * scale;
+                let world_dy = state.camera.basis_y * dy * scale;
+                world_dx + world_dy
+            }
+        };
+
+        // Apply snap/quantization if enabled
+        let snapped_delta = state.snap_settings.snap_vec3(world_delta);
+
+        // Update joint positions
+        if let ModelerSelection::SpineJoints(joints) = &state.selection {
+            let joints = joints.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                for (i, (seg_idx, joint_idx)) in joints.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(joint) = segment.joints.get_mut(*joint_idx) {
+                            if let Some(start_pos) = state.spine_drag_start_positions.get(i) {
+                                // With snap: snap the final position, not the delta
+                                if state.snap_settings.enabled {
+                                    joint.position = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                } else {
+                                    joint.position = *start_pos + snapped_delta;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Update bone positions (both joints of each bone)
+        else if let ModelerSelection::SpineBones(bones) = &state.selection {
+            let bones = bones.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                // Start positions are stored as pairs: [bone0_joint_a, bone0_joint_b, bone1_joint_a, bone1_joint_b, ...]
+                for (bone_i, (seg_idx, bone_idx)) in bones.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        let pos_idx_a = bone_i * 2;
+                        let pos_idx_b = bone_i * 2 + 1;
+
+                        // Update first joint of bone
+                        if let Some(joint_a) = segment.joints.get_mut(*bone_idx) {
+                            if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_a) {
+                                if state.snap_settings.enabled {
+                                    joint_a.position = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                } else {
+                                    joint_a.position = *start_pos + snapped_delta;
+                                }
+                            }
+                        }
+                        // Update second joint of bone
+                        if let Some(joint_b) = segment.joints.get_mut(*bone_idx + 1) {
+                            if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_b) {
+                                if state.snap_settings.enabled {
+                                    joint_b.position = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                } else {
+                                    joint_b.position = *start_pos + snapped_delta;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // End drag on mouse release
+    if !ctx.mouse.left_down {
+        if state.spine_drag_active {
+            let msg = if matches!(&state.selection, ModelerSelection::SpineBones(_)) {
+                "Bone moved"
+            } else {
+                "Joint moved"
+            };
+            state.set_status(msg, 0.5);
+        }
+        state.spine_drag_active = false;
+        state.spine_drag_start_positions.clear();
+        state.spine_drag_handle = None;
+    }
+
+    // Cancel drag on escape
+    if state.spine_drag_active && is_key_pressed(KeyCode::Escape) {
+        // Restore original positions for joints
+        if let ModelerSelection::SpineJoints(joints) = &state.selection {
+            let joints = joints.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                for (i, (seg_idx, joint_idx)) in joints.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(joint) = segment.joints.get_mut(*joint_idx) {
+                            if let Some(start_pos) = state.spine_drag_start_positions.get(i) {
+                                joint.position = *start_pos;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Restore original positions for bones
+        else if let ModelerSelection::SpineBones(bones) = &state.selection {
+            let bones = bones.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                for (bone_i, (seg_idx, bone_idx)) in bones.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        let pos_idx_a = bone_i * 2;
+                        let pos_idx_b = bone_i * 2 + 1;
+
+                        if let Some(joint_a) = segment.joints.get_mut(*bone_idx) {
+                            if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_a) {
+                                joint_a.position = *start_pos;
+                            }
+                        }
+                        if let Some(joint_b) = segment.joints.get_mut(*bone_idx + 1) {
+                            if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_b) {
+                                joint_b.position = *start_pos;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        state.spine_drag_active = false;
+        state.spine_drag_handle = None;
+        state.set_status("Move cancelled", 0.5);
+    }
+}
+
+/// Handle spine joint selection on click
+/// Supports multi-select with Shift key
+fn handle_spine_selection_click<F>(
+    state: &mut ModelerState,
+    screen_to_fb: F,
+    fb_width: usize,
+    fb_height: usize,
+) where F: Fn(f32, f32) -> Option<(f32, f32)>
+{
+    let mouse_pos = macroquad::prelude::mouse_position();
+    let Some((fb_x, fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) else {
+        return;
+    };
+
+    let Some(spine_model) = &state.spine_model else {
+        return;
+    };
+
+    // Check if Shift is held for multi-select
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+    // Find closest joint to click position (joints have priority)
+    let mut closest_joint: Option<((usize, usize), f32)> = None;
+    let joint_threshold = 8.0;
+
+    for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+        for (joint_idx, joint) in segment.joints.iter().enumerate() {
+            if let Some((sx, sy)) = world_to_screen(
+                joint.position,
+                state.camera.position,
+                state.camera.basis_x,
+                state.camera.basis_y,
+                state.camera.basis_z,
+                fb_width,
+                fb_height,
+            ) {
+                let dist = ((fb_x - sx).powi(2) + (fb_y - sy).powi(2)).sqrt();
+                if dist < joint_threshold {
+                    if closest_joint.map_or(true, |(_, best_dist)| dist < best_dist) {
+                        closest_joint = Some(((seg_idx, joint_idx), dist));
+                    }
+                }
+            }
+        }
+    }
+
+    // If a joint was clicked, select it (or add to selection with Shift)
+    if let Some(((seg_idx, joint_idx), _)) = closest_joint {
+        let joint = &spine_model.segments[seg_idx].joints[joint_idx];
+
+        if shift_held {
+            // Multi-select: add to or remove from existing joint selection
+            match &state.selection {
+                ModelerSelection::SpineJoints(joints) => {
+                    let mut new_joints = joints.clone();
+                    let item = (seg_idx, joint_idx);
+                    if let Some(pos) = new_joints.iter().position(|&j| j == item) {
+                        // Already selected - remove it (toggle)
+                        new_joints.remove(pos);
+                        if new_joints.is_empty() {
+                            state.selection = ModelerSelection::None;
+                            state.set_status("Selection cleared", 0.5);
+                        } else {
+                            state.selection = ModelerSelection::SpineJoints(new_joints);
+                            state.set_status(&format!("Deselected joint {}", joint_idx), 0.5);
+                        }
+                    } else {
+                        // Not selected - add it
+                        new_joints.push(item);
+                        state.selection = ModelerSelection::SpineJoints(new_joints.clone());
+                        state.set_status(&format!("{} joints selected", new_joints.len()), 0.5);
+                    }
+                }
+                _ => {
+                    // Start new joint selection
+                    state.selection = ModelerSelection::SpineJoints(vec![(seg_idx, joint_idx)]);
+                    state.set_status(&format!("Joint {} (radius: {:.1})", joint_idx, joint.radius), 1.5);
+                }
+            }
+        } else {
+            // Normal click: replace selection
+            state.selection = ModelerSelection::SpineJoints(vec![(seg_idx, joint_idx)]);
+            state.set_status(&format!("Joint {} (radius: {:.1})", joint_idx, joint.radius), 1.5);
+        }
+        return;
+    }
+
+    // No joint clicked, check for bone/segment clicks (lines between joints)
+    let mut closest_bone: Option<((usize, usize), f32)> = None;
+    let bone_threshold = 12.0;
+
+    for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+        for bone_idx in 0..segment.joints.len().saturating_sub(1) {
+            let joint_a = &segment.joints[bone_idx];
+            let joint_b = &segment.joints[bone_idx + 1];
+
+            // Project both joints to screen space
+            let screen_a = world_to_screen(
+                joint_a.position,
+                state.camera.position,
+                state.camera.basis_x,
+                state.camera.basis_y,
+                state.camera.basis_z,
+                fb_width,
+                fb_height,
+            );
+            let screen_b = world_to_screen(
+                joint_b.position,
+                state.camera.position,
+                state.camera.basis_x,
+                state.camera.basis_y,
+                state.camera.basis_z,
+                fb_width,
+                fb_height,
+            );
+
+            if let (Some((ax, ay)), Some((bx, by))) = (screen_a, screen_b) {
+                // Calculate distance from click to line segment
+                let dist = point_to_segment_dist(fb_x, fb_y, ax, ay, bx, by);
+                if dist < bone_threshold {
+                    if closest_bone.map_or(true, |(_, best_dist)| dist < best_dist) {
+                        closest_bone = Some(((seg_idx, bone_idx), dist));
+                    }
+                }
+            }
+        }
+    }
+
+    // If a bone was clicked, select it (or add to selection with Shift)
+    if let Some(((seg_idx, bone_idx), _)) = closest_bone {
+        if shift_held {
+            // Multi-select: add to or remove from existing bone selection
+            match &state.selection {
+                ModelerSelection::SpineBones(bones) => {
+                    let mut new_bones = bones.clone();
+                    let item = (seg_idx, bone_idx);
+                    if let Some(pos) = new_bones.iter().position(|&b| b == item) {
+                        // Already selected - remove it (toggle)
+                        new_bones.remove(pos);
+                        if new_bones.is_empty() {
+                            state.selection = ModelerSelection::None;
+                            state.set_status("Selection cleared", 0.5);
+                        } else {
+                            state.selection = ModelerSelection::SpineBones(new_bones);
+                            state.set_status(&format!("Deselected bone {}", bone_idx), 0.5);
+                        }
+                    } else {
+                        // Not selected - add it
+                        new_bones.push(item);
+                        state.selection = ModelerSelection::SpineBones(new_bones.clone());
+                        state.set_status(&format!("{} bones selected", new_bones.len()), 0.5);
+                    }
+                }
+                _ => {
+                    // Start new bone selection
+                    state.selection = ModelerSelection::SpineBones(vec![(seg_idx, bone_idx)]);
+                    state.set_status(&format!("Bone {} (joints {}-{})", bone_idx, bone_idx, bone_idx + 1), 1.5);
+                }
+            }
+        } else {
+            // Normal click: replace selection
+            state.selection = ModelerSelection::SpineBones(vec![(seg_idx, bone_idx)]);
+            state.set_status(&format!("Bone {} (joints {}-{})", bone_idx, bone_idx, bone_idx + 1), 1.5);
+        }
+        return;
+    }
+
+    // Nothing clicked, clear selection (only if Shift not held)
+    if !shift_held {
+        state.selection = ModelerSelection::None;
     }
 }
 
@@ -801,6 +1709,306 @@ fn handle_selection_click<F>(
         SelectMode::Face => {
             // TODO: Implement face selection
             state.set_status("Face selection TODO", 1.0);
+        }
+    }
+}
+
+/// Handle spine extrusion (E key) - adds a new joint extending from the last joint
+fn handle_spine_extrude(state: &mut ModelerState) {
+    // Get the selected joint(s) or bone(s)
+    let selection = state.selection.clone();
+
+    match selection {
+        ModelerSelection::SpineJoints(joints) if !joints.is_empty() => {
+            // Get the first selected joint
+            let (seg_idx, joint_idx) = joints[0];
+
+            if let Some(spine_model) = &mut state.spine_model {
+                if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                    // Only allow extrusion from the last joint
+                    if joint_idx == segment.joints.len() - 1 {
+                        // Calculate direction from previous joint (or default up)
+                        let direction = if segment.joints.len() >= 2 {
+                            let prev_pos = segment.joints[joint_idx - 1].position;
+                            let curr_pos = segment.joints[joint_idx].position;
+                            (curr_pos - prev_pos).normalize()
+                        } else {
+                            Vec3::new(0.0, 1.0, 0.0) // Default up
+                        };
+
+                        // Get radius from current joint
+                        let radius = segment.joints[joint_idx].radius;
+
+                        // New joint extends in same direction, 20 units away
+                        let new_pos = segment.joints[joint_idx].position + direction * 20.0;
+                        let new_pos = state.snap_settings.snap_vec3(new_pos);
+
+                        segment.joints.push(crate::modeler::SpineJoint::new(new_pos, radius));
+
+                        // Select the new joint
+                        let new_joint_idx = segment.joints.len() - 1;
+                        state.selection = ModelerSelection::SpineJoints(vec![(seg_idx, new_joint_idx)]);
+                        state.set_status(&format!("Extruded new joint {}", new_joint_idx), 1.0);
+                    } else {
+                        state.set_status("Extrude only from end joint", 1.5);
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineBones(bones) if !bones.is_empty() => {
+            // For bones, extrude from the end joint of the last bone
+            let (seg_idx, bone_idx) = bones[0];
+
+            if let Some(spine_model) = &mut state.spine_model {
+                if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                    let end_joint_idx = bone_idx + 1;
+
+                    // Only allow extrusion from the last bone
+                    if end_joint_idx == segment.joints.len() - 1 {
+                        // Calculate direction from the bone
+                        let start_pos = segment.joints[bone_idx].position;
+                        let end_pos = segment.joints[end_joint_idx].position;
+                        let direction = (end_pos - start_pos).normalize();
+                        let bone_length = (end_pos - start_pos).len();
+
+                        // Get radius from end joint
+                        let radius = segment.joints[end_joint_idx].radius;
+
+                        // New joint extends in same direction, same length as current bone
+                        let new_pos = end_pos + direction * bone_length;
+                        let new_pos = state.snap_settings.snap_vec3(new_pos);
+
+                        segment.joints.push(crate::modeler::SpineJoint::new(new_pos, radius));
+
+                        // Select the new bone (the one we just created)
+                        let new_bone_idx = segment.joints.len() - 2;
+                        state.selection = ModelerSelection::SpineBones(vec![(seg_idx, new_bone_idx)]);
+                        state.set_status(&format!("Extruded new bone {}", new_bone_idx), 1.0);
+                    } else {
+                        state.set_status("Extrude only from end bone", 1.5);
+                    }
+                }
+            }
+        }
+        _ => {
+            state.set_status("Select a joint or bone to extrude", 1.5);
+        }
+    }
+}
+
+/// Handle spine deletion (X key) - deletes selected joints or bones
+fn handle_spine_delete(state: &mut ModelerState) {
+    let selection = state.selection.clone();
+
+    match selection {
+        ModelerSelection::SpineJoints(joints) if !joints.is_empty() => {
+            // Sort joints in reverse order to delete from end first (prevents index shifting issues)
+            let mut sorted_joints = joints.clone();
+            sorted_joints.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+
+            let mut deleted_count = 0;
+
+            if let Some(spine_model) = &mut state.spine_model {
+                for (seg_idx, joint_idx) in sorted_joints {
+                    if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                        // Must keep at least 2 joints for a valid segment
+                        if segment.joints.len() > 2 {
+                            segment.joints.remove(joint_idx);
+                            deleted_count += 1;
+                        }
+                    }
+                }
+            }
+
+            if deleted_count > 0 {
+                state.selection = ModelerSelection::None;
+                state.set_status(&format!("Deleted {} joint(s)", deleted_count), 1.0);
+            } else {
+                state.set_status("Need at least 2 joints", 1.5);
+            }
+        }
+        ModelerSelection::SpineBones(bones) if !bones.is_empty() => {
+            // Deleting a bone means removing one of its joints
+            // We'll remove the end joint of each bone (which effectively removes the bone)
+            let mut sorted_bones = bones.clone();
+            sorted_bones.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+
+            let mut deleted_count = 0;
+
+            if let Some(spine_model) = &mut state.spine_model {
+                for (seg_idx, bone_idx) in sorted_bones {
+                    if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                        // Delete the end joint of the bone
+                        let joint_to_delete = bone_idx + 1;
+
+                        // Must keep at least 2 joints
+                        if segment.joints.len() > 2 && joint_to_delete < segment.joints.len() {
+                            segment.joints.remove(joint_to_delete);
+                            deleted_count += 1;
+                        }
+                    }
+                }
+            }
+
+            if deleted_count > 0 {
+                state.selection = ModelerSelection::None;
+                state.set_status(&format!("Deleted {} bone(s)", deleted_count), 1.0);
+            } else {
+                state.set_status("Need at least 2 joints", 1.5);
+            }
+        }
+        _ => {
+            state.set_status("Select joint(s) or bone(s) to delete", 1.5);
+        }
+    }
+}
+
+/// Handle spine subdivide (W key) - insert a joint at the midpoint of selected bone
+fn handle_spine_subdivide(state: &mut ModelerState) {
+    let selection = state.selection.clone();
+
+    match selection {
+        ModelerSelection::SpineBones(bones) if !bones.is_empty() => {
+            // Get the first selected bone
+            let (seg_idx, bone_idx) = bones[0];
+
+            if let Some(spine_model) = &mut state.spine_model {
+                if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                    if bone_idx + 1 < segment.joints.len() {
+                        // Get the two joints that form this bone
+                        let joint_a = segment.joints[bone_idx].clone();
+                        let joint_b = segment.joints[bone_idx + 1].clone();
+
+                        // Calculate midpoint position and interpolated radius
+                        let mid_pos = (joint_a.position + joint_b.position) * 0.5;
+                        let mid_radius = (joint_a.radius + joint_b.radius) * 0.5;
+
+                        // Snap the position if enabled
+                        let mid_pos = state.snap_settings.snap_vec3(mid_pos);
+
+                        // Insert the new joint after joint_a (at bone_idx + 1)
+                        let new_joint = crate::modeler::SpineJoint::new(mid_pos, mid_radius);
+                        segment.joints.insert(bone_idx + 1, new_joint);
+
+                        // Select the new joint
+                        state.selection = ModelerSelection::SpineJoints(vec![(seg_idx, bone_idx + 1)]);
+                        state.set_status(&format!("Subdivided bone {} -> joints {}, {}, {}", bone_idx, bone_idx, bone_idx + 1, bone_idx + 2), 1.5);
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineJoints(_) => {
+            state.set_status("Select a bone to subdivide (W)", 1.5);
+        }
+        _ => {
+            state.set_status("Select a bone to subdivide (W)", 1.5);
+        }
+    }
+}
+
+/// Handle spine duplicate segment (D key) - copy the current segment
+fn handle_spine_duplicate_segment(state: &mut ModelerState) {
+    // Determine which segment to duplicate based on selection
+    let seg_idx = match &state.selection {
+        ModelerSelection::SpineJoints(joints) if !joints.is_empty() => joints[0].0,
+        ModelerSelection::SpineBones(bones) if !bones.is_empty() => bones[0].0,
+        _ => {
+            // No selection, try segment 0 if it exists
+            if state.spine_model.as_ref().map_or(false, |m| !m.segments.is_empty()) {
+                0
+            } else {
+                state.set_status("No segment to duplicate", 1.5);
+                return;
+            }
+        }
+    };
+
+    if let Some(spine_model) = &mut state.spine_model {
+        if let Some(segment) = spine_model.segments.get(seg_idx) {
+            // Clone the segment
+            let mut new_segment = segment.clone();
+
+            // Generate a unique name
+            let base_name = segment.name.trim_end_matches(|c: char| c.is_numeric() || c == '_');
+            let new_name = format!("{}_copy", base_name);
+            new_segment.name = new_name;
+
+            // Offset the new segment (move it to the side)
+            let offset = Vec3::new(50.0, 0.0, 0.0);
+            for joint in &mut new_segment.joints {
+                joint.position = joint.position + offset;
+            }
+
+            // Add the new segment
+            let new_seg_idx = spine_model.segments.len();
+            spine_model.segments.push(new_segment);
+
+            // Select the first joint of the new segment
+            state.selection = ModelerSelection::SpineJoints(vec![(new_seg_idx, 0)]);
+            state.set_status(&format!("Duplicated segment -> segment {}", new_seg_idx), 1.5);
+        }
+    }
+}
+
+/// Handle spine new segment (N key) - create a new segment
+fn handle_spine_new_segment(state: &mut ModelerState) {
+    if let Some(spine_model) = &mut state.spine_model {
+        let new_seg_idx = spine_model.create_default_segment();
+        state.selection = ModelerSelection::SpineJoints(vec![(new_seg_idx, 0)]);
+        state.set_status(&format!("Created new segment {}", new_seg_idx), 1.5);
+    } else {
+        // No spine model exists, create one
+        state.spine_model = Some(crate::modeler::SpineModel::new_empty("new_model"));
+        state.selection = ModelerSelection::SpineJoints(vec![(0, 0)]);
+        state.set_status("Created new spine model", 1.5);
+    }
+}
+
+/// Handle spine delete segment (Shift+X key) - delete the entire segment
+fn handle_spine_delete_segment(state: &mut ModelerState) {
+    // Determine which segment to delete based on selection
+    let seg_idx = match &state.selection {
+        ModelerSelection::SpineJoints(joints) if !joints.is_empty() => joints[0].0,
+        ModelerSelection::SpineBones(bones) if !bones.is_empty() => bones[0].0,
+        _ => {
+            state.set_status("Select a joint or bone to delete its segment", 1.5);
+            return;
+        }
+    };
+
+    if let Some(spine_model) = &mut state.spine_model {
+        if spine_model.remove_segment(seg_idx) {
+            state.selection = ModelerSelection::None;
+            state.set_status(&format!("Deleted segment {}", seg_idx), 1.5);
+        } else {
+            state.set_status("Cannot delete last segment", 1.5);
+        }
+    }
+}
+
+/// Handle spine mirror segment (M key) - create a mirrored copy on X axis
+fn handle_spine_mirror_segment(state: &mut ModelerState) {
+    // Determine which segment to mirror based on selection
+    let seg_idx = match &state.selection {
+        ModelerSelection::SpineJoints(joints) if !joints.is_empty() => joints[0].0,
+        ModelerSelection::SpineBones(bones) if !bones.is_empty() => bones[0].0,
+        _ => {
+            // No selection, try segment 0 if it exists
+            if state.spine_model.as_ref().map_or(false, |m| !m.segments.is_empty()) {
+                0
+            } else {
+                state.set_status("No segment to mirror", 1.5);
+                return;
+            }
+        }
+    };
+
+    if let Some(spine_model) = &mut state.spine_model {
+        if let Some(new_idx) = spine_model.mirror_segment(seg_idx) {
+            state.selection = ModelerSelection::SpineJoints(vec![(new_idx, 0)]);
+            state.set_status(&format!("Mirrored segment -> segment {}", new_idx), 1.5);
+        } else {
+            state.set_status("Failed to mirror segment", 1.5);
         }
     }
 }

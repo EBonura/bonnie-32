@@ -5,7 +5,7 @@
 
 use crate::editor::{EditorState, EditorLayout, ExampleBrowser};
 use crate::landing::LandingState;
-use crate::modeler::{ModelerState, ModelerLayout};
+use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser};
 use crate::tracker::TrackerState;
 use crate::world::Level;
 use macroquad::prelude::Font;
@@ -66,6 +66,7 @@ pub struct WorldEditorState {
 pub struct ModelerToolState {
     pub modeler_state: ModelerState,
     pub modeler_layout: ModelerLayout,
+    pub model_browser: ModelBrowser,
 }
 
 /// Main application state containing all tool states
@@ -109,6 +110,7 @@ impl AppState {
             modeler: ModelerToolState {
                 modeler_state: ModelerState::new(),
                 modeler_layout: ModelerLayout::new(),
+                model_browser: ModelBrowser::default(),
             },
             tracker: TrackerState::new(),
             icon_font,

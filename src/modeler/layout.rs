@@ -1,7 +1,7 @@
 //! Modeler UI layout and rendering
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button};
 use crate::rasterizer::Framebuffer;
 use super::state::{ModelerState, ModelerView, SelectMode, TransformTool};
 use super::viewport::draw_modeler_viewport;
@@ -20,9 +20,11 @@ pub enum ModelerAction {
     New,
     Save,
     SaveAs,
-    Load,
-    Export,
-    Import,
+    PromptLoad,     // Show file dialog
+    Load(String),   // Load specific path
+    Export,         // Browser: download as file
+    Import,         // Browser: upload file
+    BrowseModels,   // Open model browser
 }
 
 /// Modeler layout state (split panel ratios)
@@ -119,7 +121,7 @@ pub fn draw_modeler(
     draw_atlas_panel(ctx, panel_content_rect(atlas_rect, true), state);
 
     draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
-    draw_properties_panel(ctx, panel_content_rect(props_rect, true), state);
+    draw_properties_panel(ctx, panel_content_rect(props_rect, true), state, icon_font);
 
     // Draw timeline if in animate mode
     if let Some(tl_rect) = timeline_rect {
@@ -143,14 +145,36 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     let mut toolbar = Toolbar::new(rect);
 
     // File operations
-    if toolbar.icon_button(ctx, icon::FILE_PLUS, icon_font, "New") {
+    if toolbar.icon_button(ctx, icon::FILE_PLUS, icon_font, "New (Ctrl+N)") {
         action = ModelerAction::New;
     }
-    if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Open") {
-        action = ModelerAction::Load;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Open (Ctrl+O)") {
+            action = ModelerAction::PromptLoad;
+        }
+        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Save (Ctrl+S)") {
+            action = ModelerAction::Save;
+        }
+        if toolbar.icon_button(ctx, icon::SAVE_AS, icon_font, "Save As (Ctrl+Shift+S)") {
+            action = ModelerAction::SaveAs;
+        }
     }
-    if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Save") {
-        action = ModelerAction::Save;
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Upload") {
+            action = ModelerAction::Import;
+        }
+        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Download") {
+            action = ModelerAction::Export;
+        }
+    }
+
+    // Model browser (works on both native and WASM)
+    if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Models") {
+        action = ModelerAction::BrowseModels;
     }
 
     toolbar.separator();
@@ -256,6 +280,20 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
         state.set_status(&format!("Aspect Ratio: {}", mode), 1.5);
     }
+    if toolbar.icon_button_active(ctx, icon::LAYERS, icon_font, "Wireframe Overlay", state.raster_settings.wireframe_overlay) {
+        state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
+        let mode = if state.raster_settings.wireframe_overlay { "ON" } else { "OFF" };
+        state.set_status(&format!("Wireframe overlay: {}", mode), 1.5);
+    }
+
+    toolbar.separator();
+
+    // Snap toggle
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, &format!("Snap to Grid ({}) [S key]", state.snap_settings.grid_size), state.snap_settings.enabled) {
+        state.snap_settings.enabled = !state.snap_settings.enabled;
+        let mode = if state.snap_settings.enabled { "ON" } else { "OFF" };
+        state.set_status(&format!("Grid Snap: {}", mode), 1.5);
+    }
 
     toolbar.separator();
 
@@ -266,6 +304,59 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         state.model.vertex_count(),
         state.model.face_count()
     ));
+
+    toolbar.separator();
+
+    // Current file label (like world editor)
+    let file_label = match &state.current_file {
+        Some(path) => {
+            let name = path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "untitled".to_string());
+            if state.dirty {
+                format!("{}*", name)
+            } else {
+                name
+            }
+        }
+        None => {
+            if state.dirty {
+                "untitled*".to_string()
+            } else {
+                "untitled".to_string()
+            }
+        }
+    };
+    toolbar.label(&file_label);
+
+    // Keyboard shortcuts for file operations
+    let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+             || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+    if ctrl && is_key_pressed(KeyCode::N) && action == ModelerAction::None {
+        action = ModelerAction::New;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if ctrl && is_key_pressed(KeyCode::O) && action == ModelerAction::None {
+            action = ModelerAction::PromptLoad;
+        }
+        if ctrl && shift && is_key_pressed(KeyCode::S) && action == ModelerAction::None {
+            action = ModelerAction::SaveAs;
+        } else if ctrl && is_key_pressed(KeyCode::S) && action == ModelerAction::None {
+            action = ModelerAction::Save;
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        if ctrl && is_key_pressed(KeyCode::O) && action == ModelerAction::None {
+            action = ModelerAction::Import;
+        }
+        if ctrl && is_key_pressed(KeyCode::S) && action == ModelerAction::None {
+            action = ModelerAction::Export;
+        }
+    }
 
     action
 }
@@ -398,7 +489,7 @@ fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
     );
 }
 
-fn draw_properties_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
+fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     let mut y = rect.y;
     let line_height = 18.0;
 
@@ -424,6 +515,12 @@ fn draw_properties_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState)
         super::state::ModelerSelection::Faces { part, faces } => {
             draw_text(&format!("{} face(s) in part {}", faces.len(), part), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
+        super::state::ModelerSelection::SpineJoints(joints) => {
+            draw_text(&format!("{} spine joint(s)", joints.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::SpineBones(bones) => {
+            draw_text(&format!("{} spine bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
     }
 
     y += line_height * 2.0;
@@ -432,6 +529,134 @@ fn draw_properties_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState)
     draw_text("Tool:", rect.x, y + 14.0, 12.0, TEXT_DIM);
     y += line_height;
     draw_text(state.tool.label(), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+
+    y += line_height * 2.0;
+
+    // Spine segment properties (when spine model exists)
+    // First, read all values we need
+    let segment_info: Option<(usize, String, u8, bool, bool)> = {
+        let seg_idx = match &state.selection {
+            super::state::ModelerSelection::SpineJoints(joints) if !joints.is_empty() => joints[0].0,
+            super::state::ModelerSelection::SpineBones(bones) if !bones.is_empty() => bones[0].0,
+            _ => 0,
+        };
+
+        state.spine_model.as_ref().and_then(|spine_model| {
+            spine_model.segments.get(seg_idx).map(|segment| {
+                (seg_idx, segment.name.clone(), segment.sides, segment.cap_start, segment.cap_end)
+            })
+        })
+    };
+
+    if let Some((seg_idx, name, sides, cap_start, cap_end)) = segment_info {
+        draw_text("Segment:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+        y += line_height;
+        draw_text(&name, rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        y += line_height * 1.5;
+
+        // Sides control
+        draw_text("Sides:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+        y += line_height;
+
+        let btn_size = 20.0;
+        let minus_rect = Rect::new(rect.x, y, btn_size, btn_size);
+        let value_x = rect.x + btn_size + 4.0;
+        let plus_rect = Rect::new(value_x + 30.0, y, btn_size, btn_size);
+
+        // Draw current value
+        draw_text(&format!("{}", sides), value_x + 8.0, y + 14.0, 12.0, TEXT_COLOR);
+
+        // Minus button
+        if icon_button(ctx, minus_rect, icon::MINUS, icon_font, "Decrease sides") {
+            if let Some(spine_model) = &mut state.spine_model {
+                if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                    if segment.sides > 3 {
+                        segment.sides -= 1;
+                    }
+                }
+            }
+            state.set_status(&format!("Sides: {}", sides.saturating_sub(1).max(3)), 0.5);
+        }
+
+        // Plus button
+        if icon_button(ctx, plus_rect, icon::PLUS, icon_font, "Increase sides") {
+            if let Some(spine_model) = &mut state.spine_model {
+                if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                    if segment.sides < 24 {
+                        segment.sides += 1;
+                    }
+                }
+            }
+            state.set_status(&format!("Sides: {}", (sides + 1).min(24)), 0.5);
+        }
+
+        y += btn_size + 8.0;
+
+        // Cap controls
+        draw_text("Caps:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+        y += line_height;
+
+        // Start cap toggle
+        let start_rect = Rect::new(rect.x, y, 60.0, 18.0);
+        let start_color = if cap_start { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+        draw_rectangle(start_rect.x, start_rect.y, start_rect.w, start_rect.h, start_color);
+        draw_text("Start", start_rect.x + 8.0, start_rect.y + 13.0, 11.0, TEXT_COLOR);
+
+        if ctx.mouse.inside(&start_rect) && ctx.mouse.left_pressed {
+            if let Some(spine_model) = &mut state.spine_model {
+                if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                    segment.cap_start = !segment.cap_start;
+                }
+            }
+            let status = if !cap_start { "Start cap ON" } else { "Start cap OFF" };
+            state.set_status(status, 0.5);
+        }
+
+        // End cap toggle
+        let end_rect = Rect::new(rect.x + 65.0, y, 60.0, 18.0);
+        let end_color = if cap_end { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+        draw_rectangle(end_rect.x, end_rect.y, end_rect.w, end_rect.h, end_color);
+        draw_text("End", end_rect.x + 14.0, end_rect.y + 13.0, 11.0, TEXT_COLOR);
+
+        if ctx.mouse.inside(&end_rect) && ctx.mouse.left_pressed {
+            if let Some(spine_model) = &mut state.spine_model {
+                if let Some(segment) = spine_model.segments.get_mut(seg_idx) {
+                    segment.cap_end = !segment.cap_end;
+                }
+            }
+            let status = if !cap_end { "End cap ON" } else { "End cap OFF" };
+            state.set_status(status, 0.5);
+        }
+
+        y += 30.0;
+    }
+
+    // Keyboard shortcuts help (always show when spine model exists)
+    if state.spine_model.is_some() {
+        draw_text("Shortcuts:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+        y += line_height;
+
+        let shortcuts = [
+            ("E", "Extrude joint"),
+            ("X", "Delete joint/bone"),
+            ("W", "Subdivide bone"),
+            ("D", "Duplicate segment"),
+            ("N", "New segment"),
+            ("M", "Mirror segment"),
+            ("Shift+X", "Delete segment"),
+            ("Shift+Click", "Multi-select"),
+            ("S", "Toggle snap"),
+            ("Scroll", "Adjust radius"),
+        ];
+
+        for (key, desc) in shortcuts {
+            if y + line_height > rect.bottom() {
+                break;
+            }
+            draw_text(&format!("{}: {}", key, desc), rect.x, y + 12.0, 10.0, TEXT_DIM);
+            y += line_height * 0.8;
+        }
+    }
 }
 
 fn draw_timeline(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
@@ -516,13 +741,17 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
         draw_text(msg, center_x, rect.y + 15.0, 14.0, Color::from_rgba(100, 255, 100, 255));
     }
 
-    // Keyboard hints
-    let hints = match state.view {
-        ModelerView::Model => "G:Move R:Rotate S:Scale E:Extrude X:Delete",
-        ModelerView::UV => "G:Move S:Scale U:Unwrap",
-        ModelerView::Paint => "LMB:Paint Shift+LMB:Pick [/]:Brush Size",
-        ModelerView::Hierarchy => "Drag to reparent | Del:Delete part",
-        ModelerView::Animate => "Space:Play I:Insert Key K:Delete Key",
+    // Keyboard hints - show spine hints if spine model is active
+    let hints = if state.spine_model.is_some() && state.view == ModelerView::Model {
+        "E:Extrude X:Del W:Subdivide D:Dup N:New M:Mirror Shift+X:Del Seg"
+    } else {
+        match state.view {
+            ModelerView::Model => "G:Move R:Rotate S:Scale E:Extrude X:Delete",
+            ModelerView::UV => "G:Move S:Scale U:Unwrap",
+            ModelerView::Paint => "LMB:Paint Shift+LMB:Pick [/]:Brush Size",
+            ModelerView::Hierarchy => "Drag to reparent | Del:Delete part",
+            ModelerView::Animate => "Space:Play I:Insert Key K:Delete Key",
+        }
     };
     draw_text(hints, rect.right() - (hints.len() as f32 * 6.0) - 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
 }
@@ -539,6 +768,9 @@ fn handle_keyboard(state: &mut ModelerState) {
             state.undo();
         }
     }
+
+    // File shortcuts (Ctrl+N, Ctrl+S, etc.) are now handled in draw_toolbar
+    // to properly return ModelerAction
 
     // View mode cycling
     if is_key_pressed(KeyCode::Tab) {

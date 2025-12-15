@@ -13,6 +13,8 @@ mod model;
 mod state;
 mod layout;
 mod viewport;
+mod spine;
+mod model_browser;
 
 // Re-export public API
 // Some of these aren't used externally yet but are part of the intended public API
@@ -22,3 +24,5 @@ pub use state::*;
 pub use layout::*;
 #[allow(unused_imports)]
 pub use viewport::*;
+pub use spine::*;
+pub use model_browser::*;

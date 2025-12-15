@@ -537,6 +537,7 @@ pub fn render_mesh(
     // Build surfaces for front-faces and collect back-faces for wireframe
     let mut surfaces: Vec<Surface> = Vec::with_capacity(faces.len());
     let mut backface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+    let mut frontface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
 
     for (face_idx, face) in faces.iter().enumerate() {
         let v1 = projected[face.v0];
@@ -624,6 +625,11 @@ pub fn render_mesh(
                 normal,
                 face_idx,
             });
+
+            // Collect for wireframe overlay
+            if settings.wireframe_overlay {
+                frontface_wireframes.push((v1, v2, v3));
+            }
         }
     }
 
@@ -648,35 +654,69 @@ pub fn render_mesh(
     // Only draw if backface culling is enabled (otherwise they're rendered solid above)
     if settings.backface_cull {
         // Deduplicate edges to avoid drawing shared edges twice (which causes double-line artifacts)
-        // Use a Vec to collect unique edges - compare by rounded screen coordinates
-        let mut unique_edges: Vec<(i32, i32, i32, i32)> = Vec::new();
+        // Include z values for depth testing
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
 
         for (v1, v2, v3) in &backface_wireframes {
             let edges = [
-                (v1.x as i32, v1.y as i32, v2.x as i32, v2.y as i32),
-                (v2.x as i32, v2.y as i32, v3.x as i32, v3.y as i32),
-                (v3.x as i32, v3.y as i32, v1.x as i32, v1.y as i32),
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
             ];
 
-            for (x0, y0, x1, y1) in edges {
+            for (x0, y0, z0, x1, y1, z1) in edges {
                 // Normalize edge direction so (a,b)-(c,d) and (c,d)-(a,b) are the same
                 let edge = if (x0, y0) < (x1, y1) {
-                    (x0, y0, x1, y1)
+                    (x0, y0, z0, x1, y1, z1)
                 } else {
-                    (x1, y1, x0, y0)
+                    (x1, y1, z1, x0, y0, z0)
                 };
 
-                // Only add if not already present
-                if !unique_edges.contains(&edge) {
+                // Only add if not already present (compare just screen coords for dedup)
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
                     unique_edges.push(edge);
                 }
             }
         }
 
-        // Draw each unique edge once
+        // Draw each unique edge once with depth testing
         let wireframe_color = Color::new(80, 80, 100);
-        for (x0, y0, x1, y1) in unique_edges {
-            fb.draw_line(x0, y0, x1, y1, wireframe_color);
+        for (x0, y0, z0, x1, y1, z1) in unique_edges {
+            fb.draw_line_3d(x0, y0, z0, x1, y1, z1, wireframe_color);
+        }
+    }
+
+    // Draw wireframes for front-faces (overlay on top of solid geometry)
+    if settings.wireframe_overlay && !frontface_wireframes.is_empty() {
+        // Deduplicate edges
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
+
+        for (v1, v2, v3) in &frontface_wireframes {
+            let edges = [
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
+            ];
+
+            for (x0, y0, z0, x1, y1, z1) in edges {
+                // Normalize edge direction for deduplication
+                let edge = if (x0, y0) < (x1, y1) {
+                    (x0, y0, z0, x1, y1, z1)
+                } else {
+                    (x1, y1, z1, x0, y0, z0)
+                };
+
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
+                    unique_edges.push(edge);
+                }
+            }
+        }
+
+        // Draw front-face wireframe with a brighter color (on top, no depth test needed since it's on visible faces)
+        let front_wireframe_color = Color::new(200, 200, 220);
+        for (x0, y0, _z0, x1, y1, _z1) in unique_edges {
+            // Draw without depth testing since these are on front faces (already visible)
+            fb.draw_line(x0, y0, x1, y1, front_wireframe_color);
         }
     }
 }
