@@ -31,6 +31,8 @@ pub struct ExampleBrowser {
     pub last_mouse: (f32, f32),
     /// Scroll offset for the list
     pub scroll_offset: f32,
+    /// Path pending async load (WASM)
+    pub pending_load_path: Option<std::path::PathBuf>,
 }
 
 impl Default for ExampleBrowser {
@@ -48,6 +50,7 @@ impl Default for ExampleBrowser {
             dragging: false,
             last_mouse: (0.0, 0.0),
             scroll_offset: 0.0,
+            pending_load_path: None,
         }
     }
 }

@@ -91,11 +91,25 @@ pub async fn load_example_level(path: &PathBuf) -> Option<Level> {
     #[cfg(target_arch = "wasm32")]
     {
         use macroquad::prelude::*;
-        let path_str = path.to_string_lossy();
+        // Convert path to string for fetch - ensure forward slashes
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        macroquad::logging::info!("load_example_level: fetching {}", path_str);
         match load_string(&path_str).await {
-            Ok(contents) => load_level_from_str(&contents).ok(),
+            Ok(contents) => {
+                macroquad::logging::info!("load_example_level: got {} bytes", contents.len());
+                match load_level_from_str(&contents) {
+                    Ok(level) => {
+                        macroquad::logging::info!("load_example_level: parsed {} rooms", level.rooms.len());
+                        Some(level)
+                    }
+                    Err(e) => {
+                        macroquad::logging::error!("load_example_level: parse error: {}", e);
+                        None
+                    }
+                }
+            }
             Err(e) => {
-                eprintln!("Failed to load example level: {}", e);
+                macroquad::logging::error!("load_example_level: fetch error: {}", e);
                 None
             }
         }

@@ -274,11 +274,11 @@ async fn main() {
 
                     match browser_action {
                         BrowserAction::SelectPreview(index) => {
-                            // Load the preview synchronously
                             if let Some(example) = ws.example_browser.examples.get(index) {
                                 let path = example.path.clone();
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
+                                    // Native: load synchronously
                                     match load_level(&path) {
                                         Ok(level) => {
                                             println!("Loaded example level with {} rooms", level.rooms.len());
@@ -289,6 +289,11 @@ async fn main() {
                                             ws.editor_state.set_status(&format!("Failed to load: {}", e), 3.0);
                                         }
                                     }
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    // WASM: set pending path for async load
+                                    ws.example_browser.pending_load_path = Some(path);
                                 }
                             }
                         }
@@ -317,6 +322,24 @@ async fn main() {
                             ws.example_browser.close();
                         }
                         BrowserAction::None => {}
+                    }
+
+                    // Handle pending async level load (WASM)
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(path) = ws.example_browser.pending_load_path.take() {
+                        use editor::load_example_level;
+                        let path_str = path.to_string_lossy().to_string();
+                        macroquad::logging::info!("WASM: Loading level from path: {}", path_str);
+                        match load_example_level(&path).await {
+                            Some(level) => {
+                                macroquad::logging::info!("WASM: Level loaded with {} rooms", level.rooms.len());
+                                ws.example_browser.set_preview(level);
+                            }
+                            None => {
+                                macroquad::logging::error!("WASM: Failed to load level from {}", path_str);
+                                ws.editor_state.set_status("Failed to load level preview", 3.0);
+                            }
+                        }
                     }
                 }
             }
