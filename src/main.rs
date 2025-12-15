@@ -272,8 +272,14 @@ async fn main() {
                         &mut fb,
                     );
 
+                    #[cfg(target_arch = "wasm32")]
+                    macroquad::logging::info!("Browser action: {:?}", browser_action);
+
                     match browser_action {
                         BrowserAction::SelectPreview(index) => {
+                            #[cfg(target_arch = "wasm32")]
+                            macroquad::logging::info!("SelectPreview({}) - setting pending path", index);
+
                             if let Some(example) = ws.example_browser.examples.get(index) {
                                 let path = example.path.clone();
                                 #[cfg(not(target_arch = "wasm32"))]
@@ -293,6 +299,7 @@ async fn main() {
                                 #[cfg(target_arch = "wasm32")]
                                 {
                                     // WASM: set pending path for async load
+                                    macroquad::logging::info!("Setting pending_load_path: {:?}", path);
                                     ws.example_browser.pending_load_path = Some(path);
                                 }
                             }
