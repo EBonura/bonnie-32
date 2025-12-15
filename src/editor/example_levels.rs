@@ -93,25 +93,9 @@ pub async fn load_example_level(path: &PathBuf) -> Option<Level> {
         use macroquad::prelude::*;
         // Convert path to string for fetch - ensure forward slashes
         let path_str = path.to_string_lossy().replace('\\', "/");
-        macroquad::logging::info!("load_example_level: fetching {}", path_str);
         match load_string(&path_str).await {
-            Ok(contents) => {
-                macroquad::logging::info!("load_example_level: got {} bytes", contents.len());
-                match load_level_from_str(&contents) {
-                    Ok(level) => {
-                        macroquad::logging::info!("load_example_level: parsed {} rooms", level.rooms.len());
-                        Some(level)
-                    }
-                    Err(e) => {
-                        macroquad::logging::error!("load_example_level: parse error: {}", e);
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                macroquad::logging::error!("load_example_level: fetch error: {}", e);
-                None
-            }
+            Ok(contents) => load_level_from_str(&contents).ok(),
+            Err(_) => None,
         }
     }
 }
