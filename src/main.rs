@@ -272,14 +272,8 @@ async fn main() {
                         &mut fb,
                     );
 
-                    #[cfg(target_arch = "wasm32")]
-                    macroquad::logging::info!("Browser action: {:?}", browser_action);
-
                     match browser_action {
                         BrowserAction::SelectPreview(index) => {
-                            #[cfg(target_arch = "wasm32")]
-                            macroquad::logging::info!("SelectPreview({}) - setting pending path", index);
-
                             if let Some(example) = ws.example_browser.examples.get(index) {
                                 let path = example.path.clone();
                                 #[cfg(not(target_arch = "wasm32"))]
@@ -298,8 +292,7 @@ async fn main() {
                                 }
                                 #[cfg(target_arch = "wasm32")]
                                 {
-                                    // WASM: set pending path for async load
-                                    macroquad::logging::info!("Setting pending_load_path: {:?}", path);
+                                    // WASM: set pending path for async load (handled after drawing)
                                     ws.example_browser.pending_load_path = Some(path);
                                 }
                             }
@@ -330,17 +323,6 @@ async fn main() {
                             ws.example_browser.close();
                         }
                         BrowserAction::None => {}
-                    }
-
-                    // Handle pending async level load (WASM)
-                    #[cfg(target_arch = "wasm32")]
-                    if let Some(path) = ws.example_browser.pending_load_path.take() {
-                        use editor::load_example_level;
-                        if let Some(level) = load_example_level(&path).await {
-                            ws.example_browser.set_preview(level);
-                        } else {
-                            ws.editor_state.set_status("Failed to load level preview", 3.0);
-                        }
                     }
                 }
             }
@@ -375,6 +357,20 @@ async fn main() {
 
         // Draw tooltips last (on top of everything)
         ui_ctx.draw_tooltip();
+
+        // Handle pending async level load (WASM) - after all drawing is complete
+        #[cfg(target_arch = "wasm32")]
+        if let Tool::WorldEditor = app.active_tool {
+            let ws = &mut app.world_editor;
+            if let Some(path) = ws.example_browser.pending_load_path.take() {
+                use editor::load_example_level;
+                if let Some(level) = load_example_level(&path).await {
+                    ws.example_browser.set_preview(level);
+                } else {
+                    ws.editor_state.set_status("Failed to load level preview", 3.0);
+                }
+            }
+        }
 
         next_frame().await;
     }
