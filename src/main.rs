@@ -305,23 +305,24 @@ async fn main() {
                             }
                         }
                         BrowserAction::OpenLevel => {
-                            // Load the selected level with its file path preserved
+                            // Load the selected level, preserving texture packs and other state
                             if let Some(level) = ws.example_browser.preview_level.take() {
                                 let (name, path) = ws.example_browser.selected_example()
                                     .map(|e| (e.name.clone(), e.path.clone()))
                                     .unwrap_or_else(|| ("example".to_string(), PathBuf::from("assets/levels/untitled.ron")));
                                 ws.editor_layout.apply_config(&level.editor_layout);
-                                // Use with_file to preserve the file path for saving
-                                ws.editor_state = editor::EditorState::with_file(level, path);
+                                // Use load_level to preserve texture packs (important for WASM)
+                                ws.editor_state.load_level(level, path);
                                 ws.editor_state.set_status(&format!("Opened: {}", name), 3.0);
                                 ws.example_browser.close();
                             }
                         }
                         BrowserAction::NewLevel => {
-                            // Start with a fresh empty level
+                            // Start with a fresh empty level, preserving texture packs
                             let new_level = create_empty_level();
-                            ws.editor_state = editor::EditorState::new(new_level);
-                            ws.editor_layout.apply_config(&ws.editor_state.level.editor_layout);
+                            ws.editor_layout.apply_config(&new_level.editor_layout);
+                            ws.editor_state.load_level(new_level, PathBuf::from("assets/levels/untitled.ron"));
+                            ws.editor_state.current_file = None; // New level has no file yet
                             ws.editor_state.set_status("New level created", 3.0);
                             ws.example_browser.close();
                         }
@@ -335,17 +336,10 @@ async fn main() {
                     #[cfg(target_arch = "wasm32")]
                     if let Some(path) = ws.example_browser.pending_load_path.take() {
                         use editor::load_example_level;
-                        let path_str = path.to_string_lossy().to_string();
-                        macroquad::logging::info!("WASM: Loading level from path: {}", path_str);
-                        match load_example_level(&path).await {
-                            Some(level) => {
-                                macroquad::logging::info!("WASM: Level loaded with {} rooms", level.rooms.len());
-                                ws.example_browser.set_preview(level);
-                            }
-                            None => {
-                                macroquad::logging::error!("WASM: Failed to load level from {}", path_str);
-                                ws.editor_state.set_status("Failed to load level preview", 3.0);
-                            }
+                        if let Some(level) = load_example_level(&path).await {
+                            ws.example_browser.set_preview(level);
+                        } else {
+                            ws.editor_state.set_status("Failed to load level preview", 3.0);
                         }
                     }
                 }
