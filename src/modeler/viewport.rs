@@ -9,7 +9,7 @@ use crate::rasterizer::{
     mat4_identity, mat4_mul, mat4_transform_point, mat4_from_position_rotation,
     mat4_rotation, mat4_translation,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, TransformTool, Axis, GizmoHandle};
+use super::state::{ModelerState, ModelerSelection, SelectMode, TransformTool, Axis, GizmoHandle, ModalTransform};
 use super::model::{Model, PartTransform};
 use super::spine::SpineModel;
 
@@ -181,6 +181,342 @@ fn handle_bone_transforms(
     }
 }
 
+/// Get all selected element positions for modal transforms
+fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
+    let mut positions = Vec::new();
+
+    match &state.selection {
+        ModelerSelection::SpineJoints(joints) => {
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, joint_idx) in joints {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let Some(joint) = segment.joints.get(*joint_idx) {
+                            positions.push(joint.position);
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineBones(bones) => {
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, bone_idx) in bones {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let Some(joint_a) = segment.joints.get(*bone_idx) {
+                            positions.push(joint_a.position);
+                        }
+                        if let Some(joint_b) = segment.joints.get(*bone_idx + 1) {
+                            positions.push(joint_b.position);
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineMeshVertices(verts) => {
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, vert_idx) in verts {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let Some(mesh_verts) = &segment.mesh_vertices {
+                            if let Some(vert) = mesh_verts.get(*vert_idx) {
+                                positions.push(vert.pos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineMeshEdges(edges) => {
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, (v0, v1)) in edges {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let Some(mesh_verts) = &segment.mesh_vertices {
+                            if let Some(vert0) = mesh_verts.get(*v0) {
+                                positions.push(vert0.pos);
+                            }
+                            if let Some(vert1) = mesh_verts.get(*v1) {
+                                positions.push(vert1.pos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineMeshFaces(faces) => {
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, face_idx) in faces {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let (Some(mesh_verts), Some(mesh_faces)) = (&segment.mesh_vertices, &segment.mesh_faces) {
+                            if let Some(face) = mesh_faces.get(*face_idx) {
+                                if let Some(v0) = mesh_verts.get(face.v0) {
+                                    positions.push(v0.pos);
+                                }
+                                if let Some(v1) = mesh_verts.get(face.v1) {
+                                    positions.push(v1.pos);
+                                }
+                                if let Some(v2) = mesh_verts.get(face.v2) {
+                                    positions.push(v2.pos);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    positions
+}
+
+/// Apply positions back to selected elements
+fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
+    let mut pos_idx = 0;
+
+    match &state.selection.clone() {
+        ModelerSelection::SpineJoints(joints) => {
+            if let Some(spine_model) = &mut state.spine_model {
+                for (seg_idx, joint_idx) in joints {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(joint) = segment.joints.get_mut(*joint_idx) {
+                            if let Some(&new_pos) = positions.get(pos_idx) {
+                                joint.position = new_pos;
+                            }
+                            pos_idx += 1;
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineBones(bones) => {
+            if let Some(spine_model) = &mut state.spine_model {
+                for (seg_idx, bone_idx) in bones {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(joint_a) = segment.joints.get_mut(*bone_idx) {
+                            if let Some(&new_pos) = positions.get(pos_idx) {
+                                joint_a.position = new_pos;
+                            }
+                            pos_idx += 1;
+                        }
+                        if let Some(joint_b) = segment.joints.get_mut(*bone_idx + 1) {
+                            if let Some(&new_pos) = positions.get(pos_idx) {
+                                joint_b.position = new_pos;
+                            }
+                            pos_idx += 1;
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineMeshVertices(verts) => {
+            if let Some(spine_model) = &mut state.spine_model {
+                for (seg_idx, vert_idx) in verts {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(mesh_verts) = &mut segment.mesh_vertices {
+                            if let Some(vert) = mesh_verts.get_mut(*vert_idx) {
+                                if let Some(&new_pos) = positions.get(pos_idx) {
+                                    vert.pos = new_pos;
+                                }
+                                pos_idx += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineMeshEdges(edges) => {
+            if let Some(spine_model) = &mut state.spine_model {
+                for (seg_idx, (v0, v1)) in edges {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(mesh_verts) = &mut segment.mesh_vertices {
+                            if let Some(vert0) = mesh_verts.get_mut(*v0) {
+                                if let Some(&new_pos) = positions.get(pos_idx) {
+                                    vert0.pos = new_pos;
+                                }
+                                pos_idx += 1;
+                            }
+                            if let Some(vert1) = mesh_verts.get_mut(*v1) {
+                                if let Some(&new_pos) = positions.get(pos_idx) {
+                                    vert1.pos = new_pos;
+                                }
+                                pos_idx += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ModelerSelection::SpineMeshFaces(faces) => {
+            if let Some(spine_model) = &mut state.spine_model {
+                for (seg_idx, face_idx) in faces {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let (Some(mesh_verts), Some(mesh_faces)) = (&mut segment.mesh_vertices, &segment.mesh_faces.clone()) {
+                            if let Some(face) = mesh_faces.get(*face_idx) {
+                                if let Some(v0) = mesh_verts.get_mut(face.v0) {
+                                    if let Some(&new_pos) = positions.get(pos_idx) {
+                                        v0.pos = new_pos;
+                                    }
+                                    pos_idx += 1;
+                                }
+                                if let Some(v1) = mesh_verts.get_mut(face.v1) {
+                                    if let Some(&new_pos) = positions.get(pos_idx) {
+                                        v1.pos = new_pos;
+                                    }
+                                    pos_idx += 1;
+                                }
+                                if let Some(v2) = mesh_verts.get_mut(face.v2) {
+                                    if let Some(&new_pos) = positions.get(pos_idx) {
+                                        v2.pos = new_pos;
+                                    }
+                                    pos_idx += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    state.spine_mesh_dirty = true;
+}
+
+/// Handle active modal transform (G/S/R)
+fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), _inside_viewport: bool) {
+    if state.modal_transform == ModalTransform::None {
+        return;
+    }
+
+    // Check for axis constraints
+    if is_key_pressed(KeyCode::X) {
+        state.axis_lock = Some(Axis::X);
+        state.set_status(&format!("{} constrained to X axis", state.modal_transform.label()), 2.0);
+    }
+    if is_key_pressed(KeyCode::Y) {
+        state.axis_lock = Some(Axis::Y);
+        state.set_status(&format!("{} constrained to Y axis", state.modal_transform.label()), 2.0);
+    }
+    if is_key_pressed(KeyCode::Z) {
+        state.axis_lock = Some(Axis::Z);
+        state.set_status(&format!("{} constrained to Z axis", state.modal_transform.label()), 2.0);
+    }
+
+    // Calculate mouse delta from start
+    let dx = mouse_pos.0 - state.modal_transform_start_mouse.0;
+    let dy = mouse_pos.1 - state.modal_transform_start_mouse.1;
+
+    // Calculate new positions based on transform type
+    let new_positions: Vec<Vec3> = match state.modal_transform {
+        ModalTransform::Grab => {
+            // Move: translate by mouse delta
+            let move_scale = 0.5; // Pixels to world units
+            let move_x = dx * move_scale;
+            let move_y = -dy * move_scale; // Invert Y for screen coords
+
+            // Get camera vectors for world-space movement
+            let cam_right = state.camera.basis_x;
+            let cam_up = state.camera.basis_y;
+
+            state.modal_transform_start_positions.iter().map(|&start_pos| {
+                let delta = match state.axis_lock {
+                    Some(Axis::X) => Vec3::new(move_x + move_y, 0.0, 0.0),
+                    Some(Axis::Y) => Vec3::new(0.0, move_x + move_y, 0.0),
+                    Some(Axis::Z) => Vec3::new(0.0, 0.0, move_x + move_y),
+                    None => cam_right * move_x + cam_up * move_y,
+                };
+                start_pos + delta
+            }).collect()
+        }
+        ModalTransform::Scale => {
+            // Scale factor based on horizontal mouse movement (like Blender)
+            let scale = (1.0 + dx * 0.01).max(0.01);
+
+            state.modal_transform_start_positions.iter().map(|&start_pos| {
+                let offset = start_pos - state.modal_transform_center;
+                let scaled_offset = match state.axis_lock {
+                    Some(Axis::X) => Vec3::new(offset.x * scale, offset.y, offset.z),
+                    Some(Axis::Y) => Vec3::new(offset.x, offset.y * scale, offset.z),
+                    Some(Axis::Z) => Vec3::new(offset.x, offset.y, offset.z * scale),
+                    None => offset * scale,
+                };
+                state.modal_transform_center + scaled_offset
+            }).collect()
+        }
+        ModalTransform::Rotate => {
+            // Rotate: rotate around center based on mouse horizontal movement
+            let angle = dx * 0.01; // Radians per pixel
+
+            state.modal_transform_start_positions.iter().map(|&start_pos| {
+                let offset = start_pos - state.modal_transform_center;
+
+                // Rotate based on axis constraint
+                let rotated_offset = match state.axis_lock {
+                    Some(Axis::X) => {
+                        // Rotate around X axis
+                        let cos_a = angle.cos();
+                        let sin_a = angle.sin();
+                        Vec3::new(
+                            offset.x,
+                            offset.y * cos_a - offset.z * sin_a,
+                            offset.y * sin_a + offset.z * cos_a,
+                        )
+                    }
+                    Some(Axis::Y) => {
+                        // Rotate around Y axis
+                        let cos_a = angle.cos();
+                        let sin_a = angle.sin();
+                        Vec3::new(
+                            offset.x * cos_a + offset.z * sin_a,
+                            offset.y,
+                            -offset.x * sin_a + offset.z * cos_a,
+                        )
+                    }
+                    Some(Axis::Z) => {
+                        // Rotate around Z axis
+                        let cos_a = angle.cos();
+                        let sin_a = angle.sin();
+                        Vec3::new(
+                            offset.x * cos_a - offset.y * sin_a,
+                            offset.x * sin_a + offset.y * cos_a,
+                            offset.z,
+                        )
+                    }
+                    None => {
+                        // Default: rotate around Y axis (vertical axis)
+                        let cos_a = angle.cos();
+                        let sin_a = angle.sin();
+                        Vec3::new(
+                            offset.x * cos_a + offset.z * sin_a,
+                            offset.y,
+                            -offset.x * sin_a + offset.z * cos_a,
+                        )
+                    }
+                };
+
+                state.modal_transform_center + rotated_offset
+            }).collect()
+        }
+        ModalTransform::None => return,
+    };
+
+    // Apply positions temporarily (real-time preview)
+    apply_selected_positions(state, &new_positions);
+
+    // Confirm on left click
+    if is_mouse_button_pressed(MouseButton::Left) {
+        state.modal_transform = ModalTransform::None;
+        state.dirty = true;
+        state.set_status("Transform applied", 1.0);
+    }
+
+    // Cancel on ESC or right click
+    if is_key_pressed(KeyCode::Escape) || is_mouse_button_pressed(MouseButton::Right) {
+        // Restore original positions
+        apply_selected_positions(state, &state.modal_transform_start_positions.clone());
+        state.modal_transform = ModalTransform::None;
+        state.set_status("Transform cancelled", 1.0);
+    }
+}
+
 /// Compute world matrices for all parts given animation pose
 fn compute_world_matrices(model: &Model, pose: &[PartTransform]) -> Vec<Mat4> {
     let mut matrices = Vec::with_capacity(model.parts.len());
@@ -293,61 +629,111 @@ pub fn draw_modeler_viewport(
         state.viewport_mouse_captured = false;
     }
 
-    // Mouse wheel: adjust radius (if spine joint selected) OR zoom
+    // Mouse wheel: zoom
     if inside_viewport {
         let scroll = mouse_wheel().1;
         if scroll != 0.0 {
-            // Check if we have a spine joint selected
-            let has_spine_selection = matches!(&state.selection, ModelerSelection::SpineJoints(j) if !j.is_empty());
-
-            if has_spine_selection {
-                // Adjust radius of selected joint(s)
-                if let ModelerSelection::SpineJoints(joints) = &state.selection {
-                    let joints = joints.clone();
-                    // Smaller delta for finer control (was 2.0, now 0.5)
-                    let delta = if scroll > 0.0 { 0.5 } else { -0.5 };
-                    let mut new_radius = 0.0;
-
-                    if let Some(spine_model) = &mut state.spine_model {
-                        for (seg_idx, joint_idx) in &joints {
-                            if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
-                                if let Some(joint) = segment.joints.get_mut(*joint_idx) {
-                                    joint.radius = (joint.radius + delta).max(1.0);
-                                    new_radius = joint.radius;
-                                }
-                            }
-                        }
-                    }
-
-                    // Show feedback (outside of spine_model borrow)
-                    state.set_status(&format!("Radius: {:.1}", new_radius), 0.5);
-                }
-            } else {
-                // Normal zoom behavior
-                let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
-                state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(50.0, 2000.0);
-                state.sync_camera_from_orbit();
-            }
+            let zoom_factor = if scroll > 0.0 { 0.98 } else { 1.02 };
+            state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(50.0, 2000.0);
+            state.sync_camera_from_orbit();
         }
     }
 
     // Update mouse position for next frame
     state.viewport_last_mouse = mouse_pos;
 
-    // Toggle snap with 'S' key (when not dragging)
-    if inside_viewport && is_key_pressed(KeyCode::S) && !state.spine_drag_active && !state.transform_active {
-        state.snap_settings.enabled = !state.snap_settings.enabled;
-        let status = if state.snap_settings.enabled {
-            format!("Snap ON (grid: {})", state.snap_settings.grid_size)
-        } else {
-            "Snap OFF".to_string()
-        };
-        state.set_status(&status, 1.5);
+    // Selection mode switching with 1/2/3 keys (Blender style)
+    // 1 = Vertex, 2 = Edge, 3 = Face, 4 = Bone
+    if inside_viewport && !state.spine_drag_active && !state.transform_active {
+        if is_key_pressed(KeyCode::Key1) {
+            state.select_mode = SelectMode::Vertex;
+            state.selection = ModelerSelection::None;
+            // Bake mesh for vertex editing
+            if let Some(spine_model) = &mut state.spine_model {
+                for segment in &mut spine_model.segments {
+                    if !segment.has_editable_mesh() {
+                        segment.bake_mesh();
+                    }
+                }
+            }
+            state.set_status("Vertex mode (mesh baked)", 1.0);
+        } else if is_key_pressed(KeyCode::Key2) {
+            state.select_mode = SelectMode::Edge;
+            state.selection = ModelerSelection::None;
+            // Bake mesh for edge editing
+            if let Some(spine_model) = &mut state.spine_model {
+                for segment in &mut spine_model.segments {
+                    if !segment.has_editable_mesh() {
+                        segment.bake_mesh();
+                    }
+                }
+            }
+            state.set_status("Edge mode (mesh baked)", 1.0);
+        } else if is_key_pressed(KeyCode::Key3) {
+            state.select_mode = SelectMode::Face;
+            state.selection = ModelerSelection::None;
+            // Bake mesh for face editing
+            if let Some(spine_model) = &mut state.spine_model {
+                for segment in &mut spine_model.segments {
+                    if !segment.has_editable_mesh() {
+                        segment.bake_mesh();
+                    }
+                }
+            }
+            state.set_status("Face mode (mesh baked)", 1.0);
+        } else if is_key_pressed(KeyCode::Key4) {
+            state.select_mode = SelectMode::Bone;
+            state.selection = ModelerSelection::None;
+            state.set_status("Bone mode", 1.0);
+        }
     }
 
-    // Extrude (E key) - add new joint at end of spine when end joint is selected
+    // Modal transforms: G = Grab, S = Scale, R = Rotate (Blender-style)
+    // Only start if we have a selection and no transform is already active
+    let has_selection = !state.selection.is_empty();
+    let no_transform_active = !state.spine_drag_active && !state.transform_active && state.modal_transform == ModalTransform::None;
+
+    if inside_viewport && has_selection && no_transform_active {
+        let start_modal = |mode: ModalTransform, state: &mut ModelerState, mouse: (f32, f32)| {
+            // Collect all selected positions
+            let positions = get_selected_positions(state);
+            if positions.is_empty() {
+                return;
+            }
+
+            // Calculate center of selection
+            let center = positions.iter().fold(Vec3::ZERO, |acc, p| acc + *p) * (1.0 / positions.len() as f32);
+
+            state.modal_transform = mode;
+            state.modal_transform_start_mouse = mouse;
+            state.modal_transform_start_positions = positions;
+            state.modal_transform_center = center;
+            state.axis_lock = None;
+
+            state.set_status(&format!("{} - move mouse, click to confirm, ESC to cancel, X/Y/Z to constrain", mode.label()), 5.0);
+        };
+
+        if is_key_pressed(KeyCode::G) {
+            start_modal(ModalTransform::Grab, state, mouse_pos);
+        } else if is_key_pressed(KeyCode::S) {
+            start_modal(ModalTransform::Scale, state, mouse_pos);
+        } else if is_key_pressed(KeyCode::R) {
+            start_modal(ModalTransform::Rotate, state, mouse_pos);
+        }
+    }
+
+    // Handle active modal transform
+    handle_modal_transform(state, mouse_pos, inside_viewport);
+
+    // Extrude (E key) - context-dependent:
+    // - In face mode: extrude selected faces
+    // - In bone mode: add new joint at end of spine
     if inside_viewport && is_key_pressed(KeyCode::E) && !state.spine_drag_active && !state.transform_active {
-        handle_spine_extrude(state);
+        if state.select_mode == SelectMode::Face {
+            handle_face_extrude(state);
+        } else {
+            handle_spine_extrude(state);
+        }
     }
 
     // Delete (X key) - delete selected joints or bones (not when Shift held - that's delete segment)
@@ -452,12 +838,19 @@ pub fn draw_modeler_viewport(
     let empty_textures: Vec<crate::rasterizer::Texture> = Vec::new();
     render_mesh(fb, &all_vertices, &all_faces, &empty_textures, &state.camera, &state.raster_settings);
 
-    // Draw spine joint markers (on top of mesh)
+    // Draw spine joint markers and mesh overlays
     let mut gizmo_info: Option<GizmoScreenInfo> = None;
     if let Some(spine_model) = &state.spine_model {
         let selected_joints = state.selection.spine_joints().unwrap_or(&[]);
         let selected_bones = state.selection.spine_bones().unwrap_or(&[]);
-        draw_spine_joints(fb, spine_model, &state.camera, selected_joints, selected_bones);
+
+        // Draw spine joints in Bone mode
+        if state.select_mode == SelectMode::Bone {
+            draw_spine_joints(fb, spine_model, &state.camera, selected_joints, selected_bones);
+        }
+
+        // Draw mesh vertices/edges/faces overlays in mesh editing modes
+        draw_spine_mesh_overlays(fb, spine_model, &state.camera, &state.selection, state.select_mode);
 
         // Draw gizmo at first selected joint
         if let Some(&(seg_idx, joint_idx)) = selected_joints.first() {
@@ -481,6 +874,21 @@ pub fn draw_modeler_viewport(
                     gizmo_info = Some(draw_gizmo(
                         fb,
                         midpoint,
+                        &state.camera,
+                        state.gizmo_hover_handle,
+                        state.spine_drag_handle,
+                    ));
+                }
+            }
+        }
+        // Draw gizmo at first selected mesh vertex
+        else if let Some(&(seg_idx, vert_idx)) = state.selection.spine_mesh_vertices().and_then(|v| v.first()) {
+            if let Some(segment) = spine_model.segments.get(seg_idx) {
+                let (verts, _) = segment.get_mesh();
+                if let Some(vert) = verts.get(vert_idx) {
+                    gizmo_info = Some(draw_gizmo(
+                        fb,
+                        vert.pos,
                         &state.camera,
                         state.gizmo_hover_handle,
                         state.spine_drag_handle,
@@ -519,8 +927,20 @@ pub fn draw_modeler_viewport(
     let clicking_gizmo = state.gizmo_hover_handle.is_some();
     if inside_viewport && ctx.mouse.left_pressed && !ctx.mouse.right_down && !state.transform_active && !state.spine_drag_active && !clicking_gizmo {
         if using_spine {
-            // Handle spine joint selection
-            handle_spine_selection_click(state, screen_to_fb, fb.width, fb.height);
+            // Route to appropriate selection handler based on mode
+            match state.select_mode {
+                SelectMode::Bone => {
+                    // Bone mode: select spine joints/bones
+                    handle_spine_selection_click(state, screen_to_fb, fb.width, fb.height);
+                }
+                SelectMode::Vertex | SelectMode::Edge | SelectMode::Face => {
+                    // Mesh editing modes: select mesh vertices/edges/faces
+                    handle_selection_click(ctx, state, &world_matrices, screen_to_fb, fb.width, fb.height);
+                }
+                _ => {
+                    handle_spine_selection_click(state, screen_to_fb, fb.width, fb.height);
+                }
+            }
         } else {
             // Handle old model selection
             let has_bone_selection = matches!(&state.selection, ModelerSelection::Bones(b) if !b.is_empty());
@@ -533,8 +953,24 @@ pub fn draw_modeler_viewport(
         }
     }
 
+    // Handle box selection (B key to start, or auto-start when clicking on empty space in mesh modes)
+    handle_box_selection(ctx, state, inside_viewport, mouse_pos, screen_to_fb, fb.width, fb.height);
+
+    // Draw box selection rectangle if active
+    if state.box_select_active {
+        let (start_x, start_y) = state.box_select_start;
+        let min_x = start_x.min(mouse_pos.0);
+        let min_y = start_y.min(mouse_pos.1);
+        let max_x = start_x.max(mouse_pos.0);
+        let max_y = start_y.max(mouse_pos.1);
+
+        // Draw on top of framebuffer (macroquad coordinates)
+        draw_rectangle_lines(min_x, min_y, max_x - min_x, max_y - min_y, 1.0, Color::from_rgba(255, 200, 50, 255));
+        draw_rectangle(min_x, min_y, max_x - min_x, max_y - min_y, Color::from_rgba(255, 200, 50, 30));
+    }
+
     // Handle spine joint dragging AFTER selection (so newly selected joint can be dragged)
-    if using_spine {
+    if using_spine && !state.box_select_active {
         handle_spine_joint_drag(ctx, state, inside_viewport, mouse_pos, screen_to_fb, fb.width, fb.height);
     }
 
@@ -715,6 +1151,106 @@ fn draw_spine_joints(
             }
 
             prev_pos = Some(joint.position);
+        }
+    }
+}
+
+/// Draw mesh vertex/edge/face overlays for spine mesh editing
+fn draw_spine_mesh_overlays(
+    fb: &mut Framebuffer,
+    spine_model: &crate::modeler::SpineModel,
+    camera: &crate::rasterizer::Camera,
+    selection: &ModelerSelection,
+    select_mode: SelectMode,
+) {
+    let vertex_color = RasterColor::new(100, 100, 255);       // Blue for vertices
+    let selected_vertex_color = RasterColor::new(255, 150, 50); // Orange for selected
+    let edge_color = RasterColor::new(80, 80, 200);           // Dim blue for edges
+    let selected_edge_color = RasterColor::new(255, 200, 50); // Yellow for selected edges
+    let face_color = RasterColor::new(255, 100, 100);         // Red for selected faces
+
+    // Get selected items
+    let selected_verts = selection.spine_mesh_vertices().unwrap_or(&[]);
+    let selected_faces = selection.spine_mesh_faces().unwrap_or(&[]);
+    let selected_edges = match selection {
+        ModelerSelection::SpineMeshEdges(e) => e.as_slice(),
+        _ => &[],
+    };
+
+    for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+        let (verts, faces) = segment.get_mesh();
+
+        // Draw vertices in vertex mode
+        if select_mode == SelectMode::Vertex {
+            for (vert_idx, vert) in verts.iter().enumerate() {
+                if let Some((sx, sy)) = world_to_screen(
+                    vert.pos,
+                    camera.position,
+                    camera.basis_x,
+                    camera.basis_y,
+                    camera.basis_z,
+                    fb.width,
+                    fb.height,
+                ) {
+                    let is_selected = selected_verts.contains(&(seg_idx, vert_idx));
+                    let color = if is_selected { selected_vertex_color } else { vertex_color };
+                    let radius = if is_selected { 3 } else { 2 };
+                    fb.draw_circle(sx as i32, sy as i32, radius, color);
+                }
+            }
+        }
+
+        // Draw edges in edge mode
+        if select_mode == SelectMode::Edge {
+            // Build unique edges from faces
+            let mut edges: Vec<(usize, usize)> = Vec::new();
+            for face in &faces {
+                let e1 = if face.v0 < face.v1 { (face.v0, face.v1) } else { (face.v1, face.v0) };
+                let e2 = if face.v1 < face.v2 { (face.v1, face.v2) } else { (face.v2, face.v1) };
+                let e3 = if face.v2 < face.v0 { (face.v2, face.v0) } else { (face.v0, face.v2) };
+                if !edges.contains(&e1) { edges.push(e1); }
+                if !edges.contains(&e2) { edges.push(e2); }
+                if !edges.contains(&e3) { edges.push(e3); }
+            }
+
+            for edge in &edges {
+                let p0 = verts[edge.0].pos;
+                let p1 = verts[edge.1].pos;
+
+                let s0 = world_to_screen(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+                let s1 = world_to_screen(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+
+                if let (Some((x0, y0)), Some((x1, y1))) = (s0, s1) {
+                    let is_selected = selected_edges.contains(&(seg_idx, *edge));
+                    let color = if is_selected { selected_edge_color } else { edge_color };
+                    fb.draw_line(x0 as i32, y0 as i32, x1 as i32, y1 as i32, color);
+                }
+            }
+        }
+
+        // Draw face centers in face mode
+        if select_mode == SelectMode::Face {
+            for (face_idx, face) in faces.iter().enumerate() {
+                let center = (verts[face.v0].pos + verts[face.v1].pos + verts[face.v2].pos) * (1.0 / 3.0);
+                if let Some((sx, sy)) = world_to_screen(
+                    center,
+                    camera.position,
+                    camera.basis_x,
+                    camera.basis_y,
+                    camera.basis_z,
+                    fb.width,
+                    fb.height,
+                ) {
+                    let is_selected = selected_faces.contains(&(seg_idx, face_idx));
+                    if is_selected {
+                        // Draw a small filled square for selected faces
+                        fb.draw_circle(sx as i32, sy as i32, 4, face_color);
+                    } else {
+                        // Draw small dot for unselected faces
+                        fb.draw_circle(sx as i32, sy as i32, 2, RasterColor::new(150, 80, 80));
+                    }
+                }
+            }
         }
     }
 }
@@ -1021,14 +1557,8 @@ fn draw_3d_line(
     let s1 = world_to_screen(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
     if let (Some((x0f, y0f)), Some((x1f, y1f))) = (s0, s1) {
-        // Recalculate z for the clipped points
-        let clipped_rel0 = clipped_p0 - camera.position;
-        let clipped_rel1 = clipped_p1 - camera.position;
-        let clipped_z0 = clipped_rel0.dot(camera.basis_z);
-        let clipped_z1 = clipped_rel1.dot(camera.basis_z);
-
-        // Use draw_line_3d which respects z-buffer
-        fb.draw_line_3d(x0f as i32, y0f as i32, clipped_z0, x1f as i32, y1f as i32, clipped_z1, color);
+        // Use draw_line (no depth test) so bones/gizmos render on top of geometry
+        fb.draw_line(x0f as i32, y0f as i32, x1f as i32, y1f as i32, color);
     }
 }
 
@@ -1153,7 +1683,7 @@ fn draw_selection_overlays<F>(
     }
 }
 
-/// Handle spine joint/bone dragging (move selected joints with mouse)
+/// Handle spine joint/bone/mesh-vertex dragging (move selected elements with mouse)
 fn handle_spine_joint_drag<F>(
     ctx: &UiContext,
     state: &mut ModelerState,
@@ -1164,11 +1694,14 @@ fn handle_spine_joint_drag<F>(
     _fb_height: usize,
 ) where F: Fn(f32, f32) -> Option<(f32, f32)>
 {
-    // Check if we have spine joints or bones selected
+    // Check if we have spine joints, bones, or mesh elements selected
     let has_joint_selection = matches!(&state.selection, ModelerSelection::SpineJoints(j) if !j.is_empty());
     let has_bone_selection = matches!(&state.selection, ModelerSelection::SpineBones(b) if !b.is_empty());
+    let has_mesh_vertex_selection = matches!(&state.selection, ModelerSelection::SpineMeshVertices(v) if !v.is_empty());
+    let has_mesh_edge_selection = matches!(&state.selection, ModelerSelection::SpineMeshEdges(e) if !e.is_empty());
+    let has_mesh_face_selection = matches!(&state.selection, ModelerSelection::SpineMeshFaces(f) if !f.is_empty());
 
-    if !has_joint_selection && !has_bone_selection {
+    if !has_joint_selection && !has_bone_selection && !has_mesh_vertex_selection && !has_mesh_edge_selection && !has_mesh_face_selection {
         state.spine_drag_active = false;
         state.spine_drag_start_positions.clear();
         return;
@@ -1207,6 +1740,80 @@ fn handle_spine_joint_drag<F>(
                         }
                         if let Some(joint_b) = segment.joints.get(*bone_idx + 1) {
                             start_positions.push(joint_b.position);
+                        }
+                    }
+                }
+            }
+
+            if !start_positions.is_empty() {
+                state.spine_drag_start_mouse = mouse_pos;
+                state.spine_drag_start_positions = start_positions;
+                state.spine_drag_handle = state.gizmo_hover_handle;
+            }
+        }
+        // Store starting positions for mesh vertices
+        else if let ModelerSelection::SpineMeshVertices(verts) = &state.selection {
+            let mut start_positions = Vec::new();
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, vert_idx) in verts {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let Some(mesh_verts) = &segment.mesh_vertices {
+                            if let Some(vert) = mesh_verts.get(*vert_idx) {
+                                start_positions.push(vert.pos);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !start_positions.is_empty() {
+                state.spine_drag_start_mouse = mouse_pos;
+                state.spine_drag_start_positions = start_positions;
+                state.spine_drag_handle = state.gizmo_hover_handle;
+            }
+        }
+        // Store starting positions for mesh edges (both vertices of each edge)
+        else if let ModelerSelection::SpineMeshEdges(edges) = &state.selection {
+            let mut start_positions = Vec::new();
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, (v0, v1)) in edges {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let Some(mesh_verts) = &segment.mesh_vertices {
+                            if let Some(vert0) = mesh_verts.get(*v0) {
+                                start_positions.push(vert0.pos);
+                            }
+                            if let Some(vert1) = mesh_verts.get(*v1) {
+                                start_positions.push(vert1.pos);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !start_positions.is_empty() {
+                state.spine_drag_start_mouse = mouse_pos;
+                state.spine_drag_start_positions = start_positions;
+                state.spine_drag_handle = state.gizmo_hover_handle;
+            }
+        }
+        // Store starting positions for mesh faces (all 3 vertices of each face)
+        else if let ModelerSelection::SpineMeshFaces(faces) = &state.selection {
+            let mut start_positions = Vec::new();
+            if let Some(spine_model) = &state.spine_model {
+                for (seg_idx, face_idx) in faces {
+                    if let Some(segment) = spine_model.segments.get(*seg_idx) {
+                        if let (Some(mesh_verts), Some(mesh_faces)) = (&segment.mesh_vertices, &segment.mesh_faces) {
+                            if let Some(face) = mesh_faces.get(*face_idx) {
+                                if let Some(v0) = mesh_verts.get(face.v0) {
+                                    start_positions.push(v0.pos);
+                                }
+                                if let Some(v1) = mesh_verts.get(face.v1) {
+                                    start_positions.push(v1.pos);
+                                }
+                                if let Some(v2) = mesh_verts.get(face.v2) {
+                                    start_positions.push(v2.pos);
+                                }
+                            }
                         }
                     }
                 }
@@ -1330,6 +1937,112 @@ fn handle_spine_joint_drag<F>(
                 }
             }
         }
+        // Update mesh vertex positions
+        else if let ModelerSelection::SpineMeshVertices(verts) = &state.selection {
+            let verts = verts.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                for (i, (seg_idx, vert_idx)) in verts.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(mesh_verts) = &mut segment.mesh_vertices {
+                            if let Some(vert) = mesh_verts.get_mut(*vert_idx) {
+                                if let Some(start_pos) = state.spine_drag_start_positions.get(i) {
+                                    if state.snap_settings.enabled {
+                                        vert.pos = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                    } else {
+                                        vert.pos = *start_pos + snapped_delta;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Update mesh edge positions (both vertices of each edge)
+        else if let ModelerSelection::SpineMeshEdges(edges) = &state.selection {
+            let edges = edges.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                for (edge_i, (seg_idx, (v0, v1))) in edges.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(mesh_verts) = &mut segment.mesh_vertices {
+                            let pos_idx_0 = edge_i * 2;
+                            let pos_idx_1 = edge_i * 2 + 1;
+
+                            if let Some(vert0) = mesh_verts.get_mut(*v0) {
+                                if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_0) {
+                                    if state.snap_settings.enabled {
+                                        vert0.pos = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                    } else {
+                                        vert0.pos = *start_pos + snapped_delta;
+                                    }
+                                }
+                            }
+                            if let Some(vert1) = mesh_verts.get_mut(*v1) {
+                                if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_1) {
+                                    if state.snap_settings.enabled {
+                                        vert1.pos = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                    } else {
+                                        vert1.pos = *start_pos + snapped_delta;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Update mesh face positions (all 3 vertices of each face)
+        else if let ModelerSelection::SpineMeshFaces(faces) = &state.selection {
+            let faces_sel = faces.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                for (face_i, (seg_idx, face_idx)) in faces_sel.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        // Get face vertex indices first
+                        let face_verts = if let Some(mesh_faces) = &segment.mesh_faces {
+                            mesh_faces.get(*face_idx).map(|f| (f.v0, f.v1, f.v2))
+                        } else {
+                            None
+                        };
+
+                        if let Some((v0, v1, v2)) = face_verts {
+                            if let Some(mesh_verts) = &mut segment.mesh_vertices {
+                                let pos_idx_0 = face_i * 3;
+                                let pos_idx_1 = face_i * 3 + 1;
+                                let pos_idx_2 = face_i * 3 + 2;
+
+                                if let Some(vert) = mesh_verts.get_mut(v0) {
+                                    if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_0) {
+                                        if state.snap_settings.enabled {
+                                            vert.pos = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                        } else {
+                                            vert.pos = *start_pos + snapped_delta;
+                                        }
+                                    }
+                                }
+                                if let Some(vert) = mesh_verts.get_mut(v1) {
+                                    if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_1) {
+                                        if state.snap_settings.enabled {
+                                            vert.pos = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                        } else {
+                                            vert.pos = *start_pos + snapped_delta;
+                                        }
+                                    }
+                                }
+                                if let Some(vert) = mesh_verts.get_mut(v2) {
+                                    if let Some(start_pos) = state.spine_drag_start_positions.get(pos_idx_2) {
+                                        if state.snap_settings.enabled {
+                                            vert.pos = state.snap_settings.snap_vec3(*start_pos + world_delta);
+                                        } else {
+                                            vert.pos = *start_pos + snapped_delta;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // End drag on mouse release
@@ -1337,6 +2050,12 @@ fn handle_spine_joint_drag<F>(
         if state.spine_drag_active {
             let msg = if matches!(&state.selection, ModelerSelection::SpineBones(_)) {
                 "Bone moved"
+            } else if matches!(&state.selection, ModelerSelection::SpineMeshVertices(_)) {
+                "Vertex moved"
+            } else if matches!(&state.selection, ModelerSelection::SpineMeshEdges(_)) {
+                "Edge moved"
+            } else if matches!(&state.selection, ModelerSelection::SpineMeshFaces(_)) {
+                "Face moved"
             } else {
                 "Joint moved"
             };
@@ -1387,9 +2106,31 @@ fn handle_spine_joint_drag<F>(
                 }
             }
         }
+        // Restore original positions for mesh vertices
+        else if let ModelerSelection::SpineMeshVertices(verts) = &state.selection {
+            let verts = verts.clone();
+            if let Some(spine_model) = &mut state.spine_model {
+                for (i, (seg_idx, vert_idx)) in verts.iter().enumerate() {
+                    if let Some(segment) = spine_model.segments.get_mut(*seg_idx) {
+                        if let Some(mesh_verts) = &mut segment.mesh_vertices {
+                            if let Some(vert) = mesh_verts.get_mut(*vert_idx) {
+                                if let Some(start_pos) = state.spine_drag_start_positions.get(i) {
+                                    vert.pos = *start_pos;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         state.spine_drag_active = false;
         state.spine_drag_handle = None;
         state.set_status("Move cancelled", 0.5);
+    }
+    // Clear selection on Escape (when not dragging)
+    else if is_key_pressed(KeyCode::Escape) && !state.selection.is_empty() {
+        state.selection = ModelerSelection::None;
+        state.set_status("Selection cleared", 0.5);
     }
 }
 
@@ -1658,57 +2399,199 @@ fn handle_selection_click<F>(
         }
 
         SelectMode::Vertex => {
-            // Find closest vertex
-            let mut closest: Option<(usize, usize, f32)> = None;
+            // Try spine mesh first, then fall back to old model
+            if let Some(spine_model) = &state.spine_model {
+                let mut closest: Option<(usize, usize, f32)> = None;
 
-            for (part_idx, part) in state.model.parts.iter().enumerate() {
-                if !part.visible {
-                    continue;
-                }
-
-                let world_mat = &world_matrices[part_idx];
-
-                for (vert_idx, vert) in part.vertices.iter().enumerate() {
-                    let world_pos = mat4_transform_point(world_mat, vert.position);
-
-                    if let Some((sx, sy)) = world_to_screen(
-                        world_pos,
-                        state.camera.position,
-                        state.camera.basis_x,
-                        state.camera.basis_y,
-                        state.camera.basis_z,
-                        fb_width,
-                        fb_height,
-                    ) {
-                        let dist = ((fb_x - sx).powi(2) + (fb_y - sy).powi(2)).sqrt();
-                        if dist < 10.0 {
-                            if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                                closest = Some((part_idx, vert_idx, dist));
+                for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+                    let (verts, _) = segment.get_mesh();
+                    for (vert_idx, vert) in verts.iter().enumerate() {
+                        if let Some((sx, sy)) = world_to_screen(
+                            vert.pos,
+                            state.camera.position,
+                            state.camera.basis_x,
+                            state.camera.basis_y,
+                            state.camera.basis_z,
+                            fb_width,
+                            fb_height,
+                        ) {
+                            let dist = ((fb_x - sx).powi(2) + (fb_y - sy).powi(2)).sqrt();
+                            if dist < 10.0 {
+                                if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                                    closest = Some((seg_idx, vert_idx, dist));
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            if let Some((part_idx, vert_idx, _)) = closest {
-                state.selection = ModelerSelection::Vertices {
-                    part: part_idx,
-                    verts: vec![vert_idx],
-                };
-                state.set_status(&format!("Selected vertex {}", vert_idx), 1.5);
+                if let Some((seg_idx, vert_idx, _)) = closest {
+                    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                    if shift_held {
+                        // Add to existing selection
+                        if let ModelerSelection::SpineMeshVertices(ref mut verts) = state.selection {
+                            if !verts.contains(&(seg_idx, vert_idx)) {
+                                verts.push((seg_idx, vert_idx));
+                            }
+                        } else {
+                            state.selection = ModelerSelection::SpineMeshVertices(vec![(seg_idx, vert_idx)]);
+                        }
+                    } else {
+                        state.selection = ModelerSelection::SpineMeshVertices(vec![(seg_idx, vert_idx)]);
+                    }
+                    state.set_status(&format!("Selected vertex {}", vert_idx), 1.0);
+                } else if !is_key_down(KeyCode::LeftShift) && !is_key_down(KeyCode::RightShift) {
+                    state.selection = ModelerSelection::None;
+                }
             } else {
-                state.selection = ModelerSelection::None;
+                // Fall back to old model vertex selection
+                let mut closest: Option<(usize, usize, f32)> = None;
+
+                for (part_idx, part) in state.model.parts.iter().enumerate() {
+                    if !part.visible {
+                        continue;
+                    }
+
+                    let world_mat = &world_matrices[part_idx];
+
+                    for (vert_idx, vert) in part.vertices.iter().enumerate() {
+                        let world_pos = mat4_transform_point(world_mat, vert.position);
+
+                        if let Some((sx, sy)) = world_to_screen(
+                            world_pos,
+                            state.camera.position,
+                            state.camera.basis_x,
+                            state.camera.basis_y,
+                            state.camera.basis_z,
+                            fb_width,
+                            fb_height,
+                        ) {
+                            let dist = ((fb_x - sx).powi(2) + (fb_y - sy).powi(2)).sqrt();
+                            if dist < 10.0 {
+                                if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                                    closest = Some((part_idx, vert_idx, dist));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some((part_idx, vert_idx, _)) = closest {
+                    state.selection = ModelerSelection::Vertices {
+                        part: part_idx,
+                        verts: vec![vert_idx],
+                    };
+                    state.set_status(&format!("Selected vertex {}", vert_idx), 1.5);
+                } else {
+                    state.selection = ModelerSelection::None;
+                }
             }
         }
 
         SelectMode::Edge => {
-            // TODO: Implement edge selection
-            state.set_status("Edge selection TODO", 1.0);
+            // Spine mesh edge selection
+            if let Some(spine_model) = &state.spine_model {
+                let mut closest: Option<(usize, (usize, usize), f32)> = None;
+
+                for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+                    let (verts, faces) = segment.get_mesh();
+                    // Build edges from faces
+                    let mut edges: Vec<(usize, usize)> = Vec::new();
+                    for face in &faces {
+                        let e1 = if face.v0 < face.v1 { (face.v0, face.v1) } else { (face.v1, face.v0) };
+                        let e2 = if face.v1 < face.v2 { (face.v1, face.v2) } else { (face.v2, face.v1) };
+                        let e3 = if face.v2 < face.v0 { (face.v2, face.v0) } else { (face.v0, face.v2) };
+                        if !edges.contains(&e1) { edges.push(e1); }
+                        if !edges.contains(&e2) { edges.push(e2); }
+                        if !edges.contains(&e3) { edges.push(e3); }
+                    }
+
+                    for edge in &edges {
+                        let p0 = verts[edge.0].pos;
+                        let p1 = verts[edge.1].pos;
+                        let mid = (p0 + p1) * 0.5;
+
+                        if let Some((sx, sy)) = world_to_screen(
+                            mid,
+                            state.camera.position,
+                            state.camera.basis_x,
+                            state.camera.basis_y,
+                            state.camera.basis_z,
+                            fb_width,
+                            fb_height,
+                        ) {
+                            let dist = ((fb_x - sx).powi(2) + (fb_y - sy).powi(2)).sqrt();
+                            if dist < 15.0 {
+                                if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                                    closest = Some((seg_idx, *edge, dist));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some((seg_idx, edge, _)) = closest {
+                    state.selection = ModelerSelection::SpineMeshEdges(vec![(seg_idx, edge)]);
+                    state.set_status(&format!("Selected edge {}-{}", edge.0, edge.1), 1.0);
+                } else {
+                    state.selection = ModelerSelection::None;
+                }
+            } else {
+                state.set_status("No spine model", 1.0);
+            }
         }
 
         SelectMode::Face => {
-            // TODO: Implement face selection
-            state.set_status("Face selection TODO", 1.0);
+            // Spine mesh face selection
+            if let Some(spine_model) = &state.spine_model {
+                let mut closest: Option<(usize, usize, f32)> = None;
+
+                for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+                    let (verts, faces) = segment.get_mesh();
+
+                    for (face_idx, face) in faces.iter().enumerate() {
+                        // Calculate face center
+                        let center = (verts[face.v0].pos + verts[face.v1].pos + verts[face.v2].pos) * (1.0 / 3.0);
+
+                        if let Some((sx, sy)) = world_to_screen(
+                            center,
+                            state.camera.position,
+                            state.camera.basis_x,
+                            state.camera.basis_y,
+                            state.camera.basis_z,
+                            fb_width,
+                            fb_height,
+                        ) {
+                            let dist = ((fb_x - sx).powi(2) + (fb_y - sy).powi(2)).sqrt();
+                            if dist < 20.0 {
+                                if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                                    closest = Some((seg_idx, face_idx, dist));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some((seg_idx, face_idx, _)) = closest {
+                    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                    if shift_held {
+                        if let ModelerSelection::SpineMeshFaces(ref mut faces) = state.selection {
+                            if !faces.contains(&(seg_idx, face_idx)) {
+                                faces.push((seg_idx, face_idx));
+                            }
+                        } else {
+                            state.selection = ModelerSelection::SpineMeshFaces(vec![(seg_idx, face_idx)]);
+                        }
+                    } else {
+                        state.selection = ModelerSelection::SpineMeshFaces(vec![(seg_idx, face_idx)]);
+                    }
+                    state.set_status(&format!("Selected face {}", face_idx), 1.0);
+                } else if !is_key_down(KeyCode::LeftShift) && !is_key_down(KeyCode::RightShift) {
+                    state.selection = ModelerSelection::None;
+                }
+            } else {
+                state.set_status("No spine model", 1.0);
+            }
         }
     }
 }
@@ -2010,5 +2893,289 @@ fn handle_spine_mirror_segment(state: &mut ModelerState) {
         } else {
             state.set_status("Failed to mirror segment", 1.5);
         }
+    }
+}
+
+/// Handle box selection for mesh elements
+fn handle_box_selection<F>(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    inside_viewport: bool,
+    mouse_pos: (f32, f32),
+    screen_to_fb: F,
+    fb_width: usize,
+    fb_height: usize,
+) where F: Fn(f32, f32) -> Option<(f32, f32)>
+{
+    // Only allow box selection in mesh editing modes
+    let is_mesh_mode = matches!(state.select_mode, SelectMode::Vertex | SelectMode::Edge | SelectMode::Face);
+    if !is_mesh_mode {
+        state.box_select_active = false;
+        return;
+    }
+
+    // Start box selection with B key
+    if inside_viewport && is_key_pressed(KeyCode::B) && !state.spine_drag_active {
+        state.box_select_active = true;
+        state.box_select_start = mouse_pos;
+        state.set_status("Box select started", 0.5);
+        return;
+    }
+
+    // Update box selection during drag
+    if state.box_select_active {
+        // Cancel with Escape or right click
+        if is_key_pressed(KeyCode::Escape) || ctx.mouse.right_pressed {
+            state.box_select_active = false;
+            state.set_status("Box select cancelled", 0.5);
+            return;
+        }
+
+        // Complete box selection on left click
+        if ctx.mouse.left_pressed {
+            let Some((start_fb_x, start_fb_y)) = screen_to_fb(state.box_select_start.0, state.box_select_start.1) else {
+                state.box_select_active = false;
+                return;
+            };
+            let Some((end_fb_x, end_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) else {
+                state.box_select_active = false;
+                return;
+            };
+
+            let min_x = start_fb_x.min(end_fb_x);
+            let max_x = start_fb_x.max(end_fb_x);
+            let min_y = start_fb_y.min(end_fb_y);
+            let max_y = start_fb_y.max(end_fb_y);
+
+            let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+            // Select elements within the box
+            if let Some(spine_model) = &state.spine_model {
+                match state.select_mode {
+                    SelectMode::Vertex => {
+                        let mut selected_verts: Vec<(usize, usize)> = if shift_held {
+                            state.selection.spine_mesh_vertices().map(|v| v.to_vec()).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+
+                        for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+                            let (verts, _) = segment.get_mesh();
+                            for (vert_idx, vert) in verts.iter().enumerate() {
+                                if let Some((sx, sy)) = world_to_screen(
+                                    vert.pos,
+                                    state.camera.position,
+                                    state.camera.basis_x,
+                                    state.camera.basis_y,
+                                    state.camera.basis_z,
+                                    fb_width,
+                                    fb_height,
+                                ) {
+                                    if sx >= min_x && sx <= max_x && sy >= min_y && sy <= max_y {
+                                        let item = (seg_idx, vert_idx);
+                                        if !selected_verts.contains(&item) {
+                                            selected_verts.push(item);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !selected_verts.is_empty() {
+                            state.selection = ModelerSelection::SpineMeshVertices(selected_verts.clone());
+                            state.set_status(&format!("Selected {} vertices", selected_verts.len()), 1.0);
+                        } else if !shift_held {
+                            state.selection = ModelerSelection::None;
+                        }
+                    }
+                    SelectMode::Edge => {
+                        let mut selected_edges: Vec<(usize, (usize, usize))> = if shift_held {
+                            match &state.selection {
+                                ModelerSelection::SpineMeshEdges(e) => e.clone(),
+                                _ => Vec::new(),
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
+                        for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+                            let (verts, faces) = segment.get_mesh();
+                            // Build unique edges
+                            let mut edges: Vec<(usize, usize)> = Vec::new();
+                            for face in &faces {
+                                let e1 = if face.v0 < face.v1 { (face.v0, face.v1) } else { (face.v1, face.v0) };
+                                let e2 = if face.v1 < face.v2 { (face.v1, face.v2) } else { (face.v2, face.v1) };
+                                let e3 = if face.v2 < face.v0 { (face.v2, face.v0) } else { (face.v0, face.v2) };
+                                if !edges.contains(&e1) { edges.push(e1); }
+                                if !edges.contains(&e2) { edges.push(e2); }
+                                if !edges.contains(&e3) { edges.push(e3); }
+                            }
+
+                            for edge in &edges {
+                                let mid = (verts[edge.0].pos + verts[edge.1].pos) * 0.5;
+                                if let Some((sx, sy)) = world_to_screen(
+                                    mid,
+                                    state.camera.position,
+                                    state.camera.basis_x,
+                                    state.camera.basis_y,
+                                    state.camera.basis_z,
+                                    fb_width,
+                                    fb_height,
+                                ) {
+                                    if sx >= min_x && sx <= max_x && sy >= min_y && sy <= max_y {
+                                        let item = (seg_idx, *edge);
+                                        if !selected_edges.contains(&item) {
+                                            selected_edges.push(item);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !selected_edges.is_empty() {
+                            state.selection = ModelerSelection::SpineMeshEdges(selected_edges.clone());
+                            state.set_status(&format!("Selected {} edges", selected_edges.len()), 1.0);
+                        } else if !shift_held {
+                            state.selection = ModelerSelection::None;
+                        }
+                    }
+                    SelectMode::Face => {
+                        let mut selected_faces: Vec<(usize, usize)> = if shift_held {
+                            state.selection.spine_mesh_faces().map(|f| f.to_vec()).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+
+                        for (seg_idx, segment) in spine_model.segments.iter().enumerate() {
+                            let (verts, faces) = segment.get_mesh();
+
+                            for (face_idx, face) in faces.iter().enumerate() {
+                                let center = (verts[face.v0].pos + verts[face.v1].pos + verts[face.v2].pos) * (1.0 / 3.0);
+                                if let Some((sx, sy)) = world_to_screen(
+                                    center,
+                                    state.camera.position,
+                                    state.camera.basis_x,
+                                    state.camera.basis_y,
+                                    state.camera.basis_z,
+                                    fb_width,
+                                    fb_height,
+                                ) {
+                                    if sx >= min_x && sx <= max_x && sy >= min_y && sy <= max_y {
+                                        let item = (seg_idx, face_idx);
+                                        if !selected_faces.contains(&item) {
+                                            selected_faces.push(item);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !selected_faces.is_empty() {
+                            state.selection = ModelerSelection::SpineMeshFaces(selected_faces.clone());
+                            state.set_status(&format!("Selected {} faces", selected_faces.len()), 1.0);
+                        } else if !shift_held {
+                            state.selection = ModelerSelection::None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            state.box_select_active = false;
+        }
+    }
+}
+
+/// Handle face extrusion (E key in face mode)
+/// Creates new geometry by duplicating selected faces and connecting them with side faces
+fn handle_face_extrude(state: &mut ModelerState) {
+    let Some(selected_faces) = state.selection.spine_mesh_faces() else {
+        state.set_status("No faces selected", 1.0);
+        return;
+    };
+
+    if selected_faces.is_empty() {
+        state.set_status("No faces selected", 1.0);
+        return;
+    }
+
+    let selected_faces = selected_faces.to_vec();
+
+    // Group faces by segment
+    let mut faces_by_segment: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for (seg_idx, face_idx) in &selected_faces {
+        faces_by_segment.entry(*seg_idx).or_default().push(*face_idx);
+    }
+
+    let mut new_face_selections: Vec<(usize, usize)> = Vec::new();
+
+    if let Some(spine_model) = &mut state.spine_model {
+        for (seg_idx, face_indices) in faces_by_segment {
+            let Some(segment) = spine_model.segments.get_mut(seg_idx) else {
+                continue;
+            };
+
+            let Some(mesh_verts) = &mut segment.mesh_vertices else {
+                continue;
+            };
+            let Some(mesh_faces) = &mut segment.mesh_faces else {
+                continue;
+            };
+
+            // For each selected face, extrude it
+            for &face_idx in &face_indices {
+                let Some(face) = mesh_faces.get(face_idx).cloned() else {
+                    continue;
+                };
+
+                // Get the face vertices
+                let v0 = mesh_verts[face.v0].clone();
+                let v1 = mesh_verts[face.v1].clone();
+                let v2 = mesh_verts[face.v2].clone();
+
+                // Calculate face normal for extrusion direction
+                let edge1 = v1.pos - v0.pos;
+                let edge2 = v2.pos - v0.pos;
+                let normal = edge1.cross(edge2).normalize();
+
+                // Extrude distance (small initial offset, user will drag to final position)
+                let extrude_dist = 10.0;
+                let offset = normal * extrude_dist;
+
+                // Create new vertices (extruded copies)
+                let new_v0_idx = mesh_verts.len();
+                let new_v1_idx = new_v0_idx + 1;
+                let new_v2_idx = new_v0_idx + 2;
+
+                mesh_verts.push(crate::rasterizer::Vertex::new(v0.pos + offset, v0.uv, normal));
+                mesh_verts.push(crate::rasterizer::Vertex::new(v1.pos + offset, v1.uv, normal));
+                mesh_verts.push(crate::rasterizer::Vertex::new(v2.pos + offset, v2.uv, normal));
+
+                // Update the original face to point to new vertices (this becomes the "top" face)
+                mesh_faces[face_idx] = crate::rasterizer::Face::new(new_v0_idx, new_v1_idx, new_v2_idx);
+
+                // Create side faces connecting old and new vertices
+                // Side 1: v0 -> v1 -> new_v1 -> new_v0 (two triangles)
+                mesh_faces.push(crate::rasterizer::Face::new(face.v0, face.v1, new_v1_idx));
+                mesh_faces.push(crate::rasterizer::Face::new(face.v0, new_v1_idx, new_v0_idx));
+
+                // Side 2: v1 -> v2 -> new_v2 -> new_v1
+                mesh_faces.push(crate::rasterizer::Face::new(face.v1, face.v2, new_v2_idx));
+                mesh_faces.push(crate::rasterizer::Face::new(face.v1, new_v2_idx, new_v1_idx));
+
+                // Side 3: v2 -> v0 -> new_v0 -> new_v2
+                mesh_faces.push(crate::rasterizer::Face::new(face.v2, face.v0, new_v0_idx));
+                mesh_faces.push(crate::rasterizer::Face::new(face.v2, new_v0_idx, new_v2_idx));
+
+                // Track the new top face for selection
+                new_face_selections.push((seg_idx, face_idx));
+            }
+        }
+    }
+
+    // Select the new extruded faces
+    if !new_face_selections.is_empty() {
+        state.selection = ModelerSelection::SpineMeshFaces(new_face_selections.clone());
+        state.set_status(&format!("Extruded {} face(s) - drag to position", new_face_selections.len()), 1.5);
     }
 }
