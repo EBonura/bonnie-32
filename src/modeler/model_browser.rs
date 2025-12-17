@@ -1,0 +1,480 @@
+//! Model Browser
+//!
+//! Modal dialog for browsing and previewing saved spine models.
+
+use macroquad::prelude::*;
+use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
+use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh};
+use super::spine::SpineModel;
+use std::path::PathBuf;
+
+/// Info about a model file
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    /// Display name (file stem)
+    pub name: String,
+    /// Full path to the file
+    pub path: PathBuf,
+}
+
+/// Discover model files in a directory
+#[cfg(not(target_arch = "wasm32"))]
+pub fn discover_models() -> Vec<ModelInfo> {
+    let models_dir = PathBuf::from("assets/models");
+    let mut models = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "ron") {
+                let name = path.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                models.push(ModelInfo { name, path });
+            }
+        }
+    }
+
+    // Sort by name
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+    models
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn discover_models() -> Vec<ModelInfo> {
+    // WASM: return empty for now (could load from manifest later)
+    Vec::new()
+}
+
+/// State for the model browser dialog
+pub struct ModelBrowser {
+    /// Whether the browser is open
+    pub open: bool,
+    /// List of available models
+    pub models: Vec<ModelInfo>,
+    /// Currently selected index
+    pub selected_index: Option<usize>,
+    /// Currently loaded preview model
+    pub preview_model: Option<SpineModel>,
+    /// Orbit camera state for preview
+    pub orbit_yaw: f32,
+    pub orbit_pitch: f32,
+    pub orbit_distance: f32,
+    pub orbit_center: Vec3,
+    /// Mouse state for orbit control
+    pub dragging: bool,
+    pub last_mouse: (f32, f32),
+    /// Scroll offset for the list
+    pub scroll_offset: f32,
+}
+
+impl Default for ModelBrowser {
+    fn default() -> Self {
+        Self {
+            open: false,
+            models: Vec::new(),
+            selected_index: None,
+            preview_model: None,
+            orbit_yaw: 0.5,
+            orbit_pitch: 0.3,
+            orbit_distance: 300.0,
+            orbit_center: Vec3::new(0.0, 50.0, 0.0),
+            dragging: false,
+            last_mouse: (0.0, 0.0),
+            scroll_offset: 0.0,
+        }
+    }
+}
+
+impl ModelBrowser {
+    /// Open the browser with the given list of models
+    pub fn open(&mut self, models: Vec<ModelInfo>) {
+        self.open = true;
+        self.models = models;
+        self.selected_index = None;
+        self.preview_model = None;
+        self.scroll_offset = 0.0;
+    }
+
+    /// Close the browser
+    pub fn close(&mut self) {
+        self.open = false;
+        self.preview_model = None;
+    }
+
+    /// Set the preview model
+    pub fn set_preview(&mut self, model: SpineModel) {
+        // Calculate bounding box to center camera
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_z = f32::MAX;
+        let mut max_z = f32::MIN;
+
+        for segment in &model.segments {
+            for joint in &segment.joints {
+                min_x = min_x.min(joint.position.x - joint.radius);
+                max_x = max_x.max(joint.position.x + joint.radius);
+                min_y = min_y.min(joint.position.y - joint.radius);
+                max_y = max_y.max(joint.position.y + joint.radius);
+                min_z = min_z.min(joint.position.z - joint.radius);
+                max_z = max_z.max(joint.position.z + joint.radius);
+            }
+        }
+
+        // Calculate center
+        if min_y != f32::MAX {
+            let center_x = (min_x + max_x) / 2.0;
+            let center_y = (min_y + max_y) / 2.0;
+            let center_z = (min_z + max_z) / 2.0;
+            self.orbit_center = Vec3::new(center_x, center_y, center_z);
+
+            // Set distance based on model size
+            let size_x = max_x - min_x;
+            let size_y = max_y - min_y;
+            let size_z = max_z - min_z;
+            let diagonal = (size_x * size_x + size_y * size_y + size_z * size_z).sqrt();
+            self.orbit_distance = diagonal.max(150.0) * 1.5;
+        } else {
+            self.orbit_center = Vec3::new(0.0, 50.0, 0.0);
+            self.orbit_distance = 300.0;
+        }
+
+        self.preview_model = Some(model);
+        self.orbit_yaw = 0.8;
+        self.orbit_pitch = 0.3;
+    }
+
+    /// Get the currently selected model info
+    pub fn selected_model(&self) -> Option<&ModelInfo> {
+        self.selected_index.and_then(|i| self.models.get(i))
+    }
+}
+
+/// Result from drawing the model browser
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelBrowserAction {
+    None,
+    /// User selected a model to preview
+    SelectPreview(usize),
+    /// User wants to open the selected model
+    OpenModel,
+    /// User wants to start with a new empty model
+    NewModel,
+    /// User cancelled
+    Cancel,
+}
+
+/// Draw the model browser modal dialog
+pub fn draw_model_browser(
+    ctx: &mut UiContext,
+    browser: &mut ModelBrowser,
+    icon_font: Option<&Font>,
+    fb: &mut Framebuffer,
+) -> ModelBrowserAction {
+    if !browser.open {
+        return ModelBrowserAction::None;
+    }
+
+    let mut action = ModelBrowserAction::None;
+
+    // Darken background
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::from_rgba(0, 0, 0, 180));
+
+    // Dialog dimensions (centered, ~80% of screen)
+    let dialog_w = (screen_width() * 0.8).min(900.0);
+    let dialog_h = (screen_height() * 0.8).min(600.0);
+    let dialog_x = (screen_width() - dialog_w) / 2.0;
+    let dialog_y = (screen_height() - dialog_h) / 2.0;
+
+    // Draw dialog background
+    draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(35, 35, 40, 255));
+    draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(60, 60, 70, 255));
+
+    // Header
+    let header_h = 40.0;
+    draw_rectangle(dialog_x, dialog_y, dialog_w, header_h, Color::from_rgba(45, 45, 55, 255));
+    draw_text("Browse Models", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
+
+    // Close button
+    let close_rect = Rect::new(dialog_x + dialog_w - 36.0, dialog_y + 4.0, 32.0, 32.0);
+    if draw_close_button(ctx, close_rect, icon_font) {
+        action = ModelBrowserAction::Cancel;
+    }
+
+    // Content area
+    let content_y = dialog_y + header_h + 8.0;
+    let content_h = dialog_h - header_h - 60.0;
+    let list_w = 200.0;
+
+    // List panel (left)
+    let list_rect = Rect::new(dialog_x + 8.0, content_y, list_w, content_h);
+    let item_h = 28.0;
+
+    let items: Vec<String> = browser.models.iter().map(|m| m.name.clone()).collect();
+
+    let list_result = draw_scrollable_list(
+        ctx,
+        list_rect,
+        &items,
+        browser.selected_index,
+        &mut browser.scroll_offset,
+        item_h,
+        None,
+    );
+
+    if let Some(clicked_idx) = list_result.clicked {
+        if browser.selected_index != Some(clicked_idx) {
+            browser.selected_index = Some(clicked_idx);
+            action = ModelBrowserAction::SelectPreview(clicked_idx);
+        }
+    }
+
+    // Preview panel (right)
+    let preview_x = dialog_x + list_w + 16.0;
+    let preview_w = dialog_w - list_w - 24.0;
+    let preview_rect = Rect::new(preview_x, content_y, preview_w, content_h);
+
+    draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h, Color::from_rgba(20, 20, 25, 255));
+
+    let has_preview = browser.preview_model.is_some();
+    let has_selection = browser.selected_index.is_some();
+
+    if has_preview {
+        draw_orbit_preview(ctx, browser, preview_rect, fb);
+
+        // Draw stats at bottom of preview
+        if let Some(model) = &browser.preview_model {
+            let stats_y = preview_rect.bottom() - 24.0;
+            draw_rectangle(preview_rect.x, stats_y, preview_rect.w, 24.0, Color::from_rgba(30, 30, 35, 200));
+
+            let total_joints: usize = model.segments.iter().map(|s| s.joints.len()).sum();
+            let stats_text = format!(
+                "Segments: {}  Joints: {}",
+                model.segments.len(), total_joints
+            );
+            draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
+        }
+    } else if has_selection {
+        draw_text("Loading preview...", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
+    } else if browser.models.is_empty() {
+        draw_text("No models found in assets/models/", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+        draw_text("Save a model first!", preview_rect.x + 20.0, preview_rect.y + 60.0, 14.0, Color::from_rgba(80, 80, 80, 255));
+    } else {
+        draw_text("Select a model to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+    }
+
+    // Footer with buttons
+    let footer_y = dialog_y + dialog_h - 44.0;
+    draw_rectangle(dialog_x, footer_y, dialog_w, 44.0, Color::from_rgba(40, 40, 48, 255));
+
+    // New button (left side)
+    let new_rect = Rect::new(dialog_x + 10.0, footer_y + 8.0, 80.0, 28.0);
+    if draw_text_button(ctx, new_rect, "New", Color::from_rgba(60, 60, 70, 255)) {
+        action = ModelBrowserAction::NewModel;
+    }
+
+    // Cancel button
+    let cancel_rect = Rect::new(dialog_x + dialog_w - 180.0, footer_y + 8.0, 80.0, 28.0);
+    if draw_text_button(ctx, cancel_rect, "Cancel", Color::from_rgba(60, 60, 70, 255)) {
+        action = ModelBrowserAction::Cancel;
+    }
+
+    // Open button
+    let open_rect = Rect::new(dialog_x + dialog_w - 90.0, footer_y + 8.0, 80.0, 28.0);
+    let open_enabled = browser.preview_model.is_some();
+    if draw_text_button_enabled(ctx, open_rect, "Open", ACCENT_COLOR, open_enabled) {
+        action = ModelBrowserAction::OpenModel;
+    }
+
+    // Handle Escape to close
+    if is_key_pressed(KeyCode::Escape) {
+        action = ModelBrowserAction::Cancel;
+    }
+
+    action
+}
+
+/// Draw the orbit preview of a model
+fn draw_orbit_preview(
+    ctx: &mut UiContext,
+    browser: &mut ModelBrowser,
+    rect: Rect,
+    fb: &mut Framebuffer,
+) {
+    let model = match &browser.preview_model {
+        Some(m) => m,
+        None => return,
+    };
+
+    // Handle mouse drag for orbit
+    if ctx.mouse.inside(&rect) {
+        if ctx.mouse.left_down {
+            if browser.dragging {
+                let dx = ctx.mouse.x - browser.last_mouse.0;
+                let dy = ctx.mouse.y - browser.last_mouse.1;
+                browser.orbit_yaw += dx * 0.01;
+                browser.orbit_pitch = (browser.orbit_pitch + dy * 0.01).clamp(-1.4, 1.4);
+            }
+            browser.dragging = true;
+            browser.last_mouse = (ctx.mouse.x, ctx.mouse.y);
+        } else {
+            browser.dragging = false;
+        }
+
+        // Scroll to zoom
+        let scroll = mouse_wheel().1;
+        if scroll != 0.0 {
+            browser.orbit_distance = (browser.orbit_distance - scroll * 20.0).clamp(50.0, 2000.0);
+        }
+    } else {
+        browser.dragging = false;
+    }
+
+    // Calculate camera position from orbit
+    let cos_pitch = browser.orbit_pitch.cos();
+    let sin_pitch = browser.orbit_pitch.sin();
+    let cos_yaw = browser.orbit_yaw.cos();
+    let sin_yaw = browser.orbit_yaw.sin();
+
+    let offset_x = browser.orbit_distance * cos_pitch * sin_yaw;
+    let offset_y = browser.orbit_distance * sin_pitch;
+    let offset_z = browser.orbit_distance * cos_pitch * cos_yaw;
+
+    let cam_pos = browser.orbit_center + Vec3::new(offset_x, offset_y, offset_z);
+
+    // Create camera
+    let mut camera = Camera::new();
+    camera.position = cam_pos;
+
+    // Calculate rotation from direction
+    let dir = browser.orbit_center - cam_pos;
+    let len = dir.len();
+    let n = dir * (1.0 / len);
+    camera.rotation_x = (-n.y).asin();
+    camera.rotation_y = n.x.atan2(n.z);
+    camera.update_basis();
+
+    // Resize framebuffer
+    let preview_h = rect.h - 24.0;
+    let target_w = (rect.w as usize).min(640);
+    let target_h = (preview_h as usize).min(target_w * 3 / 4);
+    fb.resize(target_w, target_h);
+    fb.clear(RasterColor::new(25, 25, 35));
+
+    // Render the model
+    let settings = RasterSettings::default();
+    let (vertices, faces) = model.generate_mesh();
+
+    if !vertices.is_empty() {
+        render_mesh(fb, &vertices, &faces, &[], &camera, &settings);
+    }
+
+    // Draw a simple floor plane indicator using the grid drawing
+    draw_preview_grid(fb, &camera);
+
+    // Draw framebuffer to screen
+    let fb_texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
+    fb_texture.set_filter(FilterMode::Nearest);
+
+    draw_texture_ex(
+        &fb_texture,
+        rect.x,
+        rect.y,
+        WHITE,
+        DrawTextureParams {
+            dest_size: Some(vec2(rect.w, preview_h)),
+            ..Default::default()
+        },
+    );
+}
+
+/// Draw a simple grid on the floor (Y=0 plane) with depth testing
+fn draw_preview_grid(fb: &mut Framebuffer, camera: &Camera) {
+    use crate::rasterizer::world_to_screen;
+
+    let grid_color = RasterColor::new(50, 50, 60);
+    let grid_size = 200.0;
+    let grid_step = 25.0;
+    let half = grid_size / 2.0;
+
+    // Helper to draw a 3D line with depth testing
+    let draw_line_depth = |fb: &mut Framebuffer, p0: Vec3, p1: Vec3, color: RasterColor| {
+        // Calculate relative positions and depths
+        let rel0 = p0 - camera.position;
+        let rel1 = p1 - camera.position;
+        let z0 = rel0.dot(camera.basis_z);
+        let z1 = rel1.dot(camera.basis_z);
+
+        // Skip if both behind camera
+        if z0 <= 0.1 && z1 <= 0.1 {
+            return;
+        }
+
+        let screen0 = world_to_screen(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+        let screen1 = world_to_screen(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+
+        if let (Some((x0, y0)), Some((x1, y1))) = (screen0, screen1) {
+            // Use draw_line_3d which respects z-buffer
+            fb.draw_line_3d(x0 as i32, y0 as i32, z0, x1 as i32, y1 as i32, z1, color);
+        }
+    };
+
+    // Draw grid lines
+    let mut x = -half;
+    while x <= half {
+        draw_line_depth(fb, Vec3::new(x, 0.0, -half), Vec3::new(x, 0.0, half), grid_color);
+        x += grid_step;
+    }
+
+    let mut z = -half;
+    while z <= half {
+        draw_line_depth(fb, Vec3::new(-half, 0.0, z), Vec3::new(half, 0.0, z), grid_color);
+        z += grid_step;
+    }
+}
+
+/// Draw a close button (X)
+fn draw_close_button(ctx: &mut UiContext, rect: Rect, icon_font: Option<&Font>) -> bool {
+    let hovered = ctx.mouse.inside(&rect);
+    let clicked = hovered && ctx.mouse.left_pressed;
+
+    if hovered {
+        draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(80, 40, 40, 255));
+    }
+
+    let x_char = '\u{e1c9}'; // Lucide X icon
+    draw_icon_centered(icon_font, x_char, &rect, 16.0, WHITE);
+
+    clicked
+}
+
+/// Draw a text button
+fn draw_text_button(ctx: &mut UiContext, rect: Rect, text: &str, bg_color: Color) -> bool {
+    draw_text_button_enabled(ctx, rect, text, bg_color, true)
+}
+
+/// Draw a text button with enabled state
+fn draw_text_button_enabled(ctx: &mut UiContext, rect: Rect, text: &str, bg_color: Color, enabled: bool) -> bool {
+    let hovered = enabled && ctx.mouse.inside(&rect);
+    let clicked = hovered && ctx.mouse.left_pressed;
+
+    let color = if !enabled {
+        Color::from_rgba(50, 50, 55, 255)
+    } else if hovered {
+        Color::new(bg_color.r * 1.2, bg_color.g * 1.2, bg_color.b * 1.2, bg_color.a)
+    } else {
+        bg_color
+    };
+
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, color);
+
+    let text_color = if enabled { WHITE } else { Color::from_rgba(100, 100, 100, 255) };
+    let dims = measure_text(text, None, 14, 1.0);
+    let tx = rect.x + (rect.w - dims.width) / 2.0;
+    let ty = rect.y + (rect.h + dims.height) / 2.0 - 2.0;
+    draw_text(text, tx, ty, 14.0, text_color);
+
+    clicked
+}

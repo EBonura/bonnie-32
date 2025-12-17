@@ -151,7 +151,9 @@ pub fn project(v: Vec3, snap: bool, width: usize, height: usize) -> Vec3 {
 pub fn barycentric(p: Vec3, v1: Vec3, v2: Vec3, v3: Vec3) -> Vec3 {
     let d = (v2.y - v3.y) * (v1.x - v3.x) + (v3.x - v2.x) * (v1.y - v3.y);
 
-    if d.abs() < 0.0001 {
+    // Threshold lowered to allow steep-angle triangles (nearly edge-on to camera)
+    // Very thin triangles at grazing angles have small screen-space area
+    if d.abs() < 0.00001 {
         return Vec3::new(-1.0, -1.0, -1.0); // Degenerate triangle
     }
 

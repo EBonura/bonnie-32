@@ -120,7 +120,7 @@ impl Color {
 }
 
 /// A vertex with position, texture coordinate, normal, and color
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct Vertex {
     pub pos: Vec3,
     pub uv: Vec2,
@@ -152,7 +152,7 @@ impl Vertex {
 }
 
 /// A triangle face (indices into vertex array)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Face {
     pub v0: usize,
     pub v1: usize,
@@ -405,6 +405,8 @@ pub struct RasterSettings {
     pub dithering: bool,
     /// Stretch to fill viewport (false = maintain 4:3 aspect ratio)
     pub stretch_to_fill: bool,
+    /// Show wireframe overlay on front-facing polygons
+    pub wireframe_overlay: bool,
 }
 
 impl Default for RasterSettings {
@@ -420,6 +422,7 @@ impl Default for RasterSettings {
             low_resolution: true,   // PS1 default: 320x240
             dithering: true,        // PS1 default: ordered dithering enabled
             stretch_to_fill: true,  // Default: use full viewport space
+            wireframe_overlay: true, // Default: show front-face wireframe
         }
     }
 }

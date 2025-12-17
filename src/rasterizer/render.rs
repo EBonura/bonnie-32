@@ -537,48 +537,36 @@ pub fn render_mesh(
     // Build surfaces for front-faces and collect back-faces for wireframe
     let mut surfaces: Vec<Surface> = Vec::with_capacity(faces.len());
     let mut backface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+    let mut frontface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
 
     for (face_idx, face) in faces.iter().enumerate() {
         let v1 = projected[face.v0];
         let v2 = projected[face.v1];
         let v3 = projected[face.v2];
 
-        // Calculate face normal in camera space (before projection)
+        // Get camera-space positions for near plane check
         let cv1 = cam_space_positions[face.v0];
         let cv2 = cam_space_positions[face.v1];
         let cv3 = cam_space_positions[face.v2];
 
-        // Near plane clipping (skip triangles behind camera)
-        // In our coordinate system, +Z is forward, so we check if vertices are in front of camera
-        if cv1.z <= 0.1 || cv2.z <= 0.1 || cv3.z <= 0.1 {
+        // Near plane clipping (skip triangles fully behind camera)
+        // Only skip if ALL vertices are behind - partial triangles should still render
+        // This is a simplification; proper clipping would generate new triangles
+        if cv1.z <= 0.1 && cv2.z <= 0.1 && cv3.z <= 0.1 {
             continue;
         }
 
-        // Use the stored vertex normals to determine face orientation
-        // Average the three vertex normals (already in camera space)
-        let vn1 = cam_space_normals[face.v0];
-        let vn2 = cam_space_normals[face.v1];
-        let vn3 = cam_space_normals[face.v2];
-        let face_normal = Vec3::new(
-            (vn1.x + vn2.x + vn3.x) / 3.0,
-            (vn1.y + vn2.y + vn3.y) / 3.0,
-            (vn1.z + vn2.z + vn3.z) / 3.0,
-        ).normalize();
+        // 2D screen-space backface culling (PS1-style)
+        // Calculate signed area using cross product of screen-space edges
+        // This is more robust than 3D normal-based culling at grazing angles
+        let signed_area = (v2.x - v1.x) * (v3.y - v1.y) - (v3.x - v1.x) * (v2.y - v1.y);
 
-        // Calculate view direction from camera to face center (in camera space)
-        // Camera is at origin in camera space, so view dir is just the position
-        let face_center = Vec3::new(
-            (cv1.x + cv2.x + cv3.x) / 3.0,
-            (cv1.y + cv2.y + cv3.y) / 3.0,
-            (cv1.z + cv2.z + cv3.z) / 3.0,
-        );
-        let view_dir = face_center.normalize();
+        // In screen space with Y-down, counter-clockwise winding = front-facing
+        // Positive signed area = counter-clockwise = front-facing
+        // Negative signed area = clockwise = back-facing
+        let is_backface = signed_area <= 0.0;
 
-        // Face is back-facing if its normal points away from us (same direction as view)
-        // Dot product > 0 means normal and view direction point the same way = back-facing
-        let is_backface = face_normal.dot(view_dir) > 0.0;
-
-        // Also compute geometric normal for shading (cross product gives correct winding)
+        // Compute geometric normal for shading (cross product in camera space)
         let edge1 = cv2 - cv1;
         let edge2 = cv3 - cv1;
         let normal = edge1.cross(edge2).normalize();
@@ -624,6 +612,11 @@ pub fn render_mesh(
                 normal,
                 face_idx,
             });
+
+            // Collect for wireframe overlay
+            if settings.wireframe_overlay {
+                frontface_wireframes.push((v1, v2, v3));
+            }
         }
     }
 
@@ -648,35 +641,69 @@ pub fn render_mesh(
     // Only draw if backface culling is enabled (otherwise they're rendered solid above)
     if settings.backface_cull {
         // Deduplicate edges to avoid drawing shared edges twice (which causes double-line artifacts)
-        // Use a Vec to collect unique edges - compare by rounded screen coordinates
-        let mut unique_edges: Vec<(i32, i32, i32, i32)> = Vec::new();
+        // Include z values for depth testing
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
 
         for (v1, v2, v3) in &backface_wireframes {
             let edges = [
-                (v1.x as i32, v1.y as i32, v2.x as i32, v2.y as i32),
-                (v2.x as i32, v2.y as i32, v3.x as i32, v3.y as i32),
-                (v3.x as i32, v3.y as i32, v1.x as i32, v1.y as i32),
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
             ];
 
-            for (x0, y0, x1, y1) in edges {
+            for (x0, y0, z0, x1, y1, z1) in edges {
                 // Normalize edge direction so (a,b)-(c,d) and (c,d)-(a,b) are the same
                 let edge = if (x0, y0) < (x1, y1) {
-                    (x0, y0, x1, y1)
+                    (x0, y0, z0, x1, y1, z1)
                 } else {
-                    (x1, y1, x0, y0)
+                    (x1, y1, z1, x0, y0, z0)
                 };
 
-                // Only add if not already present
-                if !unique_edges.contains(&edge) {
+                // Only add if not already present (compare just screen coords for dedup)
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
                     unique_edges.push(edge);
                 }
             }
         }
 
-        // Draw each unique edge once
+        // Draw each unique edge once with depth testing
         let wireframe_color = Color::new(80, 80, 100);
-        for (x0, y0, x1, y1) in unique_edges {
-            fb.draw_line(x0, y0, x1, y1, wireframe_color);
+        for (x0, y0, z0, x1, y1, z1) in unique_edges {
+            fb.draw_line_3d(x0, y0, z0, x1, y1, z1, wireframe_color);
+        }
+    }
+
+    // Draw wireframes for front-faces (overlay on top of solid geometry)
+    if settings.wireframe_overlay && !frontface_wireframes.is_empty() {
+        // Deduplicate edges
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
+
+        for (v1, v2, v3) in &frontface_wireframes {
+            let edges = [
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
+            ];
+
+            for (x0, y0, z0, x1, y1, z1) in edges {
+                // Normalize edge direction for deduplication
+                let edge = if (x0, y0) < (x1, y1) {
+                    (x0, y0, z0, x1, y1, z1)
+                } else {
+                    (x1, y1, z1, x0, y0, z0)
+                };
+
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
+                    unique_edges.push(edge);
+                }
+            }
+        }
+
+        // Draw front-face wireframe with a brighter color (on top, no depth test needed since it's on visible faces)
+        let front_wireframe_color = Color::new(200, 200, 220);
+        for (x0, y0, _z0, x1, y1, _z1) in unique_edges {
+            // Draw without depth testing since these are on front faces (already visible)
+            fb.draw_line(x0, y0, x1, y1, front_wireframe_color);
         }
     }
 }

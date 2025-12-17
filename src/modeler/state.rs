@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings};
 use super::model::{Model, PartTransform};
+use super::spine::SpineModel;
 
 /// Modeler view modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,17 @@ pub enum ModelerSelection {
     Vertices { part: usize, verts: Vec<usize> },
     Edges { part: usize, edges: Vec<(usize, usize)> },
     Faces { part: usize, faces: Vec<usize> },
+    /// Spine joint selection: (segment_index, joint_index)
+    SpineJoints(Vec<(usize, usize)>),
+    /// Spine segment/bone selection: (segment_index, bone_index) where bone_index is the index of the first joint
+    /// A bone connects joint[bone_index] to joint[bone_index + 1]
+    SpineBones(Vec<(usize, usize)>),
+    /// Spine mesh vertex selection: (segment_index, vertex_index)
+    SpineMeshVertices(Vec<(usize, usize)>),
+    /// Spine mesh edge selection: (segment_index, (v0_index, v1_index))
+    SpineMeshEdges(Vec<(usize, (usize, usize))>),
+    /// Spine mesh face selection: (segment_index, face_index)
+    SpineMeshFaces(Vec<(usize, usize)>),
 }
 
 impl ModelerSelection {
@@ -96,11 +108,48 @@ impl ModelerSelection {
             ModelerSelection::Vertices { verts, .. } => verts.is_empty(),
             ModelerSelection::Edges { edges, .. } => edges.is_empty(),
             ModelerSelection::Faces { faces, .. } => faces.is_empty(),
+            ModelerSelection::SpineJoints(v) => v.is_empty(),
+            ModelerSelection::SpineBones(v) => v.is_empty(),
+            ModelerSelection::SpineMeshVertices(v) => v.is_empty(),
+            ModelerSelection::SpineMeshEdges(v) => v.is_empty(),
+            ModelerSelection::SpineMeshFaces(v) => v.is_empty(),
         }
     }
 
     pub fn clear(&mut self) {
         *self = ModelerSelection::None;
+    }
+
+    /// Get selected spine joints if any
+    pub fn spine_joints(&self) -> Option<&[(usize, usize)]> {
+        match self {
+            ModelerSelection::SpineJoints(joints) => Some(joints),
+            _ => None,
+        }
+    }
+
+    /// Get selected spine bones if any
+    pub fn spine_bones(&self) -> Option<&[(usize, usize)]> {
+        match self {
+            ModelerSelection::SpineBones(bones) => Some(bones),
+            _ => None,
+        }
+    }
+
+    /// Get selected spine mesh vertices if any
+    pub fn spine_mesh_vertices(&self) -> Option<&[(usize, usize)]> {
+        match self {
+            ModelerSelection::SpineMeshVertices(verts) => Some(verts),
+            _ => None,
+        }
+    }
+
+    /// Get selected spine mesh faces if any
+    pub fn spine_mesh_faces(&self) -> Option<&[(usize, usize)]> {
+        match self {
+            ModelerSelection::SpineMeshFaces(faces) => Some(faces),
+            _ => None,
+        }
     }
 }
 
@@ -122,6 +171,26 @@ impl TransformTool {
             TransformTool::Rotate => "Rotate (R)",
             TransformTool::Scale => "Scale (S)",
             TransformTool::Extrude => "Extrude (E)",
+        }
+    }
+}
+
+/// Modal transform mode (Blender-style G/S/R)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalTransform {
+    None,
+    Grab,   // G key - move selection
+    Scale,  // S key - scale selection
+    Rotate, // R key - rotate selection
+}
+
+impl ModalTransform {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ModalTransform::None => "",
+            ModalTransform::Grab => "Grab",
+            ModalTransform::Scale => "Scale",
+            ModalTransform::Rotate => "Rotate",
         }
     }
 }
@@ -157,13 +226,91 @@ impl Axis {
             Axis::Z => Color::new(80, 80, 255),   // Blue
         }
     }
+
+    pub fn to_vec3(&self) -> Vec3 {
+        match self {
+            Axis::X => Vec3::new(1.0, 0.0, 0.0),
+            Axis::Y => Vec3::new(0.0, 1.0, 0.0),
+            Axis::Z => Vec3::new(0.0, 0.0, 1.0),
+        }
+    }
+}
+
+/// Gizmo handle types - single axis or plane (two axes)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoHandle {
+    /// Single axis movement
+    Axis(Axis),
+    /// Plane movement (move along two axes, locked on third)
+    Plane { axis1: Axis, axis2: Axis },
+}
+
+impl GizmoHandle {
+    pub const XY: GizmoHandle = GizmoHandle::Plane { axis1: Axis::X, axis2: Axis::Y };
+    pub const XZ: GizmoHandle = GizmoHandle::Plane { axis1: Axis::X, axis2: Axis::Z };
+    pub const YZ: GizmoHandle = GizmoHandle::Plane { axis1: Axis::Y, axis2: Axis::Z };
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            GizmoHandle::Axis(a) => a.label(),
+            GizmoHandle::Plane { axis1: Axis::X, axis2: Axis::Y } => "XY",
+            GizmoHandle::Plane { axis1: Axis::X, axis2: Axis::Z } => "XZ",
+            GizmoHandle::Plane { axis1: Axis::Y, axis2: Axis::Z } => "YZ",
+            _ => "Plane",
+        }
+    }
+}
+
+/// Snap/quantization settings
+#[derive(Debug, Clone, Copy)]
+pub struct SnapSettings {
+    pub enabled: bool,
+    pub grid_size: f32,  // World units to snap to
+}
+
+impl Default for SnapSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,  // Enabled by default
+            grid_size: 5.0,  // 5 unit grid by default
+        }
+    }
+}
+
+impl SnapSettings {
+    /// Snap a value to the grid
+    pub fn snap(&self, value: f32) -> f32 {
+        if self.enabled {
+            (value / self.grid_size).round() * self.grid_size
+        } else {
+            value
+        }
+    }
+
+    /// Snap a Vec3 to the grid
+    pub fn snap_vec3(&self, v: Vec3) -> Vec3 {
+        if self.enabled {
+            Vec3::new(
+                self.snap(v.x),
+                self.snap(v.y),
+                self.snap(v.z),
+            )
+        } else {
+            v
+        }
+    }
 }
 
 /// Main modeler state
 pub struct ModelerState {
-    // Model data
+    // Model data (old system - keeping for now)
     pub model: Model,
     pub current_file: Option<PathBuf>,
+
+    // Spine model (new procedural system)
+    pub spine_model: Option<SpineModel>,
+    /// Cached mesh from spine (regenerated when spine changes)
+    pub spine_mesh_dirty: bool,
 
     // View state
     pub view: ModelerView,
@@ -212,9 +359,31 @@ pub struct ModelerState {
     pub transform_start_rotations: Vec<Vec3>,
     pub axis_lock: Option<Axis>,
 
+    // Spine joint drag state
+    pub spine_drag_active: bool,
+    pub spine_drag_start_mouse: (f32, f32),
+    pub spine_drag_start_positions: Vec<Vec3>,
+    /// Which gizmo handle is being dragged (None = free drag on camera plane)
+    pub spine_drag_handle: Option<GizmoHandle>,
+    /// Hovered gizmo handle (for highlighting)
+    pub gizmo_hover_handle: Option<GizmoHandle>,
+
+    // Snap/quantization settings
+    pub snap_settings: SnapSettings,
+
     // Viewport mouse state
     pub viewport_last_mouse: (f32, f32),
     pub viewport_mouse_captured: bool,
+
+    // Box selection state
+    pub box_select_active: bool,
+    pub box_select_start: (f32, f32),
+
+    // Modal transform state (Blender-style G/S/R)
+    pub modal_transform: ModalTransform,
+    pub modal_transform_start_mouse: (f32, f32),
+    pub modal_transform_start_positions: Vec<Vec3>,
+    pub modal_transform_center: Vec3,  // Center point for scale/rotate
 }
 
 impl ModelerState {
@@ -231,6 +400,10 @@ impl ModelerState {
         Self {
             model: Model::test_humanoid(),
             current_file: None,
+
+            // Start with a cube (standard starting shape like Blender)
+            spine_model: Some(SpineModel::new_cube("untitled", 50.0)),
+            spine_mesh_dirty: true,
 
             view: ModelerView::Model,
             select_mode: SelectMode::Bone,
@@ -271,8 +444,24 @@ impl ModelerState {
             transform_start_rotations: Vec::new(),
             axis_lock: None,
 
+            spine_drag_active: false,
+            spine_drag_start_mouse: (0.0, 0.0),
+            spine_drag_start_positions: Vec::new(),
+            spine_drag_handle: None,
+            gizmo_hover_handle: None,
+
+            snap_settings: SnapSettings::default(),
+
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
+
+            box_select_active: false,
+            box_select_start: (0.0, 0.0),
+
+            modal_transform: ModalTransform::None,
+            modal_transform_start_mouse: (0.0, 0.0),
+            modal_transform_start_positions: Vec::new(),
+            modal_transform_center: Vec3::ZERO,
         }
     }
 
@@ -496,6 +685,44 @@ impl ModelerState {
         let next = (self.view.index() + 1) % ModelerView::ALL.len();
         self.view = ModelerView::from_index(next).unwrap();
         self.set_status(&format!("Mode: {}", self.view.label()), 1.0);
+    }
+
+    /// Save spine model to file (uses RON format like levels)
+    pub fn save_spine_model(&mut self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(spine_model) = &self.spine_model {
+            spine_model.save_to_file(path).map_err(|e| e.to_string())?;
+            self.current_file = Some(path.to_path_buf());
+            self.dirty = false;
+            self.set_status(&format!("Saved: {}", path.display()), 2.0);
+            Ok(())
+        } else {
+            Err("No spine model to save".to_string())
+        }
+    }
+
+    /// Load spine model from file (uses RON format like levels)
+    pub fn load_spine_model(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let model = SpineModel::load_from_file(path).map_err(|e| e.to_string())?;
+        self.spine_model = Some(model);
+        self.current_file = Some(path.to_path_buf());
+        self.selection = ModelerSelection::None;
+        self.dirty = false;
+        self.set_status(&format!("Loaded: {}", path.display()), 2.0);
+        Ok(())
+    }
+
+    /// Create a new empty spine model
+    pub fn new_spine_model(&mut self) {
+        self.spine_model = Some(SpineModel::new_empty("untitled"));
+        self.current_file = None;
+        self.selection = ModelerSelection::SpineJoints(vec![(0, 0)]);
+        self.dirty = false;
+        self.set_status("New model created", 1.5);
+    }
+
+    /// Get current spine model file path (for save)
+    pub fn current_spine_file(&self) -> Option<&std::path::Path> {
+        self.current_file.as_deref()
     }
 }
 
