@@ -544,42 +544,29 @@ pub fn render_mesh(
         let v2 = projected[face.v1];
         let v3 = projected[face.v2];
 
-        // Calculate face normal in camera space (before projection)
+        // Get camera-space positions for near plane check
         let cv1 = cam_space_positions[face.v0];
         let cv2 = cam_space_positions[face.v1];
         let cv3 = cam_space_positions[face.v2];
 
-        // Near plane clipping (skip triangles behind camera)
-        // In our coordinate system, +Z is forward, so we check if vertices are in front of camera
-        if cv1.z <= 0.1 || cv2.z <= 0.1 || cv3.z <= 0.1 {
+        // Near plane clipping (skip triangles fully behind camera)
+        // Only skip if ALL vertices are behind - partial triangles should still render
+        // This is a simplification; proper clipping would generate new triangles
+        if cv1.z <= 0.1 && cv2.z <= 0.1 && cv3.z <= 0.1 {
             continue;
         }
 
-        // Use the stored vertex normals to determine face orientation
-        // Average the three vertex normals (already in camera space)
-        let vn1 = cam_space_normals[face.v0];
-        let vn2 = cam_space_normals[face.v1];
-        let vn3 = cam_space_normals[face.v2];
-        let face_normal = Vec3::new(
-            (vn1.x + vn2.x + vn3.x) / 3.0,
-            (vn1.y + vn2.y + vn3.y) / 3.0,
-            (vn1.z + vn2.z + vn3.z) / 3.0,
-        ).normalize();
+        // 2D screen-space backface culling (PS1-style)
+        // Calculate signed area using cross product of screen-space edges
+        // This is more robust than 3D normal-based culling at grazing angles
+        let signed_area = (v2.x - v1.x) * (v3.y - v1.y) - (v3.x - v1.x) * (v2.y - v1.y);
 
-        // Calculate view direction from camera to face center (in camera space)
-        // Camera is at origin in camera space, so view dir is just the position
-        let face_center = Vec3::new(
-            (cv1.x + cv2.x + cv3.x) / 3.0,
-            (cv1.y + cv2.y + cv3.y) / 3.0,
-            (cv1.z + cv2.z + cv3.z) / 3.0,
-        );
-        let view_dir = face_center.normalize();
+        // In screen space with Y-down, counter-clockwise winding = front-facing
+        // Positive signed area = counter-clockwise = front-facing
+        // Negative signed area = clockwise = back-facing
+        let is_backface = signed_area <= 0.0;
 
-        // Face is back-facing if its normal points away from us (same direction as view)
-        // Dot product > 0 means normal and view direction point the same way = back-facing
-        let is_backface = face_normal.dot(view_dir) > 0.0;
-
-        // Also compute geometric normal for shading (cross product gives correct winding)
+        // Compute geometric normal for shading (cross product in camera space)
         let edge1 = cv2 - cv1;
         let edge2 = cv3 - cv1;
         let normal = edge1.cross(edge2).normalize();
