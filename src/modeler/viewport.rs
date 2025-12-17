@@ -819,6 +819,7 @@ pub fn draw_modeler_viewport(
                     uv: RasterVec2::new(vert.uv.x, vert.uv.y),
                     normal,
                     color: RasterColor::NEUTRAL,
+                    bone_index: None,
                 });
             }
 

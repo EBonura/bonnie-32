@@ -129,16 +129,20 @@ pub struct Vertex {
     /// Default is (128, 128, 128) = neutral (no change to texture)
     /// Values > 128 brighten, < 128 darken
     pub color: Color,
+    /// Optional bone index for mesh editor export
+    /// Used when exporting mesh editor models to PS1 format
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bone_index: Option<usize>,
 }
 
 impl Vertex {
     pub fn new(pos: Vec3, uv: Vec2, normal: Vec3) -> Self {
-        Self { pos, uv, normal, color: Color::NEUTRAL }
+        Self { pos, uv, normal, color: Color::NEUTRAL, bone_index: None }
     }
 
     /// Create vertex with explicit color
     pub fn with_color(pos: Vec3, uv: Vec2, normal: Vec3, color: Color) -> Self {
-        Self { pos, uv, normal, color }
+        Self { pos, uv, normal, color, bone_index: None }
     }
 
     pub fn from_pos(x: f32, y: f32, z: f32) -> Self {
@@ -147,6 +151,7 @@ impl Vertex {
             uv: Vec2::default(),
             normal: Vec3::ZERO,
             color: Color::NEUTRAL,
+            bone_index: None,
         }
     }
 }

@@ -776,6 +776,7 @@ pub fn create_test_cube() -> (Vec<Vertex>, Vec<Face>) {
                 uv: uvs[i],
                 normal,
                 color: Color::NEUTRAL,
+                bone_index: None,
             });
         }
 
