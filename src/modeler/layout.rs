@@ -521,6 +521,15 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         super::state::ModelerSelection::SpineBones(bones) => {
             draw_text(&format!("{} spine bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
+        super::state::ModelerSelection::SpineMeshVertices(verts) => {
+            draw_text(&format!("{} mesh vertex(es)", verts.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::SpineMeshEdges(edges) => {
+            draw_text(&format!("{} mesh edge(s)", edges.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::SpineMeshFaces(faces) => {
+            draw_text(&format!("{} mesh face(s)", faces.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
     }
 
     y += line_height * 2.0;

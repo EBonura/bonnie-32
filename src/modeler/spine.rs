@@ -174,6 +174,12 @@ pub struct SpineSegment {
     pub cap_start: bool,
     /// Close the end of the tube with a cap
     pub cap_end: bool,
+    /// Editable mesh vertices (if None, generated from joints)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_vertices: Option<Vec<Vertex>>,
+    /// Editable mesh faces (if None, generated from joints)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_faces: Option<Vec<Face>>,
 }
 
 impl SpineSegment {
@@ -184,6 +190,8 @@ impl SpineSegment {
             sides: 6,
             cap_start: true,
             cap_end: true,
+            mesh_vertices: None,
+            mesh_faces: None,
         }
     }
 
@@ -192,9 +200,39 @@ impl SpineSegment {
         self.joints.push(SpineJoint::new(position, radius));
     }
 
-    /// Generate mesh vertices and faces from this spine segment
+    /// Get the mesh for this segment
+    /// Returns stored mesh if available, otherwise generates from joints
+    pub fn get_mesh(&self) -> (Vec<Vertex>, Vec<Face>) {
+        // Return stored mesh if available
+        if let (Some(verts), Some(faces)) = (&self.mesh_vertices, &self.mesh_faces) {
+            return (verts.clone(), faces.clone());
+        }
+        // Otherwise generate from joints
+        self.generate_mesh_from_joints()
+    }
+
+    /// Initialize the editable mesh from joints
+    /// Call this to "bake" the procedural mesh into editable vertices
+    pub fn bake_mesh(&mut self) {
+        let (verts, faces) = self.generate_mesh_from_joints();
+        self.mesh_vertices = Some(verts);
+        self.mesh_faces = Some(faces);
+    }
+
+    /// Clear the stored mesh, reverting to procedural generation
+    pub fn clear_mesh(&mut self) {
+        self.mesh_vertices = None;
+        self.mesh_faces = None;
+    }
+
+    /// Check if this segment has a stored editable mesh
+    pub fn has_editable_mesh(&self) -> bool {
+        self.mesh_vertices.is_some() && self.mesh_faces.is_some()
+    }
+
+    /// Generate mesh vertices and faces from joints (procedural generation)
     /// Returns (vertices, faces) ready for rendering
-    pub fn generate_mesh(&self) -> (Vec<Vertex>, Vec<Face>) {
+    pub fn generate_mesh_from_joints(&self) -> (Vec<Vertex>, Vec<Face>) {
         if self.joints.len() < 2 {
             return (Vec::new(), Vec::new());
         }
@@ -286,10 +324,11 @@ impl SpineSegment {
             });
 
             // Create fan triangles - winding to face backward (away from spine start)
+            // Winding: center, ring[i], ring[next_i] for correct front-face orientation
             let ring = &rings[0];
             for i in 0..sides {
                 let next_i = (i + 1) % sides;
-                faces.push(Face::new(center_idx, ring[next_i], ring[i]));
+                faces.push(Face::new(center_idx, ring[i], ring[next_i]));
             }
         }
 
@@ -308,10 +347,11 @@ impl SpineSegment {
             });
 
             // Create fan triangles - winding to face forward (away from spine end)
+            // Winding: center, ring[next_i], ring[i] for correct front-face orientation
             let ring = &rings[rings.len() - 1];
             for i in 0..sides {
                 let next_i = (i + 1) % sides;
-                faces.push(Face::new(center_idx, ring[i], ring[next_i]));
+                faces.push(Face::new(center_idx, ring[next_i], ring[i]));
             }
         }
 
@@ -353,6 +393,56 @@ impl SpineSegment {
 
         (tangent, bitangent)
     }
+
+    /// Create a cube primitive as editable mesh
+    pub fn create_cube(name: &str, size: f32) -> Self {
+        let half = size * 0.5;
+        let mut segment = Self::new(name);
+
+        // Add dummy joints (just for the spine system compatibility)
+        segment.add_joint(Vec3::new(0.0, 0.0, 0.0), 1.0);
+        segment.add_joint(Vec3::new(0.0, size, 0.0), 1.0);
+
+        // Create cube vertices
+        let vertices = vec![
+            // Bottom face (y = -half)
+            Vertex::new(Vec3::new(-half, -half, -half), Vec2::new(0.0, 0.0), Vec3::new(0.0, -1.0, 0.0)), // 0
+            Vertex::new(Vec3::new( half, -half, -half), Vec2::new(1.0, 0.0), Vec3::new(0.0, -1.0, 0.0)), // 1
+            Vertex::new(Vec3::new( half, -half,  half), Vec2::new(1.0, 1.0), Vec3::new(0.0, -1.0, 0.0)), // 2
+            Vertex::new(Vec3::new(-half, -half,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, -1.0, 0.0)), // 3
+            // Top face (y = +half)
+            Vertex::new(Vec3::new(-half,  half, -half), Vec2::new(0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)), // 4
+            Vertex::new(Vec3::new( half,  half, -half), Vec2::new(1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)), // 5
+            Vertex::new(Vec3::new( half,  half,  half), Vec2::new(1.0, 1.0), Vec3::new(0.0, 1.0, 0.0)), // 6
+            Vertex::new(Vec3::new(-half,  half,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)), // 7
+        ];
+
+        // Create cube faces (2 triangles per face, 6 faces = 12 triangles)
+        let faces = vec![
+            // Bottom face (y = -half) - facing down
+            Face::new(0, 2, 1),
+            Face::new(0, 3, 2),
+            // Top face (y = +half) - facing up
+            Face::new(4, 5, 6),
+            Face::new(4, 6, 7),
+            // Front face (z = +half) - facing forward
+            Face::new(3, 6, 2),
+            Face::new(3, 7, 6),
+            // Back face (z = -half) - facing backward
+            Face::new(0, 1, 5),
+            Face::new(0, 5, 4),
+            // Right face (x = +half) - facing right
+            Face::new(1, 2, 6),
+            Face::new(1, 6, 5),
+            // Left face (x = -half) - facing left
+            Face::new(0, 4, 7),
+            Face::new(0, 7, 3),
+        ];
+
+        segment.mesh_vertices = Some(vertices);
+        segment.mesh_faces = Some(faces);
+        segment
+    }
 }
 
 /// A complete spine-based model (can have multiple segments for branching)
@@ -384,7 +474,7 @@ impl SpineModel {
 
         for segment in &self.segments {
             let vertex_offset = all_vertices.len();
-            let (verts, faces) = segment.generate_mesh();
+            let (verts, faces) = segment.get_mesh();
 
             all_vertices.extend(verts);
 
@@ -399,6 +489,13 @@ impl SpineModel {
         }
 
         (all_vertices, all_faces)
+    }
+
+    /// Create a cube primitive (default starting shape)
+    pub fn new_cube(name: &str, size: f32) -> Self {
+        let mut model = Self::new(name);
+        model.add_segment(SpineSegment::create_cube("cube", size));
+        model
     }
 
     /// Create a simple test spine (vertical tube)

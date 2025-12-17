@@ -88,6 +88,12 @@ pub fn draw_viewport_3d(
         state.set_status(&format!("Vertex mode: {}", mode), 2.0);
     }
 
+    // Clear selection with Escape key
+    if inside_viewport && is_key_pressed(KeyCode::Escape) && state.selection != Selection::None {
+        state.selection = Selection::None;
+        state.set_status("Selection cleared", 0.5);
+    }
+
     // Delete selected face with Delete or Backspace key
     if inside_viewport && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
         if let Selection::SectorFace { room, x, z, face } = &state.selection {

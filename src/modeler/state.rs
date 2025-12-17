@@ -91,6 +91,12 @@ pub enum ModelerSelection {
     /// Spine segment/bone selection: (segment_index, bone_index) where bone_index is the index of the first joint
     /// A bone connects joint[bone_index] to joint[bone_index + 1]
     SpineBones(Vec<(usize, usize)>),
+    /// Spine mesh vertex selection: (segment_index, vertex_index)
+    SpineMeshVertices(Vec<(usize, usize)>),
+    /// Spine mesh edge selection: (segment_index, (v0_index, v1_index))
+    SpineMeshEdges(Vec<(usize, (usize, usize))>),
+    /// Spine mesh face selection: (segment_index, face_index)
+    SpineMeshFaces(Vec<(usize, usize)>),
 }
 
 impl ModelerSelection {
@@ -104,6 +110,9 @@ impl ModelerSelection {
             ModelerSelection::Faces { faces, .. } => faces.is_empty(),
             ModelerSelection::SpineJoints(v) => v.is_empty(),
             ModelerSelection::SpineBones(v) => v.is_empty(),
+            ModelerSelection::SpineMeshVertices(v) => v.is_empty(),
+            ModelerSelection::SpineMeshEdges(v) => v.is_empty(),
+            ModelerSelection::SpineMeshFaces(v) => v.is_empty(),
         }
     }
 
@@ -123,6 +132,22 @@ impl ModelerSelection {
     pub fn spine_bones(&self) -> Option<&[(usize, usize)]> {
         match self {
             ModelerSelection::SpineBones(bones) => Some(bones),
+            _ => None,
+        }
+    }
+
+    /// Get selected spine mesh vertices if any
+    pub fn spine_mesh_vertices(&self) -> Option<&[(usize, usize)]> {
+        match self {
+            ModelerSelection::SpineMeshVertices(verts) => Some(verts),
+            _ => None,
+        }
+    }
+
+    /// Get selected spine mesh faces if any
+    pub fn spine_mesh_faces(&self) -> Option<&[(usize, usize)]> {
+        match self {
+            ModelerSelection::SpineMeshFaces(faces) => Some(faces),
             _ => None,
         }
     }
@@ -146,6 +171,26 @@ impl TransformTool {
             TransformTool::Rotate => "Rotate (R)",
             TransformTool::Scale => "Scale (S)",
             TransformTool::Extrude => "Extrude (E)",
+        }
+    }
+}
+
+/// Modal transform mode (Blender-style G/S/R)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalTransform {
+    None,
+    Grab,   // G key - move selection
+    Scale,  // S key - scale selection
+    Rotate, // R key - rotate selection
+}
+
+impl ModalTransform {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ModalTransform::None => "",
+            ModalTransform::Grab => "Grab",
+            ModalTransform::Scale => "Scale",
+            ModalTransform::Rotate => "Rotate",
         }
     }
 }
@@ -329,6 +374,16 @@ pub struct ModelerState {
     // Viewport mouse state
     pub viewport_last_mouse: (f32, f32),
     pub viewport_mouse_captured: bool,
+
+    // Box selection state
+    pub box_select_active: bool,
+    pub box_select_start: (f32, f32),
+
+    // Modal transform state (Blender-style G/S/R)
+    pub modal_transform: ModalTransform,
+    pub modal_transform_start_mouse: (f32, f32),
+    pub modal_transform_start_positions: Vec<Vec3>,
+    pub modal_transform_center: Vec3,  // Center point for scale/rotate
 }
 
 impl ModelerState {
@@ -346,8 +401,8 @@ impl ModelerState {
             model: Model::test_humanoid(),
             current_file: None,
 
-            // Start with a test spine model
-            spine_model: Some(SpineModel::test_humanoid()),
+            // Start with a cube (standard starting shape like Blender)
+            spine_model: Some(SpineModel::new_cube("untitled", 50.0)),
             spine_mesh_dirty: true,
 
             view: ModelerView::Model,
@@ -399,6 +454,14 @@ impl ModelerState {
 
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
+
+            box_select_active: false,
+            box_select_start: (0.0, 0.0),
+
+            modal_transform: ModalTransform::None,
+            modal_transform_start_mouse: (0.0, 0.0),
+            modal_transform_start_positions: Vec::new(),
+            modal_transform_center: Vec3::ZERO,
         }
     }
 
