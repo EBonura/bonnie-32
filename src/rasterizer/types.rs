@@ -129,16 +129,20 @@ pub struct Vertex {
     /// Default is (128, 128, 128) = neutral (no change to texture)
     /// Values > 128 brighten, < 128 darken
     pub color: Color,
+    /// Optional bone index for mesh editor export
+    /// Used when exporting mesh editor models to PS1 format
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bone_index: Option<usize>,
 }
 
 impl Vertex {
     pub fn new(pos: Vec3, uv: Vec2, normal: Vec3) -> Self {
-        Self { pos, uv, normal, color: Color::NEUTRAL }
+        Self { pos, uv, normal, color: Color::NEUTRAL, bone_index: None }
     }
 
     /// Create vertex with explicit color
     pub fn with_color(pos: Vec3, uv: Vec2, normal: Vec3, color: Color) -> Self {
-        Self { pos, uv, normal, color }
+        Self { pos, uv, normal, color, bone_index: None }
     }
 
     pub fn from_pos(x: f32, y: f32, z: f32) -> Self {
@@ -147,6 +151,7 @@ impl Vertex {
             uv: Vec2::default(),
             normal: Vec3::ZERO,
             color: Color::NEUTRAL,
+            bone_index: None,
         }
     }
 }
@@ -370,6 +375,73 @@ pub enum ShadingMode {
     Gouraud,  // Interpolate vertex colors (PS1 style)
 }
 
+/// Light type (directional, point, or spot)
+#[derive(Debug, Clone, Copy)]
+pub enum LightType {
+    /// Infinite directional light (like the sun)
+    Directional { direction: Vec3 },
+    /// Point light with falloff radius
+    Point { position: Vec3, radius: f32 },
+    /// Spot light with cone angle and falloff
+    Spot { position: Vec3, direction: Vec3, angle: f32, radius: f32 },
+}
+
+/// A light source in the scene
+#[derive(Debug, Clone)]
+pub struct Light {
+    pub light_type: LightType,
+    pub color: Color,
+    pub intensity: f32,
+    pub enabled: bool,
+    pub name: String,
+}
+
+impl Light {
+    /// Create a new directional light
+    pub fn directional(direction: Vec3, intensity: f32) -> Self {
+        Self {
+            light_type: LightType::Directional { direction: direction.normalize() },
+            color: Color::WHITE,
+            intensity,
+            enabled: true,
+            name: String::from("Directional"),
+        }
+    }
+
+    /// Create a new point light
+    pub fn point(position: Vec3, radius: f32, intensity: f32) -> Self {
+        Self {
+            light_type: LightType::Point { position, radius },
+            color: Color::WHITE,
+            intensity,
+            enabled: true,
+            name: String::from("Point"),
+        }
+    }
+
+    /// Create a new spot light
+    pub fn spot(position: Vec3, direction: Vec3, angle: f32, radius: f32, intensity: f32) -> Self {
+        Self {
+            light_type: LightType::Spot {
+                position,
+                direction: direction.normalize(),
+                angle,
+                radius,
+            },
+            color: Color::WHITE,
+            intensity,
+            enabled: true,
+            name: String::from("Spot"),
+        }
+    }
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Self::directional(Vec3::new(-1.0, -1.0, -1.0), 0.7)
+    }
+}
+
 /// PS1 semi-transparency blend modes
 /// B = Back pixel (existing framebuffer), F = Front pixel (new pixel)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -395,8 +467,8 @@ pub struct RasterSettings {
     pub shading: ShadingMode,
     /// Backface culling
     pub backface_cull: bool,
-    /// Light direction (for shading)
-    pub light_dir: Vec3,
+    /// Scene lights (multiple light sources)
+    pub lights: Vec<Light>,
     /// Ambient light intensity (0.0-1.0)
     pub ambient: f32,
     /// Use PS1 low resolution (320x240) instead of high resolution
@@ -409,6 +481,21 @@ pub struct RasterSettings {
     pub wireframe_overlay: bool,
 }
 
+impl RasterSettings {
+    /// Get the primary light direction (for backwards compatibility)
+    /// Returns the first directional light's direction, or a default if none exists
+    pub fn primary_light_dir(&self) -> Vec3 {
+        for light in &self.lights {
+            if let LightType::Directional { direction } = light.light_type {
+                if light.enabled {
+                    return direction;
+                }
+            }
+        }
+        Vec3::new(-1.0, -1.0, -1.0).normalize()
+    }
+}
+
 impl Default for RasterSettings {
     fn default() -> Self {
         Self {
@@ -417,7 +504,7 @@ impl Default for RasterSettings {
             use_zbuffer: true,
             shading: ShadingMode::Gouraud,
             backface_cull: true,
-            light_dir: Vec3::new(-1.0, -1.0, -1.0).normalize(),
+            lights: vec![Light::directional(Vec3::new(-1.0, -1.0, -1.0), 0.7)],
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240
             dithering: true,        // PS1 default: ordered dithering enabled

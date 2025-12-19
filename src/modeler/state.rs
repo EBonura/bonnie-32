@@ -1,41 +1,80 @@
 //! Modeler editor state
+//!
+//! Blender-style mode hierarchy:
+//! - InteractionMode: Object vs Edit (Tab to toggle)
+//! - DataContext: Spine, Mesh, or Rig (1/2/3 keys)
+//! - RigSubMode: Skeleton, Parts, Animate (Shift+1/2/3 in Rig context)
 
 use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings};
-use super::model::{Model, PartTransform};
 use super::spine::SpineModel;
+use super::mesh_editor::EditableMesh;
+use super::model::{Animation, Keyframe, BoneTransform};
 
-/// Modeler view modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelerView {
-    Model,      // Edit mesh geometry
-    UV,         // Edit UV mapping
-    Paint,      // Texture + vertex color painting
-    Hierarchy,  // Edit part hierarchy + pivots
-    Animate,    // Timeline + keyframe animation
+// ============================================================================
+// Mode Hierarchy (Blender-style)
+// ============================================================================
+
+/// Object vs Edit mode (like Blender's Tab toggle)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InteractionMode {
+    /// Work with whole objects (parts, bones, spine segments)
+    Object,
+    /// Edit internal structure (vertices, joints)
+    #[default]
+    Edit,
 }
 
-impl ModelerView {
-    pub const ALL: [ModelerView; 5] = [
-        ModelerView::Model,
-        ModelerView::UV,
-        ModelerView::Paint,
-        ModelerView::Hierarchy,
-        ModelerView::Animate,
+impl InteractionMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            InteractionMode::Object => "Object",
+            InteractionMode::Edit => "Edit",
+        }
+    }
+
+    pub fn toggle(&self) -> Self {
+        match self {
+            InteractionMode::Object => InteractionMode::Edit,
+            InteractionMode::Edit => InteractionMode::Object,
+        }
+    }
+}
+
+/// What data context we're working in
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataContext {
+    /// Procedural mesh from spine joints
+    Spine,
+    /// Imported/created mesh geometry (default - start with cube)
+    #[default]
+    Mesh,
+    /// Rigged model with skeleton
+    Rig,
+}
+
+impl DataContext {
+    pub const ALL: [DataContext; 3] = [
+        DataContext::Spine,
+        DataContext::Mesh,
+        DataContext::Rig,
     ];
 
     pub fn label(&self) -> &'static str {
         match self {
-            ModelerView::Model => "Model",
-            ModelerView::UV => "UV",
-            ModelerView::Paint => "Paint",
-            ModelerView::Hierarchy => "Hierarchy",
-            ModelerView::Animate => "Animate",
+            DataContext::Spine => "Spine",
+            DataContext::Mesh => "Mesh",
+            DataContext::Rig => "Rig",
         }
     }
 
     pub fn index(&self) -> usize {
-        *self as usize
+        match self {
+            DataContext::Spine => 0,
+            DataContext::Mesh => 1,
+            DataContext::Rig => 2,
+        }
     }
 
     pub fn from_index(i: usize) -> Option<Self> {
@@ -43,81 +82,267 @@ impl ModelerView {
     }
 }
 
-/// Selection modes for modeling
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectMode {
-    Bone,
-    Part,
-    Vertex,
-    Edge,
-    Face,
+/// Sub-mode when in Rig context
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RigSubMode {
+    /// Create/edit bones
+    #[default]
+    Skeleton,
+    /// Split mesh, assign parts to bones
+    Parts,
+    /// Pose and keyframe animation
+    Animate,
 }
 
-impl SelectMode {
-    pub const ALL: [SelectMode; 5] = [
-        SelectMode::Bone,
-        SelectMode::Part,
-        SelectMode::Vertex,
-        SelectMode::Edge,
-        SelectMode::Face,
+impl RigSubMode {
+    pub const ALL: [RigSubMode; 3] = [
+        RigSubMode::Skeleton,
+        RigSubMode::Parts,
+        RigSubMode::Animate,
     ];
 
     pub fn label(&self) -> &'static str {
         match self {
-            SelectMode::Bone => "Bone",
-            SelectMode::Part => "Part",
-            SelectMode::Vertex => "Vertex",
-            SelectMode::Edge => "Edge",
-            SelectMode::Face => "Face",
+            RigSubMode::Skeleton => "Skeleton",
+            RigSubMode::Parts => "Parts",
+            RigSubMode::Animate => "Animate",
         }
     }
 
     pub fn index(&self) -> usize {
-        *self as usize
+        match self {
+            RigSubMode::Skeleton => 0,
+            RigSubMode::Parts => 1,
+            RigSubMode::Animate => 2,
+        }
+    }
+
+    pub fn from_index(i: usize) -> Option<Self> {
+        Self::ALL.get(i).copied()
     }
 }
 
-/// Current selection in the modeler
+// ============================================================================
+// PS1-Style Rigged Model
+// ============================================================================
+
+/// A complete rigged model ready for animation
+/// PS1-style: each part is rigidly attached to one bone (no vertex weights)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiggedModel {
+    pub name: String,
+    pub skeleton: Vec<RigBone>,
+    pub parts: Vec<MeshPart>,
+    pub animations: Vec<Animation>,
+}
+
+impl RiggedModel {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            skeleton: Vec::new(),
+            parts: Vec::new(),
+            animations: vec![Animation::new("Action")],
+        }
+    }
+
+    /// Create from an editable mesh (single part, no bones yet)
+    pub fn from_mesh(name: &str, mesh: EditableMesh) -> Self {
+        Self {
+            name: name.to_string(),
+            skeleton: Vec::new(),
+            parts: vec![MeshPart {
+                name: "root".to_string(),
+                bone_index: None,
+                mesh,
+                pivot: Vec3::ZERO,
+            }],
+            animations: vec![Animation::new("Action")],
+        }
+    }
+
+    /// Add a bone and return its index
+    pub fn add_bone(&mut self, bone: RigBone) -> usize {
+        let idx = self.skeleton.len();
+        self.skeleton.push(bone);
+        idx
+    }
+
+    /// Get root bones (no parent)
+    pub fn root_bones(&self) -> Vec<usize> {
+        self.skeleton
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.parent.is_none())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Get children of a bone
+    pub fn bone_children(&self, parent_index: usize) -> Vec<usize> {
+        self.skeleton
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.parent == Some(parent_index))
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+/// A single bone in the hierarchy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RigBone {
+    pub name: String,
+    /// Parent bone index (None = root bone)
+    pub parent: Option<usize>,
+    /// Local position relative to parent (bind pose)
+    pub local_position: Vec3,
+    /// Local rotation in degrees (bind pose)
+    pub local_rotation: Vec3,
+    /// Length of bone for visualization
+    pub length: f32,
+}
+
+impl RigBone {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            parent: None,
+            local_position: Vec3::ZERO,
+            local_rotation: Vec3::ZERO,
+            length: 20.0,
+        }
+    }
+
+    pub fn with_parent(name: &str, parent: usize) -> Self {
+        Self {
+            name: name.to_string(),
+            parent: Some(parent),
+            local_position: Vec3::ZERO,
+            local_rotation: Vec3::ZERO,
+            length: 20.0,
+        }
+    }
+}
+
+/// A mesh piece that moves 100% with its bone (PS1-style rigid binding)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshPart {
+    pub name: String,
+    /// Which bone this part follows (None = unassigned)
+    pub bone_index: Option<usize>,
+    /// The geometry (in bone-local space when assigned)
+    pub mesh: EditableMesh,
+    /// Local pivot point
+    pub pivot: Vec3,
+}
+
+// ============================================================================
+// Selection Modes (simplified, context-aware)
+// ============================================================================
+
+/// Selection mode - what type of element to select
+/// Constrained by current DataContext and InteractionMode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectMode {
+    // Spine context
+    Segment,  // Object mode: select whole segments
+    Joint,    // Edit mode: select joints
+    SpineBone,// Edit mode: select bones (joint pairs)
+
+    // Mesh context
+    Vertex,
+    Edge,
+    Face,
+
+    // Rig context
+    Part,     // Select mesh parts
+    RigBone,  // Select bones
+}
+
+impl SelectMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SelectMode::Segment => "Segment",
+            SelectMode::Joint => "Joint",
+            SelectMode::SpineBone => "Bone",
+            SelectMode::Vertex => "Vertex",
+            SelectMode::Edge => "Edge",
+            SelectMode::Face => "Face",
+            SelectMode::Part => "Part",
+            SelectMode::RigBone => "Bone",
+        }
+    }
+
+    /// Get valid select modes for given context and interaction mode
+    pub fn valid_modes(context: DataContext, interaction: InteractionMode) -> Vec<SelectMode> {
+        match (context, interaction) {
+            (DataContext::Spine, InteractionMode::Object) => vec![SelectMode::Segment],
+            (DataContext::Spine, InteractionMode::Edit) => vec![SelectMode::Joint, SelectMode::SpineBone],
+            (DataContext::Mesh, InteractionMode::Object) => vec![], // Whole mesh selected
+            (DataContext::Mesh, InteractionMode::Edit) => vec![SelectMode::Vertex, SelectMode::Edge, SelectMode::Face],
+            (DataContext::Rig, InteractionMode::Object) => vec![SelectMode::Part, SelectMode::RigBone],
+            (DataContext::Rig, InteractionMode::Edit) => vec![SelectMode::Vertex, SelectMode::Edge, SelectMode::Face],
+        }
+    }
+}
+
+/// Current selection in the modeler (simplified, context-aware)
 #[derive(Debug, Clone)]
 pub enum ModelerSelection {
     None,
-    Bones(Vec<usize>),
-    Parts(Vec<usize>),
-    Vertices { part: usize, verts: Vec<usize> },
-    Edges { part: usize, edges: Vec<(usize, usize)> },
-    Faces { part: usize, faces: Vec<usize> },
-    /// Spine joint selection: (segment_index, joint_index)
+
+    // Spine context
+    /// Object mode: selected spine segments
+    SpineSegments(Vec<usize>),
+    /// Edit mode: selected joints (segment_index, joint_index)
     SpineJoints(Vec<(usize, usize)>),
-    /// Spine segment/bone selection: (segment_index, bone_index) where bone_index is the index of the first joint
-    /// A bone connects joint[bone_index] to joint[bone_index + 1]
+    /// Edit mode: selected bones (segment_index, bone_index)
     SpineBones(Vec<(usize, usize)>),
-    /// Spine mesh vertex selection: (segment_index, vertex_index)
-    SpineMeshVertices(Vec<(usize, usize)>),
-    /// Spine mesh edge selection: (segment_index, (v0_index, v1_index))
-    SpineMeshEdges(Vec<(usize, (usize, usize))>),
-    /// Spine mesh face selection: (segment_index, face_index)
-    SpineMeshFaces(Vec<(usize, usize)>),
+
+    // Mesh context
+    /// Object mode: whole mesh selected
+    Mesh,
+    /// Edit mode: selected vertices
+    MeshVertices(Vec<usize>),
+    /// Edit mode: selected edges (v0_index, v1_index)
+    MeshEdges(Vec<(usize, usize)>),
+    /// Edit mode: selected faces
+    MeshFaces(Vec<usize>),
+
+    // Rig context
+    /// Object mode: selected mesh parts
+    RigParts(Vec<usize>),
+    /// Object mode: selected bones
+    RigBones(Vec<usize>),
 }
 
 impl ModelerSelection {
     pub fn is_empty(&self) -> bool {
         match self {
             ModelerSelection::None => true,
-            ModelerSelection::Bones(v) => v.is_empty(),
-            ModelerSelection::Parts(v) => v.is_empty(),
-            ModelerSelection::Vertices { verts, .. } => verts.is_empty(),
-            ModelerSelection::Edges { edges, .. } => edges.is_empty(),
-            ModelerSelection::Faces { faces, .. } => faces.is_empty(),
+            ModelerSelection::SpineSegments(v) => v.is_empty(),
             ModelerSelection::SpineJoints(v) => v.is_empty(),
             ModelerSelection::SpineBones(v) => v.is_empty(),
-            ModelerSelection::SpineMeshVertices(v) => v.is_empty(),
-            ModelerSelection::SpineMeshEdges(v) => v.is_empty(),
-            ModelerSelection::SpineMeshFaces(v) => v.is_empty(),
+            ModelerSelection::Mesh => false, // Whole mesh is selected
+            ModelerSelection::MeshVertices(v) => v.is_empty(),
+            ModelerSelection::MeshEdges(v) => v.is_empty(),
+            ModelerSelection::MeshFaces(v) => v.is_empty(),
+            ModelerSelection::RigParts(v) => v.is_empty(),
+            ModelerSelection::RigBones(v) => v.is_empty(),
         }
     }
 
     pub fn clear(&mut self) {
         *self = ModelerSelection::None;
+    }
+
+    /// Get selected spine segments if any
+    pub fn spine_segments(&self) -> Option<&[usize]> {
+        match self {
+            ModelerSelection::SpineSegments(segs) => Some(segs),
+            _ => None,
+        }
     }
 
     /// Get selected spine joints if any
@@ -136,18 +361,42 @@ impl ModelerSelection {
         }
     }
 
-    /// Get selected spine mesh vertices if any
-    pub fn spine_mesh_vertices(&self) -> Option<&[(usize, usize)]> {
+    /// Get selected mesh vertices if any
+    pub fn mesh_vertices(&self) -> Option<&[usize]> {
         match self {
-            ModelerSelection::SpineMeshVertices(verts) => Some(verts),
+            ModelerSelection::MeshVertices(verts) => Some(verts),
             _ => None,
         }
     }
 
-    /// Get selected spine mesh faces if any
-    pub fn spine_mesh_faces(&self) -> Option<&[(usize, usize)]> {
+    /// Get selected mesh edges if any
+    pub fn mesh_edges(&self) -> Option<&[(usize, usize)]> {
         match self {
-            ModelerSelection::SpineMeshFaces(faces) => Some(faces),
+            ModelerSelection::MeshEdges(edges) => Some(edges),
+            _ => None,
+        }
+    }
+
+    /// Get selected mesh faces if any
+    pub fn mesh_faces(&self) -> Option<&[usize]> {
+        match self {
+            ModelerSelection::MeshFaces(faces) => Some(faces),
+            _ => None,
+        }
+    }
+
+    /// Get selected rig parts if any
+    pub fn rig_parts(&self) -> Option<&[usize]> {
+        match self {
+            ModelerSelection::RigParts(parts) => Some(parts),
+            _ => None,
+        }
+    }
+
+    /// Get selected rig bones if any
+    pub fn rig_bones(&self) -> Option<&[usize]> {
+        match self {
+            ModelerSelection::RigBones(bones) => Some(bones),
             _ => None,
         }
     }
@@ -303,17 +552,23 @@ impl SnapSettings {
 
 /// Main modeler state
 pub struct ModelerState {
-    // Model data (old system - keeping for now)
-    pub model: Model,
-    pub current_file: Option<PathBuf>,
+    // Mode hierarchy (Blender-style)
+    pub interaction_mode: InteractionMode,
+    pub data_context: DataContext,
+    pub rig_sub_mode: RigSubMode,  // Only relevant when context == Rig
 
-    // Spine model (new procedural system)
+    // Data (only one active at a time based on context)
     pub spine_model: Option<SpineModel>,
+    pub editable_mesh: Option<EditableMesh>,
+    pub rigged_model: Option<RiggedModel>,
+
     /// Cached mesh from spine (regenerated when spine changes)
     pub spine_mesh_dirty: bool,
 
-    // View state
-    pub view: ModelerView,
+    // File state
+    pub current_file: Option<PathBuf>,
+
+    // View/edit state
     pub select_mode: SelectMode,
     pub tool: TransformTool,
     pub selection: ModelerSelection,
@@ -346,9 +601,7 @@ pub struct ModelerState {
     pub playback_time: f64,
     pub selected_keyframes: Vec<usize>,
 
-    // Edit state
-    pub undo_stack: Vec<Model>,
-    pub redo_stack: Vec<Model>,
+    // Edit state (undo/redo stores context-specific snapshots)
     pub dirty: bool,
     pub status_message: Option<(String, f64)>,
 
@@ -384,6 +637,10 @@ pub struct ModelerState {
     pub modal_transform_start_mouse: (f32, f32),
     pub modal_transform_start_positions: Vec<Vec3>,
     pub modal_transform_center: Vec3,  // Center point for scale/rotate
+
+    // Rig bone rotation state (for Animate mode)
+    pub rig_bone_rotating: bool,
+    pub rig_bone_start_rotations: Vec<Vec3>,  // Original local_rotation values
 }
 
 impl ModelerState {
@@ -398,15 +655,20 @@ impl ModelerState {
         Self::update_camera_from_orbit(&mut camera, orbit_target, orbit_distance, orbit_azimuth, orbit_elevation);
 
         Self {
-            model: Model::test_humanoid(),
-            current_file: None,
+            // Mode hierarchy - start in Mesh context, Edit mode (like Blender)
+            interaction_mode: InteractionMode::Edit,
+            data_context: DataContext::Mesh,
+            rig_sub_mode: RigSubMode::Skeleton,
 
             // Start with a cube (standard starting shape like Blender)
-            spine_model: Some(SpineModel::new_cube("untitled", 50.0)),
-            spine_mesh_dirty: true,
+            spine_model: None,
+            editable_mesh: Some(EditableMesh::cube(50.0)),
+            rigged_model: None,
+            spine_mesh_dirty: false,
 
-            view: ModelerView::Model,
-            select_mode: SelectMode::Bone,
+            current_file: None,
+
+            select_mode: SelectMode::Vertex,
             tool: TransformTool::Select,
             selection: ModelerSelection::None,
 
@@ -433,8 +695,6 @@ impl ModelerState {
             playback_time: 0.0,
             selected_keyframes: Vec::new(),
 
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
             dirty: false,
             status_message: None,
 
@@ -462,6 +722,9 @@ impl ModelerState {
             modal_transform_start_mouse: (0.0, 0.0),
             modal_transform_start_positions: Vec::new(),
             modal_transform_center: Vec3::ZERO,
+
+            rig_bone_rotating: false,
+            rig_bone_start_rotations: Vec::new(),
         }
     }
 
@@ -519,82 +782,42 @@ impl ModelerState {
         None
     }
 
-    /// Save current state for undo
-    pub fn save_undo(&mut self) {
-        self.undo_stack.push(self.model.clone());
-        self.redo_stack.clear();
-        self.dirty = true;
-
-        // Limit undo stack size
-        if self.undo_stack.len() > 50 {
-            self.undo_stack.remove(0);
-        }
+    /// Toggle interaction mode (Object <-> Edit)
+    pub fn toggle_interaction_mode(&mut self) {
+        self.interaction_mode = self.interaction_mode.toggle();
+        self.selection.clear();
+        self.set_status(&format!("{} Mode", self.interaction_mode.label()), 1.0);
     }
 
-    /// Undo last action
-    pub fn undo(&mut self) {
-        if let Some(prev) = self.undo_stack.pop() {
-            self.redo_stack.push(self.model.clone());
-            self.model = prev;
-            self.set_status("Undo", 1.0);
-        }
-    }
-
-    /// Redo last undone action
-    pub fn redo(&mut self) {
-        if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(self.model.clone());
-            self.model = next;
-            self.set_status("Redo", 1.0);
-        }
-    }
-
-    /// Get the current animation being edited
-    pub fn current_animation(&self) -> Option<&super::model::Animation> {
-        self.model.animations.get(self.current_animation)
-    }
-
-    /// Get the current animation mutably
-    pub fn current_animation_mut(&mut self) -> Option<&mut super::model::Animation> {
-        self.model.animations.get_mut(self.current_animation)
-    }
-
-    /// Interpolate pose at current frame
-    pub fn get_current_pose(&self) -> Vec<PartTransform> {
-        let num_parts = self.model.parts.len();
-
-        let anim = match self.current_animation() {
-            Some(a) if !a.keyframes.is_empty() => a,
-            _ => return vec![PartTransform::default(); num_parts],
-        };
-
-        // Find surrounding keyframes
-        let frame = self.current_frame;
-        let mut prev_kf = &anim.keyframes[0];
-        let mut next_kf = &anim.keyframes[0];
-
-        for kf in &anim.keyframes {
-            if kf.frame <= frame {
-                prev_kf = kf;
+    /// Switch data context
+    pub fn set_data_context(&mut self, context: DataContext) {
+        if self.data_context != context {
+            self.data_context = context;
+            self.selection.clear();
+            // Update select mode to a valid one for this context
+            let valid_modes = SelectMode::valid_modes(context, self.interaction_mode);
+            if !valid_modes.is_empty() {
+                self.select_mode = valid_modes[0];
             }
-            if kf.frame >= frame && next_kf.frame <= frame {
-                next_kf = kf;
-            }
+            self.set_status(&format!("Context: {}", context.label()), 1.0);
         }
+    }
 
-        // If same keyframe, no interpolation needed
-        if prev_kf.frame == next_kf.frame {
-            return prev_kf.transforms.clone();
+    /// Switch rig sub-mode (only relevant in Rig context)
+    pub fn set_rig_sub_mode(&mut self, sub_mode: RigSubMode) {
+        if self.data_context == DataContext::Rig && self.rig_sub_mode != sub_mode {
+            self.rig_sub_mode = sub_mode;
+            self.selection.clear();
+            self.set_status(&format!("Rig: {}", sub_mode.label()), 1.0);
         }
+    }
 
-        // Interpolate
-        let t = (frame - prev_kf.frame) as f32 / (next_kf.frame - prev_kf.frame) as f32;
-
-        prev_kf.transforms
-            .iter()
-            .zip(next_kf.transforms.iter())
-            .map(|(a, b)| a.lerp(b, t))
-            .collect()
+    /// Cycle to next data context
+    pub fn next_context(&mut self) {
+        let next = (self.data_context.index() + 1) % DataContext::ALL.len();
+        if let Some(context) = DataContext::from_index(next) {
+            self.set_data_context(context);
+        }
     }
 
     /// Toggle playback
@@ -610,81 +833,6 @@ impl ModelerState {
         self.playing = false;
         self.current_frame = 0;
         self.playback_time = 0.0;
-    }
-
-    /// Update animation playback
-    pub fn update_playback(&mut self, delta: f64) {
-        if !self.playing {
-            return;
-        }
-
-        let anim = match self.current_animation() {
-            Some(a) => a,
-            None => {
-                self.playing = false;
-                return;
-            }
-        };
-
-        let fps = anim.fps as f64;
-        let last_frame = anim.last_frame();
-        let looping = anim.looping;
-
-        self.playback_time += delta;
-        let frame_duration = 1.0 / fps;
-
-        while self.playback_time >= frame_duration {
-            self.playback_time -= frame_duration;
-            self.current_frame += 1;
-
-            if self.current_frame > last_frame {
-                if looping {
-                    self.current_frame = 0;
-                } else {
-                    self.current_frame = last_frame;
-                    self.playing = false;
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Insert keyframe at current frame for all parts
-    pub fn insert_keyframe(&mut self) {
-        let frame = self.current_frame;
-        let pose = self.get_current_pose();
-
-        // Ensure we have at least one animation
-        if self.model.animations.is_empty() {
-            self.model.animations.push(super::model::Animation::new("default"));
-        }
-
-        let anim = &mut self.model.animations[self.current_animation];
-        anim.set_keyframe(super::model::Keyframe {
-            frame,
-            transforms: pose,
-        });
-
-        self.dirty = true;
-        self.set_status(&format!("Keyframe inserted at frame {}", frame), 1.5);
-    }
-
-    /// Delete keyframe at current frame
-    pub fn delete_keyframe(&mut self) {
-        let frame = self.current_frame;
-
-        if let Some(anim) = self.current_animation_mut() {
-            anim.remove_keyframe(frame);
-            self.dirty = true;
-            self.set_status(&format!("Keyframe deleted at frame {}", frame), 1.5);
-        }
-    }
-
-    /// Cycle to next view mode
-    pub fn next_view(&mut self) {
-        let next = (self.view.index() + 1) % ModelerView::ALL.len();
-        self.view = ModelerView::from_index(next).unwrap();
-        self.set_status(&format!("Mode: {}", self.view.label()), 1.0);
     }
 
     /// Save spine model to file (uses RON format like levels)
@@ -723,6 +871,190 @@ impl ModelerState {
     /// Get current spine model file path (for save)
     pub fn current_spine_file(&self) -> Option<&std::path::Path> {
         self.current_file.as_deref()
+    }
+
+    // ========================================================================
+    // Animation Keyframe Methods
+    // ========================================================================
+
+    /// Insert a keyframe at the current frame with current bone poses
+    pub fn insert_keyframe(&mut self) {
+        if let Some(rig) = &mut self.rigged_model {
+            if rig.skeleton.is_empty() {
+                self.set_status("No bones to keyframe", 1.0);
+                return;
+            }
+            if self.current_animation >= rig.animations.len() {
+                self.set_status("No animation selected", 1.0);
+                return;
+            }
+
+            let num_bones = rig.skeleton.len();
+
+            // Create keyframe from current bone transforms
+            let mut kf = Keyframe::new(self.current_frame, num_bones);
+            for (i, bone) in rig.skeleton.iter().enumerate() {
+                kf.transforms[i] = BoneTransform::new(bone.local_position, bone.local_rotation);
+            }
+
+            rig.animations[self.current_animation].set_keyframe(kf);
+            self.set_status(&format!("Keyframe inserted at frame {}", self.current_frame), 1.0);
+            self.dirty = true;
+        } else {
+            self.set_status("No rigged model", 1.0);
+        }
+    }
+
+    /// Delete keyframe at current frame
+    pub fn delete_keyframe(&mut self) {
+        if let Some(rig) = &mut self.rigged_model {
+            if self.current_animation >= rig.animations.len() {
+                return;
+            }
+            let anim = &mut rig.animations[self.current_animation];
+            if anim.get_keyframe(self.current_frame).is_some() {
+                anim.remove_keyframe(self.current_frame);
+                self.set_status(&format!("Keyframe deleted at frame {}", self.current_frame), 1.0);
+                self.dirty = true;
+            } else {
+                self.set_status("No keyframe at current frame", 1.0);
+            }
+        }
+    }
+
+    /// Apply interpolated pose from animation at current frame
+    pub fn apply_animation_pose(&mut self) {
+        // Need to get animation data first, then apply to skeleton
+        let pose_data = if let Some(rig) = &self.rigged_model {
+            if rig.animations.is_empty() || rig.skeleton.is_empty() {
+                return;
+            }
+            if self.current_animation >= rig.animations.len() {
+                return;
+            }
+
+            let anim = &rig.animations[self.current_animation];
+            if anim.keyframes.is_empty() {
+                return;
+            }
+
+            // Find surrounding keyframes
+            let frame = self.current_frame;
+            let mut prev_kf: Option<&Keyframe> = None;
+            let mut next_kf: Option<&Keyframe> = None;
+
+            for kf in &anim.keyframes {
+                if kf.frame <= frame {
+                    prev_kf = Some(kf);
+                } else if next_kf.is_none() {
+                    next_kf = Some(kf);
+                    break;
+                }
+            }
+
+            // Calculate interpolated transforms
+            let num_bones = rig.skeleton.len();
+            let mut result: Vec<Option<Vec3>> = vec![None; num_bones];
+
+            match (prev_kf, next_kf) {
+                (Some(prev), Some(next)) if next.frame > prev.frame => {
+                    let t = (frame - prev.frame) as f32 / (next.frame - prev.frame) as f32;
+                    for i in 0..num_bones {
+                        if i < prev.transforms.len() && i < next.transforms.len() {
+                            let interp = prev.transforms[i].lerp(&next.transforms[i], t);
+                            result[i] = Some(interp.rotation);
+                        }
+                    }
+                }
+                (Some(kf), None) | (None, Some(kf)) => {
+                    for i in 0..num_bones {
+                        if i < kf.transforms.len() {
+                            result[i] = Some(kf.transforms[i].rotation);
+                        }
+                    }
+                }
+                (Some(prev), Some(_next)) => {
+                    // Same frame or invalid range, use prev
+                    for i in 0..num_bones {
+                        if i < prev.transforms.len() {
+                            result[i] = Some(prev.transforms[i].rotation);
+                        }
+                    }
+                }
+                (None, None) => {}
+            }
+
+            Some(result)
+        } else {
+            None
+        };
+
+        // Apply the calculated pose
+        if let (Some(pose), Some(rig)) = (pose_data, &mut self.rigged_model) {
+            for (i, maybe_rot) in pose.into_iter().enumerate() {
+                if let Some(rot) = maybe_rot {
+                    if i < rig.skeleton.len() {
+                        rig.skeleton[i].local_rotation = rot;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if there's a keyframe at the current frame
+    pub fn has_keyframe_at_current_frame(&self) -> bool {
+        if let Some(rig) = &self.rigged_model {
+            if self.current_animation < rig.animations.len() {
+                return rig.animations[self.current_animation]
+                    .get_keyframe(self.current_frame)
+                    .is_some();
+            }
+        }
+        false
+    }
+
+    /// Get keyframe frames for current animation (for timeline display)
+    pub fn get_keyframe_frames(&self) -> Vec<u32> {
+        if let Some(rig) = &self.rigged_model {
+            if self.current_animation < rig.animations.len() {
+                return rig.animations[self.current_animation]
+                    .keyframes
+                    .iter()
+                    .map(|kf| kf.frame)
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
+    /// Get last frame of current animation
+    pub fn get_animation_last_frame(&self) -> u32 {
+        if let Some(rig) = &self.rigged_model {
+            if self.current_animation < rig.animations.len() {
+                return rig.animations[self.current_animation].last_frame();
+            }
+        }
+        60 // Default if no animation
+    }
+
+    /// Get FPS of current animation
+    pub fn get_animation_fps(&self) -> u8 {
+        if let Some(rig) = &self.rigged_model {
+            if self.current_animation < rig.animations.len() {
+                return rig.animations[self.current_animation].fps;
+            }
+        }
+        15 // Default
+    }
+
+    /// Check if current animation loops
+    pub fn is_animation_looping(&self) -> bool {
+        if let Some(rig) = &self.rigged_model {
+            if self.current_animation < rig.animations.len() {
+                return rig.animations[self.current_animation].looping;
+            }
+        }
+        true
     }
 }
 

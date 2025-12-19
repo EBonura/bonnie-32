@@ -15,6 +15,9 @@ mod layout;
 mod viewport;
 mod spine;
 mod model_browser;
+mod mesh_editor;
+mod obj_import;
+mod mesh_browser;
 
 // Re-export public API
 // Some of these aren't used externally yet but are part of the intended public API
@@ -26,3 +29,7 @@ pub use layout::*;
 pub use viewport::*;
 pub use spine::*;
 pub use model_browser::*;
+#[allow(unused_imports)]
+pub use mesh_editor::*;
+pub use obj_import::*;
+pub use mesh_browser::*;

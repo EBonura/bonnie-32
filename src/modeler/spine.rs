@@ -278,6 +278,7 @@ impl SpineSegment {
                     uv: Vec2::new(u, v),
                     normal,
                     color: Color::NEUTRAL,
+                    bone_index: None,
                 });
 
                 ring_indices.push(base_idx + i);
@@ -321,6 +322,7 @@ impl SpineSegment {
                 uv: Vec2::new(0.5, 0.0),
                 normal: direction * -1.0, // Points backward (away from spine)
                 color: Color::NEUTRAL,
+                bone_index: None,
             });
 
             // Create fan triangles - winding to face backward (away from spine start)
@@ -344,6 +346,7 @@ impl SpineSegment {
                 uv: Vec2::new(0.5, 1.0),
                 normal: direction, // Points forward (away from spine)
                 color: Color::NEUTRAL,
+                bone_index: None,
             });
 
             // Create fan triangles - winding to face forward (away from spine end)
