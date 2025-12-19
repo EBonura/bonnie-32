@@ -348,4 +348,39 @@ f 1/1 2/2 3/3
         assert_eq!(mesh.vertices[0].uv.x, 0.0);
         assert_eq!(mesh.vertices[1].uv.x, 1.0);
     }
+
+    #[test]
+    fn test_load_ps1_mesh_gen_files() {
+        // Test with real ps1-mesh-gen output files from assets/test_meshes
+        let test_files = [
+            "Clockwork_Abomination_-_Expose_s42_ps1.obj",
+            "entropy_crawler_t-pose_dark_s14_ps1.obj",
+            "fractured_memory_ghost_t-pose_s12_ps1.obj",
+            "pale_wandering_arch_warrior_s800_ps1.obj",
+        ];
+
+        let base_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/test_meshes");
+
+        for filename in test_files {
+            let test_path = base_path.join(filename);
+
+            if test_path.exists() {
+                let mesh = ObjImporter::load_from_file(&test_path).unwrap();
+
+                // ps1-mesh-gen outputs ~400-500 faces
+                println!(
+                    "{}: {} vertices, {} faces",
+                    filename,
+                    mesh.vertices.len(),
+                    mesh.faces.len()
+                );
+                assert!(mesh.vertices.len() > 100, "Expected many vertices in {}", filename);
+                assert!(mesh.faces.len() > 100, "Expected many faces in {}", filename);
+                assert!(mesh.faces.len() < 1000, "Expected PS1-era poly count in {}", filename);
+            } else {
+                panic!("Test file not found: {:?}", test_path);
+            }
+        }
+    }
 }
