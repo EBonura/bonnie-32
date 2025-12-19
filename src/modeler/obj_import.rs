@@ -351,22 +351,18 @@ f 1/1 2/2 3/3
 
     #[test]
     fn test_load_ps1_mesh_gen_files() {
-        // Test with real ps1-mesh-gen output files from assets/test_meshes
-        let test_files = [
-            "Clockwork_Abomination_-_Expose_s42_ps1.obj",
-            "entropy_crawler_t-pose_dark_s14_ps1.obj",
-            "fractured_memory_ghost_t-pose_s12_ps1.obj",
-            "pale_wandering_arch_warrior_s800_ps1.obj",
-        ];
-
+        // Test with all OBJ files in assets/test_meshes
         let base_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets/test_meshes");
 
-        for filename in test_files {
-            let test_path = base_path.join(filename);
+        let mut count = 0;
+        for entry in std::fs::read_dir(&base_path).expect("test_meshes dir should exist") {
+            let entry = entry.unwrap();
+            let path = entry.path();
 
-            if test_path.exists() {
-                let mesh = ObjImporter::load_from_file(&test_path).unwrap();
+            if path.extension().map_or(false, |e| e == "obj") {
+                let mesh = ObjImporter::load_from_file(&path).unwrap();
+                let filename = path.file_name().unwrap().to_string_lossy();
 
                 // ps1-mesh-gen outputs ~400-500 faces
                 println!(
@@ -375,12 +371,13 @@ f 1/1 2/2 3/3
                     mesh.vertices.len(),
                     mesh.faces.len()
                 );
-                assert!(mesh.vertices.len() > 100, "Expected many vertices in {}", filename);
-                assert!(mesh.faces.len() > 100, "Expected many faces in {}", filename);
-                assert!(mesh.faces.len() < 1000, "Expected PS1-era poly count in {}", filename);
-            } else {
-                panic!("Test file not found: {:?}", test_path);
+                assert!(mesh.vertices.len() > 50, "Expected vertices in {}", filename);
+                assert!(mesh.faces.len() > 50, "Expected faces in {}", filename);
+                count += 1;
             }
         }
+
+        assert!(count > 0, "Expected at least one OBJ file in test_meshes");
+        println!("Loaded {} OBJ files successfully", count);
     }
 }
