@@ -29,6 +29,7 @@ pub use layout::*;
 pub use viewport::*;
 pub use spine::*;
 pub use model_browser::*;
+#[allow(unused_imports)]
 pub use mesh_editor::*;
 pub use obj_import::*;
 pub use mesh_browser::*;

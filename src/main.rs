@@ -331,10 +331,6 @@ async fn main() {
             Tool::Modeler => {
                 let ms = &mut app.modeler;
 
-                // Update animation playback
-                let delta = get_frame_time() as f64;
-                ms.modeler_state.update_playback(delta);
-
                 // Block background input if any browser is open
                 let real_mouse_modeler = mouse_state;
                 if ms.model_browser.open || ms.mesh_browser.open {
@@ -419,7 +415,9 @@ async fn main() {
                             if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
                                 let path = mesh_info.path.clone();
                                 match ObjImporter::load_from_file(&path) {
-                                    Ok(mesh) => {
+                                    Ok(mut mesh) => {
+                                        // Compute normals for shading in preview
+                                        ObjImporter::compute_face_normals(&mut mesh);
                                         ms.mesh_browser.set_preview(mesh);
                                     }
                                     Err(e) => {
@@ -429,12 +427,35 @@ async fn main() {
                             }
                         }
                         MeshBrowserAction::OpenMesh => {
-                            if let Some(_mesh) = ms.mesh_browser.preview_mesh.take() {
-                                // TODO: Create MeshEditorModel and switch to mesh editing mode
+                            if let Some(mut mesh) = ms.mesh_browser.preview_mesh.take() {
                                 let path = ms.mesh_browser.selected_mesh()
                                     .map(|m| m.path.clone())
                                     .unwrap_or_else(|| PathBuf::from("assets/meshes/untitled.obj"));
-                                ms.modeler_state.set_status(&format!("Opened mesh: {}", path.display()), 3.0);
+
+                                // Compute normals if the OBJ didn't have them (required for shading)
+                                ObjImporter::compute_face_normals(&mut mesh);
+
+                                // Apply scale to mesh vertices
+                                let scale = ms.mesh_browser.import_scale;
+                                for vertex in &mut mesh.vertices {
+                                    vertex.pos.x *= scale;
+                                    vertex.pos.y *= scale;
+                                    vertex.pos.z *= scale;
+                                }
+
+                                // Set the editable mesh (clears spine model to show only the imported mesh)
+                                ms.modeler_state.editable_mesh = Some(mesh);
+                                ms.modeler_state.spine_model = None;
+                                ms.modeler_state.current_file = Some(path.clone());
+                                ms.modeler_state.dirty = false;
+                                ms.modeler_state.selection = modeler::ModelerSelection::None;
+
+                                // Reset camera to fit the scaled mesh
+                                ms.modeler_state.orbit_target = crate::rasterizer::Vec3::new(0.0, 50.0, 0.0);
+                                ms.modeler_state.orbit_distance = scale * 3.0;
+                                ms.modeler_state.sync_camera_from_orbit();
+
+                                ms.modeler_state.set_status(&format!("Opened mesh: {} (scale {}x)", path.display(), scale), 3.0);
                                 ms.mesh_browser.close();
                             }
                         }

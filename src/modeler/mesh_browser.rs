@@ -3,7 +3,7 @@
 //! Modal dialog for browsing and previewing OBJ mesh files.
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
+use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR, TEXT_COLOR};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, world_to_screen};
 use super::mesh_editor::EditableMesh;
 use super::obj_import::ObjImporter;
@@ -79,6 +79,8 @@ pub struct MeshBrowser {
     pub last_mouse: (f32, f32),
     /// Scroll offset for the list
     pub scroll_offset: f32,
+    /// Scale multiplier for imported meshes (OBJ meshes are often small)
+    pub import_scale: f32,
 }
 
 impl Default for MeshBrowser {
@@ -95,6 +97,7 @@ impl Default for MeshBrowser {
             dragging: false,
             last_mouse: (0.0, 0.0),
             scroll_offset: 0.0,
+            import_scale: 100.0, // OBJ meshes are typically ~1 unit, scale up to match world
         }
     }
 }
@@ -276,6 +279,24 @@ pub fn draw_mesh_browser(
     let footer_y = dialog_y + dialog_h - 44.0;
     draw_rectangle(dialog_x, footer_y, dialog_w, 44.0, Color::from_rgba(40, 40, 48, 255));
 
+    // Scale control on the left side of footer
+    draw_text("Scale:", dialog_x + 12.0, footer_y + 22.0, 14.0, TEXT_COLOR);
+    let scale_minus_rect = Rect::new(dialog_x + 60.0, footer_y + 8.0, 28.0, 28.0);
+    let scale_plus_rect = Rect::new(dialog_x + 150.0, footer_y + 8.0, 28.0, 28.0);
+
+    if draw_text_button(ctx, scale_minus_rect, "-", Color::from_rgba(60, 60, 70, 255)) {
+        browser.import_scale = (browser.import_scale / 2.0).max(1.0);
+    }
+
+    // Display current scale
+    let scale_text = format!("{:.0}", browser.import_scale);
+    let text_width = measure_text(&scale_text, None, 14, 1.0).width;
+    draw_text(&scale_text, dialog_x + 104.0 - text_width / 2.0, footer_y + 22.0, 14.0, TEXT_COLOR);
+
+    if draw_text_button(ctx, scale_plus_rect, "+", Color::from_rgba(60, 60, 70, 255)) {
+        browser.import_scale = (browser.import_scale * 2.0).min(1000.0);
+    }
+
     // Cancel button
     let cancel_rect = Rect::new(dialog_x + dialog_w - 180.0, footer_y + 8.0, 80.0, 28.0);
     if draw_text_button(ctx, cancel_rect, "Cancel", Color::from_rgba(60, 60, 70, 255)) {
@@ -325,9 +346,10 @@ fn draw_orbit_preview(
         }
 
         // Scroll to zoom (use ctx.mouse.scroll to respect modal blocking)
+        // Minimum 0.3 to stay safely outside the 0.1 near plane
         let scroll = ctx.mouse.scroll;
         if scroll != 0.0 {
-            browser.orbit_distance = (browser.orbit_distance * (1.0 - scroll * 0.1)).clamp(0.1, 500.0);
+            browser.orbit_distance = (browser.orbit_distance * (1.0 - scroll * 0.1)).clamp(0.3, 500.0);
         }
     } else {
         browser.dragging = false;

@@ -111,11 +111,12 @@ impl ObjImporter {
 
                     // Triangulate if needed (OBJ can have quads or n-gons)
                     // Fan triangulation from first vertex
+                    // Note: OBJ uses CCW winding, but our rasterizer expects CW, so we swap v1/v2
                     for i in 1..(face_verts.len() - 1) {
                         faces.push(Face::new(
                             face_verts[0],
-                            face_verts[i],
-                            face_verts[i + 1],
+                            face_verts[i + 1],  // swapped to flip winding
+                            face_verts[i],      // swapped to flip winding
                         ));
                     }
                 }

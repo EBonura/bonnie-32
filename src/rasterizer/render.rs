@@ -2,7 +2,7 @@
 //! Triangle rasterization with PS1-style effects
 
 use super::math::{barycentric, perspective_transform, project, Vec3};
-use super::types::{BlendMode, Color, Face, RasterSettings, ShadingMode, Texture, Vertex};
+use super::types::{BlendMode, Color, Face, Light, LightType, RasterSettings, ShadingMode, Texture, Vertex};
 
 /// Framebuffer for software rendering
 pub struct Framebuffer {
@@ -363,10 +363,65 @@ struct Surface {
     pub face_idx: usize,
 }
 
-/// Calculate shading intensity for a normal
-fn shade_intensity(normal: Vec3, light_dir: Vec3, ambient: f32) -> f32 {
-    let diffuse = normal.dot(light_dir).max(0.0);
+/// Calculate shading intensity from a single directional light
+#[allow(dead_code)]
+fn shade_intensity_directional(normal: Vec3, light_dir: Vec3, ambient: f32) -> f32 {
+    let neg_light_dir = light_dir.scale(-1.0);
+    let diffuse = normal.dot(neg_light_dir).max(0.0);
     (ambient + (1.0 - ambient) * diffuse).clamp(0.0, 1.0)
+}
+
+/// Calculate shading intensity from multiple lights
+/// For per-vertex shading (Gouraud), world_pos can be approximate (vertex position)
+fn shade_multi_light(normal: Vec3, world_pos: Vec3, lights: &[Light], ambient: f32) -> f32 {
+    let mut total = ambient;
+
+    for light in lights.iter().filter(|l| l.enabled) {
+        let contribution = match &light.light_type {
+            LightType::Directional { direction } => {
+                // Directional: same intensity everywhere
+                let neg_dir = direction.scale(-1.0);
+                let n_dot_l = normal.dot(neg_dir).max(0.0);
+                n_dot_l * light.intensity
+            }
+            LightType::Point { position, radius } => {
+                // Point: intensity falls off with distance
+                let to_light = *position - world_pos;
+                let dist = to_light.len();
+                if dist > *radius || dist < 0.001 {
+                    0.0
+                } else {
+                    let attenuation = 1.0 - (dist / radius);
+                    let n_dot_l = normal.dot(to_light.normalize()).max(0.0);
+                    n_dot_l * light.intensity * attenuation * attenuation // squared falloff
+                }
+            }
+            LightType::Spot { position, direction, angle, radius } => {
+                // Spot: point light with cone restriction
+                let to_light = *position - world_pos;
+                let dist = to_light.len();
+                if dist > *radius || dist < 0.001 {
+                    0.0
+                } else {
+                    let light_dir_to_surface = to_light.normalize();
+                    let neg_light_dir = light_dir_to_surface.scale(-1.0);
+                    let spot_angle = neg_light_dir.dot(*direction).acos();
+
+                    if spot_angle > *angle {
+                        0.0
+                    } else {
+                        let attenuation = 1.0 - (dist / radius);
+                        let edge_falloff = 1.0 - (spot_angle / angle);
+                        let n_dot_l = normal.dot(light_dir_to_surface).max(0.0);
+                        n_dot_l * light.intensity * attenuation * attenuation * edge_falloff
+                    }
+                }
+            }
+        };
+        total += contribution;
+    }
+
+    total.min(1.0)
 }
 
 /// PS1 4x4 ordered dithering matrix (Bayer pattern)
@@ -412,8 +467,10 @@ fn rasterize_triangle(
     let max_y = (surface.v1.y.max(surface.v2.y).max(surface.v3.y) + 1.0).min(fb.height as f32) as usize;
 
     // Pre-calculate flat shading if needed
+    // Note: Using Vec3::ZERO for world_pos since directional lights don't need position
+    // For point/spot lights, we'd need to add camera-space positions to Surface
     let flat_shade = if settings.shading == ShadingMode::Flat {
-        shade_intensity(surface.normal, settings.light_dir, settings.ambient)
+        shade_multi_light(surface.normal, Vec3::ZERO, &settings.lights, settings.ambient)
     } else {
         1.0
     };
@@ -484,9 +541,10 @@ fn rasterize_triangle(
                     ShadingMode::Flat => flat_shade,
                     ShadingMode::Gouraud => {
                         // Interpolate per-vertex shading from normals
-                        let s1 = shade_intensity(surface.vn1, settings.light_dir, settings.ambient);
-                        let s2 = shade_intensity(surface.vn2, settings.light_dir, settings.ambient);
-                        let s3 = shade_intensity(surface.vn3, settings.light_dir, settings.ambient);
+                        // Note: Using Vec3::ZERO for world_pos since directional lights don't need position
+                        let s1 = shade_multi_light(surface.vn1, Vec3::ZERO, &settings.lights, settings.ambient);
+                        let s2 = shade_multi_light(surface.vn2, Vec3::ZERO, &settings.lights, settings.ambient);
+                        let s3 = shade_multi_light(surface.vn3, Vec3::ZERO, &settings.lights, settings.ambient);
                         bc.x * s1 + bc.y * s2 + bc.z * s3
                     }
                 };

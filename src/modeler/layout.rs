@@ -3,7 +3,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button};
 use crate::rasterizer::Framebuffer;
-use super::state::{ModelerState, ModelerView, SelectMode, TransformTool};
+use super::state::{ModelerState, DataContext, InteractionMode, RigSubMode, SelectMode, TransformTool};
 use super::viewport::draw_modeler_viewport;
 
 // Colors (matching tracker/editor style)
@@ -81,8 +81,9 @@ pub fn draw_modeler(
     let status_rect = main_rect.slice_bottom(status_height);
     let content_rect = main_rect.remaining_after_bottom(status_height);
 
-    // Timeline at bottom of content (only in Animate mode)
-    let (panels_rect, timeline_rect) = if state.view == ModelerView::Animate {
+    // Timeline at bottom of content (only in Rig/Animate mode)
+    let show_timeline = state.data_context == DataContext::Rig && state.rig_sub_mode == RigSubMode::Animate;
+    let (panels_rect, timeline_rect) = if show_timeline {
         let timeline = content_rect.slice_bottom(layout.timeline_height);
         (content_rect.remaining_after_bottom(layout.timeline_height), Some(timeline))
     } else {
@@ -104,10 +105,13 @@ pub fn draw_modeler(
     // Right split: atlas | properties
     let (atlas_rect, props_rect) = layout.right_panel_split.update(ctx, right_rect);
 
-    // Draw panels based on view mode
-    let left_top_label = match state.view {
-        ModelerView::Animate => "Dopesheet",
-        _ => "Hierarchy",
+    // Draw panels based on data context
+    let left_top_label = match (state.data_context, state.rig_sub_mode) {
+        (DataContext::Rig, RigSubMode::Animate) => "Dopesheet",
+        (DataContext::Rig, RigSubMode::Skeleton) => "Skeleton",
+        (DataContext::Rig, RigSubMode::Parts) => "Parts",
+        (DataContext::Spine, _) => "Segments",
+        (DataContext::Mesh, _) => "Mesh",
     };
     draw_panel(hierarchy_rect, Some(left_top_label), Color::from_rgba(35, 35, 40, 255));
     draw_hierarchy_panel(ctx, panel_content_rect(hierarchy_rect, true), state);
@@ -185,16 +189,6 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 
     toolbar.separator();
 
-    // Undo/Redo
-    if toolbar.icon_button(ctx, icon::UNDO, icon_font, "Undo") {
-        state.undo();
-    }
-    if toolbar.icon_button(ctx, icon::REDO, icon_font, "Redo") {
-        state.redo();
-    }
-
-    toolbar.separator();
-
     // Tool buttons
     let tools = [
         (icon::POINTER, "Select", TransformTool::Select),
@@ -212,40 +206,71 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 
     toolbar.separator();
 
-    // View mode selector
-    toolbar.label("Mode:");
-    for view in ModelerView::ALL {
-        let is_active = state.view == view;
-        let icon_char = match view {
-            ModelerView::Model => icon::BOX,
-            ModelerView::UV => icon::MAXIMIZE_2,
-            ModelerView::Paint => icon::BRUSH,
-            ModelerView::Hierarchy => icon::GIT_BRANCH,
-            ModelerView::Animate => icon::PLAY,
+    // Data context selector (Spine/Mesh/Rig)
+    toolbar.label("Context:");
+    for context in DataContext::ALL {
+        let is_active = state.data_context == context;
+        let icon_char = match context {
+            DataContext::Spine => icon::GIT_BRANCH,
+            DataContext::Mesh => icon::BOX,
+            DataContext::Rig => icon::BONE,
         };
-        if toolbar.icon_button_active(ctx, icon_char, icon_font, view.label(), is_active) {
-            state.view = view;
+        if toolbar.icon_button_active(ctx, icon_char, icon_font, context.label(), is_active) {
+            state.set_data_context(context);
         }
     }
 
     toolbar.separator();
 
-    // Selection mode (only in Model mode)
-    if state.view == ModelerView::Model {
-        for mode in SelectMode::ALL {
-            let is_active = state.select_mode == mode;
+    // Interaction mode toggle (Object/Edit)
+    let mode_icon = match state.interaction_mode {
+        InteractionMode::Object => icon::BOX,        // Object mode - whole objects
+        InteractionMode::Edit => icon::CIRCLE_DOT,   // Edit mode - vertices/details
+    };
+    if toolbar.icon_button_active(ctx, mode_icon, icon_font, &format!("{} Mode (Tab)", state.interaction_mode.label()), true) {
+        state.toggle_interaction_mode();
+    }
+
+    toolbar.separator();
+
+    // Rig sub-mode (only in Rig context)
+    if state.data_context == DataContext::Rig {
+        for sub_mode in RigSubMode::ALL {
+            let is_active = state.rig_sub_mode == sub_mode;
+            let icon_char = match sub_mode {
+                RigSubMode::Skeleton => icon::GIT_BRANCH,
+                RigSubMode::Parts => icon::LAYERS,
+                RigSubMode::Animate => icon::PLAY,
+            };
+            if toolbar.icon_button_active(ctx, icon_char, icon_font, sub_mode.label(), is_active) {
+                state.set_rig_sub_mode(sub_mode);
+            }
+        }
+        toolbar.separator();
+    }
+
+    // Selection mode (only in Edit mode with valid modes)
+    let valid_modes = SelectMode::valid_modes(state.data_context, state.interaction_mode);
+    if !valid_modes.is_empty() {
+        for mode in &valid_modes {
+            let is_active = state.select_mode == *mode;
             let icon_char = match mode {
-                SelectMode::Bone => icon::BONE,
-                SelectMode::Part => icon::BOX,
+                SelectMode::Segment => icon::LAYERS,
+                SelectMode::Joint => icon::CIRCLE_DOT,
+                SelectMode::SpineBone => icon::BONE,
                 SelectMode::Vertex => icon::CIRCLE_DOT,
                 SelectMode::Edge => icon::MINUS,
                 SelectMode::Face => icon::SCAN,
+                SelectMode::Part => icon::BOX,
+                SelectMode::RigBone => icon::BONE,
             };
             if toolbar.icon_button_active(ctx, icon_char, icon_font, mode.label(), is_active) {
-                state.select_mode = mode;
+                if state.select_mode != *mode {
+                    state.select_mode = *mode;
+                    state.selection.clear(); // Clear selection when changing select mode
+                }
             }
         }
-
         toolbar.separator();
     }
 
@@ -303,13 +328,32 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 
     toolbar.separator();
 
-    // Model stats
-    toolbar.label(&format!(
-        "Parts:{} Verts:{} Faces:{}",
-        state.model.parts.len(),
-        state.model.vertex_count(),
-        state.model.face_count()
-    ));
+    // Context-specific stats
+    let stats = match state.data_context {
+        DataContext::Spine => {
+            if let Some(spine) = &state.spine_model {
+                format!("Segs:{} Joints:{}", spine.segments.len(),
+                    spine.segments.iter().map(|s| s.joints.len()).sum::<usize>())
+            } else {
+                "No spine".to_string()
+            }
+        }
+        DataContext::Mesh => {
+            if let Some(mesh) = &state.editable_mesh {
+                format!("Verts:{} Faces:{}", mesh.vertex_count(), mesh.face_count())
+            } else {
+                "No mesh".to_string()
+            }
+        }
+        DataContext::Rig => {
+            if let Some(rig) = &state.rigged_model {
+                format!("Parts:{} Bones:{}", rig.parts.len(), rig.skeleton.len())
+            } else {
+                "No rig".to_string()
+            }
+        }
+    };
+    toolbar.label(&stats);
 
     toolbar.separator();
 
@@ -370,55 +414,84 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 fn draw_hierarchy_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
     let mut y = rect.y;
     let line_height = 20.0;
-    let indent = 16.0;
 
-    // Draw part tree
-    fn draw_part_tree(
-        parts: &[super::model::ModelPart],
-        parent: Option<usize>,
-        depth: usize,
-        y: &mut f32,
-        rect: &Rect,
-        line_height: f32,
-        indent: f32,
-        _state: &ModelerState,
-    ) {
-        for (i, part) in parts.iter().enumerate() {
-            if part.parent == parent {
-                if *y > rect.bottom() - line_height {
-                    return;
+    // Draw hierarchy based on current data context
+    match state.data_context {
+        DataContext::Spine => {
+            if let Some(spine) = &state.spine_model {
+                for (i, segment) in spine.segments.iter().enumerate() {
+                    if y > rect.bottom() - line_height { break; }
+                    draw_text(
+                        &format!("▼ {} ({} joints)", segment.name, segment.joints.len()),
+                        rect.x,
+                        y + 14.0,
+                        14.0,
+                        TEXT_COLOR,
+                    );
+                    y += line_height;
+
+                    // Show joints if selected
+                    if matches!(&state.selection, super::state::ModelerSelection::SpineJoints(joints) if joints.iter().any(|(s, _)| *s == i)) {
+                        for (j, joint) in segment.joints.iter().enumerate() {
+                            if y > rect.bottom() - line_height { break; }
+                            draw_text(
+                                &format!("  └ Joint {} (r={:.0})", j, joint.radius),
+                                rect.x,
+                                y + 14.0,
+                                12.0,
+                                TEXT_DIM,
+                            );
+                            y += line_height * 0.8;
+                        }
+                    }
+                }
+            } else {
+                draw_text("No spine model", rect.x, y + 14.0, 14.0, TEXT_DIM);
+            }
+        }
+        DataContext::Mesh => {
+            if let Some(mesh) = &state.editable_mesh {
+                draw_text(&format!("Mesh: {} verts, {} faces", mesh.vertex_count(), mesh.face_count()), rect.x, y + 14.0, 14.0, TEXT_COLOR);
+            } else {
+                draw_text("No mesh loaded", rect.x, y + 14.0, 14.0, TEXT_DIM);
+            }
+        }
+        DataContext::Rig => {
+            if let Some(rig) = &state.rigged_model {
+                // Show skeleton
+                draw_text("Skeleton:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+                y += line_height;
+
+                for (_i, bone) in rig.skeleton.iter().enumerate() {
+                    if y > rect.bottom() - line_height { break; }
+                    let prefix = if bone.parent.is_some() { "  └ " } else { "▼ " };
+                    draw_text(&format!("{}{}", prefix, bone.name), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+                    y += line_height * 0.8;
                 }
 
-                let x = rect.x + (depth as f32 * indent);
+                y += line_height * 0.5;
 
-                // Draw part name
-                draw_text(
-                    &format!("{}{}",
-                        if depth > 0 { "└ " } else { "▼ " },
-                        part.name
-                    ),
-                    x,
-                    *y + 14.0,
-                    14.0,
-                    TEXT_COLOR,
-                );
+                // Show parts
+                draw_text("Parts:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+                y += line_height;
 
-                *y += line_height;
-
-                // Recursively draw children
-                draw_part_tree(parts, Some(i), depth + 1, y, rect, line_height, indent, _state);
+                for part in &rig.parts {
+                    if y > rect.bottom() - line_height { break; }
+                    let bone_name = part.bone_index
+                        .and_then(|i| rig.skeleton.get(i))
+                        .map(|b| b.name.as_str())
+                        .unwrap_or("unassigned");
+                    draw_text(&format!("  {} → {}", part.name, bone_name), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+                    y += line_height * 0.8;
+                }
+            } else {
+                draw_text("No rigged model", rect.x, y + 14.0, 14.0, TEXT_DIM);
             }
         }
     }
-
-    if state.model.parts.is_empty() {
-        draw_text("No parts", rect.x, y + 14.0, 14.0, TEXT_DIM);
-    } else {
-        draw_part_tree(&state.model.parts, None, 0, &mut y, &rect, line_height, indent, state);
-    }
 }
 
-fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
+fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, _state: &ModelerState) {
     // Draw checkerboard background
     let checker_size = 8.0;
     for cy in 0..(rect.h as usize / checker_size as usize) {
@@ -438,11 +511,8 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
         }
     }
 
-    // Draw atlas texture
-    let atlas = &state.model.atlas;
-    let atlas_dim = atlas.dimension() as f32;
-
-    // Scale to fit panel (with padding)
+    // UV editor placeholder
+    let atlas_dim = 128.0;
     let padding = 10.0;
     let available = rect.w.min(rect.h) - padding * 2.0;
     let scale = available / atlas_dim;
@@ -450,14 +520,11 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
     let atlas_x = rect.x + (rect.w - atlas_dim * scale) * 0.5;
     let atlas_y = rect.y + (rect.h - atlas_dim * scale) * 0.5;
 
-    // Draw atlas pixels (simplified - would be a texture in real impl)
     draw_rectangle(atlas_x, atlas_y, atlas_dim * scale, atlas_dim * scale, Color::from_rgba(100, 100, 100, 255));
-
-    // Draw UV wireframe for selected part
-    // TODO: implement UV display
+    draw_rectangle_lines(atlas_x, atlas_y, atlas_dim * scale, atlas_dim * scale, 1.0, Color::from_rgba(80, 80, 85, 255));
 
     draw_text(
-        &format!("Atlas: {}", atlas.size.label()),
+        "UV Editor (placeholder)",
         rect.x + 4.0,
         rect.y + 14.0,
         12.0,
@@ -469,9 +536,8 @@ fn draw_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: 
     draw_modeler_viewport(ctx, rect, state, fb);
 }
 
-fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
-    let atlas = &state.model.atlas;
-    let atlas_dim = atlas.dimension() as f32;
+fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, _state: &ModelerState) {
+    let atlas_dim = 128.0;
 
     // Scale to fit panel
     let padding = 4.0;
@@ -481,13 +547,13 @@ fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
     let atlas_x = rect.x + (rect.w - atlas_dim * scale) * 0.5;
     let atlas_y = rect.y + padding;
 
-    // Draw atlas (simplified placeholder)
+    // Draw atlas placeholder
     draw_rectangle(atlas_x, atlas_y, atlas_dim * scale, atlas_dim * scale, Color::from_rgba(100, 100, 100, 255));
     draw_rectangle_lines(atlas_x, atlas_y, atlas_dim * scale, atlas_dim * scale, 1.0, Color::from_rgba(80, 80, 85, 255));
 
     // Size label below
     draw_text(
-        atlas.size.label(),
+        "128x128",
         rect.x + (rect.w - 40.0) * 0.5,
         atlas_y + atlas_dim * scale + 16.0,
         12.0,
@@ -506,35 +572,32 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         super::state::ModelerSelection::None => {
             draw_text("Nothing selected", rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
-        super::state::ModelerSelection::Bones(bones) => {
-            draw_text(&format!("{} bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
-        }
-        super::state::ModelerSelection::Parts(parts) => {
-            draw_text(&format!("{} part(s)", parts.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
-        }
-        super::state::ModelerSelection::Vertices { part, verts } => {
-            draw_text(&format!("{} vertex(es) in part {}", verts.len(), part), rect.x, y + 14.0, 12.0, TEXT_COLOR);
-        }
-        super::state::ModelerSelection::Edges { part, edges } => {
-            draw_text(&format!("{} edge(s) in part {}", edges.len(), part), rect.x, y + 14.0, 12.0, TEXT_COLOR);
-        }
-        super::state::ModelerSelection::Faces { part, faces } => {
-            draw_text(&format!("{} face(s) in part {}", faces.len(), part), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        super::state::ModelerSelection::SpineSegments(segs) => {
+            draw_text(&format!("{} segment(s)", segs.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
         super::state::ModelerSelection::SpineJoints(joints) => {
-            draw_text(&format!("{} spine joint(s)", joints.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+            draw_text(&format!("{} joint(s)", joints.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
         super::state::ModelerSelection::SpineBones(bones) => {
-            draw_text(&format!("{} spine bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+            draw_text(&format!("{} bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
-        super::state::ModelerSelection::SpineMeshVertices(verts) => {
-            draw_text(&format!("{} mesh vertex(es)", verts.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        super::state::ModelerSelection::Mesh => {
+            draw_text("Mesh (whole)", rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
-        super::state::ModelerSelection::SpineMeshEdges(edges) => {
-            draw_text(&format!("{} mesh edge(s)", edges.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        super::state::ModelerSelection::MeshVertices(verts) => {
+            draw_text(&format!("{} vertex(es)", verts.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
-        super::state::ModelerSelection::SpineMeshFaces(faces) => {
-            draw_text(&format!("{} mesh face(s)", faces.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        super::state::ModelerSelection::MeshEdges(edges) => {
+            draw_text(&format!("{} edge(s)", edges.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::MeshFaces(faces) => {
+            draw_text(&format!("{} face(s)", faces.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::RigParts(parts) => {
+            draw_text(&format!("{} part(s)", parts.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::RigBones(bones) => {
+            draw_text(&format!("{} bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
     }
 
@@ -671,49 +734,136 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             draw_text(&format!("{}: {}", key, desc), rect.x, y + 12.0, 10.0, TEXT_DIM);
             y += line_height * 0.8;
         }
+        y += line_height;
+    }
+
+    // Lights section
+    if y + line_height * 3.0 < rect.bottom() {
+        draw_text("Lights:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+        y += line_height;
+
+        // Show light count and add/remove buttons
+        let light_count = state.raster_settings.lights.len();
+        draw_text(&format!("{} light(s)", light_count), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        y += line_height;
+
+        // Add light button
+        let btn_size = 20.0;
+        let add_rect = Rect::new(rect.x, y, btn_size, btn_size);
+        if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add directional light") {
+            use crate::rasterizer::{Light, LightType, Vec3};
+            let new_light = Light {
+                light_type: LightType::Directional { direction: Vec3::new(-1.0, -1.0, -1.0).normalize() },
+                color: crate::rasterizer::Color::new(255, 255, 255),
+                intensity: 0.5,
+                enabled: true,
+                name: format!("Light {}", light_count + 1),
+            };
+            state.raster_settings.lights.push(new_light);
+            state.set_status(&format!("Added light {}", light_count + 1), 1.0);
+        }
+
+        // Remove last light button
+        let remove_rect = Rect::new(rect.x + btn_size + 4.0, y, btn_size, btn_size);
+        if icon_button(ctx, remove_rect, icon::MINUS, icon_font, "Remove last light") && light_count > 0 {
+            state.raster_settings.lights.pop();
+            state.set_status(&format!("Removed light (now {})", light_count.saturating_sub(1)), 1.0);
+        }
+
+        y += btn_size + 8.0;
+
+        // List lights with enable toggle - collect click actions first
+        let mut toggle_light: Option<usize> = None;
+
+        for (i, light) in state.raster_settings.lights.iter().enumerate() {
+            if y + line_height > rect.bottom() {
+                break;
+            }
+
+            let light_type_str = match &light.light_type {
+                crate::rasterizer::LightType::Directional { .. } => "Dir",
+                crate::rasterizer::LightType::Point { .. } => "Pt",
+                crate::rasterizer::LightType::Spot { .. } => "Sp",
+            };
+
+            // Toggle button
+            let toggle_rect = Rect::new(rect.x, y, 50.0, 16.0);
+            let toggle_color = if light.enabled { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+            draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+            draw_text(&format!("{} {}", light_type_str, i + 1), toggle_rect.x + 4.0, toggle_rect.y + 12.0, 10.0, TEXT_COLOR);
+
+            if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
+                toggle_light = Some(i);
+            }
+
+            // Intensity indicator
+            let intensity_str = format!("{:.0}%", light.intensity * 100.0);
+            draw_text(&intensity_str, rect.x + 55.0, y + 12.0, 10.0, TEXT_DIM);
+
+            y += line_height;
+        }
+
+        // Apply toggle action after the loop
+        if let Some(i) = toggle_light {
+            let was_enabled = state.raster_settings.lights[i].enabled;
+            state.raster_settings.lights[i].enabled = !was_enabled;
+            let status = if !was_enabled { "ON" } else { "OFF" };
+            state.set_status(&format!("Light {}: {}", i + 1, status), 0.5);
+        }
     }
 }
 
-fn draw_timeline(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+fn draw_timeline(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, HEADER_COLOR);
+
+    // Handle playback animation
+    if state.playing {
+        let fps = state.get_animation_fps() as f64;
+        state.playback_time += get_frame_time() as f64;
+        let new_frame = (state.playback_time * fps) as u32;
+        if new_frame != state.current_frame {
+            state.current_frame = new_frame;
+            let last_frame = state.get_animation_last_frame();
+            if state.is_animation_looping() && state.current_frame > last_frame && last_frame > 0 {
+                state.current_frame = 0;
+                state.playback_time = 0.0;
+            }
+            state.apply_animation_pose();
+        }
+    }
 
     // Transport controls
     let mut toolbar = Toolbar::new(Rect::new(rect.x, rect.y, 200.0, 32.0));
 
-    if toolbar.icon_button(_ctx, icon::SKIP_BACK, icon_font, "Stop & Rewind") {
+    if toolbar.icon_button(ctx, icon::SKIP_BACK, icon_font, "Stop & Rewind") {
         state.stop_playback();
+        state.apply_animation_pose();
     }
 
     let play_icon = if state.playing { icon::PAUSE } else { icon::PLAY };
-    if toolbar.icon_button(_ctx, play_icon, icon_font, if state.playing { "Pause" } else { "Play" }) {
+    if toolbar.icon_button(ctx, play_icon, icon_font, if state.playing { "Pause" } else { "Play" }) {
         state.toggle_playback();
     }
 
     toolbar.separator();
 
-    // Frame counter
-    let last_frame = state.current_animation()
-        .map(|a| a.last_frame())
-        .unwrap_or(60);
-
+    // Frame counter - use actual animation last frame
+    let last_frame = state.get_animation_last_frame().max(60);
     toolbar.label(&format!("Frame: {:03}/{:03}", state.current_frame, last_frame));
 
-    toolbar.separator();
+    // Show keyframe indicator
+    if state.has_keyframe_at_current_frame() {
+        toolbar.label(" [K]");
+    }
 
-    // Keyframe buttons
-    if toolbar.icon_button(_ctx, icon::PLUS, icon_font, "Insert Keyframe (I)") {
-        state.insert_keyframe();
-    }
-    if toolbar.icon_button(_ctx, icon::MINUS, icon_font, "Delete Keyframe (K)") {
-        state.delete_keyframe();
-    }
+    toolbar.separator();
 
     // Timeline scrubber area
     let scrub_rect = Rect::new(rect.x + 10.0, rect.y + 40.0, rect.w - 20.0, 30.0);
     draw_rectangle(scrub_rect.x, scrub_rect.y, scrub_rect.w, scrub_rect.h, Color::from_rgba(20, 20, 25, 255));
 
     // Draw frame markers
-    let frames_visible = 60;
+    let frames_visible = last_frame.max(60) as usize;
     let frame_width = scrub_rect.w / frames_visible as f32;
 
     for f in 0..=frames_visible {
@@ -731,20 +881,40 @@ fn draw_timeline(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, ico
         }
     }
 
-    // Draw keyframe markers
-    if let Some(anim) = state.current_animation() {
-        for kf in &anim.keyframes {
-            if kf.frame <= frames_visible as u32 {
-                let x = scrub_rect.x + kf.frame as f32 * frame_width;
-                // Diamond shape
-                draw_poly(x, scrub_rect.y + 12.0, 4, 5.0, 45.0, ACCENT_COLOR);
-            }
-        }
+    // Draw keyframe markers (diamonds)
+    let keyframe_frames = state.get_keyframe_frames();
+    for kf_frame in keyframe_frames {
+        let kf_x = scrub_rect.x + kf_frame as f32 * frame_width;
+        // Draw diamond shape
+        let size = 4.0;
+        let cy = scrub_rect.y + 20.0;
+        draw_triangle(
+            vec2(kf_x, cy - size),        // top
+            vec2(kf_x - size, cy),        // left
+            vec2(kf_x + size, cy),        // right
+            ACCENT_COLOR,
+        );
+        draw_triangle(
+            vec2(kf_x - size, cy),        // left
+            vec2(kf_x, cy + size),        // bottom
+            vec2(kf_x + size, cy),        // right
+            ACCENT_COLOR,
+        );
     }
 
     // Draw playhead
     let playhead_x = scrub_rect.x + state.current_frame as f32 * frame_width;
     draw_line(playhead_x, scrub_rect.y, playhead_x, scrub_rect.bottom(), 2.0, Color::from_rgba(255, 100, 100, 255));
+
+    // Handle timeline click to scrub
+    if ctx.mouse.inside(&scrub_rect) && is_mouse_button_pressed(MouseButton::Left) {
+        let click_x = ctx.mouse.x - scrub_rect.x;
+        let new_frame = ((click_x / scrub_rect.w) * frames_visible as f32) as u32;
+        if new_frame != state.current_frame {
+            state.current_frame = new_frame;
+            state.apply_animation_pose();
+        }
+    }
 }
 
 fn draw_status_bar(rect: Rect, state: &ModelerState) {
@@ -756,17 +926,17 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
         draw_text(msg, center_x, rect.y + 15.0, 14.0, Color::from_rgba(100, 255, 100, 255));
     }
 
-    // Keyboard hints - show spine hints if spine model is active
-    let hints = if state.spine_model.is_some() && state.view == ModelerView::Model {
-        "E:Extrude X:Del W:Subdivide D:Dup N:New M:Mirror Shift+X:Del Seg"
-    } else {
-        match state.view {
-            ModelerView::Model => "G:Move R:Rotate S:Scale E:Extrude X:Delete",
-            ModelerView::UV => "G:Move S:Scale U:Unwrap",
-            ModelerView::Paint => "LMB:Paint Shift+LMB:Pick [/]:Brush Size",
-            ModelerView::Hierarchy => "Drag to reparent | Del:Delete part",
-            ModelerView::Animate => "Space:Play I:Insert Key K:Delete Key",
-        }
+    // Keyboard hints based on data context and interaction mode
+    let hints = match (state.data_context, state.interaction_mode) {
+        (DataContext::Spine, InteractionMode::Edit) => "1/2/3:Vert/Edge/Face E:Extrude X:Del W:Subdivide Tab:Object",
+        (DataContext::Spine, InteractionMode::Object) => "Tab:Edit Ctrl+1/2/3:Spine/Mesh/Rig",
+        (DataContext::Mesh, InteractionMode::Edit) => "1/2/3:Vert/Edge/Face G:Move R:Rotate S:Scale Tab:Object",
+        (DataContext::Mesh, InteractionMode::Object) => "Tab:Edit Ctrl+1/2/3:Spine/Mesh/Rig",
+        (DataContext::Rig, _) => match state.rig_sub_mode {
+            RigSubMode::Skeleton => "E:Extrude N:Root X:Delete Shift+1/2/3:Skel/Parts/Anim",
+            RigSubMode::Parts => "Ctrl+1-9:Assign to bone Shift+1/2/3:Skel/Parts/Anim",
+            RigSubMode::Animate => "Space:Play R:Rotate I:Key K:Delete Key",
+        },
     };
     draw_text(hints, rect.right() - (hints.len() as f32 * 6.0) - 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
 }
@@ -774,43 +944,70 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
 fn handle_keyboard(state: &mut ModelerState) {
     let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
              || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
-
-    // Undo/Redo
-    if ctrl && is_key_pressed(KeyCode::Z) {
-        if is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) {
-            state.redo();
-        } else {
-            state.undo();
-        }
-    }
+    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
     // File shortcuts (Ctrl+N, Ctrl+S, etc.) are now handled in draw_toolbar
     // to properly return ModelerAction
 
-    // View mode cycling
+    // Tab = Toggle interaction mode (Object <-> Edit)
     if is_key_pressed(KeyCode::Tab) {
-        state.next_view();
+        state.toggle_interaction_mode();
     }
 
-    // Selection mode (1-4 keys)
+    // Blender-style shortcuts:
+    // 1/2/3 = Vertex/Edge/Face selection modes (in Edit mode)
+    // Ctrl+1/2/3 = Switch data context (Spine/Mesh/Rig)
+    // Shift+1/2/3 = Switch rig sub-mode (when in Rig context)
+
+    // Note: Ctrl+1-9 in Rig/Parts mode is handled in viewport.rs for part-to-bone assignment
+    let in_rig_parts = state.data_context == DataContext::Rig && state.rig_sub_mode == RigSubMode::Parts;
+
     if is_key_pressed(KeyCode::Key1) {
-        state.select_mode = SelectMode::Part;
-        state.set_status("Part select mode", 1.0);
-    }
-    if is_key_pressed(KeyCode::Key2) {
-        state.select_mode = SelectMode::Vertex;
-        state.set_status("Vertex select mode", 1.0);
-    }
-    if is_key_pressed(KeyCode::Key3) {
-        state.select_mode = SelectMode::Edge;
-        state.set_status("Edge select mode", 1.0);
-    }
-    if is_key_pressed(KeyCode::Key4) {
-        state.select_mode = SelectMode::Face;
-        state.set_status("Face select mode", 1.0);
+        if ctrl && !in_rig_parts {
+            // Ctrl+1 = Spine context (not in Rig/Parts where it assigns to bone)
+            state.set_data_context(DataContext::Spine);
+        } else if shift && state.data_context == DataContext::Rig {
+            // Shift+1 = Skeleton sub-mode (in Rig context)
+            state.set_rig_sub_mode(RigSubMode::Skeleton);
+        } else if !ctrl && state.interaction_mode == InteractionMode::Edit {
+            // 1 = Vertex mode (Blender-style, Edit mode only)
+            state.select_mode = SelectMode::Vertex;
+            state.selection = super::state::ModelerSelection::None;
+            state.set_status("Vertex mode", 1.0);
+        }
     }
 
-    // Transform tools
+    if is_key_pressed(KeyCode::Key2) {
+        if ctrl && !in_rig_parts {
+            // Ctrl+2 = Mesh context (not in Rig/Parts where it assigns to bone)
+            state.set_data_context(DataContext::Mesh);
+        } else if shift && state.data_context == DataContext::Rig {
+            // Shift+2 = Parts sub-mode (in Rig context)
+            state.set_rig_sub_mode(RigSubMode::Parts);
+        } else if !ctrl && state.interaction_mode == InteractionMode::Edit {
+            // 2 = Edge mode (Blender-style, Edit mode only)
+            state.select_mode = SelectMode::Edge;
+            state.selection = super::state::ModelerSelection::None;
+            state.set_status("Edge mode", 1.0);
+        }
+    }
+
+    if is_key_pressed(KeyCode::Key3) {
+        if ctrl && !in_rig_parts {
+            // Ctrl+3 = Rig context (not in Rig/Parts where it assigns to bone)
+            state.set_data_context(DataContext::Rig);
+        } else if shift && state.data_context == DataContext::Rig {
+            // Shift+3 = Animate sub-mode (in Rig context)
+            state.set_rig_sub_mode(RigSubMode::Animate);
+        } else if !ctrl && state.interaction_mode == InteractionMode::Edit {
+            // 3 = Face mode (Blender-style, Edit mode only)
+            state.select_mode = SelectMode::Face;
+            state.selection = super::state::ModelerSelection::None;
+            state.set_status("Face mode", 1.0);
+        }
+    }
+
+    // Transform tools (not in Object mode for Mesh context)
     if is_key_pressed(KeyCode::G) {
         state.tool = TransformTool::Move;
         state.set_status("Move", 1.0);
@@ -828,27 +1025,34 @@ fn handle_keyboard(state: &mut ModelerState) {
         state.set_status("Extrude", 1.0);
     }
 
-    // Animation controls (in Animate mode)
-    if state.view == ModelerView::Animate {
+    // Animation controls (in Rig/Animate sub-mode)
+    if state.data_context == DataContext::Rig && state.rig_sub_mode == RigSubMode::Animate {
         if is_key_pressed(KeyCode::Space) {
             state.toggle_playback();
-        }
-        if is_key_pressed(KeyCode::I) {
-            state.insert_keyframe();
-        }
-        if is_key_pressed(KeyCode::K) {
-            state.delete_keyframe();
         }
         if is_key_pressed(KeyCode::Left) {
             if state.current_frame > 0 {
                 state.current_frame -= 1;
+                state.apply_animation_pose();
             }
         }
         if is_key_pressed(KeyCode::Right) {
             state.current_frame += 1;
+            state.apply_animation_pose();
         }
         if is_key_pressed(KeyCode::Home) {
             state.current_frame = 0;
+            state.apply_animation_pose();
+        }
+
+        // I key: Insert keyframe at current frame
+        if is_key_pressed(KeyCode::I) {
+            state.insert_keyframe();
+        }
+
+        // K key: Delete keyframe at current frame
+        if is_key_pressed(KeyCode::K) {
+            state.delete_keyframe();
         }
     }
 }
