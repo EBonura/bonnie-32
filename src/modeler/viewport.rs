@@ -629,9 +629,9 @@ pub fn draw_modeler_viewport(
         state.viewport_mouse_captured = false;
     }
 
-    // Mouse wheel: zoom
+    // Mouse wheel: zoom (use ctx.mouse.scroll to respect modal blocking)
     if inside_viewport {
-        let scroll = mouse_wheel().1;
+        let scroll = ctx.mouse.scroll;
         if scroll != 0.0 {
             let zoom_factor = if scroll > 0.0 { 0.98 } else { 1.02 };
             state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(50.0, 2000.0);

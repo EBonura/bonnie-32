@@ -1,61 +1,74 @@
-//! Model Browser
+//! Mesh Browser
 //!
-//! Modal dialog for browsing and previewing saved spine models.
+//! Modal dialog for browsing and previewing OBJ mesh files.
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
-use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh};
-use super::spine::SpineModel;
+use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, world_to_screen};
+use super::mesh_editor::EditableMesh;
+use super::obj_import::ObjImporter;
 use std::path::PathBuf;
 
-/// Info about a model file
+/// Info about a mesh file
 #[derive(Debug, Clone)]
-pub struct ModelInfo {
+pub struct MeshInfo {
     /// Display name (file stem)
     pub name: String,
     /// Full path to the file
     pub path: PathBuf,
+    /// Vertex count (from parsing)
+    pub vertex_count: usize,
+    /// Face count (from parsing)
+    pub face_count: usize,
 }
 
-/// Discover model files in a directory
+/// Discover mesh files in a directory
 #[cfg(not(target_arch = "wasm32"))]
-pub fn discover_models() -> Vec<ModelInfo> {
-    let models_dir = PathBuf::from("assets/models");
-    let mut models = Vec::new();
+pub fn discover_meshes() -> Vec<MeshInfo> {
+    let meshes_dir = PathBuf::from("assets/meshes");
+    let mut meshes = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+    if let Ok(entries) = std::fs::read_dir(&meshes_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "ron") {
+            if path.extension().map_or(false, |ext| ext == "obj") {
                 let name = path.file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                models.push(ModelInfo { name, path });
+
+                // Parse to get vertex/face counts
+                let (vertex_count, face_count) = if let Ok(mesh) = ObjImporter::load_from_file(&path) {
+                    (mesh.vertices.len(), mesh.faces.len())
+                } else {
+                    (0, 0)
+                };
+
+                meshes.push(MeshInfo { name, path, vertex_count, face_count });
             }
         }
     }
 
     // Sort by name
-    models.sort_by(|a, b| a.name.cmp(&b.name));
-    models
+    meshes.sort_by(|a, b| a.name.cmp(&b.name));
+    meshes
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn discover_models() -> Vec<ModelInfo> {
+pub fn discover_meshes() -> Vec<MeshInfo> {
     // WASM: return empty for now (could load from manifest later)
     Vec::new()
 }
 
-/// State for the model browser dialog
-pub struct ModelBrowser {
+/// State for the mesh browser dialog
+pub struct MeshBrowser {
     /// Whether the browser is open
     pub open: bool,
-    /// List of available models
-    pub models: Vec<ModelInfo>,
+    /// List of available meshes
+    pub meshes: Vec<MeshInfo>,
     /// Currently selected index
     pub selected_index: Option<usize>,
-    /// Currently loaded preview model
-    pub preview_model: Option<SpineModel>,
+    /// Currently loaded preview mesh
+    pub preview_mesh: Option<EditableMesh>,
     /// Orbit camera state for preview
     pub orbit_yaw: f32,
     pub orbit_pitch: f32,
@@ -68,17 +81,17 @@ pub struct ModelBrowser {
     pub scroll_offset: f32,
 }
 
-impl Default for ModelBrowser {
+impl Default for MeshBrowser {
     fn default() -> Self {
         Self {
             open: false,
-            models: Vec::new(),
+            meshes: Vec::new(),
             selected_index: None,
-            preview_model: None,
+            preview_mesh: None,
             orbit_yaw: 0.5,
             orbit_pitch: 0.3,
             orbit_distance: 300.0,
-            orbit_center: Vec3::new(0.0, 50.0, 0.0),
+            orbit_center: Vec3::new(0.0, 0.0, 0.0),
             dragging: false,
             last_mouse: (0.0, 0.0),
             scroll_offset: 0.0,
@@ -86,98 +99,91 @@ impl Default for ModelBrowser {
     }
 }
 
-impl ModelBrowser {
-    /// Open the browser with the given list of models
-    pub fn open(&mut self, models: Vec<ModelInfo>) {
+impl MeshBrowser {
+    /// Open the browser with the given list of meshes
+    pub fn open(&mut self, meshes: Vec<MeshInfo>) {
         self.open = true;
-        self.models = models;
+        self.meshes = meshes;
         self.selected_index = None;
-        self.preview_model = None;
+        self.preview_mesh = None;
         self.scroll_offset = 0.0;
     }
 
     /// Close the browser
     pub fn close(&mut self) {
         self.open = false;
-        self.preview_model = None;
+        self.preview_mesh = None;
     }
 
-    /// Set the preview model
-    pub fn set_preview(&mut self, model: SpineModel) {
+    /// Set the preview mesh
+    pub fn set_preview(&mut self, mesh: EditableMesh) {
         // Calculate bounding box to center camera
-        let mut min_y = f32::MAX;
-        let mut max_y = f32::MIN;
-        let mut min_x = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut min_z = f32::MAX;
-        let mut max_z = f32::MIN;
+        let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
 
-        for segment in &model.segments {
-            for joint in &segment.joints {
-                min_x = min_x.min(joint.position.x - joint.radius);
-                max_x = max_x.max(joint.position.x + joint.radius);
-                min_y = min_y.min(joint.position.y - joint.radius);
-                max_y = max_y.max(joint.position.y + joint.radius);
-                min_z = min_z.min(joint.position.z - joint.radius);
-                max_z = max_z.max(joint.position.z + joint.radius);
-            }
+        for vertex in &mesh.vertices {
+            min.x = min.x.min(vertex.pos.x);
+            min.y = min.y.min(vertex.pos.y);
+            min.z = min.z.min(vertex.pos.z);
+            max.x = max.x.max(vertex.pos.x);
+            max.y = max.y.max(vertex.pos.y);
+            max.z = max.z.max(vertex.pos.z);
         }
 
         // Calculate center
-        if min_y != f32::MAX {
-            let center_x = (min_x + max_x) / 2.0;
-            let center_y = (min_y + max_y) / 2.0;
-            let center_z = (min_z + max_z) / 2.0;
-            self.orbit_center = Vec3::new(center_x, center_y, center_z);
+        if min.x != f32::MAX {
+            self.orbit_center = Vec3::new(
+                (min.x + max.x) / 2.0,
+                (min.y + max.y) / 2.0,
+                (min.z + max.z) / 2.0,
+            );
 
-            // Set distance based on model size
-            let size_x = max_x - min_x;
-            let size_y = max_y - min_y;
-            let size_z = max_z - min_z;
+            // Set distance based on mesh size
+            let size_x = max.x - min.x;
+            let size_y = max.y - min.y;
+            let size_z = max.z - min.z;
             let diagonal = (size_x * size_x + size_y * size_y + size_z * size_z).sqrt();
-            self.orbit_distance = diagonal.max(150.0) * 1.5;
+            self.orbit_distance = diagonal.max(0.5) * 2.0;
         } else {
-            self.orbit_center = Vec3::new(0.0, 50.0, 0.0);
-            self.orbit_distance = 300.0;
+            self.orbit_center = Vec3::new(0.0, 0.0, 0.0);
+            self.orbit_distance = 2.0;
         }
 
-        self.preview_model = Some(model);
+        self.preview_mesh = Some(mesh);
         self.orbit_yaw = 0.8;
         self.orbit_pitch = 0.3;
     }
 
-    /// Get the currently selected model info
-    pub fn selected_model(&self) -> Option<&ModelInfo> {
-        self.selected_index.and_then(|i| self.models.get(i))
+    /// Get the currently selected mesh info
+    pub fn selected_mesh(&self) -> Option<&MeshInfo> {
+        self.selected_index.and_then(|i| self.meshes.get(i))
     }
 }
 
-/// Result from drawing the model browser
+/// Result from drawing the mesh browser
 #[derive(Debug, Clone, PartialEq)]
-pub enum ModelBrowserAction {
+pub enum MeshBrowserAction {
     None,
-    /// User selected a model to preview
+    /// User selected a mesh to preview
     SelectPreview(usize),
-    /// User wants to open the selected model
-    OpenModel,
-    /// User wants to start with a new empty model
-    NewModel,
+    /// User wants to open the selected mesh
+    OpenMesh,
     /// User cancelled
     Cancel,
 }
 
-/// Draw the model browser modal dialog
-pub fn draw_model_browser(
+/// Draw the mesh browser modal dialog
+pub fn draw_mesh_browser(
     ctx: &mut UiContext,
-    browser: &mut ModelBrowser,
+    browser: &mut MeshBrowser,
     icon_font: Option<&Font>,
     fb: &mut Framebuffer,
-) -> ModelBrowserAction {
+) -> MeshBrowserAction {
     if !browser.open {
-        return ModelBrowserAction::None;
+        return MeshBrowserAction::None;
     }
 
-    let mut action = ModelBrowserAction::None;
+    let mut action = MeshBrowserAction::None;
 
     // Darken background
     draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::from_rgba(0, 0, 0, 180));
@@ -195,12 +201,12 @@ pub fn draw_model_browser(
     // Header
     let header_h = 40.0;
     draw_rectangle(dialog_x, dialog_y, dialog_w, header_h, Color::from_rgba(45, 45, 55, 255));
-    draw_text("Browse Models", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
+    draw_text("Browse Meshes", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
 
     // Close button
     let close_rect = Rect::new(dialog_x + dialog_w - 36.0, dialog_y + 4.0, 32.0, 32.0);
     if draw_close_button(ctx, close_rect, icon_font) {
-        action = ModelBrowserAction::Cancel;
+        action = MeshBrowserAction::Cancel;
     }
 
     // Content area
@@ -212,7 +218,7 @@ pub fn draw_model_browser(
     let list_rect = Rect::new(dialog_x + 8.0, content_y, list_w, content_h);
     let item_h = 28.0;
 
-    let items: Vec<String> = browser.models.iter().map(|m| m.name.clone()).collect();
+    let items: Vec<String> = browser.meshes.iter().map(|m| m.name.clone()).collect();
 
     let list_result = draw_scrollable_list(
         ctx,
@@ -227,7 +233,7 @@ pub fn draw_model_browser(
     if let Some(clicked_idx) = list_result.clicked {
         if browser.selected_index != Some(clicked_idx) {
             browser.selected_index = Some(clicked_idx);
-            action = ModelBrowserAction::SelectPreview(clicked_idx);
+            action = MeshBrowserAction::SelectPreview(clicked_idx);
         }
     }
 
@@ -238,72 +244,67 @@ pub fn draw_model_browser(
 
     draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h, Color::from_rgba(20, 20, 25, 255));
 
-    let has_preview = browser.preview_model.is_some();
+    let has_preview = browser.preview_mesh.is_some();
     let has_selection = browser.selected_index.is_some();
 
     if has_preview {
         draw_orbit_preview(ctx, browser, preview_rect, fb);
 
         // Draw stats at bottom of preview
-        if let Some(model) = &browser.preview_model {
-            let stats_y = preview_rect.bottom() - 24.0;
-            draw_rectangle(preview_rect.x, stats_y, preview_rect.w, 24.0, Color::from_rgba(30, 30, 35, 200));
+        if let Some(idx) = browser.selected_index {
+            if let Some(info) = browser.meshes.get(idx) {
+                let stats_y = preview_rect.bottom() - 24.0;
+                draw_rectangle(preview_rect.x, stats_y, preview_rect.w, 24.0, Color::from_rgba(30, 30, 35, 200));
 
-            let total_joints: usize = model.segments.iter().map(|s| s.joints.len()).sum();
-            let stats_text = format!(
-                "Segments: {}  Joints: {}",
-                model.segments.len(), total_joints
-            );
-            draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
+                let stats_text = format!(
+                    "Vertices: {}  Faces: {}",
+                    info.vertex_count, info.face_count
+                );
+                draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
+            }
         }
     } else if has_selection {
         draw_text("Loading preview...", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
-    } else if browser.models.is_empty() {
-        draw_text("No models found in assets/models/", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
-        draw_text("Save a model first!", preview_rect.x + 20.0, preview_rect.y + 60.0, 14.0, Color::from_rgba(80, 80, 80, 255));
+    } else if browser.meshes.is_empty() {
+        draw_text("No meshes found in assets/meshes/", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+        draw_text("Add OBJ files to that folder!", preview_rect.x + 20.0, preview_rect.y + 60.0, 14.0, Color::from_rgba(80, 80, 80, 255));
     } else {
-        draw_text("Select a model to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+        draw_text("Select a mesh to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
     }
 
     // Footer with buttons
     let footer_y = dialog_y + dialog_h - 44.0;
     draw_rectangle(dialog_x, footer_y, dialog_w, 44.0, Color::from_rgba(40, 40, 48, 255));
 
-    // New button (left side)
-    let new_rect = Rect::new(dialog_x + 10.0, footer_y + 8.0, 80.0, 28.0);
-    if draw_text_button(ctx, new_rect, "New", Color::from_rgba(60, 60, 70, 255)) {
-        action = ModelBrowserAction::NewModel;
-    }
-
     // Cancel button
     let cancel_rect = Rect::new(dialog_x + dialog_w - 180.0, footer_y + 8.0, 80.0, 28.0);
     if draw_text_button(ctx, cancel_rect, "Cancel", Color::from_rgba(60, 60, 70, 255)) {
-        action = ModelBrowserAction::Cancel;
+        action = MeshBrowserAction::Cancel;
     }
 
     // Open button
     let open_rect = Rect::new(dialog_x + dialog_w - 90.0, footer_y + 8.0, 80.0, 28.0);
-    let open_enabled = browser.preview_model.is_some();
+    let open_enabled = browser.preview_mesh.is_some();
     if draw_text_button_enabled(ctx, open_rect, "Open", ACCENT_COLOR, open_enabled) {
-        action = ModelBrowserAction::OpenModel;
+        action = MeshBrowserAction::OpenMesh;
     }
 
     // Handle Escape to close
     if is_key_pressed(KeyCode::Escape) {
-        action = ModelBrowserAction::Cancel;
+        action = MeshBrowserAction::Cancel;
     }
 
     action
 }
 
-/// Draw the orbit preview of a model
+/// Draw the orbit preview of a mesh
 fn draw_orbit_preview(
     ctx: &mut UiContext,
-    browser: &mut ModelBrowser,
+    browser: &mut MeshBrowser,
     rect: Rect,
     fb: &mut Framebuffer,
 ) {
-    let model = match &browser.preview_model {
+    let mesh = match &browser.preview_mesh {
         Some(m) => m,
         None => return,
     };
@@ -323,11 +324,10 @@ fn draw_orbit_preview(
             browser.dragging = false;
         }
 
-        // Scroll to zoom (multiplicative for smooth zooming, wider range)
+        // Scroll to zoom (use ctx.mouse.scroll to respect modal blocking)
         let scroll = ctx.mouse.scroll;
         if scroll != 0.0 {
-            let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
-            browser.orbit_distance = (browser.orbit_distance * zoom_factor).clamp(10.0, 5000.0);
+            browser.orbit_distance = (browser.orbit_distance * (1.0 - scroll * 0.1)).clamp(0.1, 500.0);
         }
     } else {
         browser.dragging = false;
@@ -364,15 +364,14 @@ fn draw_orbit_preview(
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(25, 25, 35));
 
-    // Render the model
+    // Render the mesh
     let settings = RasterSettings::default();
-    let (vertices, faces) = model.generate_mesh();
 
-    if !vertices.is_empty() {
-        render_mesh(fb, &vertices, &faces, &[], &camera, &settings);
+    if !mesh.vertices.is_empty() {
+        render_mesh(fb, &mesh.vertices, &mesh.faces, &[], &camera, &settings);
     }
 
-    // Draw a simple floor plane indicator using the grid drawing
+    // Draw a simple floor plane indicator
     draw_preview_grid(fb, &camera);
 
     // Draw framebuffer to screen
@@ -393,11 +392,9 @@ fn draw_orbit_preview(
 
 /// Draw a simple grid on the floor (Y=0 plane) with depth testing
 fn draw_preview_grid(fb: &mut Framebuffer, camera: &Camera) {
-    use crate::rasterizer::world_to_screen;
-
     let grid_color = RasterColor::new(50, 50, 60);
-    let grid_size = 200.0;
-    let grid_step = 25.0;
+    let grid_size = 2.0;
+    let grid_step = 0.25;
     let half = grid_size / 2.0;
 
     // Helper to draw a 3D line with depth testing
@@ -417,7 +414,6 @@ fn draw_preview_grid(fb: &mut Framebuffer, camera: &Camera) {
         let screen1 = world_to_screen(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
         if let (Some((x0, y0)), Some((x1, y1))) = (screen0, screen1) {
-            // Use draw_line_3d which respects z-buffer
             fb.draw_line_3d(x0 as i32, y0 as i32, z0, x1 as i32, y1 as i32, z1, color);
         }
     };

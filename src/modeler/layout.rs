@@ -25,6 +25,7 @@ pub enum ModelerAction {
     Export,         // Browser: download as file
     Import,         // Browser: upload file
     BrowseModels,   // Open model browser
+    BrowseMeshes,   // Open mesh browser (OBJ files)
 }
 
 /// Modeler layout state (split panel ratios)
@@ -175,6 +176,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     // Model browser (works on both native and WASM)
     if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Models") {
         action = ModelerAction::BrowseModels;
+    }
+
+    // Mesh browser for OBJ files
+    if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Browse Meshes") {
+        action = ModelerAction::BrowseMeshes;
     }
 
     toolbar.separator();

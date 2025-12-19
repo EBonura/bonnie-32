@@ -5,7 +5,7 @@
 
 use crate::editor::{EditorState, EditorLayout, ExampleBrowser};
 use crate::landing::LandingState;
-use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser};
+use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, MeshBrowser};
 use crate::tracker::TrackerState;
 use crate::world::Level;
 use macroquad::prelude::Font;
@@ -67,6 +67,7 @@ pub struct ModelerToolState {
     pub modeler_state: ModelerState,
     pub modeler_layout: ModelerLayout,
     pub model_browser: ModelBrowser,
+    pub mesh_browser: MeshBrowser,
 }
 
 /// Main application state containing all tool states
@@ -111,6 +112,7 @@ impl AppState {
                 modeler_state: ModelerState::new(),
                 modeler_layout: ModelerLayout::new(),
                 model_browser: ModelBrowser::default(),
+                mesh_browser: MeshBrowser::default(),
             },
             tracker: TrackerState::new(),
             icon_font,

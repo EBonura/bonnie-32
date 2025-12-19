@@ -24,7 +24,7 @@ use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level, save_level};
 use ui::{UiContext, MouseState, Rect, draw_fixed_tabs, TabEntry, layout as tab_layout, icon};
 use editor::{EditorAction, draw_editor, draw_example_browser, BrowserAction, discover_examples};
-use modeler::{ModelerAction, ModelBrowserAction, draw_model_browser, discover_models};
+use modeler::{ModelerAction, ModelBrowserAction, MeshBrowserAction, draw_model_browser, draw_mesh_browser, discover_models, discover_meshes, ObjImporter};
 use app::{AppState, Tool};
 use std::path::PathBuf;
 
@@ -335,9 +335,9 @@ async fn main() {
                 let delta = get_frame_time() as f64;
                 ms.modeler_state.update_playback(delta);
 
-                // Block background input if model browser is open
+                // Block background input if any browser is open
                 let real_mouse_modeler = mouse_state;
-                if ms.model_browser.open {
+                if ms.model_browser.open || ms.mesh_browser.open {
                     ui_ctx.begin_modal();
                 }
 
@@ -352,7 +352,7 @@ async fn main() {
                 );
 
                 // Handle modeler actions
-                handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser);
+                handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.mesh_browser);
 
                 // Draw model browser overlay if open
                 if ms.model_browser.open {
@@ -400,6 +400,48 @@ async fn main() {
                             ms.model_browser.close();
                         }
                         ModelBrowserAction::None => {}
+                    }
+                }
+
+                // Draw mesh browser overlay if open
+                if ms.mesh_browser.open {
+                    ui_ctx.end_modal(real_mouse_modeler);
+
+                    let browser_action = draw_mesh_browser(
+                        &mut ui_ctx,
+                        &mut ms.mesh_browser,
+                        app.icon_font.as_ref(),
+                        &mut fb,
+                    );
+
+                    match browser_action {
+                        MeshBrowserAction::SelectPreview(index) => {
+                            if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
+                                let path = mesh_info.path.clone();
+                                match ObjImporter::load_from_file(&path) {
+                                    Ok(mesh) => {
+                                        ms.mesh_browser.set_preview(mesh);
+                                    }
+                                    Err(e) => {
+                                        ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
+                                    }
+                                }
+                            }
+                        }
+                        MeshBrowserAction::OpenMesh => {
+                            if let Some(_mesh) = ms.mesh_browser.preview_mesh.take() {
+                                // TODO: Create MeshEditorModel and switch to mesh editing mode
+                                let path = ms.mesh_browser.selected_mesh()
+                                    .map(|m| m.path.clone())
+                                    .unwrap_or_else(|| PathBuf::from("assets/meshes/untitled.obj"));
+                                ms.modeler_state.set_status(&format!("Opened mesh: {}", path.display()), 3.0);
+                                ms.mesh_browser.close();
+                            }
+                        }
+                        MeshBrowserAction::Cancel => {
+                            ms.mesh_browser.close();
+                        }
+                        MeshBrowserAction::None => {}
                     }
                 }
             }
@@ -602,15 +644,25 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
     }
 }
 
-fn handle_modeler_action(action: ModelerAction, state: &mut modeler::ModelerState, browser: &mut modeler::ModelBrowser) {
+fn handle_modeler_action(
+    action: ModelerAction,
+    state: &mut modeler::ModelerState,
+    model_browser: &mut modeler::ModelBrowser,
+    mesh_browser: &mut modeler::MeshBrowser,
+) {
     match action {
         ModelerAction::New => {
             state.new_spine_model();
         }
         ModelerAction::BrowseModels => {
             let models = discover_models();
-            browser.open(models);
+            model_browser.open(models);
             state.set_status("Browse models", 2.0);
+        }
+        ModelerAction::BrowseMeshes => {
+            let meshes = discover_meshes();
+            mesh_browser.open(meshes);
+            state.set_status("Browse meshes", 2.0);
         }
         ModelerAction::Save => {
             if let Some(path) = state.current_file.clone() {
