@@ -1387,18 +1387,11 @@ pub fn draw_viewport_3d(
                 let is_hovered = hovered_vertex.map_or(false, |(hr, hgx, hgz, hci, hface, _)|
                     hr == *room_idx && hgx == *gx && hgz == *gz && hci == *corner_idx && hface == *face);
 
-                // Choose color based on state
-                let color = if is_hovered {
-                    RasterColor::new(255, 200, 150) // Orange when hovered
-                } else {
-                    RasterColor::with_alpha(200, 200, 220, 200) // Default (slightly transparent grey)
-                };
-
-                // Choose radius (larger when hovered)
-                let radius = if is_hovered { 4 } else { 2 };
-
-                // Draw circle directly into framebuffer
-                fb.draw_circle(fb_x as i32, fb_y as i32, radius, color);
+                // Only draw vertex dot when hovered (no gray dots for unselected vertices)
+                if is_hovered {
+                    let color = RasterColor::new(255, 200, 150); // Orange when hovered
+                    fb.draw_circle(fb_x as i32, fb_y as i32, 4, color);
+                }
             }
         }
     }
