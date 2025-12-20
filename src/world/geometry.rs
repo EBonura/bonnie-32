@@ -366,6 +366,51 @@ impl Aabb {
     }
 }
 
+/// A point light source in a room
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomLight {
+    /// Position relative to room origin
+    pub position: Vec3,
+    /// Light color (RGB, 0-255)
+    pub color: Color,
+    /// Light intensity (0.0 = off, 1.0 = normal, >1.0 = overbright)
+    #[serde(default = "default_light_intensity")]
+    pub intensity: f32,
+    /// Falloff radius in world units
+    #[serde(default = "default_light_radius")]
+    pub radius: f32,
+    /// Whether light is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_light_intensity() -> f32 { 1.0 }
+fn default_light_radius() -> f32 { 1024.0 }
+
+impl RoomLight {
+    /// Create a new point light with default values
+    pub fn new(position: Vec3) -> Self {
+        Self {
+            position,
+            color: Color::new(255, 255, 255),
+            intensity: 1.0,
+            radius: 1024.0,
+            enabled: true,
+        }
+    }
+
+    /// Create a light with custom color
+    pub fn with_color(position: Vec3, color: Color) -> Self {
+        Self {
+            position,
+            color,
+            intensity: 1.0,
+            radius: 1024.0,
+            enabled: true,
+        }
+    }
+}
+
 /// Portal connecting two rooms
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Portal {
@@ -412,6 +457,9 @@ pub struct Room {
     /// Portals to adjacent rooms
     #[serde(default)]
     pub portals: Vec<Portal>,
+    /// Point lights in this room
+    #[serde(default)]
+    pub lights: Vec<RoomLight>,
     /// Bounding box (room-relative) - computed from sectors, not serialized
     #[serde(skip)]
     pub bounds: Aabb,
@@ -439,6 +487,7 @@ impl Room {
             depth,
             sectors,
             portals: Vec::new(),
+            lights: Vec::new(),
             bounds: Aabb::default(),
             ambient: 0.5,
         }

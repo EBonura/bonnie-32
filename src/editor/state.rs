@@ -29,6 +29,7 @@ pub enum EditorTool {
     DrawCeiling,
     PlacePortal,
     PlaceObject,
+    PlaceLight,
 }
 
 /// Which face within a sector is selected
@@ -58,6 +59,8 @@ pub enum Selection {
     /// wall_face: Some(SectorFace::WallXxx) when face_idx=2
     Edge { room: usize, x: usize, z: usize, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace> },
     Portal { room: usize, portal: usize },
+    /// Light selected
+    Light { room: usize, light: usize },
 }
 
 impl Selection {
@@ -192,6 +195,11 @@ pub struct EditorState {
     pub dragging_sector_vertices: Vec<(usize, usize, usize, SectorFace, usize)>,
     pub drag_initial_heights: Vec<f32>, // Initial Y/height values for each vertex
 
+    /// 3D viewport light dragging state
+    pub dragging_light: Option<(usize, usize)>, // (room_idx, light_idx)
+    pub dragging_light_initial_y: f32,          // Initial Y when drag started
+    pub dragging_light_plane_y: f32,            // Current accumulated drag plane Y
+
     /// Texture palette state
     pub texture_packs: Vec<TexturePack>,
     pub selected_pack: usize,
@@ -309,6 +317,9 @@ impl EditorState {
             viewport_drag_initial_y: Vec::new(),
             dragging_sector_vertices: Vec::new(),
             drag_initial_heights: Vec::new(),
+            dragging_light: None,
+            dragging_light_initial_y: 0.0,
+            dragging_light_plane_y: 0.0,
             texture_packs,
             selected_pack: 0,
             texture_scroll: 0.0,
@@ -536,6 +547,18 @@ impl EditorState {
                         let sum = p.vertices.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
                         let count = p.vertices.len() as f32;
                         Vec3::new(sum.x / count, sum.y / count, sum.z / count)
+                    })
+                })
+            }
+            Selection::Light { room, light } => {
+                self.level.rooms.get(*room).and_then(|r| {
+                    r.lights.get(*light).map(|l| {
+                        // Light position in world space
+                        Vec3::new(
+                            r.position.x + l.position.x,
+                            r.position.y + l.position.y,
+                            r.position.z + l.position.z,
+                        )
                     })
                 })
             }

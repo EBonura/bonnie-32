@@ -1,7 +1,7 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture};
 use super::{EditorState, EditorTool, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
@@ -210,6 +210,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         (icon::BOX, "Wall", EditorTool::DrawWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
         (icon::DOOR_CLOSED, "Portal", EditorTool::PlacePortal),
+        (icon::SUN, "Light", EditorTool::PlaceLight),
     ];
 
     for (icon_char, tooltip, tool) in tools {
@@ -430,6 +431,42 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
         draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 14.0).floor(), 16.0, WHITE);
         y += line_height;
+
+        draw_text(&format!("Lights: {}", room.lights.len()), x, (y + 14.0).floor(), 16.0, WHITE);
+        y += line_height;
+
+        // Ambient light knob
+        y += 8.0; // Extra space before knob
+        let knob_radius = 20.0;
+        let knob_center_x = x + rect.w / 2.0 - 4.0; // Center in panel
+        let knob_center_y = y + knob_radius + 12.0; // Account for label above
+
+        // Convert ambient (0.0-1.0) to knob value (0-127)
+        // Scale so 100% ambient = 127 (max knob position)
+        let ambient_value = (room.ambient * 127.0).round() as u8;
+        let knob_result = draw_knob(
+            ctx,
+            knob_center_x,
+            knob_center_y,
+            knob_radius,
+            ambient_value.min(127),
+            "Ambient",
+            false, // Not bipolar
+            false, // Not editing (no text entry mode for now)
+        );
+
+        // Apply knob changes
+        if let Some(new_val) = knob_result.value {
+            let clamped: u8 = new_val.min(127);
+            let new_ambient = (clamped as f32) / 127.0;
+            if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                if (room.ambient - new_ambient).abs() > 0.001 {
+                    room.ambient = new_ambient;
+                }
+            }
+        }
+
+        y += knob_radius * 2.0 + 30.0; // Knob height + label + value box
 
         // Room list
         y += 10.0;
@@ -1729,6 +1766,156 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 }
             }
         }
+        super::Selection::Light { room, light } => {
+            // Light properties - capture values first to avoid borrow issues
+            let room_idx = *room;
+            let light_idx = *light;
+
+            // Get light data snapshot (to avoid borrow issues with mutation later)
+            let light_snapshot = state.level.rooms.get(room_idx)
+                .and_then(|r| r.lights.get(light_idx))
+                .map(|l| (l.position, l.color, l.intensity, l.radius, l.enabled));
+
+            if let Some((position, color, intensity, radius, enabled)) = light_snapshot {
+                draw_text(&format!("Light {} in Room {}", light_idx, room_idx), x, (y + 14.0).floor(), 16.0, WHITE);
+                y += 24.0;
+
+                // Position
+                draw_text("Position:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                y += 18.0;
+                draw_text(&format!("  X: {:.0}  Y: {:.0}  Z: {:.0}",
+                    position.x, position.y, position.z),
+                    x, (y + 12.0).floor(), 13.0, WHITE);
+                y += 18.0;
+
+                // Color
+                draw_text("Color:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                y += 18.0;
+                // Color swatch
+                let swatch_x = x;
+                let swatch_y = y;
+                let swatch_color = Color::from_rgba(color.r, color.g, color.b, 255);
+                draw_rectangle(swatch_x, swatch_y, 20.0, 20.0, swatch_color);
+                draw_rectangle_lines(swatch_x, swatch_y, 20.0, 20.0, 1.0, WHITE);
+                draw_text(&format!("R:{} G:{} B:{}", color.r, color.g, color.b),
+                    x + 28.0, (y + 14.0).floor(), 13.0, WHITE);
+                y += 24.0;
+
+                // Intensity and Radius knobs side by side
+                let knob_radius = 18.0;
+                let knob_spacing = 70.0;
+                let knob_center_y = y + knob_radius + 8.0;
+
+                // Intensity knob (0-127 maps to 0.0-1.27)
+                let intensity_knob_x = x + 30.0;
+                let intensity_value = (intensity * 100.0).round() as u8;
+                let intensity_result = draw_knob(
+                    ctx,
+                    intensity_knob_x,
+                    knob_center_y,
+                    knob_radius,
+                    intensity_value.min(127),
+                    "Intensity",
+                    false,
+                    false,
+                );
+
+                // Radius knob (0-127 maps to 0-20480 units)
+                let radius_knob_x = x + 30.0 + knob_spacing;
+                let radius_value = ((radius / 20480.0) * 127.0).round() as u8;
+                let radius_result = draw_knob(
+                    ctx,
+                    radius_knob_x,
+                    knob_center_y,
+                    knob_radius,
+                    radius_value.min(127),
+                    "Radius",
+                    false,
+                    false,
+                );
+
+                // Apply intensity changes
+                if let Some(new_val) = intensity_result.value {
+                    let clamped: u8 = new_val.min(127);
+                    let new_intensity = (clamped as f32) / 100.0;
+                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
+                        if let Some(l) = room_data.lights.get_mut(light_idx) {
+                            if (l.intensity - new_intensity).abs() > 0.001 {
+                                l.intensity = new_intensity;
+                            }
+                        }
+                    }
+                }
+
+                // Apply radius changes
+                if let Some(new_val) = radius_result.value {
+                    let new_radius = (new_val as f32 / 127.0) * 20480.0;
+                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
+                        if let Some(l) = room_data.lights.get_mut(light_idx) {
+                            if (l.radius - new_radius).abs() > 1.0 {
+                                l.radius = new_radius.max(64.0); // Minimum radius of 64
+                            }
+                        }
+                    }
+                }
+                y += knob_radius * 2.0 + 28.0;
+
+                // Enabled toggle button
+                let enabled_btn_rect = Rect::new(x, y, 80.0, 20.0);
+                let enabled_hovered = ctx.mouse.inside(&enabled_btn_rect);
+                let enabled_color = if enabled {
+                    if enabled_hovered { Color::from_rgba(120, 255, 120, 255) } else { Color::from_rgba(100, 255, 100, 255) }
+                } else {
+                    if enabled_hovered { Color::from_rgba(255, 120, 120, 255) } else { Color::from_rgba(255, 100, 100, 255) }
+                };
+                draw_rectangle(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h,
+                    Color::from_rgba(40, 40, 45, 255));
+                if enabled_hovered {
+                    draw_rectangle_lines(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h, 1.0, WHITE);
+                }
+                let enabled_text = if enabled { "Enabled" } else { "Disabled" };
+                draw_text(enabled_text, x + 10.0, (y + 14.0).floor(), 13.0, enabled_color);
+
+                if enabled_hovered && ctx.mouse.left_pressed {
+                    // Toggle enabled state
+                    state.save_undo();
+                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
+                        if let Some(l) = room_data.lights.get_mut(light_idx) {
+                            l.enabled = !l.enabled;
+                        }
+                    }
+                }
+                y += 24.0;
+
+                // Delete button
+                let delete_btn_rect = Rect::new(x, y, 100.0, 22.0);
+                let delete_hovered = ctx.mouse.inside(&delete_btn_rect);
+                let delete_color = if delete_hovered {
+                    Color::from_rgba(220, 80, 80, 255)
+                } else {
+                    Color::from_rgba(180, 60, 60, 255)
+                };
+                draw_rectangle(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, delete_color);
+                if delete_hovered {
+                    draw_rectangle_lines(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, 1.0, WHITE);
+                }
+                draw_text("Delete Light", x + 10.0, (y + 15.0).floor(), 13.0, WHITE);
+
+                if delete_hovered && ctx.mouse.left_pressed {
+                    // Delete the light
+                    state.save_undo();
+                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
+                        if light_idx < room_data.lights.len() {
+                            room_data.lights.remove(light_idx);
+                        }
+                    }
+                    state.set_selection(super::Selection::None);
+                    state.set_status("Light deleted", 2.0);
+                }
+            } else {
+                draw_text("Light not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+            }
+        }
     }
 
     // Disable scissor
@@ -1755,6 +1942,7 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
 
     match selection {
         super::Selection::None | super::Selection::Room(_) | super::Selection::Portal { .. } => 30.0,
+        super::Selection::Light { .. } => 320.0, // Light header + position + color + intensity knob + radius knob + enabled + delete
 
         super::Selection::Edge { .. } => 120.0, // Edge header + 2 vertex coords
 

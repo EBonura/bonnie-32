@@ -350,9 +350,15 @@ struct Surface {
     pub v1: Vec3, // Screen-space vertex 1
     pub v2: Vec3, // Screen-space vertex 2
     pub v3: Vec3, // Screen-space vertex 3
+    pub w1: Vec3, // World-space vertex 1 (for point light calculations)
+    pub w2: Vec3, // World-space vertex 2
+    pub w3: Vec3, // World-space vertex 3
     pub vn1: Vec3, // Vertex normal 1 (camera space)
     pub vn2: Vec3, // Vertex normal 2
     pub vn3: Vec3, // Vertex normal 3
+    pub wn1: Vec3, // World-space vertex normal 1 (for point light calculations)
+    pub wn2: Vec3, // World-space vertex normal 2
+    pub wn3: Vec3, // World-space vertex normal 3
     pub uv1: super::math::Vec2,
     pub uv2: super::math::Vec2,
     pub uv3: super::math::Vec2,
@@ -467,10 +473,11 @@ fn rasterize_triangle(
     let max_y = (surface.v1.y.max(surface.v2.y).max(surface.v3.y) + 1.0).min(fb.height as f32) as usize;
 
     // Pre-calculate flat shading if needed
-    // Note: Using Vec3::ZERO for world_pos since directional lights don't need position
-    // For point/spot lights, we'd need to add camera-space positions to Surface
+    // Use world-space normal and center position for point/spot lights
     let flat_shade = if settings.shading == ShadingMode::Flat {
-        shade_multi_light(surface.normal, Vec3::ZERO, &settings.lights, settings.ambient)
+        let center_pos = (surface.w1 + surface.w2 + surface.w3).scale(1.0 / 3.0);
+        let world_normal = (surface.wn1 + surface.wn2 + surface.wn3).scale(1.0 / 3.0).normalize();
+        shade_multi_light(world_normal, center_pos, &settings.lights, settings.ambient)
     } else {
         1.0
     };
@@ -540,11 +547,10 @@ fn rasterize_triangle(
                     ShadingMode::None => 1.0,
                     ShadingMode::Flat => flat_shade,
                     ShadingMode::Gouraud => {
-                        // Interpolate per-vertex shading from normals
-                        // Note: Using Vec3::ZERO for world_pos since directional lights don't need position
-                        let s1 = shade_multi_light(surface.vn1, Vec3::ZERO, &settings.lights, settings.ambient);
-                        let s2 = shade_multi_light(surface.vn2, Vec3::ZERO, &settings.lights, settings.ambient);
-                        let s3 = shade_multi_light(surface.vn3, Vec3::ZERO, &settings.lights, settings.ambient);
+                        // Interpolate per-vertex shading from world-space normals and positions
+                        let s1 = shade_multi_light(surface.wn1, surface.w1, &settings.lights, settings.ambient);
+                        let s2 = shade_multi_light(surface.wn2, surface.w2, &settings.lights, settings.ambient);
+                        let s3 = shade_multi_light(surface.wn3, surface.w3, &settings.lights, settings.ambient);
                         bc.x * s1 + bc.y * s2 + bc.z * s3
                     }
                 };
@@ -635,9 +641,15 @@ pub fn render_mesh(
                     v1,
                     v2,
                     v3,
+                    w1: vertices[face.v0].pos,
+                    w2: vertices[face.v1].pos,
+                    w3: vertices[face.v2].pos,
                     vn1: cam_space_normals[face.v0].scale(-1.0),
                     vn2: cam_space_normals[face.v1].scale(-1.0),
                     vn3: cam_space_normals[face.v2].scale(-1.0),
+                    wn1: vertices[face.v0].normal.scale(-1.0),
+                    wn2: vertices[face.v1].normal.scale(-1.0),
+                    wn3: vertices[face.v2].normal.scale(-1.0),
                     uv1: vertices[face.v0].uv,
                     uv2: vertices[face.v1].uv,
                     uv3: vertices[face.v2].uv,
@@ -654,9 +666,15 @@ pub fn render_mesh(
                 v1,
                 v2,
                 v3,
+                w1: vertices[face.v0].pos,
+                w2: vertices[face.v1].pos,
+                w3: vertices[face.v2].pos,
                 vn1: cam_space_normals[face.v0],
                 vn2: cam_space_normals[face.v1],
                 vn3: cam_space_normals[face.v2],
+                wn1: vertices[face.v0].normal,
+                wn2: vertices[face.v1].normal,
+                wn3: vertices[face.v2].normal,
                 uv1: vertices[face.v0].uv,
                 uv2: vertices[face.v1].uv,
                 uv3: vertices[face.v2].uv,

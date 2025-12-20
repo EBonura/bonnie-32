@@ -17,6 +17,7 @@ use crate::rasterizer::{
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
     world_to_screen, world_to_screen_with_depth,
     point_to_segment_distance, point_in_triangle_2d,
+    Light, RasterSettings,
 };
 use crate::world::SECTOR_SIZE;
 use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode};
@@ -212,7 +213,8 @@ pub fn draw_viewport_3d(
     let mut preview_sector: Option<(f32, f32, f32, bool)> = None; // (x, z, target_y, is_occupied)
     let mut preview_wall: Option<(f32, f32, crate::world::Direction, f32, f32, bool)> = None; // (x, z, direction, y_bottom, y_top, is_occupied)
 
-    let hover = if inside_viewport && !ctx.mouse.right_down && state.tool == EditorTool::Select {
+    let hover = if inside_viewport && !ctx.mouse.right_down &&
+        (state.tool == EditorTool::Select || state.tool == EditorTool::PlaceLight) {
         screen_to_fb(mouse_pos.0, mouse_pos.1)
             .map(|mouse_fb| find_hovered_elements(state, mouse_fb, fb_width, fb_height, &all_vertices))
             .unwrap_or_default()
@@ -223,6 +225,7 @@ pub fn draw_viewport_3d(
     let hovered_vertex = hover.vertex;
     let hovered_edge = hover.edge;
     let hovered_face = hover.face;
+    let hovered_light = hover.light;
 
     // In drawing modes, find preview sector position
     if inside_viewport && (state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling) {
@@ -706,6 +709,25 @@ pub fn draw_viewport_3d(
                     if height_count > 0 {
                         state.viewport_drag_plane_y = avg_height / height_count as f32;
                     }
+                } else if let Some((room_idx, light_idx, _)) = hovered_light {
+                    // Light selection/dragging - checked before faces so lights are clickable
+                    let is_already_selected = matches!(&state.selection,
+                        Selection::Light { room, light } if *room == room_idx && *light == light_idx);
+
+                    if is_already_selected {
+                        // Start dragging the light (Y-axis)
+                        if let Some(room) = state.level.rooms.get(room_idx) {
+                            if let Some(light) = room.lights.get(light_idx) {
+                                state.dragging_light = Some((room_idx, light_idx));
+                                state.dragging_light_initial_y = light.position.y;
+                                state.dragging_light_plane_y = light.position.y;
+                            }
+                        }
+                    } else {
+                        // Select light
+                        state.selection = Selection::Light { room: room_idx, light: light_idx };
+                        state.set_status("Light selected", 1.0);
+                    }
                 } else if let Some((room_idx, gx, gz, face)) = hovered_face {
                     // Start dragging face (all 4 vertices)
                     state.dragging_sector_vertices.clear();
@@ -998,6 +1020,15 @@ pub fn draw_viewport_3d(
                     }
                 }
             }
+            // PlaceLight mode - select existing lights (placement is in 2D grid view)
+            else if state.tool == EditorTool::PlaceLight {
+                if let Some((room_idx, light_idx, _)) = hovered_light {
+                    state.selection = Selection::Light { room: room_idx, light: light_idx };
+                    state.set_status("Light selected", 1.0);
+                } else {
+                    state.set_status("Use 2D grid view to place lights", 2.0);
+                }
+            }
         }
 
         // Continue dragging (Y-axis only - TRLE constraint)
@@ -1067,6 +1098,38 @@ pub fn draw_viewport_3d(
             }
         }
 
+        // Continue dragging light (Y-axis only)
+        if ctx.mouse.left_down && state.dragging_light.is_some() {
+            use super::CLICK_HEIGHT;
+
+            if !state.viewport_drag_started {
+                state.save_undo();
+                state.viewport_drag_started = true;
+            }
+
+            // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
+            let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
+            let y_sensitivity = 5.0;
+            let y_delta = mouse_delta_y * y_sensitivity;
+
+            // Accumulate delta
+            state.dragging_light_plane_y += y_delta;
+
+            // Calculate snapped height
+            let delta_from_initial = state.dragging_light_plane_y - state.dragging_light_initial_y;
+            let new_y = state.dragging_light_initial_y + delta_from_initial;
+            let snapped_y = (new_y / CLICK_HEIGHT).round() * CLICK_HEIGHT;
+
+            // Apply to light
+            if let Some((room_idx, light_idx)) = state.dragging_light {
+                if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(light) = room.lights.get_mut(light_idx) {
+                        light.position.y = snapped_y;
+                    }
+                }
+            }
+        }
+
         // End dragging on release
         if ctx.mouse.left_released {
             // If we actually dragged geometry, recalculate room bounds
@@ -1078,6 +1141,7 @@ pub fn draw_viewport_3d(
             }
             state.dragging_sector_vertices.clear();
             state.drag_initial_heights.clear();
+            state.dragging_light = None;
             state.viewport_drag_started = false;
         }
     }
@@ -1314,15 +1378,48 @@ pub fn draw_viewport_3d(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
+    // Build lighting settings: when Gouraud is ON, use room lights; when OFF, no shading
+    let render_settings = if state.raster_settings.shading != crate::rasterizer::ShadingMode::None {
+        // Collect all enabled lights from all rooms
+        let mut lights = Vec::new();
+        for room in &state.level.rooms {
+            for room_light in &room.lights {
+                if room_light.enabled {
+                    // Convert room-local position to world position
+                    let world_pos = Vec3::new(
+                        room.position.x + room_light.position.x,
+                        room.position.y + room_light.position.y,
+                        room.position.z + room_light.position.z,
+                    );
+                    let mut light = Light::point(world_pos, room_light.radius, room_light.intensity);
+                    light.color = room_light.color;
+                    lights.push(light);
+                }
+            }
+        }
+        // Use room ambient from current room (or default)
+        let ambient = state.level.rooms.get(state.current_room)
+            .map(|r| r.ambient)
+            .unwrap_or(0.5);
+        // Create modified settings with room lights
+        RasterSettings {
+            lights,
+            ambient,
+            ..state.raster_settings.clone()
+        }
+    } else {
+        state.raster_settings.clone()
+    };
+
     // Render all rooms (skip hidden ones)
-    let settings = &state.raster_settings;
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         // Skip hidden rooms
         if state.hidden_rooms.contains(&room_idx) {
             continue;
         }
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, settings);
+
+        render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
     }
 
     // Draw room boundary wireframes for all rooms
@@ -1417,6 +1514,61 @@ pub fn draw_viewport_3d(
                 for (i, j) in portal_edges {
                     if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_verts[i], screen_verts[j]) {
                         fb.draw_line_3d(x0, y0, z0, x1, y1, z1, portal_color);
+                    }
+                }
+            }
+
+            // Draw light gizmos for this room
+            for (light_idx, light) in room.lights.iter().enumerate() {
+                // Light position in world space
+                let world_pos = Vec3::new(
+                    room.position.x + light.position.x,
+                    room.position.y + light.position.y,
+                    room.position.z + light.position.z,
+                );
+
+                // Project to screen
+                if let Some((fb_x, fb_y)) = world_to_screen(
+                    world_pos,
+                    state.camera_3d.position,
+                    state.camera_3d.basis_x,
+                    state.camera_3d.basis_y,
+                    state.camera_3d.basis_z,
+                    fb.width,
+                    fb.height,
+                ) {
+                    // Light color
+                    let light_color = if light.enabled {
+                        RasterColor::new(light.color.r, light.color.g, light.color.b)
+                    } else {
+                        RasterColor::new(80, 80, 80) // Dim gray for disabled
+                    };
+
+                    // Check if this light is selected
+                    let is_selected = matches!(&state.selection, Selection::Light { room: r, light: l }
+                        if *r == room_idx && *l == light_idx);
+
+                    // Draw light gizmo
+                    let radius = if is_selected { 8 } else { 5 };
+
+                    // Selection highlight (white circle behind)
+                    if is_selected {
+                        fb.draw_circle(fb_x as i32, fb_y as i32, radius + 3, RasterColor::new(255, 255, 255));
+                    }
+
+                    fb.draw_circle(fb_x as i32, fb_y as i32, radius, light_color);
+
+                    // Sun rays for enabled lights
+                    if light.enabled {
+                        let ray_len = radius as i32 + 4;
+                        let offsets = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+                        for (dx, dy) in offsets {
+                            let x0 = fb_x as i32 + dx * (radius as i32 + 1);
+                            let y0 = fb_y as i32 + dy * (radius as i32 + 1);
+                            let x1 = fb_x as i32 + dx * ray_len;
+                            let y1 = fb_y as i32 + dy * ray_len;
+                            fb.draw_line_3d(x0, y0, 0.0, x1, y1, 0.0, light_color);
+                        }
                     }
                 }
             }
@@ -2194,6 +2346,8 @@ pub struct HoverResult {
     pub edge: Option<(usize, usize, usize, usize, usize, Option<SectorFace>, f32)>,
     /// Hovered face: (room_idx, gx, gz, face)
     pub face: Option<(usize, usize, usize, SectorFace)>,
+    /// Hovered light: (room_idx, light_idx, screen_dist)
+    pub light: Option<(usize, usize, f32)>,
 }
 
 impl Default for HoverResult {
@@ -2202,6 +2356,7 @@ impl Default for HoverResult {
             vertex: None,
             edge: None,
             face: None,
+            light: None,
         }
     }
 }
@@ -2487,6 +2642,34 @@ fn find_hovered_elements(
                                 break 'face_loop;
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check lights (for all rooms, not just current)
+    const LIGHT_THRESHOLD: f32 = 12.0;
+    for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        for (light_idx, light) in room.lights.iter().enumerate() {
+            let world_pos = Vec3::new(
+                room.position.x + light.position.x,
+                room.position.y + light.position.y,
+                room.position.z + light.position.z,
+            );
+            if let Some((sx, sy)) = world_to_screen(
+                world_pos,
+                state.camera_3d.position,
+                state.camera_3d.basis_x,
+                state.camera_3d.basis_y,
+                state.camera_3d.basis_z,
+                fb_width,
+                fb_height,
+            ) {
+                let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                if dist < LIGHT_THRESHOLD {
+                    if result.light.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                        result.light = Some((room_idx, light_idx, dist));
                     }
                 }
             }
