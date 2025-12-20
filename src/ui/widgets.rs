@@ -720,3 +720,188 @@ pub fn draw_drag_value_compact_editable(
         dragging: *is_dragging,
     }
 }
+
+// =============================================================================
+// PS1 Color Picker Widget (15-bit color: 5 bits per channel, 0-31 range)
+// =============================================================================
+
+use crate::rasterizer::Color as RasterColor;
+
+/// Result from the PS1 color picker
+pub struct ColorPickerResult {
+    /// New color if changed
+    pub color: Option<RasterColor>,
+    /// Whether a slider is currently being dragged
+    pub active: bool,
+}
+
+/// PS1 preset colors (5-bit values)
+const PS1_PRESETS: [(u8, u8, u8); 8] = [
+    (31, 31, 31), // White
+    (0, 0, 0),    // Black
+    (31, 0, 0),   // Red
+    (0, 31, 0),   // Green
+    (0, 0, 31),   // Blue
+    (31, 31, 0),  // Yellow
+    (0, 31, 31),  // Cyan
+    (31, 0, 31),  // Magenta
+];
+
+/// Draw a PS1-authentic color picker with RGB sliders (0-31 range) and preset swatches
+///
+/// Layout:
+/// ```text
+/// [Swatch]  R: [====|------] 16
+///           G: [==|--------] 8
+///           B: [======|----] 24
+/// [■][■][■][■][■][■][■][■]  <- presets
+/// ```
+pub fn draw_ps1_color_picker(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    current_color: RasterColor,
+    label: &str,
+    active_slider: &mut Option<usize>, // 0=R, 1=G, 2=B
+) -> ColorPickerResult {
+    let mut result = ColorPickerResult {
+        color: None,
+        active: false,
+    };
+
+    let swatch_size = 32.0;
+    let slider_height = 10.0;
+    let slider_spacing = 1.0;
+    let label_width = 16.0;
+    let value_width = 20.0;
+    let slider_x = x + swatch_size + 8.0 + label_width;
+    let slider_width = width - swatch_size - 8.0 - label_width - value_width - 4.0;
+    let sliders_total_height = 3.0 * slider_height + 2.0 * slider_spacing; // 3 sliders with 2 gaps
+
+    let text_color = Color::new(0.8, 0.8, 0.8, 1.0);
+    let label_color = Color::new(0.6, 0.6, 0.6, 1.0);
+    let track_bg = Color::new(0.15, 0.15, 0.18, 1.0);
+
+    // Draw label above
+    if !label.is_empty() {
+        draw_text(label, x, y - 4.0, 11.0, label_color);
+    }
+
+    // Draw color swatch (current color)
+    let swatch_y = y;
+    draw_rectangle(x, swatch_y, swatch_size, swatch_size, Color::from_rgba(60, 60, 65, 255));
+    draw_rectangle(
+        x + 1.0,
+        swatch_y + 1.0,
+        swatch_size - 2.0,
+        swatch_size - 2.0,
+        Color::from_rgba(current_color.r, current_color.g, current_color.b, 255),
+    );
+
+    // Get current 5-bit values
+    let mut r5 = current_color.r5();
+    let mut g5 = current_color.g5();
+    let mut b5 = current_color.b5();
+
+    // Draw RGB sliders (vertically centered with swatch)
+    let sliders_start_y = y + (swatch_size - sliders_total_height) / 2.0;
+    let channels = [
+        ("R", r5, Color::new(0.8, 0.2, 0.2, 1.0)),
+        ("G", g5, Color::new(0.2, 0.8, 0.2, 1.0)),
+        ("B", b5, Color::new(0.2, 0.4, 0.9, 1.0)),
+    ];
+
+    for (i, (name, value, tint)) in channels.iter().enumerate() {
+        let slider_y = sliders_start_y + (i as f32) * (slider_height + slider_spacing);
+
+        // Label
+        draw_text(name, x + swatch_size + 8.0, slider_y + slider_height - 3.0, 11.0, text_color);
+
+        // Slider track background
+        let track_rect = Rect::new(slider_x, slider_y, slider_width, slider_height);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+        // Filled portion with channel tint
+        let fill_ratio = *value as f32 / 31.0;
+        let fill_width = fill_ratio * slider_width;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, *tint);
+
+        // Thumb indicator
+        let thumb_x = track_rect.x + fill_width - 1.0;
+        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+        // Value text
+        let value_str = format!("{:2}", value);
+        draw_text(
+            &value_str,
+            slider_x + slider_width + 4.0,
+            slider_y + slider_height - 3.0,
+            11.0,
+            text_color,
+        );
+
+        // Handle slider interaction
+        let hovered = ctx.mouse.inside(&track_rect);
+
+        // Start dragging
+        if hovered && ctx.mouse.left_pressed {
+            *active_slider = Some(i);
+        }
+
+        // Continue dragging (even outside the rect)
+        if *active_slider == Some(i) && ctx.mouse.left_down {
+            result.active = true;
+            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+            match i {
+                0 => r5 = new_val,
+                1 => g5 = new_val,
+                2 => b5 = new_val,
+                _ => {}
+            }
+            result.color = Some(RasterColor::from_ps1(r5, g5, b5));
+        }
+
+        // End dragging
+        if *active_slider == Some(i) && !ctx.mouse.left_down {
+            *active_slider = None;
+        }
+    }
+
+    // Draw preset row below sliders
+    let preset_y = y + swatch_size + 6.0;
+    let preset_size = 14.0;
+    let preset_spacing = 2.0;
+
+    for (i, (pr, pg, pb)) in PS1_PRESETS.iter().enumerate() {
+        let preset_x = x + (i as f32) * (preset_size + preset_spacing);
+        let preset_rect = Rect::new(preset_x, preset_y, preset_size, preset_size);
+
+        // Border
+        draw_rectangle(preset_x, preset_y, preset_size, preset_size, Color::from_rgba(60, 60, 65, 255));
+
+        // Color fill
+        let preset_color = RasterColor::from_ps1(*pr, *pg, *pb);
+        draw_rectangle(
+            preset_x + 1.0,
+            preset_y + 1.0,
+            preset_size - 2.0,
+            preset_size - 2.0,
+            Color::from_rgba(preset_color.r, preset_color.g, preset_color.b, 255),
+        );
+
+        // Click to apply preset
+        if ctx.mouse.inside(&preset_rect) && ctx.mouse.left_pressed {
+            result.color = Some(preset_color);
+        }
+    }
+
+    result
+}
+
+/// Calculate the height needed for a PS1 color picker
+pub fn ps1_color_picker_height() -> f32 {
+    // Swatch height (32) + spacing (6) + preset row (14) = 52
+    52.0
+}

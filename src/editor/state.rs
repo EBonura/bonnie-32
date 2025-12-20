@@ -234,6 +234,12 @@ pub struct EditorState {
     /// Selected vertex indices for color editing (0-3 for face corners)
     pub selected_vertex_indices: Vec<usize>,
 
+    /// Color picker active slider (0=R, 1=G, 2=B) for light color editing
+    pub light_color_slider: Option<usize>,
+
+    /// Color picker active slider for vertex color editing
+    pub vertex_color_slider: Option<usize>,
+
     /// Hidden rooms (room indices that should not be rendered in 2D/3D views)
     pub hidden_rooms: std::collections::HashSet<usize>,
 
@@ -338,6 +344,8 @@ impl EditorState {
             height_adjust_locked_pos: None,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
             selected_vertex_indices: Vec::new(),
+            light_color_slider: None,
+            vertex_color_slider: None,
             hidden_rooms: std::collections::HashSet::new(),
             portals_dirty: true, // Recalculate on first frame
         }

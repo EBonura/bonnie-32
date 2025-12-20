@@ -75,6 +75,45 @@ impl Color {
         [self.r, self.g, self.b, self.a]
     }
 
+    // =====================================================
+    // PS1 15-bit color helpers (5 bits per channel, 0-31)
+    // =====================================================
+
+    /// Create color from PS1 5-bit values (0-31 per channel)
+    pub fn from_ps1(r: u8, g: u8, b: u8) -> Self {
+        Self::new((r.min(31)) << 3, (g.min(31)) << 3, (b.min(31)) << 3)
+    }
+
+    /// Get red channel as 5-bit value (0-31)
+    pub fn r5(&self) -> u8 {
+        self.r >> 3
+    }
+
+    /// Get green channel as 5-bit value (0-31)
+    pub fn g5(&self) -> u8 {
+        self.g >> 3
+    }
+
+    /// Get blue channel as 5-bit value (0-31)
+    pub fn b5(&self) -> u8 {
+        self.b >> 3
+    }
+
+    /// Set red channel from 5-bit value (0-31)
+    pub fn set_r5(&mut self, v: u8) {
+        self.r = (v.min(31)) << 3;
+    }
+
+    /// Set green channel from 5-bit value (0-31)
+    pub fn set_g5(&mut self, v: u8) {
+        self.g = (v.min(31)) << 3;
+    }
+
+    /// Set blue channel from 5-bit value (0-31)
+    pub fn set_b5(&mut self, v: u8) {
+        self.b = (v.min(31)) << 3;
+    }
+
     /// PS1-style blend: combine this color (front) with back color using blend mode
     pub fn blend(self, back: Color, mode: BlendMode) -> Color {
         match mode {

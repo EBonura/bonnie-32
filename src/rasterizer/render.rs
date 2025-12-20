@@ -377,10 +377,13 @@ fn shade_intensity_directional(normal: Vec3, light_dir: Vec3, ambient: f32) -> f
     (ambient + (1.0 - ambient) * diffuse).clamp(0.0, 1.0)
 }
 
-/// Calculate shading intensity from multiple lights
+/// Calculate shading color from multiple lights (with colored light support)
+/// Returns RGB values 0.0-1.0 for each channel
 /// For per-vertex shading (Gouraud), world_pos can be approximate (vertex position)
-fn shade_multi_light(normal: Vec3, world_pos: Vec3, lights: &[Light], ambient: f32) -> f32 {
-    let mut total = ambient;
+fn shade_multi_light_color(normal: Vec3, world_pos: Vec3, lights: &[Light], ambient: f32) -> (f32, f32, f32) {
+    let mut total_r = ambient;
+    let mut total_g = ambient;
+    let mut total_b = ambient;
 
     for light in lights.iter().filter(|l| l.enabled) {
         let contribution = match &light.light_type {
@@ -424,10 +427,27 @@ fn shade_multi_light(normal: Vec3, world_pos: Vec3, lights: &[Light], ambient: f
                 }
             }
         };
-        total += contribution;
+
+        // Apply light color to contribution
+        let light_r = light.color.r as f32 / 255.0;
+        let light_g = light.color.g as f32 / 255.0;
+        let light_b = light.color.b as f32 / 255.0;
+        total_r += contribution * light_r;
+        total_g += contribution * light_g;
+        total_b += contribution * light_b;
     }
 
-    total.min(1.0)
+    (total_r.min(1.0), total_g.min(1.0), total_b.min(1.0))
+}
+
+/// Apply RGB shading to a color
+fn shade_color_rgb(color: Color, shade_r: f32, shade_g: f32, shade_b: f32) -> Color {
+    Color::with_alpha(
+        (color.r as f32 * shade_r).min(255.0) as u8,
+        (color.g as f32 * shade_g).min(255.0) as u8,
+        (color.b as f32 * shade_b).min(255.0) as u8,
+        color.a,
+    )
 }
 
 /// PS1 4x4 ordered dithering matrix (Bayer pattern)
@@ -477,9 +497,9 @@ fn rasterize_triangle(
     let flat_shade = if settings.shading == ShadingMode::Flat {
         let center_pos = (surface.w1 + surface.w2 + surface.w3).scale(1.0 / 3.0);
         let world_normal = (surface.wn1 + surface.wn2 + surface.wn3).scale(1.0 / 3.0).normalize();
-        shade_multi_light(world_normal, center_pos, &settings.lights, settings.ambient)
+        shade_multi_light_color(world_normal, center_pos, &settings.lights, settings.ambient)
     } else {
-        1.0
+        (1.0, 1.0, 1.0)
     };
 
     // Rasterize
@@ -542,20 +562,24 @@ fn rasterize_triangle(
                 // Apply PS1-style texture modulation: (texel * vertex_color) / 128
                 color = color.modulate(vertex_color);
 
-                // Apply shading (lighting)
-                let shade = match settings.shading {
-                    ShadingMode::None => 1.0,
+                // Apply shading (lighting) with colored lights
+                let (shade_r, shade_g, shade_b) = match settings.shading {
+                    ShadingMode::None => (1.0, 1.0, 1.0),
                     ShadingMode::Flat => flat_shade,
                     ShadingMode::Gouraud => {
                         // Interpolate per-vertex shading from world-space normals and positions
-                        let s1 = shade_multi_light(surface.wn1, surface.w1, &settings.lights, settings.ambient);
-                        let s2 = shade_multi_light(surface.wn2, surface.w2, &settings.lights, settings.ambient);
-                        let s3 = shade_multi_light(surface.wn3, surface.w3, &settings.lights, settings.ambient);
-                        bc.x * s1 + bc.y * s2 + bc.z * s3
+                        let (r1, g1, b1) = shade_multi_light_color(surface.wn1, surface.w1, &settings.lights, settings.ambient);
+                        let (r2, g2, b2) = shade_multi_light_color(surface.wn2, surface.w2, &settings.lights, settings.ambient);
+                        let (r3, g3, b3) = shade_multi_light_color(surface.wn3, surface.w3, &settings.lights, settings.ambient);
+                        (
+                            bc.x * r1 + bc.y * r2 + bc.z * r3,
+                            bc.x * g1 + bc.y * g2 + bc.z * g3,
+                            bc.x * b1 + bc.y * b2 + bc.z * b3,
+                        )
                     }
                 };
 
-                color = color.shade(shade);
+                color = shade_color_rgb(color, shade_r, shade_g, shade_b);
 
                 // Apply PS1-style ordered dithering
                 if settings.dithering {

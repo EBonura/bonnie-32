@@ -181,6 +181,29 @@ This project uses the following free texture packs:
 
 ## Backlog
 
+### Rendering / PS1 Authenticity
+
+- [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
+- [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face
+- [ ] **Face normal flipping**: In properties panel, allow swapping/flipping face normals
+
+---
+
+### World Editor - UI/UX
+
+- [ ] **Fix link icon**: The "vertices independent" toolbar icon is wrong - should use `link-2` from Lucide
+- [ ] **Rename linking feature**: "Vertex linking" is misleading since it now works for edges and faces too. Needs better naming (e.g., "Geometry Linking" or "Coincident Linking")
+- [ ] **Per-room ambient light**: Currently changing ambient in one room affects all rooms. Each room should have independent ambient settings.
+
+---
+
+### World Editor - Geometry
+
+- [ ] **Cross-room boundary linking**: Linking/moving coincident vertices doesn't work across room boundaries - should detect and move shared boundary vertices together
+- [ ] **Multiple walls per sector edge**: Currently limited to 1 wall per side. The `Sector` struct already supports multiple walls via `Vec<VerticalFace>`. Implement smart placement where new walls stack on top/bottom of existing walls with configurable start/end heights.
+
+---
+
 ### Overall / Meta
 
 - [ ] Remove AI/Claude mentions from git history (use `git filter-branch` or BFG Repo Cleaner - backup first!)
@@ -189,9 +212,6 @@ This project uses the following free texture packs:
 
 ### Rendering Pipeline
 
-- [x] **Per-vertex colors with texture modulation**: RGB color per vertex that multiplies texture
-- [x] **Aspect ratio toggle**: Switch between 4:3 and stretch-to-fill viewport
-- [x] **PS1 SPU reverb**: Authentic reverb emulation with 10 PsyQ SDK presets
 - [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights
 
 ---
@@ -211,11 +231,6 @@ This project uses the following free texture packs:
 
 ### Music Editor
 
-#### Completed
-- [x] **37-key piano keyboard** - 3 octaves with full keyboard mapping
-- [x] **PS1 SPU reverb** - 10 authentic PsyQ SDK presets with wet/dry mix
-- [x] **Knob widget fixes** - Thicker borders, correct drag direction
-
 #### Remaining
 - [ ] Configurable pattern length: Currently hardcoded to 64 rows - should be adjustable
 - [ ] Per-note vs channel FX toggle
@@ -227,10 +242,6 @@ This project uses the following free texture packs:
 ---
 
 ### Assets (Modeler)
-
-#### Completed
-- [x] **Bone selection mode** - Added to modeler toolbar
-- [x] **Aspect ratio toggle** - Same feature as World Editor
 
 #### Remaining
 - [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
@@ -364,3 +375,8 @@ The software rasterizer is based on [tipsy](https://github.com/nkanaev/tipsy), a
 ## License
 
 MIT
+
+
+
+
+

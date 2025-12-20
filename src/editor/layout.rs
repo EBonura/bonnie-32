@@ -1,7 +1,7 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture};
 use super::{EditorState, EditorTool, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
@@ -572,13 +572,14 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace) -> f32 
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
     let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let mut lines = 3; // texture, height, walkable
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    // Add space for UV info, controls, buttons, and color
+    // Add space for UV info, controls, buttons, color, and color picker
     let uv_lines = if face.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height
 }
 
 /// Calculate height needed for a wall face container
@@ -588,10 +589,11 @@ fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
     let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let lines = 3; // texture, y range, blend
-    // Add space for UV info, controls, buttons, and color
+    // Add space for UV info, controls, buttons, color, and color picker
     let uv_lines = if wall.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height
 }
 
 /// Draw properties for a horizontal face inside a container
@@ -901,6 +903,54 @@ fn draw_horizontal_face_container(
                 x: ctx.mouse.x,
                 y: ctx.mouse.y,
             });
+        }
+    }
+
+    // PS1 color picker below swatches (for custom colors)
+    content_y += 36.0;
+    let picker_label = if state.selected_vertex_indices.is_empty() {
+        "Custom (all)"
+    } else {
+        "Custom (selected)"
+    };
+
+    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
+    let display_color = if !state.selected_vertex_indices.is_empty() {
+        let idx = state.selected_vertex_indices[0].min(3);
+        face.colors[idx]
+    } else {
+        face.colors[0]
+    };
+
+    let picker_result = draw_ps1_color_picker(
+        ctx,
+        content_x,
+        content_y + 14.0,
+        width - CONTAINER_PADDING * 2.0,
+        display_color,
+        picker_label,
+        &mut state.vertex_color_slider,
+    );
+
+    if let Some(new_color) = picker_result.color {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    if state.selected_vertex_indices.is_empty() {
+                        // No vertices selected - apply to all
+                        f.set_uniform_color(new_color);
+                    } else {
+                        // Apply only to selected vertices
+                        for &idx in &state.selected_vertex_indices {
+                            if idx < 4 {
+                                f.colors[idx] = new_color;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1472,6 +1522,53 @@ fn draw_wall_face_container(
         }
     }
 
+    // PS1 color picker below swatches (for custom colors)
+    content_y += 36.0;
+    let picker_label = if state.selected_vertex_indices.is_empty() {
+        "Custom (all)"
+    } else {
+        "Custom (selected)"
+    };
+
+    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
+    let display_color = if !state.selected_vertex_indices.is_empty() {
+        let idx = state.selected_vertex_indices[0].min(3);
+        wall.colors[idx]
+    } else {
+        wall.colors[0]
+    };
+
+    let picker_result = draw_ps1_color_picker(
+        ctx,
+        content_x,
+        content_y + 14.0,
+        width - CONTAINER_PADDING * 2.0,
+        display_color,
+        picker_label,
+        &mut state.vertex_color_slider,
+    );
+
+    if let Some(new_color) = picker_result.color {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    if state.selected_vertex_indices.is_empty() {
+                        // No vertices selected - apply to all
+                        w.set_uniform_color(new_color);
+                    } else {
+                        // Apply only to selected vertices
+                        for &idx in &state.selected_vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = new_color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     container_height
 }
 
@@ -1788,18 +1885,24 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     x, (y + 12.0).floor(), 13.0, WHITE);
                 y += 18.0;
 
-                // Color
-                draw_text("Color:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
-                y += 18.0;
-                // Color swatch
-                let swatch_x = x;
-                let swatch_y = y;
-                let swatch_color = Color::from_rgba(color.r, color.g, color.b, 255);
-                draw_rectangle(swatch_x, swatch_y, 20.0, 20.0, swatch_color);
-                draw_rectangle_lines(swatch_x, swatch_y, 20.0, 20.0, 1.0, WHITE);
-                draw_text(&format!("R:{} G:{} B:{}", color.r, color.g, color.b),
-                    x + 28.0, (y + 14.0).floor(), 13.0, WHITE);
-                y += 24.0;
+                // Color picker
+                let picker_result = draw_ps1_color_picker(
+                    ctx,
+                    x,
+                    y + 14.0,
+                    container_width - 8.0,
+                    color,
+                    "Color",
+                    &mut state.light_color_slider,
+                );
+                if let Some(new_color) = picker_result.color {
+                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
+                        if let Some(l) = room_data.lights.get_mut(light_idx) {
+                            l.color = new_color;
+                        }
+                    }
+                }
+                y += ps1_color_picker_height() + 18.0;
 
                 // Intensity and Radius knobs side by side
                 let knob_radius = 18.0;
@@ -1942,7 +2045,7 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
 
     match selection {
         super::Selection::None | super::Selection::Room(_) | super::Selection::Portal { .. } => 30.0,
-        super::Selection::Light { .. } => 320.0, // Light header + position + color + intensity knob + radius knob + enabled + delete
+        super::Selection::Light { .. } => 350.0, // Light header + position + color picker + intensity knob + radius knob + enabled + delete
 
         super::Selection::Edge { .. } => 120.0, // Edge header + 2 vertex coords
 
