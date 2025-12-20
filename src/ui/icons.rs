@@ -89,7 +89,8 @@ pub mod icon {
     pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
 
     // Camera modes
-    pub const EYE: char = '\u{e0b4}';             // Free camera (eye)
+    pub const EYE: char = '\u{e0ba}';             // Free camera (eye)
+    pub const EYE_OFF: char = '\u{e0bb}';         // Hidden (eye-off)
     pub const ORBIT: char = '\u{e12e}';           // Orbit camera (orbit icon)
 }
 

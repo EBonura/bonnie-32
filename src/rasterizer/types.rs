@@ -509,7 +509,7 @@ impl Default for RasterSettings {
             low_resolution: true,   // PS1 default: 320x240
             dithering: true,        // PS1 default: ordered dithering enabled
             stretch_to_fill: true,  // Default: use full viewport space
-            wireframe_overlay: true, // Default: show front-face wireframe
+            wireframe_overlay: false, // Default: wireframe off
         }
     }
 }

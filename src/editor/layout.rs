@@ -3,7 +3,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture};
-use super::{EditorState, EditorTool};
+use super::{EditorState, EditorTool, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -38,15 +38,17 @@ pub struct EditorLayout {
 
 impl EditorLayout {
     pub fn new() -> Self {
+        // Use high IDs (1000+) to avoid collision with toolbar button IDs
+        // which are auto-generated starting from 1 via ctx.next_id()
         Self {
-            main_split: SplitPanel::horizontal(1).with_ratio(0.25).with_min_size(150.0),
-            right_split: SplitPanel::horizontal(2).with_ratio(0.75).with_min_size(150.0),
-            left_split: SplitPanel::vertical(3).with_ratio(0.6).with_min_size(100.0),
-            right_panel_split: SplitPanel::vertical(4).with_ratio(0.6).with_min_size(100.0),
+            main_split: SplitPanel::horizontal(1000).with_ratio(0.25).with_min_size(150.0),
+            right_split: SplitPanel::horizontal(1001).with_ratio(0.75).with_min_size(150.0),
+            left_split: SplitPanel::vertical(1002).with_ratio(0.6).with_min_size(100.0),
+            right_panel_split: SplitPanel::vertical(1003).with_ratio(0.6).with_min_size(100.0),
         }
     }
 
-    /// Apply layout config from a level
+    /// Apply layout config from a level (panel splits only)
     pub fn apply_config(&mut self, config: &crate::world::EditorLayoutConfig) {
         self.main_split.ratio = config.main_split;
         self.right_split.ratio = config.right_split;
@@ -55,12 +57,31 @@ impl EditorLayout {
     }
 
     /// Extract current layout as a config (for saving with level)
-    pub fn to_config(&self) -> crate::world::EditorLayoutConfig {
+    /// Takes grid view and orbit camera state from EditorState since they're stored there
+    pub fn to_config(
+        &self,
+        grid_offset_x: f32,
+        grid_offset_y: f32,
+        grid_zoom: f32,
+        orbit_target: crate::rasterizer::Vec3,
+        orbit_distance: f32,
+        orbit_azimuth: f32,
+        orbit_elevation: f32,
+    ) -> crate::world::EditorLayoutConfig {
         crate::world::EditorLayoutConfig {
             main_split: self.main_split.ratio,
             right_split: self.right_split.ratio,
             left_split: self.left_split.ratio,
             right_panel_split: self.right_panel_split.ratio,
+            grid_offset_x,
+            grid_offset_y,
+            grid_zoom,
+            orbit_target_x: orbit_target.x,
+            orbit_target_y: orbit_target.y,
+            orbit_target_z: orbit_target.z,
+            orbit_distance,
+            orbit_azimuth,
+            orbit_elevation,
         }
     }
 }
@@ -107,7 +128,7 @@ pub fn draw_editor(
     draw_grid_view(ctx, panel_content_rect(grid_rect, true), state);
 
     draw_panel(room_props_rect, Some("Room"), Color::from_rgba(35, 35, 40, 255));
-    draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state);
+    draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);
 
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb);
@@ -235,6 +256,13 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.set_status(&format!("Room boundaries: {}", mode), 2.0);
     }
 
+    // Wireframe overlay toggle
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe Overlay", state.raster_settings.wireframe_overlay) {
+        state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
+        let mode = if state.raster_settings.wireframe_overlay { "ON" } else { "OFF" };
+        state.set_status(&format!("Wireframe overlay: {}", mode), 2.0);
+    }
+
     toolbar.separator();
 
     // Room navigation
@@ -251,8 +279,28 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
     if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Add Room") {
-        // TODO: Add new room
-        println!("Add room clicked");
+        // Create new room offset from existing rooms
+        let new_id = state.level.rooms.len();
+
+        // Calculate position: offset from the last room or origin
+        let offset_x = if let Some(last_room) = state.level.rooms.last() {
+            // Place new room to the east of the last room
+            last_room.position.x + (last_room.width as f32) * SECTOR_SIZE + SECTOR_SIZE
+        } else {
+            0.0
+        };
+
+        let new_room = crate::world::Room::new(
+            new_id,
+            crate::rasterizer::Vec3::new(offset_x, 0.0, 0.0),
+            1, // 1x1 grid to start
+            1,
+        );
+
+        state.save_undo();
+        state.level.rooms.push(new_room);
+        state.current_room = new_id;
+        state.set_status(&format!("Created Room {}", new_id), 2.0);
     }
 
     toolbar.separator();
@@ -357,7 +405,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     action
 }
 
-fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
+fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
     let mut y = rect.y.floor();
     let x = rect.x.floor();
     let line_height = 20.0;
@@ -388,15 +436,36 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         draw_text("Rooms:", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
         y += line_height;
 
-        for (i, room) in state.level.rooms.iter().enumerate() {
+        let icon_btn_size = 18.0;
+        let num_rooms = state.level.rooms.len();
+
+        for i in 0..num_rooms {
+            let room = &state.level.rooms[i];
             let is_selected = i == state.current_room;
-            let color = if is_selected {
+            let is_hidden = state.hidden_rooms.contains(&i);
+
+            let text_color = if is_hidden {
+                Color::from_rgba(80, 80, 80, 255) // Dimmed when hidden
+            } else if is_selected {
                 Color::from_rgba(100, 200, 100, 255)
             } else {
                 WHITE
             };
 
-            let room_btn_rect = Rect::new(x, y, rect.w - 4.0, line_height);
+            // Visibility toggle button on the left
+            let vis_btn_rect = Rect::new(x, y + 1.0, icon_btn_size, icon_btn_size);
+            let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
+            let vis_tooltip = if is_hidden { "Show room" } else { "Hide room" };
+            if crate::ui::icon_button(ctx, vis_btn_rect, vis_icon, icon_font, vis_tooltip) {
+                if is_hidden {
+                    state.hidden_rooms.remove(&i);
+                } else {
+                    state.hidden_rooms.insert(i);
+                }
+            }
+
+            // Room row (clickable area to the right of visibility button)
+            let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size - 6.0, line_height);
             if ctx.mouse.clicked(&room_btn_rect) {
                 state.current_room = i;
             }
@@ -406,7 +475,7 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             }
 
             let sector_count = room.iter_sectors().count();
-            draw_text(&format!("  Room {} ({} sectors)", room.id, sector_count), x, (y + 14.0).floor(), 16.0, color);
+            draw_text(&format!("Room {} ({} sectors)", room.id, sector_count), (x + icon_btn_size + 4.0).floor(), (y + 14.0).floor(), 16.0, text_color);
             y += line_height;
 
             if y > rect.bottom() - line_height {

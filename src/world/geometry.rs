@@ -573,6 +573,86 @@ impl Room {
         }
     }
 
+    /// Trim empty rows and columns from the edges of the room grid.
+    /// Adjusts room position to keep sectors in the same world position.
+    pub fn trim_empty_edges(&mut self) {
+        if self.sectors.is_empty() || self.width == 0 || self.depth == 0 {
+            return;
+        }
+
+        // Find first non-empty column (from left)
+        let mut first_col = 0;
+        while first_col < self.width {
+            let col_has_sector = (0..self.depth).any(|z| self.sectors[first_col][z].is_some());
+            if col_has_sector {
+                break;
+            }
+            first_col += 1;
+        }
+
+        // Find last non-empty column (from right)
+        let mut last_col = self.width;
+        while last_col > first_col {
+            let col_has_sector = (0..self.depth).any(|z| self.sectors[last_col - 1][z].is_some());
+            if col_has_sector {
+                break;
+            }
+            last_col -= 1;
+        }
+
+        // Find first non-empty row (from front)
+        let mut first_row = 0;
+        while first_row < self.depth {
+            let row_has_sector = (first_col..last_col).any(|x| self.sectors[x][first_row].is_some());
+            if row_has_sector {
+                break;
+            }
+            first_row += 1;
+        }
+
+        // Find last non-empty row (from back)
+        let mut last_row = self.depth;
+        while last_row > first_row {
+            let row_has_sector = (first_col..last_col).any(|x| self.sectors[x][last_row - 1].is_some());
+            if row_has_sector {
+                break;
+            }
+            last_row -= 1;
+        }
+
+        // If grid is completely empty, leave at least 1x1
+        if first_col >= last_col || first_row >= last_row {
+            self.width = 1;
+            self.depth = 1;
+            self.sectors = vec![vec![None]];
+            return;
+        }
+
+        // Apply trimming if needed
+        if first_col > 0 || first_row > 0 || last_col < self.width || last_row < self.depth {
+            // Adjust room position for removed columns/rows at the start
+            self.position.x += (first_col as f32) * SECTOR_SIZE;
+            self.position.z += (first_row as f32) * SECTOR_SIZE;
+
+            // Extract the trimmed portion
+            let new_width = last_col - first_col;
+            let new_depth = last_row - first_row;
+            let mut new_sectors = Vec::with_capacity(new_width);
+
+            for x in first_col..last_col {
+                let mut col = Vec::with_capacity(new_depth);
+                for z in first_row..last_row {
+                    col.push(self.sectors[x][z].take());
+                }
+                new_sectors.push(col);
+            }
+
+            self.sectors = new_sectors;
+            self.width = new_width;
+            self.depth = new_depth;
+        }
+    }
+
     /// Check if a world-space point is inside this room's bounds
     pub fn contains_point(&self, point: Vec3) -> bool {
         let relative = Vec3::new(
@@ -819,7 +899,45 @@ pub struct EditorLayoutConfig {
     pub left_split: f32,
     /// Right vertical split ratio (texture palette | properties)
     pub right_panel_split: f32,
+    /// 2D grid view pan offset X (screen pixels)
+    #[serde(default)]
+    pub grid_offset_x: f32,
+    /// 2D grid view pan offset Y (screen pixels)
+    #[serde(default)]
+    pub grid_offset_y: f32,
+    /// 2D grid view zoom level (pixels per world unit)
+    #[serde(default = "default_grid_zoom")]
+    pub grid_zoom: f32,
+    /// 3D orbit camera target X
+    #[serde(default = "default_orbit_target_x")]
+    pub orbit_target_x: f32,
+    /// 3D orbit camera target Y
+    #[serde(default = "default_orbit_target_y")]
+    pub orbit_target_y: f32,
+    /// 3D orbit camera target Z
+    #[serde(default = "default_orbit_target_z")]
+    pub orbit_target_z: f32,
+    /// 3D orbit camera distance from target
+    #[serde(default = "default_orbit_distance")]
+    pub orbit_distance: f32,
+    /// 3D orbit camera horizontal angle (radians)
+    #[serde(default = "default_orbit_azimuth")]
+    pub orbit_azimuth: f32,
+    /// 3D orbit camera vertical angle (radians)
+    #[serde(default = "default_orbit_elevation")]
+    pub orbit_elevation: f32,
 }
+
+fn default_grid_zoom() -> f32 {
+    0.1
+}
+
+fn default_orbit_target_x() -> f32 { 512.0 }
+fn default_orbit_target_y() -> f32 { 512.0 }
+fn default_orbit_target_z() -> f32 { 512.0 }
+fn default_orbit_distance() -> f32 { 4000.0 }
+fn default_orbit_azimuth() -> f32 { 0.8 }
+fn default_orbit_elevation() -> f32 { 0.4 }
 
 impl Default for EditorLayoutConfig {
     fn default() -> Self {
@@ -828,6 +946,15 @@ impl Default for EditorLayoutConfig {
             right_split: 0.75,
             left_split: 0.6,
             right_panel_split: 0.6,
+            grid_offset_x: 0.0,
+            grid_offset_y: 0.0,
+            grid_zoom: 0.1,
+            orbit_target_x: 512.0,
+            orbit_target_y: 512.0,
+            orbit_target_z: 512.0,
+            orbit_distance: 4000.0,
+            orbit_azimuth: 0.8,
+            orbit_elevation: 0.4,
         }
     }
 }

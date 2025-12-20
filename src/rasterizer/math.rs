@@ -146,6 +146,244 @@ pub fn project(v: Vec3, snap: bool, width: usize, height: usize) -> Vec3 {
     result
 }
 
+// =============================================================================
+// Near-plane triangle clipping
+// =============================================================================
+
+/// Near plane distance threshold
+pub const NEAR_PLANE: f32 = 0.1;
+
+/// Result of clipping a triangle against the near plane.
+/// A triangle can produce 0, 1, or 2 triangles after clipping.
+pub enum ClipResult {
+    /// Triangle is entirely behind the near plane (culled)
+    Culled,
+    /// Triangle is entirely in front of the near plane (unchanged)
+    Unclipped,
+    /// Triangle was clipped, producing 1 triangle
+    One {
+        v1: Vec3,
+        v2: Vec3,
+        v3: Vec3,
+        /// Barycentric weights for interpolating attributes (UVs, colors)
+        /// Each vertex's weights are (w1, w2, w3) relative to original triangle
+        weights: [(f32, f32, f32); 3],
+    },
+    /// Triangle was clipped, producing 2 triangles
+    Two {
+        // First triangle
+        t1_v1: Vec3,
+        t1_v2: Vec3,
+        t1_v3: Vec3,
+        t1_weights: [(f32, f32, f32); 3],
+        // Second triangle
+        t2_v1: Vec3,
+        t2_v2: Vec3,
+        t2_v3: Vec3,
+        t2_weights: [(f32, f32, f32); 3],
+    },
+}
+
+/// Clip a triangle against the near plane (z = NEAR_PLANE).
+/// Takes camera-space vertices and returns clipped result.
+///
+/// When a triangle crosses the near plane:
+/// - If 1 vertex is in front, clip produces 1 triangle
+/// - If 2 vertices are in front, clip produces 2 triangles (a quad split)
+pub fn clip_triangle_to_near_plane(v1: Vec3, v2: Vec3, v3: Vec3) -> ClipResult {
+    // Classify vertices: true = in front of near plane (visible)
+    let in_front = [
+        v1.z > NEAR_PLANE,
+        v2.z > NEAR_PLANE,
+        v3.z > NEAR_PLANE,
+    ];
+
+    let count_in_front = in_front.iter().filter(|&&b| b).count();
+
+    match count_in_front {
+        0 => ClipResult::Culled,
+        3 => ClipResult::Unclipped,
+        1 => {
+            // One vertex in front: clip to single triangle
+            // Find which vertex is in front
+            let (front_idx, back1_idx, back2_idx) = if in_front[0] {
+                (0, 1, 2)
+            } else if in_front[1] {
+                (1, 2, 0)
+            } else {
+                (2, 0, 1)
+            };
+
+            let verts = [v1, v2, v3];
+            let front = verts[front_idx];
+            let back1 = verts[back1_idx];
+            let back2 = verts[back2_idx];
+
+            // Find intersection points on the near plane
+            let t1 = (NEAR_PLANE - front.z) / (back1.z - front.z);
+            let t2 = (NEAR_PLANE - front.z) / (back2.z - front.z);
+
+            let clip1 = lerp_vec3(front, back1, t1);
+            let clip2 = lerp_vec3(front, back2, t2);
+
+            // Build weight arrays for attribute interpolation
+            // The front vertex keeps its original weights (1,0,0), (0,1,0), or (0,0,1)
+            // The clipped vertices interpolate between front and back vertices
+            let mut weights = [(0.0, 0.0, 0.0); 3];
+
+            // Front vertex weight
+            weights[0] = match front_idx {
+                0 => (1.0, 0.0, 0.0),
+                1 => (0.0, 1.0, 0.0),
+                _ => (0.0, 0.0, 1.0),
+            };
+
+            // Clip1 is between front and back1
+            let w_front = 1.0 - t1;
+            let w_back1 = t1;
+            weights[1] = match (front_idx, back1_idx) {
+                (0, 1) => (w_front, w_back1, 0.0),
+                (0, 2) => (w_front, 0.0, w_back1),
+                (1, 0) => (w_back1, w_front, 0.0),
+                (1, 2) => (0.0, w_front, w_back1),
+                (2, 0) => (w_back1, 0.0, w_front),
+                (2, 1) => (0.0, w_back1, w_front),
+                _ => (0.0, 0.0, 0.0),
+            };
+
+            // Clip2 is between front and back2
+            let w_front = 1.0 - t2;
+            let w_back2 = t2;
+            weights[2] = match (front_idx, back2_idx) {
+                (0, 1) => (w_front, w_back2, 0.0),
+                (0, 2) => (w_front, 0.0, w_back2),
+                (1, 0) => (w_back2, w_front, 0.0),
+                (1, 2) => (0.0, w_front, w_back2),
+                (2, 0) => (w_back2, 0.0, w_front),
+                (2, 1) => (0.0, w_back2, w_front),
+                _ => (0.0, 0.0, 0.0),
+            };
+
+            ClipResult::One {
+                v1: front,
+                v2: clip1,
+                v3: clip2,
+                weights,
+            }
+        }
+        2 => {
+            // Two vertices in front: clip to quad (2 triangles)
+            // Find which vertex is behind
+            let (back_idx, front1_idx, front2_idx) = if !in_front[0] {
+                (0, 1, 2)
+            } else if !in_front[1] {
+                (1, 2, 0)
+            } else {
+                (2, 0, 1)
+            };
+
+            let verts = [v1, v2, v3];
+            let back = verts[back_idx];
+            let front1 = verts[front1_idx];
+            let front2 = verts[front2_idx];
+
+            // Find intersection points
+            let t1 = (NEAR_PLANE - front1.z) / (back.z - front1.z);
+            let t2 = (NEAR_PLANE - front2.z) / (back.z - front2.z);
+
+            let clip1 = lerp_vec3(front1, back, t1);
+            let clip2 = lerp_vec3(front2, back, t2);
+
+            // Build weights for first triangle: front1, clip1, front2
+            let mut t1_weights = [(0.0, 0.0, 0.0); 3];
+            t1_weights[0] = match front1_idx {
+                0 => (1.0, 0.0, 0.0),
+                1 => (0.0, 1.0, 0.0),
+                _ => (0.0, 0.0, 1.0),
+            };
+            // clip1 interpolates between front1 and back
+            let w_front1 = 1.0 - t1;
+            let w_back = t1;
+            t1_weights[1] = match (front1_idx, back_idx) {
+                (0, 1) => (w_front1, w_back, 0.0),
+                (0, 2) => (w_front1, 0.0, w_back),
+                (1, 0) => (w_back, w_front1, 0.0),
+                (1, 2) => (0.0, w_front1, w_back),
+                (2, 0) => (w_back, 0.0, w_front1),
+                (2, 1) => (0.0, w_back, w_front1),
+                _ => (0.0, 0.0, 0.0),
+            };
+            t1_weights[2] = match front2_idx {
+                0 => (1.0, 0.0, 0.0),
+                1 => (0.0, 1.0, 0.0),
+                _ => (0.0, 0.0, 1.0),
+            };
+
+            // Build weights for second triangle: clip1, clip2, front2
+            let mut t2_weights = [(0.0, 0.0, 0.0); 3];
+            t2_weights[0] = t1_weights[1]; // clip1 same as before
+            // clip2 interpolates between front2 and back
+            let w_front2 = 1.0 - t2;
+            let w_back = t2;
+            t2_weights[1] = match (front2_idx, back_idx) {
+                (0, 1) => (w_front2, w_back, 0.0),
+                (0, 2) => (w_front2, 0.0, w_back),
+                (1, 0) => (w_back, w_front2, 0.0),
+                (1, 2) => (0.0, w_front2, w_back),
+                (2, 0) => (w_back, 0.0, w_front2),
+                (2, 1) => (0.0, w_back, w_front2),
+                _ => (0.0, 0.0, 0.0),
+            };
+            t2_weights[2] = t1_weights[2]; // front2 same as before
+
+            ClipResult::Two {
+                t1_v1: front1,
+                t1_v2: clip1,
+                t1_v3: front2,
+                t1_weights,
+                t2_v1: clip1,
+                t2_v2: clip2,
+                t2_v3: front2,
+                t2_weights,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Linear interpolation between two Vec3 values
+fn lerp_vec3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
+    Vec3::new(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+    )
+}
+
+/// Clip an edge against the near plane for wireframe rendering.
+/// Returns None if entirely behind, Some((start, end)) for the visible portion.
+pub fn clip_edge_to_near_plane(v1: Vec3, v2: Vec3) -> Option<(Vec3, Vec3)> {
+    let in_front1 = v1.z > NEAR_PLANE;
+    let in_front2 = v2.z > NEAR_PLANE;
+
+    match (in_front1, in_front2) {
+        (false, false) => None, // Both behind
+        (true, true) => Some((v1, v2)), // Both in front
+        (true, false) => {
+            // v1 in front, v2 behind - clip v2
+            let t = (NEAR_PLANE - v1.z) / (v2.z - v1.z);
+            let clip = lerp_vec3(v1, v2, t);
+            Some((v1, clip))
+        }
+        (false, true) => {
+            // v1 behind, v2 in front - clip v1
+            let t = (NEAR_PLANE - v2.z) / (v1.z - v2.z);
+            let clip = lerp_vec3(v2, v1, t);
+            Some((clip, v2))
+        }
+    }
+}
+
 /// Calculate barycentric coordinates for point p in triangle (v1, v2, v3)
 /// Returns (u, v, w) where u + v + w = 1 if point is inside triangle
 pub fn barycentric(p: Vec3, v1: Vec3, v2: Vec3, v3: Vec3) -> Vec3 {

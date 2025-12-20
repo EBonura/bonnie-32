@@ -1310,65 +1310,85 @@ pub fn draw_viewport_3d(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
-    // Render all rooms
+    // Render all rooms (skip hidden ones)
     let settings = &state.raster_settings;
-    for room in &state.level.rooms {
+    for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        // Skip hidden rooms
+        if state.hidden_rooms.contains(&room_idx) {
+            continue;
+        }
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, settings);
     }
 
-    // Draw room boundary wireframe for the current room
+    // Draw room boundary wireframes for all rooms
     if state.show_room_bounds {
-    if let Some(room) = state.level.rooms.get(state.current_room) {
-        let room_color = RasterColor::new(80, 120, 200); // Blue for room boundary
+        for (room_idx, room) in state.level.rooms.iter().enumerate() {
+            // Skip hidden rooms
+            if state.hidden_rooms.contains(&room_idx) {
+                continue;
+            }
 
-        // Room grid extents in world space
-        let min_x = room.position.x;
-        let min_z = room.position.z;
-        let max_x = room.position.x + (room.width as f32) * SECTOR_SIZE;
-        let max_z = room.position.z + (room.depth as f32) * SECTOR_SIZE;
+            let is_current = room_idx == state.current_room;
+            // Current room: bright blue, other rooms: dim gray
+            let room_color = if is_current {
+                RasterColor::new(80, 120, 200) // Blue for current room
+            } else {
+                RasterColor::new(60, 60, 80) // Dim gray for other rooms
+            };
 
-        // Use Y range from room's actual geometry bounds
-        // bounds are room-relative, so add room.position.y
-        let min_y = room.position.y + room.bounds.min.y;
-        let max_y = room.position.y + room.bounds.max.y;
+            // Room grid extents in world space
+            let min_x = room.position.x;
+            let min_z = room.position.z;
+            let max_x = room.position.x + (room.width as f32) * SECTOR_SIZE;
+            let max_z = room.position.z + (room.depth as f32) * SECTOR_SIZE;
 
-        // 8 corners of the room bounding box
-        let corners = [
-            Vec3::new(min_x, min_y, min_z), // 0: front-bottom-left
-            Vec3::new(max_x, min_y, min_z), // 1: front-bottom-right
-            Vec3::new(max_x, min_y, max_z), // 2: back-bottom-right
-            Vec3::new(min_x, min_y, max_z), // 3: back-bottom-left
-            Vec3::new(min_x, max_y, min_z), // 4: front-top-left
-            Vec3::new(max_x, max_y, min_z), // 5: front-top-right
-            Vec3::new(max_x, max_y, max_z), // 6: back-top-right
-            Vec3::new(min_x, max_y, max_z), // 7: back-top-left
-        ];
+            // Use Y range from room's actual geometry bounds
+            // bounds are room-relative, so add room.position.y
+            let min_y = room.position.y + room.bounds.min.y;
+            let max_y = room.position.y + room.bounds.max.y;
 
-        // Project corners to screen with depth for z-tested line drawing
-        let screen_corners: Vec<Option<(i32, i32, f32)>> = corners.iter()
-            .map(|c| world_to_screen_with_depth(*c, state.camera_3d.position,
-                state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                fb.width, fb.height)
-                .map(|(x, y, z)| (x as i32, y as i32, z)))
-            .collect();
+            // Skip rooms with no geometry (empty bounds)
+            if min_y > max_y || min_x > max_x || min_z > max_z {
+                continue;
+            }
 
-        // Draw 12 edges of the bounding box with depth testing
-        let edges = [
-            // Bottom face
-            (0, 1), (1, 2), (2, 3), (3, 0),
-            // Top face
-            (4, 5), (5, 6), (6, 7), (7, 4),
-            // Vertical edges
-            (0, 4), (1, 5), (2, 6), (3, 7),
-        ];
+            // 8 corners of the room bounding box
+            let corners = [
+                Vec3::new(min_x, min_y, min_z), // 0: front-bottom-left
+                Vec3::new(max_x, min_y, min_z), // 1: front-bottom-right
+                Vec3::new(max_x, min_y, max_z), // 2: back-bottom-right
+                Vec3::new(min_x, min_y, max_z), // 3: back-bottom-left
+                Vec3::new(min_x, max_y, min_z), // 4: front-top-left
+                Vec3::new(max_x, max_y, min_z), // 5: front-top-right
+                Vec3::new(max_x, max_y, max_z), // 6: back-top-right
+                Vec3::new(min_x, max_y, max_z), // 7: back-top-left
+            ];
 
-        for (i, j) in edges {
-            if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_corners[i], screen_corners[j]) {
-                fb.draw_line_3d(x0, y0, z0, x1, y1, z1, room_color);
+            // Project corners to screen with depth for z-tested line drawing
+            let screen_corners: Vec<Option<(i32, i32, f32)>> = corners.iter()
+                .map(|c| world_to_screen_with_depth(*c, state.camera_3d.position,
+                    state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                    fb.width, fb.height)
+                    .map(|(x, y, z)| (x as i32, y as i32, z)))
+                .collect();
+
+            // Draw 12 edges of the bounding box with depth testing
+            let edges = [
+                // Bottom face
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                // Top face
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                // Vertical edges
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ];
+
+            for (i, j) in edges {
+                if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_corners[i], screen_corners[j]) {
+                    fb.draw_line_3d(x0, y0, z0, x1, y1, z1, room_color);
+                }
             }
         }
-    }
     }
 
     // Draw vertex overlays directly into framebuffer (only in Select mode)
@@ -1387,18 +1407,11 @@ pub fn draw_viewport_3d(
                 let is_hovered = hovered_vertex.map_or(false, |(hr, hgx, hgz, hci, hface, _)|
                     hr == *room_idx && hgx == *gx && hgz == *gz && hci == *corner_idx && hface == *face);
 
-                // Choose color based on state
-                let color = if is_hovered {
-                    RasterColor::new(255, 200, 150) // Orange when hovered
-                } else {
-                    RasterColor::with_alpha(200, 200, 220, 200) // Default (slightly transparent grey)
-                };
-
-                // Choose radius (larger when hovered)
-                let radius = if is_hovered { 4 } else { 2 };
-
-                // Draw circle directly into framebuffer
-                fb.draw_circle(fb_x as i32, fb_y as i32, radius, color);
+                // Only draw vertex dot when hovered (no gray dots for unselected vertices)
+                if is_hovered {
+                    let color = RasterColor::new(255, 200, 150); // Orange when hovered
+                    fb.draw_circle(fb_x as i32, fb_y as i32, 4, color);
+                }
             }
         }
     }
