@@ -1120,33 +1120,48 @@ impl Level {
                         continue; // Wall blocks the portal
                     }
 
-                    // Calculate portal opening (vertical gap between floor and ceiling)
-                    // Portal bottom = max of both floors at the shared edge
-                    // Portal top = min of both ceilings at the shared edge
-                    let floor_a_max = sector_a.floor.as_ref().map(|f| f.edge_max(dir)).unwrap_or(f32::NEG_INFINITY);
-                    let floor_b_max = sector_b.floor.as_ref().map(|f| f.edge_max(opposite_dir)).unwrap_or(f32::NEG_INFINITY);
-                    let portal_bottom = floor_a_max.max(floor_b_max);
+                    // Calculate portal opening at each corner (trapezoidal portal for sloped surfaces)
+                    // Get edge heights from both sectors: (left, right) when looking from inside
+                    // The edge_heights function returns corners in world-space order for the shared edge,
+                    // so both rooms' left/right corners line up (A.NW = B.SW, A.NE = B.SE for North/South)
+                    let (floor_a_left, floor_a_right) = sector_a.floor.as_ref()
+                        .map(|f| f.edge_heights(dir))
+                        .unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
+                    let (floor_b_left, floor_b_right) = sector_b.floor.as_ref()
+                        .map(|f| f.edge_heights(opposite_dir))
+                        .unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
 
-                    let ceil_a_min = sector_a.ceiling.as_ref().map(|c| c.edge_min(dir)).unwrap_or(f32::INFINITY);
-                    let ceil_b_min = sector_b.ceiling.as_ref().map(|c| c.edge_min(opposite_dir)).unwrap_or(f32::INFINITY);
-                    let portal_top = ceil_a_min.min(ceil_b_min);
+                    let (ceil_a_left, ceil_a_right) = sector_a.ceiling.as_ref()
+                        .map(|c| c.edge_heights(dir))
+                        .unwrap_or((f32::INFINITY, f32::INFINITY));
+                    let (ceil_b_left, ceil_b_right) = sector_b.ceiling.as_ref()
+                        .map(|c| c.edge_heights(opposite_dir))
+                        .unwrap_or((f32::INFINITY, f32::INFINITY));
 
-                    // Skip if no vertical opening
-                    if portal_bottom >= portal_top {
+                    // Portal bottom at each corner = max of both floors
+                    // Portal top at each corner = min of both ceilings
+                    let portal_bottom_left = floor_a_left.max(floor_b_left);
+                    let portal_bottom_right = floor_a_right.max(floor_b_right);
+                    let portal_top_left = ceil_a_left.min(ceil_b_left);
+                    let portal_top_right = ceil_a_right.min(ceil_b_right);
+
+                    // Skip if no vertical opening at either corner
+                    if portal_bottom_left >= portal_top_left && portal_bottom_right >= portal_top_right {
                         continue;
                     }
 
                     // Create portal vertices (quad at the shared edge)
                     // Vertices are in world space, will be converted to room-relative when stored
+                    // v0=bottom-left, v1=bottom-right, v2=top-right, v3=top-left
                     let (v0, v1, v2, v3, normal_a) = match dir {
                         Direction::North => {
                             // Edge at -Z side of sector A
                             let edge_z = world_z_a;
                             (
-                                Vec3::new(world_x_a, portal_bottom, edge_z),              // bottom-left (NW corner)
-                                Vec3::new(world_x_a + SECTOR_SIZE, portal_bottom, edge_z), // bottom-right (NE corner)
-                                Vec3::new(world_x_a + SECTOR_SIZE, portal_top, edge_z),    // top-right
-                                Vec3::new(world_x_a, portal_top, edge_z),                  // top-left
+                                Vec3::new(world_x_a, portal_bottom_left, edge_z),              // bottom-left (NW corner)
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_bottom_right, edge_z), // bottom-right (NE corner)
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_top_right, edge_z),    // top-right
+                                Vec3::new(world_x_a, portal_top_left, edge_z),                  // top-left
                                 Vec3::new(0.0, 0.0, -1.0), // Normal points into room A (toward -Z)
                             )
                         }
@@ -1154,10 +1169,10 @@ impl Level {
                             // Edge at +X side of sector A
                             let edge_x = world_x_a + SECTOR_SIZE;
                             (
-                                Vec3::new(edge_x, portal_bottom, world_z_a),              // bottom-left (NE corner)
-                                Vec3::new(edge_x, portal_bottom, world_z_a + SECTOR_SIZE), // bottom-right (SE corner)
-                                Vec3::new(edge_x, portal_top, world_z_a + SECTOR_SIZE),    // top-right
-                                Vec3::new(edge_x, portal_top, world_z_a),                  // top-left
+                                Vec3::new(edge_x, portal_bottom_left, world_z_a),              // bottom-left (NE corner)
+                                Vec3::new(edge_x, portal_bottom_right, world_z_a + SECTOR_SIZE), // bottom-right (SE corner)
+                                Vec3::new(edge_x, portal_top_right, world_z_a + SECTOR_SIZE),    // top-right
+                                Vec3::new(edge_x, portal_top_left, world_z_a),                  // top-left
                                 Vec3::new(1.0, 0.0, 0.0), // Normal points into room A (toward +X)
                             )
                         }
@@ -1165,10 +1180,10 @@ impl Level {
                             // Edge at +Z side of sector A
                             let edge_z = world_z_a + SECTOR_SIZE;
                             (
-                                Vec3::new(world_x_a + SECTOR_SIZE, portal_bottom, edge_z), // bottom-left (SE corner)
-                                Vec3::new(world_x_a, portal_bottom, edge_z),              // bottom-right (SW corner)
-                                Vec3::new(world_x_a, portal_top, edge_z),                  // top-right
-                                Vec3::new(world_x_a + SECTOR_SIZE, portal_top, edge_z),    // top-left
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_bottom_left, edge_z), // bottom-left (SE corner)
+                                Vec3::new(world_x_a, portal_bottom_right, edge_z),              // bottom-right (SW corner)
+                                Vec3::new(world_x_a, portal_top_right, edge_z),                  // top-right
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_top_left, edge_z),    // top-left
                                 Vec3::new(0.0, 0.0, 1.0), // Normal points into room A (toward +Z)
                             )
                         }
@@ -1176,10 +1191,10 @@ impl Level {
                             // Edge at -X side of sector A
                             let edge_x = world_x_a;
                             (
-                                Vec3::new(edge_x, portal_bottom, world_z_a + SECTOR_SIZE), // bottom-left (SW corner)
-                                Vec3::new(edge_x, portal_bottom, world_z_a),              // bottom-right (NW corner)
-                                Vec3::new(edge_x, portal_top, world_z_a),                  // top-right
-                                Vec3::new(edge_x, portal_top, world_z_a + SECTOR_SIZE),    // top-left
+                                Vec3::new(edge_x, portal_bottom_left, world_z_a + SECTOR_SIZE), // bottom-left (SW corner)
+                                Vec3::new(edge_x, portal_bottom_right, world_z_a),              // bottom-right (NW corner)
+                                Vec3::new(edge_x, portal_top_right, world_z_a),                  // top-right
+                                Vec3::new(edge_x, portal_top_left, world_z_a + SECTOR_SIZE),    // top-left
                                 Vec3::new(-1.0, 0.0, 0.0), // Normal points into room A (toward -X)
                             )
                         }
