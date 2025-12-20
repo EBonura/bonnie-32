@@ -899,7 +899,45 @@ pub struct EditorLayoutConfig {
     pub left_split: f32,
     /// Right vertical split ratio (texture palette | properties)
     pub right_panel_split: f32,
+    /// 2D grid view pan offset X (screen pixels)
+    #[serde(default)]
+    pub grid_offset_x: f32,
+    /// 2D grid view pan offset Y (screen pixels)
+    #[serde(default)]
+    pub grid_offset_y: f32,
+    /// 2D grid view zoom level (pixels per world unit)
+    #[serde(default = "default_grid_zoom")]
+    pub grid_zoom: f32,
+    /// 3D orbit camera target X
+    #[serde(default = "default_orbit_target_x")]
+    pub orbit_target_x: f32,
+    /// 3D orbit camera target Y
+    #[serde(default = "default_orbit_target_y")]
+    pub orbit_target_y: f32,
+    /// 3D orbit camera target Z
+    #[serde(default = "default_orbit_target_z")]
+    pub orbit_target_z: f32,
+    /// 3D orbit camera distance from target
+    #[serde(default = "default_orbit_distance")]
+    pub orbit_distance: f32,
+    /// 3D orbit camera horizontal angle (radians)
+    #[serde(default = "default_orbit_azimuth")]
+    pub orbit_azimuth: f32,
+    /// 3D orbit camera vertical angle (radians)
+    #[serde(default = "default_orbit_elevation")]
+    pub orbit_elevation: f32,
 }
+
+fn default_grid_zoom() -> f32 {
+    0.1
+}
+
+fn default_orbit_target_x() -> f32 { 512.0 }
+fn default_orbit_target_y() -> f32 { 512.0 }
+fn default_orbit_target_z() -> f32 { 512.0 }
+fn default_orbit_distance() -> f32 { 4000.0 }
+fn default_orbit_azimuth() -> f32 { 0.8 }
+fn default_orbit_elevation() -> f32 { 0.4 }
 
 impl Default for EditorLayoutConfig {
     fn default() -> Self {
@@ -908,6 +946,15 @@ impl Default for EditorLayoutConfig {
             right_split: 0.75,
             left_split: 0.6,
             right_panel_split: 0.6,
+            grid_offset_x: 0.0,
+            grid_offset_y: 0.0,
+            grid_zoom: 0.1,
+            orbit_target_x: 512.0,
+            orbit_target_y: 512.0,
+            orbit_target_z: 512.0,
+            orbit_distance: 4000.0,
+            orbit_azimuth: 0.8,
+            orbit_elevation: 0.4,
         }
     }
 }

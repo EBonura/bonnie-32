@@ -156,6 +156,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             continue;
         }
 
+        // Skip hidden rooms
+        if state.hidden_rooms.contains(&room_idx) {
+            continue;
+        }
+
         // Draw non-current room sectors with dimmed colors
         for (gx, gz, sector) in r.iter_sectors() {
             let base_x = r.position.x + (gx as f32) * SECTOR_SIZE;
@@ -331,12 +336,19 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     // Draw room center markers for all rooms (handle for moving the room)
     let mut hovered_room_origin: Option<usize> = None;
     for (room_idx, r) in state.level.rooms.iter().enumerate() {
+        let is_current = room_idx == current_room_idx;
+        let is_hidden = state.hidden_rooms.contains(&room_idx);
+
+        // Skip hidden rooms (but always show current room)
+        if is_hidden && !is_current {
+            continue;
+        }
+
         // Calculate room center (not origin corner)
         let center_x = r.position.x + (r.width as f32 * SECTOR_SIZE) / 2.0;
         let center_z = r.position.z + (r.depth as f32 * SECTOR_SIZE) / 2.0;
         let (ox, oy) = world_to_screen(center_x, center_z);
         if ox >= rect.x - 10.0 && ox <= rect.right() + 10.0 && oy >= rect.y - 10.0 && oy <= rect.bottom() + 10.0 {
-            let is_current = room_idx == current_room_idx;
             let dist_to_mouse = ((mouse_pos.0 - ox).powi(2) + (mouse_pos.1 - oy).powi(2)).sqrt();
             let is_hovered = inside && dist_to_mouse < 12.0;
 
@@ -344,9 +356,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 hovered_room_origin = Some(room_idx);
             }
 
-            // Draw center handle
+            // Draw center handle (dimmed if hidden)
             let color = if is_hovered {
                 Color::from_rgba(255, 255, 150, 255) // Bright yellow when hovered
+            } else if is_hidden {
+                Color::from_rgba(100, 60, 60, 150) // Very dim for hidden current room
             } else if is_current {
                 Color::from_rgba(255, 100, 100, 255) // Red for current room
             } else {

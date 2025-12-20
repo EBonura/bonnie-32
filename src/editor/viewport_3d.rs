@@ -1310,9 +1310,13 @@ pub fn draw_viewport_3d(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
-    // Render all rooms
+    // Render all rooms (skip hidden ones)
     let settings = &state.raster_settings;
-    for room in &state.level.rooms {
+    for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        // Skip hidden rooms
+        if state.hidden_rooms.contains(&room_idx) {
+            continue;
+        }
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, settings);
     }
@@ -1320,6 +1324,11 @@ pub fn draw_viewport_3d(
     // Draw room boundary wireframes for all rooms
     if state.show_room_bounds {
         for (room_idx, room) in state.level.rooms.iter().enumerate() {
+            // Skip hidden rooms
+            if state.hidden_rooms.contains(&room_idx) {
+                continue;
+            }
+
             let is_current = room_idx == state.current_room;
             // Current room: bright blue, other rooms: dim gray
             let room_color = if is_current {

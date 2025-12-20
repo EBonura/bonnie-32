@@ -228,6 +228,18 @@ async fn main() {
                             match world::load_level_from_str(&data) {
                                 Ok(level) => {
                                     ws.editor_layout.apply_config(&level.editor_layout);
+                                    ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
+                                    ws.editor_state.grid_offset_y = level.editor_layout.grid_offset_y;
+                                    ws.editor_state.grid_zoom = level.editor_layout.grid_zoom;
+                                    ws.editor_state.orbit_target = rasterizer::Vec3::new(
+                                        level.editor_layout.orbit_target_x,
+                                        level.editor_layout.orbit_target_y,
+                                        level.editor_layout.orbit_target_z,
+                                    );
+                                    ws.editor_state.orbit_distance = level.editor_layout.orbit_distance;
+                                    ws.editor_state.orbit_azimuth = level.editor_layout.orbit_azimuth;
+                                    ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
+                                    ws.editor_state.sync_camera_from_orbit();
                                     ws.editor_state.load_level(level, PathBuf::from(&filename));
                                     ws.editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
                                 }
@@ -305,6 +317,18 @@ async fn main() {
                                     .map(|e| (e.name.clone(), e.path.clone()))
                                     .unwrap_or_else(|| ("example".to_string(), PathBuf::from("assets/levels/untitled.ron")));
                                 ws.editor_layout.apply_config(&level.editor_layout);
+                                ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
+                                ws.editor_state.grid_offset_y = level.editor_layout.grid_offset_y;
+                                ws.editor_state.grid_zoom = level.editor_layout.grid_zoom;
+                                ws.editor_state.orbit_target = rasterizer::Vec3::new(
+                                    level.editor_layout.orbit_target_x,
+                                    level.editor_layout.orbit_target_y,
+                                    level.editor_layout.orbit_target_z,
+                                );
+                                ws.editor_state.orbit_distance = level.editor_layout.orbit_distance;
+                                ws.editor_state.orbit_azimuth = level.editor_layout.orbit_azimuth;
+                                ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
+                                ws.editor_state.sync_camera_from_orbit();
                                 // Use load_level to preserve texture packs (important for WASM)
                                 ws.editor_state.load_level(level, path);
                                 ws.editor_state.set_status(&format!("Opened: {}", name), 3.0);
@@ -315,6 +339,18 @@ async fn main() {
                             // Start with a fresh empty level, preserving texture packs
                             let new_level = create_empty_level();
                             ws.editor_layout.apply_config(&new_level.editor_layout);
+                            ws.editor_state.grid_offset_x = new_level.editor_layout.grid_offset_x;
+                            ws.editor_state.grid_offset_y = new_level.editor_layout.grid_offset_y;
+                            ws.editor_state.grid_zoom = new_level.editor_layout.grid_zoom;
+                            ws.editor_state.orbit_target = rasterizer::Vec3::new(
+                                new_level.editor_layout.orbit_target_x,
+                                new_level.editor_layout.orbit_target_y,
+                                new_level.editor_layout.orbit_target_z,
+                            );
+                            ws.editor_state.orbit_distance = new_level.editor_layout.orbit_distance;
+                            ws.editor_state.orbit_azimuth = new_level.editor_layout.orbit_azimuth;
+                            ws.editor_state.orbit_elevation = new_level.editor_layout.orbit_elevation;
+                            ws.editor_state.sync_camera_from_orbit();
                             ws.editor_state.load_level(new_level, PathBuf::from("assets/levels/untitled.ron"));
                             ws.editor_state.current_file = None; // New level has no file yet
                             ws.editor_state.set_status("New level created", 3.0);
@@ -508,10 +544,32 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
             let new_level = create_empty_level();
             ws.editor_state = editor::EditorState::new(new_level);
             ws.editor_layout.apply_config(&ws.editor_state.level.editor_layout);
+            // Reset grid view to defaults for new level
+            ws.editor_state.grid_offset_x = ws.editor_state.level.editor_layout.grid_offset_x;
+            ws.editor_state.grid_offset_y = ws.editor_state.level.editor_layout.grid_offset_y;
+            ws.editor_state.grid_zoom = ws.editor_state.level.editor_layout.grid_zoom;
+            // Reset orbit camera to defaults
+            ws.editor_state.orbit_target = rasterizer::Vec3::new(
+                ws.editor_state.level.editor_layout.orbit_target_x,
+                ws.editor_state.level.editor_layout.orbit_target_y,
+                ws.editor_state.level.editor_layout.orbit_target_z,
+            );
+            ws.editor_state.orbit_distance = ws.editor_state.level.editor_layout.orbit_distance;
+            ws.editor_state.orbit_azimuth = ws.editor_state.level.editor_layout.orbit_azimuth;
+            ws.editor_state.orbit_elevation = ws.editor_state.level.editor_layout.orbit_elevation;
+            ws.editor_state.sync_camera_from_orbit();
             ws.editor_state.set_status("Created new level", 3.0);
         }
         EditorAction::Save => {
-            ws.editor_state.level.editor_layout = ws.editor_layout.to_config();
+            ws.editor_state.level.editor_layout = ws.editor_layout.to_config(
+                ws.editor_state.grid_offset_x,
+                ws.editor_state.grid_offset_y,
+                ws.editor_state.grid_zoom,
+                ws.editor_state.orbit_target,
+                ws.editor_state.orbit_distance,
+                ws.editor_state.orbit_azimuth,
+                ws.editor_state.orbit_elevation,
+            );
 
             if let Some(path) = &ws.editor_state.current_file.clone() {
                 match save_level(&ws.editor_state.level, path) {
@@ -542,7 +600,15 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
         }
         #[cfg(not(target_arch = "wasm32"))]
         EditorAction::SaveAs => {
-            ws.editor_state.level.editor_layout = ws.editor_layout.to_config();
+            ws.editor_state.level.editor_layout = ws.editor_layout.to_config(
+                ws.editor_state.grid_offset_x,
+                ws.editor_state.grid_offset_y,
+                ws.editor_state.grid_zoom,
+                ws.editor_state.orbit_target,
+                ws.editor_state.orbit_distance,
+                ws.editor_state.orbit_azimuth,
+                ws.editor_state.orbit_elevation,
+            );
             let default_dir = PathBuf::from("assets/levels");
             let _ = std::fs::create_dir_all(&default_dir);
 
@@ -581,6 +647,18 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
                 match load_level(&path) {
                     Ok(level) => {
                         ws.editor_layout.apply_config(&level.editor_layout);
+                        ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
+                        ws.editor_state.grid_offset_y = level.editor_layout.grid_offset_y;
+                        ws.editor_state.grid_zoom = level.editor_layout.grid_zoom;
+                        ws.editor_state.orbit_target = rasterizer::Vec3::new(
+                            level.editor_layout.orbit_target_x,
+                            level.editor_layout.orbit_target_y,
+                            level.editor_layout.orbit_target_z,
+                        );
+                        ws.editor_state.orbit_distance = level.editor_layout.orbit_distance;
+                        ws.editor_state.orbit_azimuth = level.editor_layout.orbit_azimuth;
+                        ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
+                        ws.editor_state.sync_camera_from_orbit();
                         ws.editor_state.load_level(level, path.clone());
                         ws.editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
                     }
@@ -596,7 +674,15 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
         }
         #[cfg(target_arch = "wasm32")]
         EditorAction::Export => {
-            ws.editor_state.level.editor_layout = ws.editor_layout.to_config();
+            ws.editor_state.level.editor_layout = ws.editor_layout.to_config(
+                ws.editor_state.grid_offset_x,
+                ws.editor_state.grid_offset_y,
+                ws.editor_state.grid_zoom,
+                ws.editor_state.orbit_target,
+                ws.editor_state.orbit_distance,
+                ws.editor_state.orbit_azimuth,
+                ws.editor_state.orbit_elevation,
+            );
 
             match ron::ser::to_string_pretty(&ws.editor_state.level, ron::ser::PrettyConfig::default()) {
                 Ok(ron_str) => {
@@ -648,6 +734,18 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
             match load_level(&path) {
                 Ok(level) => {
                     ws.editor_layout.apply_config(&level.editor_layout);
+                    ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
+                    ws.editor_state.grid_offset_y = level.editor_layout.grid_offset_y;
+                    ws.editor_state.grid_zoom = level.editor_layout.grid_zoom;
+                    ws.editor_state.orbit_target = rasterizer::Vec3::new(
+                        level.editor_layout.orbit_target_x,
+                        level.editor_layout.orbit_target_y,
+                        level.editor_layout.orbit_target_z,
+                    );
+                    ws.editor_state.orbit_distance = level.editor_layout.orbit_distance;
+                    ws.editor_state.orbit_azimuth = level.editor_layout.orbit_azimuth;
+                    ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
+                    ws.editor_state.sync_camera_from_orbit();
                     ws.editor_state.load_level(level, path.clone());
                     ws.editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
                 }
