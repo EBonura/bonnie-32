@@ -3,7 +3,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture};
-use super::{EditorState, EditorTool};
+use super::{EditorState, EditorTool, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -258,8 +258,28 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
     if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Add Room") {
-        // TODO: Add new room
-        println!("Add room clicked");
+        // Create new room offset from existing rooms
+        let new_id = state.level.rooms.len();
+
+        // Calculate position: offset from the last room or origin
+        let offset_x = if let Some(last_room) = state.level.rooms.last() {
+            // Place new room to the east of the last room
+            last_room.position.x + (last_room.width as f32) * SECTOR_SIZE + SECTOR_SIZE
+        } else {
+            0.0
+        };
+
+        let new_room = crate::world::Room::new(
+            new_id,
+            crate::rasterizer::Vec3::new(offset_x, 0.0, 0.0),
+            1, // 1x1 grid to start
+            1,
+        );
+
+        state.save_undo();
+        state.level.rooms.push(new_room);
+        state.current_room = new_id;
+        state.set_status(&format!("Created Room {}", new_id), 2.0);
     }
 
     toolbar.separator();

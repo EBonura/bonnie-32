@@ -169,6 +169,16 @@ pub struct EditorState {
     pub grid_dragging_vertices: Vec<usize>,   // All vertices being dragged (for linking)
     pub grid_drag_started: bool, // True if we've started dragging (for undo)
 
+    /// 2D grid view sector dragging (for moving sectors within room or moving entire room)
+    /// List of (room_idx, grid_x, grid_z) for sectors being dragged
+    pub grid_dragging_sectors: Vec<(usize, usize, usize)>,
+    /// World-space offset being applied during drag
+    pub grid_sector_drag_offset: (f32, f32),
+    /// Starting world position when drag began (for calculating offset)
+    pub grid_sector_drag_start: Option<(f32, f32)>,
+    /// True if dragging the room origin marker (moves entire room position)
+    pub grid_dragging_room_origin: bool,
+
     /// 3D viewport vertex dragging state (legacy - kept for compatibility)
     pub viewport_dragging_vertices: Vec<(usize, usize)>, // List of (room_idx, vertex_idx)
     pub viewport_drag_started: bool,
@@ -270,7 +280,7 @@ impl EditorState {
             grid_zoom: 0.1, // Pixels per world unit (very zoomed out for TRLE 1024-unit sectors)
             grid_size: SECTOR_SIZE, // TRLE sector size
             show_grid: true,
-            show_room_bounds: true, // Show room boundaries by default
+            show_room_bounds: true, // Room boundaries visible by default
             link_coincident_vertices: true, // Default to linked mode
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -283,6 +293,10 @@ impl EditorState {
             grid_dragging_vertex: None,
             grid_dragging_vertices: Vec::new(),
             grid_drag_started: false,
+            grid_dragging_sectors: Vec::new(),
+            grid_sector_drag_offset: (0.0, 0.0),
+            grid_sector_drag_start: None,
+            grid_dragging_room_origin: false,
             viewport_dragging_vertices: Vec::new(),
             viewport_drag_started: false,
             viewport_drag_plane_y: 0.0,
