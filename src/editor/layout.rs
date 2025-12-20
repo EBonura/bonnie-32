@@ -235,6 +235,13 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.set_status(&format!("Room boundaries: {}", mode), 2.0);
     }
 
+    // Wireframe overlay toggle
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe Overlay", state.raster_settings.wireframe_overlay) {
+        state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
+        let mode = if state.raster_settings.wireframe_overlay { "ON" } else { "OFF" };
+        state.set_status(&format!("Wireframe overlay: {}", mode), 2.0);
+    }
+
     toolbar.separator();
 
     // Room navigation

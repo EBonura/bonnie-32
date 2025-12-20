@@ -1,7 +1,7 @@
 //! Core rendering functions
 //! Triangle rasterization with PS1-style effects
 
-use super::math::{barycentric, perspective_transform, project, Vec3};
+use super::math::{barycentric, perspective_transform, project, Vec3, NEAR_PLANE};
 use super::types::{BlendMode, Color, Face, Light, LightType, RasterSettings, ShadingMode, Texture, Vertex};
 
 /// Framebuffer for software rendering
@@ -572,10 +572,10 @@ pub fn render_mesh(
     camera: &Camera,
     settings: &RasterSettings,
 ) {
-    // Transform and project all vertices
-    let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
+    // Transform all vertices to camera space
     let mut cam_space_positions: Vec<Vec3> = Vec::with_capacity(vertices.len());
     let mut cam_space_normals: Vec<Vec3> = Vec::with_capacity(vertices.len());
+    let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
 
     for v in vertices {
         // Transform position to camera space
@@ -583,7 +583,8 @@ pub fn render_mesh(
         let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
         cam_space_positions.push(cam_pos);
 
-        // Project to screen
+        // Project to screen (safe because we check near plane per-triangle)
+        // For vertices behind camera, this produces garbage - we skip those triangles
         let screen_pos = project(cam_pos, settings.vertex_snap, fb.width, fb.height);
         projected.push(screen_pos);
 
@@ -598,30 +599,25 @@ pub fn render_mesh(
     let mut frontface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
 
     for (face_idx, face) in faces.iter().enumerate() {
-        let v1 = projected[face.v0];
-        let v2 = projected[face.v1];
-        let v3 = projected[face.v2];
-
-        // Get camera-space positions for near plane check
+        // Get camera-space positions
         let cv1 = cam_space_positions[face.v0];
         let cv2 = cam_space_positions[face.v1];
         let cv3 = cam_space_positions[face.v2];
 
-        // Near plane clipping (skip triangles fully behind camera)
-        // Only skip if ALL vertices are behind - partial triangles should still render
-        // This is a simplification; proper clipping would generate new triangles
-        if cv1.z <= 0.1 && cv2.z <= 0.1 && cv3.z <= 0.1 {
+        // PS1-style: Skip triangles that have ANY vertex behind the near plane
+        // This is conservative but simple and matches PS1 behavior
+        // (Games were designed to not let geometry get too close to camera)
+        if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
             continue;
         }
 
-        // 2D screen-space backface culling (PS1-style)
-        // Calculate signed area using cross product of screen-space edges
-        // This is more robust than 3D normal-based culling at grazing angles
-        let signed_area = (v2.x - v1.x) * (v3.y - v1.y) - (v3.x - v1.x) * (v2.y - v1.y);
+        // Use pre-projected screen positions
+        let v1 = projected[face.v0];
+        let v2 = projected[face.v1];
+        let v3 = projected[face.v2];
 
-        // In screen space with Y-down, counter-clockwise winding = front-facing
-        // Positive signed area = counter-clockwise = front-facing
-        // Negative signed area = clockwise = back-facing
+        // 2D screen-space backface culling (PS1-style)
+        let signed_area = (v2.x - v1.x) * (v3.y - v1.y) - (v3.x - v1.x) * (v2.y - v1.y);
         let is_backface = signed_area <= 0.0;
 
         // Compute geometric normal for shading (cross product in camera space)
@@ -630,7 +626,7 @@ pub fn render_mesh(
         let normal = edge1.cross(edge2).normalize();
 
         if is_backface {
-            // Back-face: collect for wireframe rendering (always, regardless of backface_cull setting)
+            // Back-face: collect for wireframe rendering
             backface_wireframes.push((v1, v2, v3));
 
             // If backface culling is disabled, also render as solid
