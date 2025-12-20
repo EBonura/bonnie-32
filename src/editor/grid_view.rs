@@ -302,15 +302,16 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
     // Draw portals
     for portal in &room.portals {
+        // Portal vertices are room-relative, convert to world space
         let v0 = portal.vertices[0];
         let v1 = portal.vertices[1];
         let v2 = portal.vertices[2];
         let v3 = portal.vertices[3];
 
-        let (sx0, sy0) = world_to_screen(v0.x, v0.z);
-        let (sx1, sy1) = world_to_screen(v1.x, v1.z);
-        let (sx2, sy2) = world_to_screen(v2.x, v2.z);
-        let (sx3, sy3) = world_to_screen(v3.x, v3.z);
+        let (sx0, sy0) = world_to_screen(v0.x + room.position.x, v0.z + room.position.z);
+        let (sx1, sy1) = world_to_screen(v1.x + room.position.x, v1.z + room.position.z);
+        let (sx2, sy2) = world_to_screen(v2.x + room.position.x, v2.z + room.position.z);
+        let (sx3, sy3) = world_to_screen(v3.x + room.position.x, v3.z + room.position.z);
 
         // Portal fill (magenta)
         draw_triangle(
@@ -488,6 +489,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     if let Some(room) = state.level.rooms.get(current_room_idx) {
                         state.set_status(&format!("Moved room to ({:.0}, {:.0})", room.position.x, room.position.z), 2.0);
                     }
+                    state.mark_portals_dirty();
                 } else {
                     // Move selected sectors within the room grid
                     let grid_dx = (snapped_offset_x / SECTOR_SIZE).round() as i32;
@@ -576,6 +578,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         room.trim_empty_edges();
                         room.recalculate_bounds();
                         state.set_status(&format!("Moved {} sector(s)", state.grid_dragging_sectors.len()), 2.0);
+                        state.mark_portals_dirty();
                     }
                 }
             }
@@ -741,6 +744,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
                             room.set_floor(gx, gz, 0.0, state.selected_texture.clone());
                             room.recalculate_bounds();
+                            state.mark_portals_dirty();
                             state.set_status("Created floor sector", 2.0);
                         }
                     }
@@ -778,6 +782,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
                             room.set_ceiling(gx, gz, CEILING_HEIGHT, state.selected_texture.clone());
                             room.recalculate_bounds();
+                            state.mark_portals_dirty();
                             state.set_status("Created ceiling sector", 2.0);
                         }
                     }

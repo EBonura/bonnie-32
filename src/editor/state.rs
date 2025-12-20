@@ -228,6 +228,9 @@ pub struct EditorState {
 
     /// Hidden rooms (room indices that should not be rendered in 2D/3D views)
     pub hidden_rooms: std::collections::HashSet<usize>,
+
+    /// Portals need recalculation (set when geometry changes)
+    pub portals_dirty: bool,
 }
 
 impl EditorState {
@@ -325,6 +328,7 @@ impl EditorState {
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
             selected_vertex_indices: Vec::new(),
             hidden_rooms: std::collections::HashSet::new(),
+            portals_dirty: true, // Recalculate on first frame
         }
     }
 
@@ -344,6 +348,7 @@ impl EditorState {
         self.redo_stack.clear();
         self.selection = Selection::None;
         self.selected_vertex_indices.clear();
+        self.portals_dirty = true; // Recalculate portals for loaded level
         // Clamp current_room to valid range
         if self.current_room >= self.level.rooms.len() {
             self.current_room = 0;
@@ -546,5 +551,10 @@ impl EditorState {
             // Use last known target if nothing selected
             self.orbit_target = self.last_orbit_target;
         }
+    }
+
+    /// Mark portals as needing recalculation
+    pub fn mark_portals_dirty(&mut self) {
+        self.portals_dirty = true;
     }
 }

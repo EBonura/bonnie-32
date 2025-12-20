@@ -181,6 +181,12 @@ async fn main() {
             Tool::WorldEditor => {
                 let ws = &mut app.world_editor;
 
+                // Recalculate portals if geometry changed
+                if ws.editor_state.portals_dirty {
+                    ws.editor_state.level.recalculate_portals();
+                    ws.editor_state.portals_dirty = false;
+                }
+
                 // Check for pending import from browser (WASM only)
                 #[cfg(target_arch = "wasm32")]
                 {

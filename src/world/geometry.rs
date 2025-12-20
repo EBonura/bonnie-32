@@ -121,6 +121,31 @@ impl HorizontalFace {
         let h = self.heights[0];
         self.heights.iter().all(|&corner| (corner - h).abs() < 0.001)
     }
+
+    /// Get heights at a specific edge (left_corner, right_corner) when looking from inside the sector
+    /// Returns (left_height, right_height) for the edge in that direction
+    pub fn edge_heights(&self, dir: Direction) -> (f32, f32) {
+        // Heights are [NW, NE, SE, SW] = [0, 1, 2, 3]
+        // NW = (-X, -Z), NE = (+X, -Z), SE = (+X, +Z), SW = (-X, +Z)
+        match dir {
+            Direction::North => (self.heights[0], self.heights[1]), // NW, NE (looking at -Z edge)
+            Direction::East => (self.heights[1], self.heights[2]),  // NE, SE (looking at +X edge)
+            Direction::South => (self.heights[3], self.heights[2]), // SW, SE (looking at +Z edge)
+            Direction::West => (self.heights[0], self.heights[3]),  // NW, SW (looking at -X edge)
+        }
+    }
+
+    /// Get max height at a specific edge
+    pub fn edge_max(&self, dir: Direction) -> f32 {
+        let (h1, h2) = self.edge_heights(dir);
+        h1.max(h2)
+    }
+
+    /// Get min height at a specific edge
+    pub fn edge_min(&self, dir: Direction) -> f32 {
+        let (h1, h2) = self.edge_heights(dir);
+        h1.min(h2)
+    }
 }
 
 /// A vertical face (wall) on a sector edge
@@ -1006,6 +1031,182 @@ impl Level {
 
         // Fall back to linear search
         self.find_room_at(point)
+    }
+
+    /// Recalculate all portals based on room adjacency
+    /// Call this after room positions change, heights change, or walls are added/removed
+    pub fn recalculate_portals(&mut self) {
+        // Clear existing portals from all rooms
+        for room in &mut self.rooms {
+            room.portals.clear();
+        }
+
+        // For each pair of rooms, detect portals between them
+        let num_rooms = self.rooms.len();
+        for room_a_idx in 0..num_rooms {
+            for room_b_idx in (room_a_idx + 1)..num_rooms {
+                self.detect_portals_between(room_a_idx, room_b_idx);
+            }
+        }
+    }
+
+    /// Detect and create portals between two rooms based on adjacent sectors
+    fn detect_portals_between(&mut self, room_a_idx: usize, room_b_idx: usize) {
+        // We need to check if any sector edges in room A are adjacent to sector edges in room B
+        // Two sectors are adjacent if they share an edge at the same world position
+
+        // Get room data (positions and dimensions)
+        let (pos_a, width_a, depth_a) = {
+            let room = &self.rooms[room_a_idx];
+            (room.position, room.width, room.depth)
+        };
+        let (pos_b, width_b, depth_b) = {
+            let room = &self.rooms[room_b_idx];
+            (room.position, room.width, room.depth)
+        };
+
+        // Check all directions for adjacency
+        let directions = [Direction::North, Direction::East, Direction::South, Direction::West];
+
+        for &dir in &directions {
+            // For each sector in room A on its boundary facing direction `dir`
+            // Check if there's a matching sector in room B on the opposite boundary
+
+            for gx_a in 0..width_a {
+                for gz_a in 0..depth_a {
+                    // World position of this sector in room A
+                    let world_x_a = pos_a.x + (gx_a as f32) * SECTOR_SIZE;
+                    let world_z_a = pos_a.z + (gz_a as f32) * SECTOR_SIZE;
+
+                    // World position of the adjacent sector (on the edge in direction `dir`)
+                    let (adj_world_x, adj_world_z) = match dir {
+                        Direction::North => (world_x_a, world_z_a - SECTOR_SIZE),
+                        Direction::East => (world_x_a + SECTOR_SIZE, world_z_a),
+                        Direction::South => (world_x_a, world_z_a + SECTOR_SIZE),
+                        Direction::West => (world_x_a - SECTOR_SIZE, world_z_a),
+                    };
+
+                    // Check if this adjacent position falls within room B's grid
+                    let local_x_b = adj_world_x - pos_b.x;
+                    let local_z_b = adj_world_z - pos_b.z;
+
+                    // Must be aligned to grid
+                    if local_x_b < 0.0 || local_z_b < 0.0 {
+                        continue;
+                    }
+                    if (local_x_b % SECTOR_SIZE).abs() > 0.1 || (local_z_b % SECTOR_SIZE).abs() > 0.1 {
+                        continue;
+                    }
+
+                    let gx_b = (local_x_b / SECTOR_SIZE) as usize;
+                    let gz_b = (local_z_b / SECTOR_SIZE) as usize;
+
+                    if gx_b >= width_b || gz_b >= depth_b {
+                        continue;
+                    }
+
+                    // Now check if both sectors exist and have no walls blocking
+                    let sector_a = self.rooms[room_a_idx].get_sector(gx_a, gz_a);
+                    let sector_b = self.rooms[room_b_idx].get_sector(gx_b, gz_b);
+
+                    let (sector_a, sector_b) = match (sector_a, sector_b) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => continue, // One or both sectors don't exist
+                    };
+
+                    // Check for walls blocking the portal
+                    let opposite_dir = dir.opposite();
+                    if !sector_a.walls(dir).is_empty() || !sector_b.walls(opposite_dir).is_empty() {
+                        continue; // Wall blocks the portal
+                    }
+
+                    // Calculate portal opening (vertical gap between floor and ceiling)
+                    // Portal bottom = max of both floors at the shared edge
+                    // Portal top = min of both ceilings at the shared edge
+                    let floor_a_max = sector_a.floor.as_ref().map(|f| f.edge_max(dir)).unwrap_or(f32::NEG_INFINITY);
+                    let floor_b_max = sector_b.floor.as_ref().map(|f| f.edge_max(opposite_dir)).unwrap_or(f32::NEG_INFINITY);
+                    let portal_bottom = floor_a_max.max(floor_b_max);
+
+                    let ceil_a_min = sector_a.ceiling.as_ref().map(|c| c.edge_min(dir)).unwrap_or(f32::INFINITY);
+                    let ceil_b_min = sector_b.ceiling.as_ref().map(|c| c.edge_min(opposite_dir)).unwrap_or(f32::INFINITY);
+                    let portal_top = ceil_a_min.min(ceil_b_min);
+
+                    // Skip if no vertical opening
+                    if portal_bottom >= portal_top {
+                        continue;
+                    }
+
+                    // Create portal vertices (quad at the shared edge)
+                    // Vertices are in world space, will be converted to room-relative when stored
+                    let (v0, v1, v2, v3, normal_a) = match dir {
+                        Direction::North => {
+                            // Edge at -Z side of sector A
+                            let edge_z = world_z_a;
+                            (
+                                Vec3::new(world_x_a, portal_bottom, edge_z),              // bottom-left (NW corner)
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_bottom, edge_z), // bottom-right (NE corner)
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_top, edge_z),    // top-right
+                                Vec3::new(world_x_a, portal_top, edge_z),                  // top-left
+                                Vec3::new(0.0, 0.0, -1.0), // Normal points into room A (toward -Z)
+                            )
+                        }
+                        Direction::East => {
+                            // Edge at +X side of sector A
+                            let edge_x = world_x_a + SECTOR_SIZE;
+                            (
+                                Vec3::new(edge_x, portal_bottom, world_z_a),              // bottom-left (NE corner)
+                                Vec3::new(edge_x, portal_bottom, world_z_a + SECTOR_SIZE), // bottom-right (SE corner)
+                                Vec3::new(edge_x, portal_top, world_z_a + SECTOR_SIZE),    // top-right
+                                Vec3::new(edge_x, portal_top, world_z_a),                  // top-left
+                                Vec3::new(1.0, 0.0, 0.0), // Normal points into room A (toward +X)
+                            )
+                        }
+                        Direction::South => {
+                            // Edge at +Z side of sector A
+                            let edge_z = world_z_a + SECTOR_SIZE;
+                            (
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_bottom, edge_z), // bottom-left (SE corner)
+                                Vec3::new(world_x_a, portal_bottom, edge_z),              // bottom-right (SW corner)
+                                Vec3::new(world_x_a, portal_top, edge_z),                  // top-right
+                                Vec3::new(world_x_a + SECTOR_SIZE, portal_top, edge_z),    // top-left
+                                Vec3::new(0.0, 0.0, 1.0), // Normal points into room A (toward +Z)
+                            )
+                        }
+                        Direction::West => {
+                            // Edge at -X side of sector A
+                            let edge_x = world_x_a;
+                            (
+                                Vec3::new(edge_x, portal_bottom, world_z_a + SECTOR_SIZE), // bottom-left (SW corner)
+                                Vec3::new(edge_x, portal_bottom, world_z_a),              // bottom-right (NW corner)
+                                Vec3::new(edge_x, portal_top, world_z_a),                  // top-right
+                                Vec3::new(edge_x, portal_top, world_z_a + SECTOR_SIZE),    // top-left
+                                Vec3::new(-1.0, 0.0, 0.0), // Normal points into room A (toward -X)
+                            )
+                        }
+                    };
+
+                    // Convert to room-relative coordinates and add portals to both rooms
+                    // Portal in room A points to room B
+                    let vertices_a = [
+                        Vec3::new(v0.x - pos_a.x, v0.y - pos_a.y, v0.z - pos_a.z),
+                        Vec3::new(v1.x - pos_a.x, v1.y - pos_a.y, v1.z - pos_a.z),
+                        Vec3::new(v2.x - pos_a.x, v2.y - pos_a.y, v2.z - pos_a.z),
+                        Vec3::new(v3.x - pos_a.x, v3.y - pos_a.y, v3.z - pos_a.z),
+                    ];
+                    self.rooms[room_a_idx].portals.push(Portal::new(room_b_idx, vertices_a, normal_a));
+
+                    // Portal in room B points to room A (opposite normal)
+                    let normal_b = Vec3::new(-normal_a.x, -normal_a.y, -normal_a.z);
+                    let vertices_b = [
+                        Vec3::new(v1.x - pos_b.x, v1.y - pos_b.y, v1.z - pos_b.z), // Swap order for opposite facing
+                        Vec3::new(v0.x - pos_b.x, v0.y - pos_b.y, v0.z - pos_b.z),
+                        Vec3::new(v3.x - pos_b.x, v3.y - pos_b.y, v3.z - pos_b.z),
+                        Vec3::new(v2.x - pos_b.x, v2.y - pos_b.y, v2.z - pos_b.z),
+                    ];
+                    self.rooms[room_b_idx].portals.push(Portal::new(room_a_idx, vertices_b, normal_b));
+                }
+            }
+        }
     }
 }
 

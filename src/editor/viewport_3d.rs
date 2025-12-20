@@ -197,6 +197,7 @@ pub fn draw_viewport_3d(
 
                 if let Some(type_name) = deleted {
                     state.set_selection(Selection::None);
+                    state.mark_portals_dirty();
                     state.set_status(&format!("Deleted {}", type_name), 2.0);
                 }
             }
@@ -910,6 +911,7 @@ pub fn draw_viewport_3d(
                             room.recalculate_bounds();
                         }
 
+                        state.mark_portals_dirty();
                         let status = if is_floor { "Created floor sector" } else { "Created ceiling sector" };
                         state.set_status(status, 2.0);
                     }
@@ -985,6 +987,7 @@ pub fn draw_viewport_3d(
                             room.recalculate_bounds();
                         }
 
+                        state.mark_portals_dirty();
                         let dir_name = match dir {
                             Direction::North => "north",
                             Direction::East => "east",
@@ -1071,6 +1074,7 @@ pub fn draw_viewport_3d(
                 if let Some(room) = state.level.rooms.get_mut(state.current_room) {
                     room.recalculate_bounds();
                 }
+                state.mark_portals_dirty();
             }
             state.dragging_sector_vertices.clear();
             state.drag_initial_heights.clear();
@@ -1386,6 +1390,34 @@ pub fn draw_viewport_3d(
             for (i, j) in edges {
                 if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_corners[i], screen_corners[j]) {
                     fb.draw_line_3d(x0, y0, z0, x1, y1, z1, room_color);
+                }
+            }
+
+            // Draw portal outlines for this room
+            let portal_color = RasterColor::new(255, 100, 255); // Magenta
+            for portal in &room.portals {
+                // Portal vertices are room-relative, convert to world space
+                let world_verts: [Vec3; 4] = [
+                    Vec3::new(portal.vertices[0].x + room.position.x, portal.vertices[0].y + room.position.y, portal.vertices[0].z + room.position.z),
+                    Vec3::new(portal.vertices[1].x + room.position.x, portal.vertices[1].y + room.position.y, portal.vertices[1].z + room.position.z),
+                    Vec3::new(portal.vertices[2].x + room.position.x, portal.vertices[2].y + room.position.y, portal.vertices[2].z + room.position.z),
+                    Vec3::new(portal.vertices[3].x + room.position.x, portal.vertices[3].y + room.position.y, portal.vertices[3].z + room.position.z),
+                ];
+
+                // Project to screen
+                let screen_verts: Vec<Option<(i32, i32, f32)>> = world_verts.iter()
+                    .map(|v| world_to_screen_with_depth(*v, state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb.width, fb.height)
+                        .map(|(x, y, z)| (x as i32, y as i32, z)))
+                    .collect();
+
+                // Draw portal quad outline
+                let portal_edges = [(0, 1), (1, 2), (2, 3), (3, 0)];
+                for (i, j) in portal_edges {
+                    if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_verts[i], screen_verts[j]) {
+                        fb.draw_line_3d(x0, y0, z0, x1, y1, z1, portal_color);
+                    }
                 }
             }
         }
