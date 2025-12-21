@@ -18,6 +18,7 @@ mod landing;
 mod modeler;
 mod tracker;
 mod app;
+mod game;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
