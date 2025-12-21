@@ -114,6 +114,18 @@ impl Color {
         self.b = (v.min(31)) << 3;
     }
 
+    /// Quantize color to PS1 15-bit (5 bits per channel)
+    /// Uses the same 0xF8 mask as the PS1 hardware to keep top 5 bits
+    #[inline]
+    pub fn quantize_15bit(self) -> Self {
+        Self {
+            r: self.r & 0xF8,
+            g: self.g & 0xF8,
+            b: self.b & 0xF8,
+            a: self.a,
+        }
+    }
+
     /// PS1-style blend: combine this color (front) with back color using blend mode
     pub fn blend(self, back: Color, mode: BlendMode) -> Color {
         match mode {
@@ -270,6 +282,14 @@ impl Texture {
             pixels,
             name,
         })
+    }
+
+    /// Quantize all pixels to PS1 15-bit color (5 bits per channel)
+    /// Modifies pixels in-place. Call after loading to simulate PS1 color depth.
+    pub fn quantize_15bit(&mut self) {
+        for pixel in &mut self.pixels {
+            *pixel = pixel.quantize_15bit();
+        }
     }
 
     /// Load all textures from a directory

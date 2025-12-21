@@ -27,7 +27,6 @@ pub enum EditorTool {
     DrawFloor,
     DrawWall,
     DrawCeiling,
-    PlacePortal,
     PlaceObject,
 }
 

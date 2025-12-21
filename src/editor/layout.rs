@@ -203,13 +203,12 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
-    // Tool buttons
+    // Tool buttons (Portal removed - portals are now auto-generated)
     let tools = [
         (icon::MOVE, "Select", EditorTool::Select),
         (icon::SQUARE, "Floor", EditorTool::DrawFloor),
         (icon::BOX, "Wall", EditorTool::DrawWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
-        (icon::DOOR_CLOSED, "Portal", EditorTool::PlacePortal),
         (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
 

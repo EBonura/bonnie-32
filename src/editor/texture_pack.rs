@@ -17,7 +17,12 @@ impl TexturePack {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_directory(path: PathBuf) -> Option<Self> {
         let name = path.file_name()?.to_string_lossy().to_string();
-        let textures = Texture::load_directory(&path);
+        let mut textures = Texture::load_directory(&path);
+
+        // Quantize all textures to PS1 15-bit color depth
+        for tex in &mut textures {
+            tex.quantize_15bit();
+        }
 
         if textures.is_empty() {
             // Try loading from subdirectories (some packs have nested folders)
@@ -29,6 +34,10 @@ impl TexturePack {
                         all_textures.extend(Texture::load_directory(&entry_path));
                     }
                 }
+            }
+            // Quantize subdirectory textures too
+            for tex in &mut all_textures {
+                tex.quantize_15bit();
             }
             if all_textures.is_empty() {
                 return None;
@@ -92,7 +101,9 @@ impl TexturePack {
 
             let mut textures = Vec::with_capacity(files.len());
             for filename in &files {
-                if let Some(tex) = load_single_texture(&pack_name, filename).await {
+                if let Some(mut tex) = load_single_texture(&pack_name, filename).await {
+                    // Quantize to PS1 15-bit color depth
+                    tex.quantize_15bit();
                     textures.push(tex);
                 }
             }

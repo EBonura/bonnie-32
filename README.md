@@ -120,7 +120,6 @@ The editor features a MuseScore-inspired interface design:
 - **Floor**: Place floor sectors (Shift+drag to adjust height)
 - **Wall**: Create walls on sector edges (faces toward camera)
 - **Ceil**: Place ceiling sectors (Shift+drag to adjust height)
-- **Portal**: (WIP) Connect rooms
 - **Link ON/OFF**: Toggle vertex linking mode
 - **Delete/Backspace**: Remove selected faces
 
@@ -223,10 +222,10 @@ This project uses the following free texture packs:
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
 
 #### Major Features
-- [ ] **Implement portals**: Create and visualize room connections (Portal struct exists in geometry.rs)
+- [x] **Implement portals**: Auto-generated portals between adjacent rooms (supports infinite height for open-air sectors)
 
 #### Future
-- [ ] Entity system design: Research TrenchBroom and TRLE for spawn points, interactables, triggers, lights
+- [x] Entity system design: Tile-based objects (PlayerStart, Light) with properties panel editing
 
 ---
 
@@ -280,12 +279,12 @@ For implementing authentic PS1 constraints:
 
 ### Priority: Map Creation & Basic Gameplay
 - [ ] Fix 2D grid placement precision (sectors not aligning to clicks)
-- [ ] Portal creation and room connectivity
-- [ ] Multi-room support
+- [x] Portal creation and room connectivity (auto-generated portals between adjacent rooms)
+- [x] Multi-room support
 - [ ] Slope/ramp tools
-- [ ] Collision detection and physics
-- [ ] Character controller (movement, jumping)
-- [ ] Camera system (third-person, lock-on)
+- [x] Collision detection and physics (TR-style cylinder collision)
+- [x] Character controller (movement, jumping)
+- [x] Camera system (third-person follow, orbit preview)
 
 ### UI & Settings
 - [x] Editor toolbar: PS1 effects toggles (vertex jitter, affine mapping, dithering, etc.)
@@ -300,7 +299,7 @@ For implementing authentic PS1 constraints:
 - [ ] Fog system (distance-based fade)
 
 ### Core Systems
-- [ ] Entity system (enemies, items, spawn points)
+- [x] Entity system (tile-based objects: PlayerStart, Light, with properties panel)
 - [ ] Inventory system
 - [ ] Save/load game state
 
