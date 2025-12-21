@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::path::Path;
-use super::{Level, Room, Sector, HorizontalFace, VerticalFace, TextureRef};
+use super::{Level, Room, Sector, HorizontalFace, VerticalFace, TextureRef, LevelObject, ObjectType, SECTOR_SIZE};
 
 /// Validation limits to prevent resource exhaustion from malicious files
 pub mod limits {
@@ -240,9 +240,6 @@ pub fn load_level<P: AsRef<Path>>(path: P) -> Result<Level, LevelError> {
 
     // Validate level to prevent malicious files
     validate_level(&level)?;
-
-    // Migrate old RoomLights to LevelObjects
-    migrate_room_lights(&mut level);
 
     // Recalculate bounds for all rooms (not serialized)
     for room in &mut level.rooms {

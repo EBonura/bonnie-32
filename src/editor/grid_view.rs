@@ -334,66 +334,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         draw_line(sx3, sy3, sx0, sy0, 2.0, Color::from_rgba(255, 100, 255, 255));
     }
 
-    // Draw lights and detect hover
-    let mut hovered_light: Option<usize> = None;
-    for (light_idx, light) in room.lights.iter().enumerate() {
-        // Light position in world space
-        let world_x = room.position.x + light.position.x;
-        let world_z = room.position.z + light.position.z;
-        let (sx, sy) = world_to_screen(world_x, world_z);
-
-        // Light color
-        let light_color = Color::from_rgba(light.color.r, light.color.g, light.color.b, 200);
-        let outline_color = Color::from_rgba(light.color.r, light.color.g, light.color.b, 255);
-
-        // Check if this light is selected
-        let is_selected = matches!(&state.selection, super::Selection::Light { room: r, light: l }
-            if *r == current_room_idx && *l == light_idx);
-
-        // Check if mouse is hovering over this light
-        let center_radius = if is_selected { 10.0 } else { 6.0 };
-        let dist_to_mouse = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
-        if inside && dist_to_mouse < center_radius + 4.0 {
-            hovered_light = Some(light_idx);
-        }
-
-        // Radius in screen pixels (minimum 4px for visibility)
-        let radius_world = light.radius;
-        let radius_px = (radius_world * scale).max(4.0);
-
-        // Draw radius circle (faint)
-        if light.enabled {
-            draw_circle_lines(sx, sy, radius_px, 1.0, Color::from_rgba(light.color.r, light.color.g, light.color.b, 60));
-        }
-
-        // Draw light center
-        if light.enabled {
-            draw_circle(sx, sy, center_radius, light_color);
-        } else {
-            // Disabled lights shown as hollow
-            draw_circle_lines(sx, sy, center_radius, 2.0, Color::from_rgba(100, 100, 100, 200));
-        }
-
-        // Selection/hover highlight
-        if is_selected {
-            draw_circle_lines(sx, sy, center_radius + 3.0, 2.0, WHITE);
-        } else if hovered_light == Some(light_idx) {
-            draw_circle_lines(sx, sy, center_radius + 3.0, 1.0, Color::from_rgba(255, 255, 200, 180));
-        }
-
-        // Light icon (sun rays)
-        if light.enabled {
-            let ray_len = center_radius + 4.0;
-            for i in 0..4 {
-                let angle = (i as f32) * std::f32::consts::PI / 2.0 + std::f32::consts::PI / 4.0;
-                let dx = angle.cos() * ray_len;
-                let dy = angle.sin() * ray_len;
-                draw_line(sx + dx * 0.7, sy + dy * 0.7, sx + dx, sy + dy, 1.5, outline_color);
-            }
-        }
-    }
-
-    // Draw level objects (spawns, triggers, etc.) for current room and detect hover
+    // Draw level objects (spawns, lights, triggers, etc.) for current room and detect hover
     let mut hovered_object: Option<usize> = None;
     for (obj_idx, obj) in state.level.objects.iter().enumerate() {
         // Only draw objects in current room (or all rooms if not hidden)
@@ -579,37 +520,6 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
     }
 
-    // Draw ghost preview when dragging a light
-    if let Selection::Light { room: light_room, light: light_idx } = &state.selection {
-        if state.grid_sector_drag_start.is_some() && !state.grid_dragging_room_origin && state.grid_dragging_sectors.is_empty() {
-            let (offset_x, offset_z) = state.grid_sector_drag_offset;
-            // Snap to sector grid
-            let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
-            let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
-
-            if let Some(r) = state.level.rooms.get(*light_room) {
-                if let Some(light) = r.lights.get(*light_idx) {
-                    // Ghost at new position
-                    let new_world_x = r.position.x + light.position.x + snapped_x;
-                    let new_world_z = r.position.z + light.position.z + snapped_z;
-                    let (gx, gy) = world_to_screen(new_world_x, new_world_z);
-
-                    // Ghost light circle
-                    draw_circle(gx, gy, 10.0, Color::from_rgba(255, 255, 100, 150));
-                    draw_circle_lines(gx, gy, 13.0, 2.0, Color::from_rgba(255, 255, 100, 255));
-
-                    // Ghost sun rays
-                    for i in 0..4 {
-                        let angle = (i as f32) * std::f32::consts::PI / 2.0 + std::f32::consts::PI / 4.0;
-                        let dx = angle.cos() * 14.0;
-                        let dy = angle.sin() * 14.0;
-                        draw_line(gx + dx * 0.7, gy + dy * 0.7, gx + dx, gy + dy, 1.5, Color::from_rgba(255, 255, 100, 200));
-                    }
-                }
-            }
-        }
-    }
-
     // Draw ghost preview when dragging an object
     if let Some(obj_idx) = state.grid_dragging_object {
         if state.grid_sector_drag_start.is_some() {
@@ -737,33 +647,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 state.grid_sector_drag_offset = (0.0, 0.0);
                 state.grid_sector_drag_start = None;
             }
-            // Check if we're dragging a light (no grid snapping for lights)
-            else if let Selection::Light { room: light_room, light: light_idx } = state.selection {
-                if !state.grid_dragging_room_origin && state.grid_dragging_sectors.is_empty() {
-                    // Light dragging - apply offset directly (snapped to sector center)
-                    let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
-                    let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
-
-                    if snapped_x.abs() > 1.0 || snapped_z.abs() > 1.0 {
-                        state.save_undo();
-                        let mut new_pos = None;
-                        if let Some(room) = state.level.rooms.get_mut(light_room) {
-                            if let Some(light) = room.lights.get_mut(light_idx) {
-                                light.position.x += snapped_x;
-                                light.position.z += snapped_z;
-                                new_pos = Some((light.position.x, light.position.z));
-                            }
-                        }
-                        if let Some((x, z)) = new_pos {
-                            state.set_status(&format!("Moved light to ({:.0}, {:.0})", x, z), 2.0);
-                        }
-                    }
-
-                    // Clear drag state
-                    state.grid_sector_drag_offset = (0.0, 0.0);
-                    state.grid_sector_drag_start = None;
-                }
-            } else {
+            // Handle sector/room dragging
+            else {
                 // Snap offset to sector grid for sectors/rooms
                 let snapped_offset_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
                 let snapped_offset_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
@@ -960,23 +845,6 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             // Select the object
                             state.clear_multi_selection();
                             state.set_selection(Selection::Object { index: obj_idx });
-                        }
-                    }
-                    // Check if clicking on a light
-                    else if let Some(light_idx) = hovered_light {
-                        // Check if this light is already selected (start drag)
-                        let is_already_selected = matches!(&state.selection,
-                            Selection::Light { room, light } if *room == current_room_idx && *light == light_idx);
-
-                        if is_already_selected {
-                            // Start dragging the light
-                            let (wx, wz) = screen_to_world(mouse_pos.0, mouse_pos.1);
-                            state.grid_sector_drag_start = Some((wx, wz));
-                            state.grid_sector_drag_offset = (0.0, 0.0);
-                        } else {
-                            // Select the light
-                            state.clear_multi_selection();
-                            state.set_selection(Selection::Light { room: current_room_idx, light: light_idx });
                         }
                     }
                     // Check if clicking on room origin

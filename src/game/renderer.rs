@@ -52,19 +52,14 @@ pub fn draw_game_viewport(
 
     // Build lighting settings
     let render_settings = if game.raster_settings.shading != ShadingMode::None {
-        // Collect all enabled lights from all rooms
+        // Collect all lights from level objects
         let mut lights = Vec::new();
-        for room in &level.rooms {
-            for room_light in &room.lights {
-                if room_light.enabled {
-                    // Convert room-local position to world position
-                    let world_pos = Vec3::new(
-                        room.position.x + room_light.position.x,
-                        room.position.y + room_light.position.y,
-                        room.position.z + room_light.position.z,
-                    );
-                    let mut light = Light::point(world_pos, room_light.radius, room_light.intensity);
-                    light.color = room_light.color;
+        for obj in &level.objects {
+            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                if let Some(room) = level.rooms.get(obj.room) {
+                    let world_pos = obj.world_position(room);
+                    let mut light = Light::point(world_pos, *radius, *intensity);
+                    light.color = *color;
                     lights.push(light);
                 }
             }

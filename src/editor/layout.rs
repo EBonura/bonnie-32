@@ -468,7 +468,11 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 14.0).floor(), 16.0, WHITE);
         y += line_height;
 
-        draw_text(&format!("Lights: {}", room.lights.len()), x, (y + 14.0).floor(), 16.0, WHITE);
+        // Count lights in this room from level objects
+        let light_count = state.level.objects.iter()
+            .filter(|obj| obj.room == state.current_room && obj.is_light())
+            .count();
+        draw_text(&format!("Lights: {}", light_count), x, (y + 14.0).floor(), 16.0, WHITE);
         y += line_height;
 
         // Ambient light knob
@@ -1899,167 +1903,11 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 }
             }
         }
-        super::Selection::Light { room, light } => {
-            // Light properties - capture values first to avoid borrow issues
-            let room_idx = *room;
-            let light_idx = *light;
-
-            // Get light data snapshot (to avoid borrow issues with mutation later)
-            let light_snapshot = state.level.rooms.get(room_idx)
-                .and_then(|r| r.lights.get(light_idx))
-                .map(|l| (l.position, l.color, l.intensity, l.radius, l.enabled));
-
-            if let Some((position, color, intensity, radius, enabled)) = light_snapshot {
-                draw_text(&format!("Light {} in Room {}", light_idx, room_idx), x, (y + 14.0).floor(), 16.0, WHITE);
-                y += 24.0;
-
-                // Position
-                draw_text("Position:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
-                y += 18.0;
-                draw_text(&format!("  X: {:.0}  Y: {:.0}  Z: {:.0}",
-                    position.x, position.y, position.z),
-                    x, (y + 12.0).floor(), 13.0, WHITE);
-                y += 18.0;
-
-                // Color picker
-                let picker_result = draw_ps1_color_picker(
-                    ctx,
-                    x,
-                    y + 14.0,
-                    container_width - 8.0,
-                    color,
-                    "Color",
-                    &mut state.light_color_slider,
-                );
-                if let Some(new_color) = picker_result.color {
-                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
-                        if let Some(l) = room_data.lights.get_mut(light_idx) {
-                            l.color = new_color;
-                        }
-                    }
-                }
-                y += ps1_color_picker_height() + 18.0;
-
-                // Intensity and Radius knobs side by side
-                let knob_radius = 18.0;
-                let knob_spacing = 70.0;
-                let knob_center_y = y + knob_radius + 8.0;
-
-                // Intensity knob (0-127 maps to 0.0-1.27)
-                let intensity_knob_x = x + 30.0;
-                let intensity_value = (intensity * 100.0).round() as u8;
-                let intensity_result = draw_knob(
-                    ctx,
-                    intensity_knob_x,
-                    knob_center_y,
-                    knob_radius,
-                    intensity_value.min(127),
-                    "Intensity",
-                    false,
-                    false,
-                );
-
-                // Radius knob (0-127 maps to 0-20480 units)
-                let radius_knob_x = x + 30.0 + knob_spacing;
-                let radius_value = ((radius / 20480.0) * 127.0).round() as u8;
-                let radius_result = draw_knob(
-                    ctx,
-                    radius_knob_x,
-                    knob_center_y,
-                    knob_radius,
-                    radius_value.min(127),
-                    "Radius",
-                    false,
-                    false,
-                );
-
-                // Apply intensity changes
-                if let Some(new_val) = intensity_result.value {
-                    let clamped: u8 = new_val.min(127);
-                    let new_intensity = (clamped as f32) / 100.0;
-                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
-                        if let Some(l) = room_data.lights.get_mut(light_idx) {
-                            if (l.intensity - new_intensity).abs() > 0.001 {
-                                l.intensity = new_intensity;
-                            }
-                        }
-                    }
-                }
-
-                // Apply radius changes
-                if let Some(new_val) = radius_result.value {
-                    let new_radius = (new_val as f32 / 127.0) * 20480.0;
-                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
-                        if let Some(l) = room_data.lights.get_mut(light_idx) {
-                            if (l.radius - new_radius).abs() > 1.0 {
-                                l.radius = new_radius.max(64.0); // Minimum radius of 64
-                            }
-                        }
-                    }
-                }
-                y += knob_radius * 2.0 + 28.0;
-
-                // Enabled toggle button
-                let enabled_btn_rect = Rect::new(x, y, 80.0, 20.0);
-                let enabled_hovered = ctx.mouse.inside(&enabled_btn_rect);
-                let enabled_color = if enabled {
-                    if enabled_hovered { Color::from_rgba(120, 255, 120, 255) } else { Color::from_rgba(100, 255, 100, 255) }
-                } else {
-                    if enabled_hovered { Color::from_rgba(255, 120, 120, 255) } else { Color::from_rgba(255, 100, 100, 255) }
-                };
-                draw_rectangle(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h,
-                    Color::from_rgba(40, 40, 45, 255));
-                if enabled_hovered {
-                    draw_rectangle_lines(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h, 1.0, WHITE);
-                }
-                let enabled_text = if enabled { "Enabled" } else { "Disabled" };
-                draw_text(enabled_text, x + 10.0, (y + 14.0).floor(), 13.0, enabled_color);
-
-                if enabled_hovered && ctx.mouse.left_pressed {
-                    // Toggle enabled state
-                    state.save_undo();
-                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
-                        if let Some(l) = room_data.lights.get_mut(light_idx) {
-                            l.enabled = !l.enabled;
-                        }
-                    }
-                }
-                y += 24.0;
-
-                // Delete button
-                let delete_btn_rect = Rect::new(x, y, 100.0, 22.0);
-                let delete_hovered = ctx.mouse.inside(&delete_btn_rect);
-                let delete_color = if delete_hovered {
-                    Color::from_rgba(220, 80, 80, 255)
-                } else {
-                    Color::from_rgba(180, 60, 60, 255)
-                };
-                draw_rectangle(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, delete_color);
-                if delete_hovered {
-                    draw_rectangle_lines(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, 1.0, WHITE);
-                }
-                draw_text("Delete Light", x + 10.0, (y + 15.0).floor(), 13.0, WHITE);
-
-                if delete_hovered && ctx.mouse.left_pressed {
-                    // Delete the light
-                    state.save_undo();
-                    if let Some(room_data) = state.level.rooms.get_mut(room_idx) {
-                        if light_idx < room_data.lights.len() {
-                            room_data.lights.remove(light_idx);
-                        }
-                    }
-                    state.set_selection(super::Selection::None);
-                    state.set_status("Light deleted", 2.0);
-                }
-            } else {
-                draw_text("Light not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
-            }
-        }
         super::Selection::Object { index } => {
             // Object properties
             let obj_idx = *index;
 
-            if let Some(obj) = state.level.objects.get(obj_idx) {
+            if let Some(obj) = state.level.objects.get(obj_idx).cloned() {
                 let obj_name = obj.object_type.display_name();
                 draw_text(obj_name, x, (y + 14.0).floor(), 16.0, WHITE);
                 y += 24.0;
@@ -2076,7 +1924,123 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     x, (y + 12.0).floor(), 13.0, WHITE);
                 y += 24.0;
 
-                // Delete button (same pattern as Light delete)
+                // Type-specific properties
+                match &obj.object_type {
+                    crate::world::ObjectType::Light { color, intensity, radius } => {
+                        // Color picker
+                        let picker_height = ps1_color_picker_height();
+                        let picker_result = draw_ps1_color_picker(
+                            ctx,
+                            x,
+                            y,
+                            container_width - 8.0,
+                            *color,
+                            "Color",
+                            &mut state.light_color_slider,
+                        );
+                        if let Some(new_color) = picker_result.color {
+                            if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                                if let crate::world::ObjectType::Light { color: c, .. } = &mut obj_mut.object_type {
+                                    *c = new_color;
+                                }
+                            }
+                        }
+                        y += picker_height + 16.0;
+
+                        // Intensity knob
+                        let knob_radius = 18.0;
+                        let knob_center_x = x + container_width * 0.25;
+                        let knob_center_y = y + knob_radius + 12.0;
+
+                        // Convert intensity (0.0-2.0) to knob value (0-127)
+                        let intensity_value = ((intensity / 2.0) * 127.0).round() as u8;
+                        let intensity_result = draw_knob(
+                            ctx,
+                            knob_center_x,
+                            knob_center_y,
+                            knob_radius,
+                            intensity_value.min(127),
+                            "Intensity",
+                            false,
+                            false,
+                        );
+
+                        if let Some(new_val) = intensity_result.value {
+                            let new_intensity = (new_val as f32 / 127.0) * 2.0;
+                            if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                                if let crate::world::ObjectType::Light { intensity: i, .. } = &mut obj_mut.object_type {
+                                    *i = new_intensity;
+                                }
+                            }
+                        }
+
+                        // Radius knob
+                        let knob_center_x2 = x + container_width * 0.75;
+
+                        // Convert radius (0-16384) to knob value (0-127)
+                        // 16384 = 16 sectors worth of radius
+                        const MAX_LIGHT_RADIUS: f32 = 16384.0;
+                        let radius_value = ((radius / MAX_LIGHT_RADIUS) * 127.0).round() as u8;
+                        let radius_result = draw_knob(
+                            ctx,
+                            knob_center_x2,
+                            knob_center_y,
+                            knob_radius,
+                            radius_value.min(127),
+                            "Radius",
+                            false,
+                            false,
+                        );
+
+                        if let Some(new_val) = radius_result.value {
+                            let new_radius = (new_val as f32 / 127.0) * MAX_LIGHT_RADIUS;
+                            if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                                if let crate::world::ObjectType::Light { radius: r, .. } = &mut obj_mut.object_type {
+                                    *r = new_radius;
+                                }
+                            }
+                        }
+
+                        y += knob_radius * 2.0 + 35.0;
+                    }
+                    crate::world::ObjectType::Spawn(spawn_type) => {
+                        draw_text(&format!("Type: {:?}", spawn_type), x, (y + 12.0).floor(), 13.0, WHITE);
+                        y += 24.0;
+                    }
+                    crate::world::ObjectType::Prop(model_name) => {
+                        draw_text(&format!("Model: {}", model_name), x, (y + 12.0).floor(), 13.0, WHITE);
+                        y += 24.0;
+                    }
+                    _ => {
+                        // Other object types - just show enabled status
+                        y += 8.0;
+                    }
+                }
+
+                // Enabled toggle
+                let enabled_btn_rect = Rect::new(x, y, container_width - 8.0, 22.0);
+                let enabled_hovered = enabled_btn_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                let enabled_color = if obj.enabled {
+                    if enabled_hovered { Color::from_rgba(60, 140, 60, 255) } else { Color::from_rgba(40, 100, 40, 255) }
+                } else {
+                    if enabled_hovered { Color::from_rgba(100, 100, 100, 255) } else { Color::from_rgba(60, 60, 60, 255) }
+                };
+                draw_rectangle(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h, enabled_color);
+                if enabled_hovered {
+                    draw_rectangle_lines(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h, 1.0, WHITE);
+                }
+                let enabled_text = if obj.enabled { "Enabled" } else { "Disabled" };
+                draw_text(enabled_text, x + 10.0, (y + 15.0).floor(), 13.0, WHITE);
+
+                if enabled_hovered && ctx.mouse.left_pressed {
+                    state.save_undo();
+                    if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                        obj_mut.enabled = !obj_mut.enabled;
+                    }
+                }
+                y += 28.0;
+
+                // Delete button
                 let delete_btn_rect = Rect::new(x, y, container_width - 8.0, 22.0);
                 let delete_hovered = delete_btn_rect.contains(ctx.mouse.x, ctx.mouse.y);
                 let delete_color = if delete_hovered {
@@ -2126,7 +2090,6 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
 
     match selection {
         super::Selection::None | super::Selection::Room(_) | super::Selection::Portal { .. } => 30.0,
-        super::Selection::Light { .. } => 350.0, // Light header + position + color picker + intensity knob + radius knob + enabled + delete
 
         super::Selection::Edge { .. } => 120.0, // Edge header + 2 vertex coords
 
@@ -2201,7 +2164,20 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
             }
             height
         }
-        super::Selection::Object { .. } => 150.0, // Object header + location + height/facing + delete button
+        super::Selection::Object { index } => {
+            // Base height for all objects: header + location + enabled + delete
+            let mut height = 24.0 + 18.0 + 18.0 + 24.0 + 28.0 + 28.0; // header + location lines + type-specific + enabled + delete
+
+            // Add extra height for light objects (color picker + 2 knobs)
+            if let Some(obj) = state.level.objects.get(*index) {
+                if matches!(obj.object_type, crate::world::ObjectType::Light { .. }) {
+                    height += 18.0 + ps1_color_picker_height() + 16.0 + 18.0 * 2.0 + 35.0; // color label + picker + knobs
+                } else {
+                    height += 24.0; // Just the type info line
+                }
+            }
+            height
+        }
     }
 }
 

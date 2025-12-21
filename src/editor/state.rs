@@ -58,8 +58,6 @@ pub enum Selection {
     /// wall_face: Some(SectorFace::WallXxx) when face_idx=2
     Edge { room: usize, x: usize, z: usize, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace> },
     Portal { room: usize, portal: usize },
-    /// Light selected
-    Light { room: usize, light: usize },
     /// Level object selected (spawn, light, prop, etc.)
     Object { index: usize },
 }
@@ -198,11 +196,6 @@ pub struct EditorState {
     pub dragging_sector_vertices: Vec<(usize, usize, usize, SectorFace, usize)>,
     pub drag_initial_heights: Vec<f32>, // Initial Y/height values for each vertex
 
-    /// 3D viewport light dragging state
-    pub dragging_light: Option<(usize, usize)>, // (room_idx, light_idx)
-    pub dragging_light_initial_y: f32,          // Initial Y when drag started
-    pub dragging_light_plane_y: f32,            // Current accumulated drag plane Y
-
     /// 3D viewport object dragging state
     pub dragging_object: Option<usize>,         // Object index
     pub dragging_object_initial_y: f32,         // Initial Y when drag started
@@ -335,9 +328,6 @@ impl EditorState {
             viewport_drag_initial_y: Vec::new(),
             dragging_sector_vertices: Vec::new(),
             drag_initial_heights: Vec::new(),
-            dragging_light: None,
-            dragging_light_initial_y: 0.0,
-            dragging_light_plane_y: 0.0,
             dragging_object: None,
             dragging_object_initial_y: 0.0,
             dragging_object_plane_y: 0.0,
@@ -571,18 +561,6 @@ impl EditorState {
                         let sum = p.vertices.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
                         let count = p.vertices.len() as f32;
                         Vec3::new(sum.x / count, sum.y / count, sum.z / count)
-                    })
-                })
-            }
-            Selection::Light { room, light } => {
-                self.level.rooms.get(*room).and_then(|r| {
-                    r.lights.get(*light).map(|l| {
-                        // Light position in world space
-                        Vec3::new(
-                            r.position.x + l.position.x,
-                            r.position.y + l.position.y,
-                            r.position.z + l.position.z,
-                        )
                     })
                 })
             }

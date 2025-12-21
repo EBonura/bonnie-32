@@ -403,16 +403,14 @@ fn draw_orbit_preview(
     for room in &level.rooms {
         total_ambient += room.ambient;
         room_count += 1;
-        for room_light in &room.lights {
-            if room_light.enabled {
-                // Convert room-local position to world position
-                let world_pos = Vec3::new(
-                    room.position.x + room_light.position.x,
-                    room.position.y + room_light.position.y,
-                    room.position.z + room_light.position.z,
-                );
-                let mut light = Light::point(world_pos, room_light.radius, room_light.intensity);
-                light.color = room_light.color;
+    }
+    // Collect lights from level objects
+    for obj in &level.objects {
+        if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+            if let Some(room) = level.rooms.get(obj.room) {
+                let world_pos = obj.world_position(room);
+                let mut light = Light::point(world_pos, *radius, *intensity);
+                light.color = *color;
                 lights.push(light);
             }
         }
