@@ -49,6 +49,9 @@ pub struct World {
     /// Velocity for moving entities
     pub velocities: ComponentStorage<Velocity>,
 
+    /// Character controller (TR-style cylinder collision)
+    pub controllers: ComponentStorage<CharacterController>,
+
     /// Health and damage tracking
     pub health: ComponentStorage<Health>,
 
@@ -106,6 +109,7 @@ impl World {
 
             // Gameplay
             velocities: ComponentStorage::new(),
+            controllers: ComponentStorage::new(),
             health: ComponentStorage::new(),
             hitboxes: ComponentStorage::new(),
             hurtboxes: ComponentStorage::new(),
@@ -181,6 +185,7 @@ impl World {
         self.transforms.clear_slot(idx);
         self.global_transforms.clear_slot(idx);
         self.velocities.clear_slot(idx);
+        self.controllers.clear_slot(idx);
         self.health.clear_slot(idx);
         self.hitboxes.clear_slot(idx);
         self.hurtboxes.clear_slot(idx);
@@ -255,12 +260,17 @@ impl World {
     // =========================================================================
 
     /// Spawn a player entity with standard components.
-    pub fn spawn_player(&mut self, position: Vec3, max_health: i32) -> Entity {
+    /// Uses player settings from Level for collision dimensions.
+    pub fn spawn_player(&mut self, position: Vec3, max_health: i32, settings: &crate::world::PlayerSettings) -> Entity {
         let entity = self.spawn_at(position);
         self.players.insert(entity, Player);
+        // Create controller with settings from Level
+        let mut controller = CharacterController::new(settings.radius, settings.height);
+        controller.step_height = settings.step_height;
+        self.controllers.insert(entity, controller);
         self.health.insert(entity, Health::new(max_health));
         self.velocities.insert(entity, Velocity::default());
-        self.hurtboxes.insert(entity, Hurtbox::sphere(1.0));
+        self.hurtboxes.insert(entity, Hurtbox::sphere(settings.radius));
         entity
     }
 
@@ -349,7 +359,8 @@ mod tests {
     #[test]
     fn test_spawn_player() {
         let mut world = World::new();
-        let player = world.spawn_player(Vec3::new(0.0, 0.0, 0.0), 100);
+        let settings = crate::world::PlayerSettings::default();
+        let player = world.spawn_player(Vec3::new(0.0, 0.0, 0.0), 100, &settings);
 
         assert!(world.players.contains(player));
         assert!(world.health.contains(player));

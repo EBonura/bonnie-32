@@ -22,6 +22,79 @@ impl Velocity {
 }
 
 // =============================================================================
+// Character Controller (TR-style cylinder collision)
+// =============================================================================
+
+/// Character controller constants (TR-style, scaled to our 1024-unit sectors)
+pub mod character {
+    /// Player collision cylinder radius (about 1/10 of a sector)
+    pub const PLAYER_RADIUS: f32 = 100.0;
+    /// Player height (about 3/4 of a sector)
+    pub const PLAYER_HEIGHT: f32 = 762.0;
+    /// Maximum step-up height (about 1.5 "clicks" or 384 units)
+    pub const STEP_HEIGHT: f32 = 384.0;
+    /// Gravity acceleration (units per second squared)
+    pub const GRAVITY: f32 = 2400.0;
+    /// Terminal velocity (max falling speed)
+    pub const TERMINAL_VELOCITY: f32 = 4000.0;
+    /// Walk speed (units per second)
+    pub const WALK_SPEED: f32 = 800.0;
+    /// Run speed (units per second)
+    pub const RUN_SPEED: f32 = 1600.0;
+}
+
+/// Character controller component for TR-style cylinder collision
+///
+/// The character is modeled as a vertical cylinder that collides with
+/// sector-based floor/ceiling geometry. Like OpenLara, we check 4 points
+/// around the cylinder for wall collision.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CharacterController {
+    /// Cylinder collision radius
+    pub radius: f32,
+    /// Character height (for ceiling collision)
+    pub height: f32,
+    /// Maximum height character can step up
+    pub step_height: f32,
+    /// Is the character currently on the ground?
+    pub grounded: bool,
+    /// Current room index (for sector lookups)
+    pub current_room: usize,
+    /// Vertical velocity (for gravity/jumping)
+    pub vertical_velocity: f32,
+    /// Facing direction (yaw in radians)
+    pub facing: f32,
+}
+
+impl CharacterController {
+    /// Create a player-sized character controller
+    pub fn player() -> Self {
+        Self {
+            radius: character::PLAYER_RADIUS,
+            height: character::PLAYER_HEIGHT,
+            step_height: character::STEP_HEIGHT,
+            grounded: false,
+            current_room: 0,
+            vertical_velocity: 0.0,
+            facing: 0.0,
+        }
+    }
+
+    /// Create a character controller with custom dimensions
+    pub fn new(radius: f32, height: f32) -> Self {
+        Self {
+            radius,
+            height,
+            step_height: character::STEP_HEIGHT,
+            grounded: false,
+            current_room: 0,
+            vertical_velocity: 0.0,
+            facing: 0.0,
+        }
+    }
+}
+
+// =============================================================================
 // Combat Components
 // =============================================================================
 

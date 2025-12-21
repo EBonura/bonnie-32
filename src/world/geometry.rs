@@ -379,6 +379,42 @@ pub enum SpawnPointType {
     Item,
 }
 
+/// Player settings for the level (TR-style character controller parameters)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PlayerSettings {
+    /// Collision cylinder radius
+    pub radius: f32,
+    /// Character height (collision cylinder)
+    pub height: f32,
+    /// Maximum step-up height
+    pub step_height: f32,
+    /// Walk speed (units per second)
+    pub walk_speed: f32,
+    /// Run speed (units per second)
+    pub run_speed: f32,
+    /// Gravity acceleration (units per second squared)
+    pub gravity: f32,
+    /// Camera distance behind player
+    pub camera_distance: f32,
+    /// Camera height offset
+    pub camera_height: f32,
+}
+
+impl Default for PlayerSettings {
+    fn default() -> Self {
+        Self {
+            radius: 100.0,
+            height: 762.0,
+            step_height: 384.0,
+            walk_speed: 800.0,
+            run_speed: 1600.0,
+            gravity: 2400.0,
+            camera_distance: 800.0,
+            camera_height: 610.0,
+        }
+    }
+}
+
 // ============================================================================
 // Unified Tile-Based Object System (TR-style)
 // ============================================================================
@@ -1183,6 +1219,21 @@ impl Default for EditorLayoutConfig {
     }
 }
 
+/// Floor info at a world position for collision detection
+#[derive(Debug, Clone, Copy)]
+pub struct FloorInfo {
+    /// Room index containing this point
+    pub room: usize,
+    /// Floor height at this position (world Y)
+    pub floor: f32,
+    /// Ceiling height at this position (world Y)
+    pub ceiling: f32,
+    /// Sector grid X within room
+    pub sector_x: usize,
+    /// Sector grid Z within room
+    pub sector_z: usize,
+}
+
 /// The entire level
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Level {
@@ -1193,6 +1244,9 @@ pub struct Level {
     /// Editor layout configuration (optional, uses default if missing)
     #[serde(default)]
     pub editor_layout: EditorLayoutConfig,
+    /// Player character settings (collision, movement, camera)
+    #[serde(default)]
+    pub player_settings: PlayerSettings,
 }
 
 impl Level {
@@ -1201,6 +1255,7 @@ impl Level {
             rooms: Vec::new(),
             objects: Vec::new(),
             editor_layout: EditorLayoutConfig::default(),
+            player_settings: PlayerSettings::default(),
         }
     }
 
@@ -1353,6 +1408,63 @@ impl Level {
         self.find_room_at(point)
     }
 
+    // ========================================================================
+    // Floor/Ceiling queries (for collision detection)
+    // ========================================================================
+
+    /// Get floor and ceiling info at a world position
+    ///
+    /// Returns None if the point is outside all rooms.
+    pub fn get_floor_info(&self, point: Vec3, room_hint: Option<usize>) -> Option<FloorInfo> {
+        let room_idx = self.find_room_at_with_hint(point, room_hint)?;
+        let room = &self.rooms[room_idx];
+
+        // Convert world position to sector coordinates
+        let local_x = point.x - room.position.x;
+        let local_z = point.z - room.position.z;
+
+        let sector_x = (local_x / SECTOR_SIZE).floor() as isize;
+        let sector_z = (local_z / SECTOR_SIZE).floor() as isize;
+
+        // Bounds check
+        if sector_x < 0 || sector_z < 0 {
+            return None;
+        }
+        let sector_x = sector_x as usize;
+        let sector_z = sector_z as usize;
+
+        // Get sector
+        let sector = room.get_sector(sector_x, sector_z)?;
+
+        // Get floor height (interpolated for sloped floors would be ideal, but avg works)
+        let floor_y = sector.floor.as_ref()
+            .map(|f| room.position.y + f.avg_height())
+            .unwrap_or(room.position.y);
+
+        // Get ceiling height
+        let ceiling_y = sector.ceiling.as_ref()
+            .map(|c| room.position.y + c.avg_height())
+            .unwrap_or(room.position.y + 2048.0); // Default 2 sectors high
+
+        Some(FloorInfo {
+            room: room_idx,
+            floor: floor_y,
+            ceiling: ceiling_y,
+            sector_x,
+            sector_z,
+        })
+    }
+
+    /// Get floor height at a world position (simpler query)
+    pub fn get_floor_height(&self, point: Vec3, room_hint: Option<usize>) -> Option<f32> {
+        self.get_floor_info(point, room_hint).map(|info| info.floor)
+    }
+
+    /// Get ceiling height at a world position
+    pub fn get_ceiling_height(&self, point: Vec3, room_hint: Option<usize>) -> Option<f32> {
+        self.get_floor_info(point, room_hint).map(|info| info.ceiling)
+    }
+
     /// Recalculate all portals based on room adjacency
     /// Call this after room positions change, heights change, or walls are added/removed
     pub fn recalculate_portals(&mut self) {
@@ -1444,6 +1556,9 @@ impl Level {
                     // Get edge heights from both sectors: (left, right) when looking from inside
                     // The edge_heights function returns corners in world-space order for the shared edge,
                     // so both rooms' left/right corners line up (A.NW = B.SW, A.NE = B.SE for North/South)
+                    //
+                    // For open-air sectors (no ceiling), we use INFINITY to represent unbounded height.
+                    // This is valid for rendering but must be handled specially during serialization.
                     let (floor_a_left, floor_a_right) = sector_a.floor.as_ref()
                         .map(|f| f.edge_heights(dir))
                         .unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));

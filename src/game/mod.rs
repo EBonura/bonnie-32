@@ -21,6 +21,7 @@ pub mod world;
 pub mod event;
 pub mod transform;
 pub mod components;
+pub mod collision;
 pub mod runtime;
 pub mod renderer;
 
@@ -31,5 +32,6 @@ pub use world::World;
 pub use event::{Events, EventQueue};
 pub use transform::{Transform, GlobalTransform, propagate_transforms};
 pub use components::*;
+pub use collision::{collide_cylinder, move_and_slide, CollisionResult};
 pub use runtime::GameToolState;
-pub use renderer::draw_game_viewport;
+pub use renderer::draw_test_viewport;

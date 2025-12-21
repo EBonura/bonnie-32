@@ -65,6 +65,12 @@ fn is_valid_float(f: f32) -> bool {
     f.is_finite() && f.abs() <= limits::MAX_COORD
 }
 
+/// Check if a portal coordinate is valid (allows infinity for unbounded portals)
+/// Portal Y coordinates can be infinite for open-air sectors with no ceiling
+fn is_valid_portal_coord(f: f32) -> bool {
+    !f.is_nan() && (f.is_finite() && f.abs() <= limits::MAX_COORD || f.is_infinite())
+}
+
 /// Validate a texture reference
 fn validate_texture_ref(tex: &TextureRef, context: &str) -> Result<(), String> {
     if tex.pack.len() > limits::MAX_STRING_LEN {
@@ -186,10 +192,11 @@ fn validate_room(room: &Room, room_idx: usize, total_rooms: usize) -> Result<(),
             return Err(format!("{} portal[{}]: invalid target_room {} (only {} rooms)",
                 context, i, portal.target_room, total_rooms));
         }
-        // Validate portal vertices
+        // Validate portal vertices (Y can be infinite for open-air sectors)
         for (j, v) in portal.vertices.iter().enumerate() {
-            if !is_valid_float(v.x) || !is_valid_float(v.y) || !is_valid_float(v.z) {
-                return Err(format!("{} portal[{}] vertex[{}]: invalid coordinates", context, i, j));
+            if !is_valid_portal_coord(v.x) || !is_valid_portal_coord(v.y) || !is_valid_portal_coord(v.z) {
+                return Err(format!("{} portal[{}] vertex[{}]: invalid coordinates ({}, {}, {})",
+                    context, i, j, v.x, v.y, v.z));
             }
         }
         // Validate portal normal

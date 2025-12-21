@@ -506,6 +506,8 @@ pub struct RasterSettings {
     pub shading: ShadingMode,
     /// Backface culling
     pub backface_cull: bool,
+    /// Show wireframe on back-facing polygons (editor feature, disable in game)
+    pub backface_wireframe: bool,
     /// Scene lights (multiple light sources)
     pub lights: Vec<Light>,
     /// Ambient light intensity (0.0-1.0)
@@ -533,6 +535,14 @@ impl RasterSettings {
         }
         Vec3::new(-1.0, -1.0, -1.0).normalize()
     }
+
+    /// Create settings for in-game rendering (no editor debug features)
+    pub fn game() -> Self {
+        Self {
+            backface_wireframe: false, // Disable editor debug wireframe
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for RasterSettings {
@@ -543,6 +553,7 @@ impl Default for RasterSettings {
             use_zbuffer: true,
             shading: ShadingMode::Gouraud,
             backface_cull: true,
+            backface_wireframe: true, // Editor default: show backfaces as wireframe
             lights: vec![Light::directional(Vec3::new(-1.0, -1.0, -1.0), 0.7)],
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240

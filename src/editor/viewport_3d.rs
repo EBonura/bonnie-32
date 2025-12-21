@@ -1567,55 +1567,45 @@ pub fn draw_viewport_3d(
                     ObjectType::Audio { .. } => (RasterColor::new(100, 200, 255), '~', None),
                 };
 
-                let base_radius = if is_selected { 8 } else { 5 };
+                // For lights, draw 3D filled octahedron gizmo
+                if let Some(_radius) = draw_radius {
+                    let octa_size = if is_selected { 80.0 } else { 50.0 };
+                    let octa_color = if is_selected {
+                        RasterColor::new(255, 255, 255) // White when selected
+                    } else {
+                        color
+                    };
+                    draw_filled_octahedron(fb, &state.camera_3d, world_pos, octa_size, octa_color);
+                } else {
+                    // Non-light objects: use 2D circles
+                    let base_radius = if is_selected { 8 } else { 5 };
 
-                // Selection highlight (white circle behind)
-                if is_selected {
-                    fb.draw_circle(fb_x as i32, fb_y as i32, base_radius + 3, RasterColor::new(255, 255, 255));
+                    // Selection highlight (white circle behind)
+                    if is_selected {
+                        fb.draw_circle(fb_x as i32, fb_y as i32, base_radius + 3, RasterColor::new(255, 255, 255));
+                    }
+
+                    // Main circle
+                    fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
                 }
 
-                // Main circle
-                fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
-
-                // For lights, draw radius indicator and sun rays
-                if let Some(radius) = draw_radius {
-                    // Calculate screen-space radius (approximate)
-                    let cam_dist = (world_pos - state.camera_3d.position).len();
-                    if cam_dist > 0.1 {
-                        // Simple perspective approximation for radius visualization
-                        let screen_radius = (radius / cam_dist * fb.width as f32 * 0.3).min(200.0);
-                        if screen_radius > 10.0 && obj.enabled {
-                            // Draw radius circle (hollow)
-                            let r = screen_radius as i32;
-                            let dim_color = RasterColor::new(
-                                (color.r as u16 / 2) as u8,
-                                (color.g as u16 / 2) as u8,
-                                (color.b as u16 / 2) as u8,
-                            );
-                            // Draw dashed circle approximation (8 points)
-                            for i in 0..16 {
-                                let angle = (i as f32) * std::f32::consts::PI / 8.0;
-                                let px = fb_x as i32 + (angle.cos() * r as f32) as i32;
-                                let py = fb_y as i32 + (angle.sin() * r as f32) as i32;
-                                if i % 2 == 0 {
-                                    fb.draw_circle(px, py, 1, dim_color);
-                                }
-                            }
-                        }
-                    }
-
-                    // Sun rays for enabled lights
-                    if obj.enabled {
-                        let ray_len = base_radius as i32 + 4;
-                        let offsets = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-                        for (dx, dy) in offsets {
-                            let x0 = fb_x as i32 + dx * (base_radius as i32 + 1);
-                            let y0 = fb_y as i32 + dy * (base_radius as i32 + 1);
-                            let x1 = fb_x as i32 + dx * ray_len;
-                            let y1 = fb_y as i32 + dy * ray_len;
-                            fb.draw_line_3d(x0, y0, 0.0, x1, y1, 0.0, color);
-                        }
-                    }
+                // For PlayerStart, draw collision cylinder wireframe
+                if matches!(&obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)) {
+                    let settings = &state.level.player_settings;
+                    let cylinder_color = if is_selected {
+                        RasterColor::new(150, 255, 150) // Brighter green when selected
+                    } else {
+                        RasterColor::new(80, 200, 80) // Normal green
+                    };
+                    draw_wireframe_cylinder(
+                        fb,
+                        &state.camera_3d,
+                        world_pos,
+                        settings.radius,
+                        settings.height,
+                        12, // segments
+                        cylinder_color,
+                    );
                 }
             }
         }
@@ -2280,6 +2270,187 @@ fn draw_3d_line(
         if e2 <= dx {
             err += dx;
             y0 += sy;
+        }
+    }
+}
+
+/// Draw a wireframe cylinder in the 3D view (for player collision visualization)
+fn draw_wireframe_cylinder(
+    fb: &mut Framebuffer,
+    camera: &crate::rasterizer::Camera,
+    center: Vec3,
+    radius: f32,
+    height: f32,
+    segments: usize,
+    color: RasterColor,
+) {
+    use std::f32::consts::PI;
+
+    // Generate circle points at bottom and top
+    let mut bottom_points: Vec<Vec3> = Vec::with_capacity(segments);
+    let mut top_points: Vec<Vec3> = Vec::with_capacity(segments);
+
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let x = center.x + radius * angle.cos();
+        let z = center.z + radius * angle.sin();
+
+        bottom_points.push(Vec3::new(x, center.y, z));
+        top_points.push(Vec3::new(x, center.y + height, z));
+    }
+
+    // Draw bottom circle
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        draw_3d_line(fb, bottom_points[i], bottom_points[next], camera, color);
+    }
+
+    // Draw top circle
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        draw_3d_line(fb, top_points[i], top_points[next], camera, color);
+    }
+
+    // Draw vertical lines connecting top and bottom (every other segment for cleaner look)
+    let skip = if segments > 8 { 2 } else { 1 };
+    for i in (0..segments).step_by(skip) {
+        draw_3d_line(fb, bottom_points[i], top_points[i], camera, color);
+    }
+}
+
+/// Draw a filled octahedron in 3D (classic light gizmo)
+fn draw_filled_octahedron(
+    fb: &mut Framebuffer,
+    camera: &crate::rasterizer::Camera,
+    center: Vec3,
+    size: f32,
+    color: RasterColor,
+) {
+    // Octahedron has 6 vertices: top, bottom, and 4 around the middle
+    let top = Vec3::new(center.x, center.y + size, center.z);
+    let bottom = Vec3::new(center.x, center.y - size, center.z);
+    let front = Vec3::new(center.x, center.y, center.z + size);
+    let back = Vec3::new(center.x, center.y, center.z - size);
+    let left = Vec3::new(center.x - size, center.y, center.z);
+    let right = Vec3::new(center.x + size, center.y, center.z);
+
+    // Project all vertices to screen space
+    let project_vertex = |p: Vec3| -> Option<(i32, i32, f32)> {
+        let rel = p - camera.position;
+        let cam = crate::rasterizer::perspective_transform(rel, camera.basis_x, camera.basis_y, camera.basis_z);
+        if cam.z < 0.1 { return None; }
+        let proj = crate::rasterizer::project(cam, false, fb.width, fb.height);
+        Some((proj.x as i32, proj.y as i32, cam.z))
+    };
+
+    let top_s = project_vertex(top);
+    let bottom_s = project_vertex(bottom);
+    let front_s = project_vertex(front);
+    let back_s = project_vertex(back);
+    let left_s = project_vertex(left);
+    let right_s = project_vertex(right);
+
+    // 8 triangular faces of the octahedron
+    // Top pyramid: top-front-right, top-right-back, top-back-left, top-left-front
+    // Bottom pyramid: bottom-right-front, bottom-back-right, bottom-left-back, bottom-front-left
+    let faces = [
+        (top_s, front_s, right_s),
+        (top_s, right_s, back_s),
+        (top_s, back_s, left_s),
+        (top_s, left_s, front_s),
+        (bottom_s, right_s, front_s),
+        (bottom_s, back_s, right_s),
+        (bottom_s, left_s, back_s),
+        (bottom_s, front_s, left_s),
+    ];
+
+    for (v0, v1, v2) in faces {
+        if let (Some(p0), Some(p1), Some(p2)) = (v0, v1, v2) {
+            draw_filled_triangle_3d(fb, p0, p1, p2, color);
+        }
+    }
+
+    // Draw edges for definition
+    let edge_color = RasterColor::new(
+        (color.r as u16 * 3 / 4) as u8,
+        (color.g as u16 * 3 / 4) as u8,
+        (color.b as u16 * 3 / 4) as u8,
+    );
+    draw_3d_line(fb, top, front, camera, edge_color);
+    draw_3d_line(fb, top, back, camera, edge_color);
+    draw_3d_line(fb, top, left, camera, edge_color);
+    draw_3d_line(fb, top, right, camera, edge_color);
+    draw_3d_line(fb, bottom, front, camera, edge_color);
+    draw_3d_line(fb, bottom, back, camera, edge_color);
+    draw_3d_line(fb, bottom, left, camera, edge_color);
+    draw_3d_line(fb, bottom, right, camera, edge_color);
+    draw_3d_line(fb, front, right, camera, edge_color);
+    draw_3d_line(fb, right, back, camera, edge_color);
+    draw_3d_line(fb, back, left, camera, edge_color);
+    draw_3d_line(fb, left, front, camera, edge_color);
+}
+
+/// Draw a filled triangle (for gizmos, renders on top without z-test)
+fn draw_filled_triangle_3d(
+    fb: &mut Framebuffer,
+    p0: (i32, i32, f32),
+    p1: (i32, i32, f32),
+    p2: (i32, i32, f32),
+    color: RasterColor,
+) {
+    // Sort vertices by y coordinate (ignore z, we don't z-test gizmos)
+    let mut pts = [(p0.0, p0.1), (p1.0, p1.1), (p2.0, p2.1)];
+    pts.sort_by(|a, b| a.1.cmp(&b.1));
+    let (x0, y0) = pts[0];
+    let (x1, y1) = pts[1];
+    let (x2, y2) = pts[2];
+
+    if y2 == y0 { return; } // Degenerate triangle
+
+    // Scanline fill
+    let total_height = (y2 - y0) as f32;
+
+    for y in y0.max(0)..=y2.min(fb.height as i32 - 1) {
+        let second_half = y > y1 || y1 == y0;
+        let segment_height = if second_half {
+            (y2 - y1) as f32
+        } else {
+            (y1 - y0) as f32
+        };
+
+        if segment_height == 0.0 { continue; }
+
+        let alpha = (y - y0) as f32 / total_height;
+        let beta = if second_half {
+            (y - y1) as f32 / segment_height
+        } else {
+            (y - y0) as f32 / segment_height
+        };
+
+        // Interpolate x along edges
+        let mut ax = x0 as f32 + (x2 - x0) as f32 * alpha;
+        let mut bx = if second_half {
+            x1 as f32 + (x2 - x1) as f32 * beta
+        } else {
+            x0 as f32 + (x1 - x0) as f32 * beta
+        };
+
+        if ax > bx {
+            std::mem::swap(&mut ax, &mut bx);
+        }
+
+        let x_start = (ax as i32).max(0);
+        let x_end = (bx as i32).min(fb.width as i32 - 1);
+
+        // Draw horizontal scanline
+        for x in x_start..=x_end {
+            let idx = (y as usize * fb.width + x as usize) * 4;
+            if idx + 3 < fb.pixels.len() {
+                fb.pixels[idx] = color.r;
+                fb.pixels[idx + 1] = color.g;
+                fb.pixels[idx + 2] = color.b;
+                fb.pixels[idx + 3] = 255;
+            }
         }
     }
 }

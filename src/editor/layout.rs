@@ -2004,8 +2004,101 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                         y += knob_radius * 2.0 + 35.0;
                     }
                     crate::world::ObjectType::Spawn(spawn_type) => {
-                        draw_text(&format!("Type: {:?}", spawn_type), x, (y + 12.0).floor(), 13.0, WHITE);
-                        y += 24.0;
+                        use crate::world::SpawnPointType;
+
+                        match spawn_type {
+                            SpawnPointType::PlayerStart => {
+                                // Player settings - editable with scroll-to-edit
+                                let section_color = Color::from_rgba(120, 150, 180, 255);
+                                let line_height = 20.0;
+
+                                // Helper to draw a property row with scroll-to-edit
+                                let draw_prop = |ctx: &UiContext, x: f32, y: f32, w: f32, label: &str, value: f32, min: f32, max: f32, step: f32| -> (f32, Option<f32>) {
+                                    let label_color = Color::from_rgba(180, 180, 190, 255);
+                                    let value_color = Color::from_rgba(220, 220, 230, 255);
+
+                                    draw_text(label, x, (y + 13.0).floor(), 12.0, label_color);
+
+                                    let value_x = x + 80.0;
+                                    let value_w = w - 90.0;
+                                    let value_rect = Rect::new(value_x, y, value_w, line_height - 2.0);
+
+                                    let hovered = value_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                                    let bg_color = if hovered {
+                                        Color::from_rgba(55, 55, 65, 255)
+                                    } else {
+                                        Color::from_rgba(45, 45, 55, 255)
+                                    };
+                                    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, bg_color);
+
+                                    draw_text(&format!("{:.0}", value), value_x + 4.0, (y + 13.0).floor(), 12.0, value_color);
+
+                                    let new_val = if hovered {
+                                        let scroll = mouse_wheel().1;
+                                        if scroll.abs() > 0.1 {
+                                            Some((value + scroll * step).clamp(min, max))
+                                        } else { None }
+                                    } else { None };
+
+                                    (y + line_height, new_val)
+                                };
+
+                                // === Collision Section ===
+                                draw_text("Collision", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Radius", state.level.player_settings.radius, 20.0, 500.0, 5.0);
+                                if let Some(v) = nv { state.level.player_settings.radius = v; }
+                                y = ny;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Height", state.level.player_settings.height, 100.0, 2000.0, 20.0);
+                                if let Some(v) = nv { state.level.player_settings.height = v; }
+                                y = ny;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Step", state.level.player_settings.step_height, 50.0, 1000.0, 10.0);
+                                if let Some(v) = nv { state.level.player_settings.step_height = v; }
+                                y = ny;
+
+                                y += 6.0;
+
+                                // === Movement Section ===
+                                draw_text("Movement", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Walk", state.level.player_settings.walk_speed, 100.0, 3000.0, 50.0);
+                                if let Some(v) = nv { state.level.player_settings.walk_speed = v; }
+                                y = ny;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Run", state.level.player_settings.run_speed, 200.0, 5000.0, 50.0);
+                                if let Some(v) = nv { state.level.player_settings.run_speed = v; }
+                                y = ny;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Gravity", state.level.player_settings.gravity, 500.0, 10000.0, 100.0);
+                                if let Some(v) = nv { state.level.player_settings.gravity = v; }
+                                y = ny;
+
+                                y += 6.0;
+
+                                // === Camera Section ===
+                                draw_text("Camera", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Distance", state.level.player_settings.camera_distance, 200.0, 3000.0, 25.0);
+                                if let Some(v) = nv { state.level.player_settings.camera_distance = v; }
+                                y = ny;
+
+                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Height", state.level.player_settings.camera_height, 100.0, 1500.0, 25.0);
+                                if let Some(v) = nv { state.level.player_settings.camera_height = v; }
+                                y = ny;
+
+                                y += 8.0;
+                            }
+                            _ => {
+                                // Other spawn types - just show type
+                                draw_text(&format!("Type: {:?}", spawn_type), x, (y + 12.0).floor(), 13.0, WHITE);
+                                y += 24.0;
+                            }
+                        }
                     }
                     crate::world::ObjectType::Prop(model_name) => {
                         draw_text(&format!("Model: {}", model_name), x, (y + 12.0).floor(), 13.0, WHITE);
@@ -2168,12 +2261,22 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
             // Base height for all objects: header + location + enabled + delete
             let mut height = 24.0 + 18.0 + 18.0 + 24.0 + 28.0 + 28.0; // header + location lines + type-specific + enabled + delete
 
-            // Add extra height for light objects (color picker + 2 knobs)
+            // Add extra height for objects with custom properties
             if let Some(obj) = state.level.objects.get(*index) {
-                if matches!(obj.object_type, crate::world::ObjectType::Light { .. }) {
-                    height += 18.0 + ps1_color_picker_height() + 16.0 + 18.0 * 2.0 + 35.0; // color label + picker + knobs
-                } else {
-                    height += 24.0; // Just the type info line
+                match &obj.object_type {
+                    crate::world::ObjectType::Light { .. } => {
+                        height += 18.0 + ps1_color_picker_height() + 16.0 + 18.0 * 2.0 + 35.0; // color label + picker + knobs
+                    }
+                    crate::world::ObjectType::Spawn(crate::world::SpawnPointType::PlayerStart) => {
+                        // Player settings: 3 sections with scroll-to-edit rows
+                        // Collision: header 18 + 3 rows at 20 = 78
+                        // Movement: header 18 + 3 rows at 20 = 78 + 6 gap
+                        // Camera: header 18 + 2 rows at 20 = 58 + 6 gap + 8 final
+                        height += 78.0 + 6.0 + 78.0 + 6.0 + 58.0 + 8.0; // = 234
+                    }
+                    _ => {
+                        height += 24.0; // Just the type info line
+                    }
                 }
             }
             height

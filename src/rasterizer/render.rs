@@ -734,8 +734,8 @@ pub fn render_mesh(
     }
 
     // Draw wireframes for back-faces (visible but not solid)
-    // Only draw if backface culling is enabled (otherwise they're rendered solid above)
-    if settings.backface_cull {
+    // Only draw if backface culling is enabled AND backface wireframe is enabled
+    if settings.backface_cull && settings.backface_wireframe {
         // Deduplicate edges to avoid drawing shared edges twice (which causes double-line artifacts)
         // Include z values for depth testing
         let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();

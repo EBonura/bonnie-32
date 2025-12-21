@@ -18,7 +18,7 @@ use std::path::PathBuf;
 pub enum Tool {
     Home = 0,
     WorldEditor = 1,
-    Game = 2,
+    Test = 2,
     Modeler = 3,
     Tracker = 4,
 }
@@ -27,7 +27,7 @@ impl Tool {
     pub const ALL: [Tool; 5] = [
         Tool::Home,
         Tool::WorldEditor,
-        Tool::Game,
+        Tool::Test,
         Tool::Modeler,
         Tool::Tracker,
     ];
@@ -38,7 +38,7 @@ impl Tool {
         match self {
             Tool::Home => "Home",
             Tool::WorldEditor => "World",
-            Tool::Game => "Game",
+            Tool::Test => "Test",
             Tool::Modeler => "Assets",
             Tool::Tracker => "Music",
         }
@@ -50,7 +50,7 @@ impl Tool {
         [
             Tool::Home.label(),
             Tool::WorldEditor.label(),
-            Tool::Game.label(),
+            Tool::Test.label(),
             Tool::Modeler.label(),
             Tool::Tracker.label(),
         ]

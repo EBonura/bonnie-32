@@ -377,7 +377,7 @@ async fn main() {
                 }
             }
 
-            Tool::Game => {
+            Tool::Test => {
                 // Build textures array from World Editor texture packs
                 let game_textures: Vec<Texture> = app.world_editor.editor_state.texture_packs
                     .iter()
@@ -385,8 +385,22 @@ async fn main() {
                     .cloned()
                     .collect();
 
-                // Render the game using project.level (live editing!)
-                game::draw_game_viewport(
+                // Spawn player if playing and no player exists
+                if app.game.playing && app.game.player_entity.is_none() {
+                    if let Some(spawn) = app.project.level.get_player_start() {
+                        if let Some(room) = app.project.level.rooms.get(spawn.room) {
+                            let pos = spawn.world_position(room);
+                            app.game.spawn_player(pos, &app.project.level);
+                        }
+                    }
+                }
+
+                // Run game simulation
+                let delta = get_frame_time();
+                app.game.tick(&app.project.level, delta);
+
+                // Render the test viewport (player settings edited in World Editor)
+                game::draw_test_viewport(
                     content_rect,
                     &mut app.game,
                     &app.project.level,
