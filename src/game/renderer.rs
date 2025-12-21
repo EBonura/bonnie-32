@@ -52,36 +52,33 @@ pub fn draw_test_viewport(
     };
 
     // Build lighting settings
-    let render_settings = if game.raster_settings.shading != ShadingMode::None {
-        // Collect all lights from level objects
-        let mut lights = Vec::new();
-        for obj in &level.objects {
-            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                if let Some(room) = level.rooms.get(obj.room) {
-                    let world_pos = obj.world_position(room);
-                    let mut light = Light::point(world_pos, *radius, *intensity);
-                    light.color = *color;
-                    lights.push(light);
+    // Collect all lights from level objects (shared across rooms)
+    let lights: Vec<Light> = if game.raster_settings.shading != ShadingMode::None {
+        level.objects.iter()
+            .filter_map(|obj| {
+                if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                    level.rooms.get(obj.room).map(|room| {
+                        let world_pos = obj.world_position(room);
+                        let mut light = Light::point(world_pos, *radius, *intensity);
+                        light.color = *color;
+                        light
+                    })
+                } else {
+                    None
                 }
-            }
-        }
-
-        // Use ambient from first room (or default)
-        let ambient = level.rooms.first()
-            .map(|r| r.ambient)
-            .unwrap_or(0.5);
-
-        RasterSettings {
-            lights,
-            ambient,
-            ..game.raster_settings.clone()
-        }
+            })
+            .collect()
     } else {
-        game.raster_settings.clone()
+        Vec::new()
     };
 
-    // Render all rooms
+    // Render each room with its own ambient setting
     for room in &level.rooms {
+        let render_settings = RasterSettings {
+            lights: lights.clone(),
+            ambient: room.ambient,
+            ..game.raster_settings.clone()
+        };
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings);
     }

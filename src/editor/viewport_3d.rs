@@ -1385,42 +1385,38 @@ pub fn draw_viewport_3d(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
-    // Build lighting settings: when Gouraud is ON, use level lights; when OFF, no shading
-    let render_settings = if state.raster_settings.shading != crate::rasterizer::ShadingMode::None {
-        // Collect all enabled lights from level objects
-        let mut lights = Vec::new();
-        for obj in &state.level.objects {
-            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                if let Some(room) = state.level.rooms.get(obj.room) {
-                    let world_pos = obj.world_position(room);
-                    let mut light = Light::point(world_pos, *radius, *intensity);
-                    light.color = *color;
-                    lights.push(light);
+    // Collect all lights from level objects (shared across rooms)
+    let lights: Vec<Light> = if state.raster_settings.shading != crate::rasterizer::ShadingMode::None {
+        state.level.objects.iter()
+            .filter_map(|obj| {
+                if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                    state.level.rooms.get(obj.room).map(|room| {
+                        let world_pos = obj.world_position(room);
+                        let mut light = Light::point(world_pos, *radius, *intensity);
+                        light.color = *color;
+                        light
+                    })
+                } else {
+                    None
                 }
-            }
-        }
-        // Use room ambient from current room (or default)
-        let ambient = state.level.rooms.get(state.current_room)
-            .map(|r| r.ambient)
-            .unwrap_or(0.5);
-        // Create modified settings with level lights
-        RasterSettings {
-            lights,
-            ambient,
-            ..state.raster_settings.clone()
-        }
+            })
+            .collect()
     } else {
-        state.raster_settings.clone()
+        Vec::new()
     };
 
-    // Render all rooms (skip hidden ones)
+    // Render each room with its own ambient setting (skip hidden ones)
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         // Skip hidden rooms
         if state.hidden_rooms.contains(&room_idx) {
             continue;
         }
+        let render_settings = RasterSettings {
+            lights: lights.clone(),
+            ambient: room.ambient,
+            ..state.raster_settings.clone()
+        };
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-
         render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
     }
 

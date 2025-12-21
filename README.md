@@ -192,7 +192,7 @@ This project uses the following free texture packs:
 
 - [ ] **Fix link icon**: The "vertices independent" toolbar icon is wrong - should use `link-2` from Lucide
 - [ ] **Rename linking feature**: "Vertex linking" is misleading since it now works for edges and faces too. Needs better naming (e.g., "Geometry Linking" or "Coincident Linking")
-- [ ] **Per-room ambient light**: Currently changing ambient in one room affects all rooms. Each room should have independent ambient settings.
+- [x] **Per-room ambient light**: Each room now uses its own ambient setting when rendering
 
 ---
 
