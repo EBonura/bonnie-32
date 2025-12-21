@@ -366,6 +366,205 @@ impl Aabb {
     }
 }
 
+/// Types of spawn points in the level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpawnPointType {
+    /// Player start position
+    PlayerStart,
+    /// Checkpoint / bonfire / save point
+    Checkpoint,
+    /// Enemy spawn location
+    Enemy,
+    /// Item pickup location
+    Item,
+}
+
+// ============================================================================
+// Unified Tile-Based Object System (TR-style)
+// ============================================================================
+
+/// Object types that can be placed on tiles
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ObjectType {
+    /// Spawn point (player start, checkpoint, enemy, item)
+    Spawn(SpawnPointType),
+    /// Point light source
+    Light {
+        /// Light color (RGB)
+        color: Color,
+        /// Light intensity (0.0-2.0+)
+        intensity: f32,
+        /// Falloff radius in world units
+        radius: f32,
+    },
+    /// Static prop/decoration (references model by name)
+    Prop(String),
+    /// Trigger zone (for scripting)
+    Trigger {
+        /// Trigger identifier for scripting
+        trigger_id: String,
+        /// Trigger type (e.g., "on_enter", "on_leave", "on_use")
+        trigger_type: String,
+    },
+    /// Particle emitter
+    Particle {
+        /// Particle effect name
+        effect: String,
+    },
+    /// Audio source (ambient sound)
+    Audio {
+        /// Sound asset name
+        sound: String,
+        /// Volume (0.0-1.0)
+        volume: f32,
+        /// Radius for 3D falloff
+        radius: f32,
+        /// Loop the sound?
+        looping: bool,
+    },
+}
+
+impl ObjectType {
+    /// Get a display name for the object type
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ObjectType::Spawn(SpawnPointType::PlayerStart) => "Player Start",
+            ObjectType::Spawn(SpawnPointType::Checkpoint) => "Checkpoint",
+            ObjectType::Spawn(SpawnPointType::Enemy) => "Enemy Spawn",
+            ObjectType::Spawn(SpawnPointType::Item) => "Item Spawn",
+            ObjectType::Light { .. } => "Light",
+            ObjectType::Prop(_) => "Prop",
+            ObjectType::Trigger { .. } => "Trigger",
+            ObjectType::Particle { .. } => "Particle",
+            ObjectType::Audio { .. } => "Audio",
+        }
+    }
+
+    /// Check if this object type is unique per tile (only one allowed)
+    pub fn is_unique_per_tile(&self) -> bool {
+        matches!(self,
+            ObjectType::Spawn(SpawnPointType::PlayerStart) |
+            ObjectType::Spawn(SpawnPointType::Checkpoint) |
+            ObjectType::Light { .. }
+        )
+    }
+
+    /// Check if this object type is unique per level (only one in entire level)
+    pub fn is_unique_per_level(&self) -> bool {
+        matches!(self, ObjectType::Spawn(SpawnPointType::PlayerStart))
+    }
+}
+
+/// A tile-based object placed in the level
+///
+/// Objects are tied to sectors (tiles) using room + grid coordinates.
+/// Height offset allows vertical positioning within the sector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LevelObject {
+    /// Room this object belongs to
+    pub room: usize,
+    /// Sector X coordinate within the room
+    pub sector_x: usize,
+    /// Sector Z coordinate within the room
+    pub sector_z: usize,
+    /// Height offset from sector floor (in world units)
+    #[serde(default)]
+    pub height: f32,
+    /// Facing direction (yaw angle in radians, 0 = +Z)
+    #[serde(default)]
+    pub facing: f32,
+    /// The object type and its specific properties
+    pub object_type: ObjectType,
+    /// Optional name/identifier
+    #[serde(default)]
+    pub name: String,
+    /// Is this object active/enabled?
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl LevelObject {
+    /// Create a new object at a sector position
+    pub fn new(room: usize, sector_x: usize, sector_z: usize, object_type: ObjectType) -> Self {
+        Self {
+            room,
+            sector_x,
+            sector_z,
+            height: 0.0,
+            facing: 0.0,
+            object_type,
+            name: String::new(),
+            enabled: true,
+        }
+    }
+
+    /// Create a player start object
+    pub fn player_start(room: usize, sector_x: usize, sector_z: usize) -> Self {
+        Self::new(room, sector_x, sector_z, ObjectType::Spawn(SpawnPointType::PlayerStart))
+    }
+
+    /// Create a light object
+    pub fn light(room: usize, sector_x: usize, sector_z: usize, color: Color, intensity: f32, radius: f32) -> Self {
+        Self::new(room, sector_x, sector_z, ObjectType::Light { color, intensity, radius })
+    }
+
+    /// Create a prop object
+    pub fn prop(room: usize, sector_x: usize, sector_z: usize, model_name: impl Into<String>) -> Self {
+        Self::new(room, sector_x, sector_z, ObjectType::Prop(model_name.into()))
+    }
+
+    /// Set height offset
+    pub fn with_height(mut self, height: f32) -> Self {
+        self.height = height;
+        self
+    }
+
+    /// Set facing direction
+    pub fn with_facing(mut self, facing: f32) -> Self {
+        self.facing = facing;
+        self
+    }
+
+    /// Set name
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Calculate world-space position of this object
+    /// Requires the room to calculate the sector's floor height
+    pub fn world_position(&self, room: &Room) -> Vec3 {
+        let base_x = room.position.x + (self.sector_x as f32) * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+        let base_z = room.position.z + (self.sector_z as f32) * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+
+        // Get floor height at this sector (average if sloped)
+        let base_y = room.get_sector(self.sector_x, self.sector_z)
+            .and_then(|s| s.floor.as_ref())
+            .map(|f| f.avg_height())
+            .unwrap_or(room.position.y);
+
+        Vec3::new(base_x, base_y + self.height, base_z)
+    }
+
+    /// Check if this object is a spawn point
+    pub fn is_spawn(&self) -> bool {
+        matches!(self.object_type, ObjectType::Spawn(_))
+    }
+
+    /// Check if this object is a light
+    pub fn is_light(&self) -> bool {
+        matches!(self.object_type, ObjectType::Light { .. })
+    }
+
+    /// Get spawn type if this is a spawn object
+    pub fn spawn_type(&self) -> Option<SpawnPointType> {
+        match &self.object_type {
+            ObjectType::Spawn(t) => Some(*t),
+            _ => None,
+        }
+    }
+}
+
 /// A point light source in a room
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomLight {
@@ -1037,6 +1236,9 @@ impl Default for EditorLayoutConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Level {
     pub rooms: Vec<Room>,
+    /// Tile-based objects (spawns, lights, props, triggers, etc.)
+    #[serde(default)]
+    pub objects: Vec<LevelObject>,
     /// Editor layout configuration (optional, uses default if missing)
     #[serde(default)]
     pub editor_layout: EditorLayoutConfig,
@@ -1046,8 +1248,126 @@ impl Level {
     pub fn new() -> Self {
         Self {
             rooms: Vec::new(),
+            objects: Vec::new(),
             editor_layout: EditorLayoutConfig::default(),
         }
+    }
+
+    // ========================================================================
+    // Tile-based object system
+    // ========================================================================
+
+    /// Get the player start object
+    pub fn get_player_start(&self) -> Option<&LevelObject> {
+        self.objects.iter()
+            .find(|obj| obj.enabled && matches!(obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)))
+    }
+
+    /// Get all objects at a specific sector
+    pub fn objects_at(&self, room: usize, sector_x: usize, sector_z: usize) -> impl Iterator<Item = &LevelObject> {
+        self.objects.iter()
+            .filter(move |obj| obj.room == room && obj.sector_x == sector_x && obj.sector_z == sector_z)
+    }
+
+    /// Get all objects in a room
+    pub fn objects_in_room(&self, room: usize) -> impl Iterator<Item = &LevelObject> {
+        self.objects.iter()
+            .filter(move |obj| obj.room == room)
+    }
+
+    /// Get all light objects
+    pub fn lights(&self) -> impl Iterator<Item = &LevelObject> {
+        self.objects.iter()
+            .filter(|obj| obj.is_light() && obj.enabled)
+    }
+
+    /// Get all spawn objects
+    pub fn spawns(&self) -> impl Iterator<Item = &LevelObject> {
+        self.objects.iter()
+            .filter(|obj| obj.is_spawn() && obj.enabled)
+    }
+
+    /// Check if an object can be added at a sector (validates restrictions)
+    pub fn can_add_object(&self, room: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Result<(), &'static str> {
+        // Check per-level uniqueness (e.g., only one PlayerStart)
+        if object_type.is_unique_per_level() {
+            let exists = self.objects.iter().any(|obj| {
+                std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type)
+            });
+            if exists {
+                return Err("Only one of this object type allowed per level");
+            }
+        }
+
+        // Check per-tile uniqueness (e.g., only one light per tile)
+        if object_type.is_unique_per_tile() {
+            let tile_objects = self.objects_at(room, sector_x, sector_z);
+            for obj in tile_objects {
+                // Check if same category exists
+                let same_category = match (&obj.object_type, object_type) {
+                    (ObjectType::Light { .. }, ObjectType::Light { .. }) => true,
+                    (ObjectType::Spawn(SpawnPointType::PlayerStart), ObjectType::Spawn(SpawnPointType::PlayerStart)) => true,
+                    (ObjectType::Spawn(SpawnPointType::Checkpoint), ObjectType::Spawn(SpawnPointType::Checkpoint)) => true,
+                    _ => false,
+                };
+                if same_category {
+                    return Err("Only one of this object type allowed per tile");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add an object to the level (validates restrictions)
+    pub fn add_object(&mut self, object: LevelObject) -> Result<usize, &'static str> {
+        self.can_add_object(object.room, object.sector_x, object.sector_z, &object.object_type)?;
+        let idx = self.objects.len();
+        self.objects.push(object);
+        Ok(idx)
+    }
+
+    /// Add an object without validation (for internal use or loading)
+    pub fn add_object_unchecked(&mut self, object: LevelObject) -> usize {
+        let idx = self.objects.len();
+        self.objects.push(object);
+        idx
+    }
+
+    /// Remove an object by index
+    pub fn remove_object(&mut self, index: usize) -> Option<LevelObject> {
+        if index < self.objects.len() {
+            Some(self.objects.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Remove all objects at a specific sector
+    pub fn remove_objects_at(&mut self, room: usize, sector_x: usize, sector_z: usize) {
+        self.objects.retain(|obj| !(obj.room == room && obj.sector_x == sector_x && obj.sector_z == sector_z));
+    }
+
+    /// Find object index by position and type
+    pub fn find_object(&self, room: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Option<usize> {
+        self.objects.iter().position(|obj| {
+            obj.room == room
+                && obj.sector_x == sector_x
+                && obj.sector_z == sector_z
+                && std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type)
+        })
+    }
+
+    /// Get mutable reference to an object by index
+    pub fn get_object_mut(&mut self, index: usize) -> Option<&mut LevelObject> {
+        self.objects.get_mut(index)
+    }
+
+    /// Count objects of a specific type
+    pub fn count_objects_of_type(&self, object_type: &ObjectType) -> usize {
+        self.objects.iter()
+            .filter(|obj| std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type))
+            .count()
     }
 
     /// Add a room and return its index

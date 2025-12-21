@@ -4,7 +4,7 @@ use super::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// RGBA color (0-255 per channel)
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Color {
     pub r: u8,
     pub g: u8,

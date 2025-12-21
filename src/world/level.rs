@@ -241,6 +241,9 @@ pub fn load_level<P: AsRef<Path>>(path: P) -> Result<Level, LevelError> {
     // Validate level to prevent malicious files
     validate_level(&level)?;
 
+    // Migrate old RoomLights to LevelObjects
+    migrate_room_lights(&mut level);
+
     // Recalculate bounds for all rooms (not serialized)
     for room in &mut level.rooms {
         room.recalculate_bounds();

@@ -19,6 +19,7 @@ mod modeler;
 mod tracker;
 mod app;
 mod game;
+mod project;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -156,6 +157,7 @@ async fn main() {
         let tabs = [
             TabEntry::new(icon::HOUSE, "Home"),
             TabEntry::new(icon::GLOBE, "World"),
+            TabEntry::new(icon::PLAY, "Game"),
             TabEntry::new(icon::PERSON_STANDING, "Assets"),
             TabEntry::new(icon::MUSIC, "Music"),
         ];
@@ -172,6 +174,10 @@ async fn main() {
 
         // Content area below tab bar
         let content_rect = Rect::new(0.0, tab_layout::BAR_HEIGHT, screen_w, screen_h - tab_layout::BAR_HEIGHT);
+
+        // Sync level from World Editor to ProjectData for live editing
+        // This ensures Game tab always sees the current editor state
+        app.project.level = app.world_editor.editor_state.level.clone();
 
         // Draw active tool content
         match app.active_tool {
@@ -369,6 +375,24 @@ async fn main() {
                         BrowserAction::None => {}
                     }
                 }
+            }
+
+            Tool::Game => {
+                // Build textures array from World Editor texture packs
+                let game_textures: Vec<Texture> = app.world_editor.editor_state.texture_packs
+                    .iter()
+                    .flat_map(|pack| &pack.textures)
+                    .cloned()
+                    .collect();
+
+                // Render the game using project.level (live editing!)
+                game::draw_game_viewport(
+                    content_rect,
+                    &mut app.game,
+                    &app.project.level,
+                    &game_textures,
+                    &mut fb,
+                );
             }
 
             Tool::Modeler => {

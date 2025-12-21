@@ -4,8 +4,10 @@
 //! Switch between tools via the tab bar - all tools stay alive in background.
 
 use crate::editor::{EditorState, EditorLayout, ExampleBrowser};
+use crate::game::GameToolState;
 use crate::landing::LandingState;
 use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, MeshBrowser};
+use crate::project::ProjectData;
 use crate::tracker::TrackerState;
 use crate::world::Level;
 use macroquad::prelude::Font;
@@ -16,14 +18,16 @@ use std::path::PathBuf;
 pub enum Tool {
     Home = 0,
     WorldEditor = 1,
-    Modeler = 2,
-    Tracker = 3,
+    Game = 2,
+    Modeler = 3,
+    Tracker = 4,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 4] = [
+    pub const ALL: [Tool; 5] = [
         Tool::Home,
         Tool::WorldEditor,
+        Tool::Game,
         Tool::Modeler,
         Tool::Tracker,
     ];
@@ -34,6 +38,7 @@ impl Tool {
         match self {
             Tool::Home => "Home",
             Tool::WorldEditor => "World",
+            Tool::Game => "Game",
             Tool::Modeler => "Assets",
             Tool::Tracker => "Music",
         }
@@ -41,10 +46,11 @@ impl Tool {
 
     /// Get all tool labels (for tab bar)
     #[allow(dead_code)]
-    pub fn labels() -> [&'static str; 4] {
+    pub fn labels() -> [&'static str; 5] {
         [
             Tool::Home.label(),
             Tool::WorldEditor.label(),
+            Tool::Game.label(),
             Tool::Modeler.label(),
             Tool::Tracker.label(),
         ]
@@ -75,11 +81,19 @@ pub struct AppState {
     /// Currently active tool
     pub active_tool: Tool,
 
+    /// Shared project data (single source of truth for all editors)
+    /// This enables live editing: changes in any editor are immediately
+    /// visible in all other views including the game preview.
+    pub project: ProjectData,
+
     /// Landing page state
     pub landing: LandingState,
 
     /// World Editor state
     pub world_editor: WorldEditorState,
+
+    /// Game preview state
+    pub game: GameToolState,
 
     /// Modeler state
     pub modeler: ModelerToolState,
@@ -102,12 +116,14 @@ impl AppState {
 
         Self {
             active_tool: Tool::Home,
+            project: ProjectData::new(),
             landing: LandingState::new(),
             world_editor: WorldEditorState {
                 editor_state,
                 editor_layout: EditorLayout::new(),
                 example_browser: ExampleBrowser::default(),
             },
+            game: GameToolState::new(),
             modeler: ModelerToolState {
                 modeler_state: ModelerState::new(),
                 modeler_layout: ModelerLayout::new(),

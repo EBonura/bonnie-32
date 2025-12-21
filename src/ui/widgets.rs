@@ -285,6 +285,68 @@ impl Toolbar {
         self.cursor_x += size + self.spacing;
         icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active)
     }
+
+    /// Add a letter button with active state (for object type picker)
+    pub fn letter_button_active(&mut self, ctx: &mut UiContext, letter: char, tooltip: &str, is_active: bool) -> bool {
+        let size = (self.rect.h - 4.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), size, size);
+        self.cursor_x += size + self.spacing;
+        letter_button_active(ctx, btn_rect, letter, tooltip, is_active)
+    }
+
+    /// Add an arrow picker widget: "< label >" with clickable arrows
+    /// Returns true if either arrow was clicked. The callback receives -1 (left) or +1 (right).
+    pub fn arrow_picker<F>(&mut self, ctx: &mut UiContext, icon_font: Option<&Font>, label: &str, on_change: &mut F) -> bool
+    where
+        F: FnMut(i32),
+    {
+        let size = (self.rect.h - 4.0).round();
+        let arrow_size = size;
+        let y = (self.rect.y + 2.0).round();
+
+        // Measure label text
+        let font_size = 14.0;
+        let text_dims = measure_text(label, None, font_size as u16, 1.0);
+        let label_width = text_dims.width.max(60.0); // Minimum width for short labels
+
+        // Left arrow button "<"
+        let left_rect = Rect::new(self.cursor_x.round(), y, arrow_size, size);
+        self.cursor_x += arrow_size;
+
+        // Label area (centered text)
+        let label_rect = Rect::new(self.cursor_x.round(), y, label_width + 8.0, size);
+        self.cursor_x += label_width + 8.0;
+
+        // Right arrow button ">"
+        let right_rect = Rect::new(self.cursor_x.round(), y, arrow_size, size);
+        self.cursor_x += arrow_size + self.spacing;
+
+        // Draw left arrow
+        let left_clicked = draw_arrow_button(ctx, left_rect, icon_font, true);
+
+        // Draw label with subtle background
+        draw_rectangle(
+            label_rect.x, label_rect.y, label_rect.w, label_rect.h,
+            Color::from_rgba(50, 50, 55, 255),
+        );
+        // Center label text
+        let text_x = label_rect.x + (label_rect.w - text_dims.width) * 0.5;
+        let text_y = label_rect.y + (label_rect.h + text_dims.height) * 0.5 - 2.0;
+        draw_text(label, text_x.round(), text_y.round(), font_size, WHITE);
+
+        // Draw right arrow
+        let right_clicked = draw_arrow_button(ctx, right_rect, icon_font, false);
+
+        if left_clicked {
+            on_change(-1);
+            true
+        } else if right_clicked {
+            on_change(1);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Accent color (cyan like MuseScore)
@@ -355,6 +417,90 @@ fn draw_rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32, color: Color) {
     draw_circle(x + w - r, y + r, r, color);
     draw_circle(x + r, y + h - r, r, color);
     draw_circle(x + w - r, y + h - r, r, color);
+}
+
+/// Draw an arrow button (< or >) for picker navigation
+fn draw_arrow_button(ctx: &mut UiContext, rect: Rect, icon_font: Option<&Font>, is_left: bool) -> bool {
+    let id = ctx.next_id();
+    let hovered = ctx.mouse.inside(&rect);
+    let pressed = ctx.mouse.clicking(&rect);
+    let clicked = ctx.mouse.clicked(&rect);
+
+    if hovered {
+        ctx.set_hot(id);
+    }
+
+    let corner_radius = 4.0;
+
+    // Draw background on hover/press
+    if pressed {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(60, 60, 70, 255));
+    } else if hovered {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(50, 50, 60, 255));
+    }
+
+    // Arrow color
+    let arrow_color = if hovered {
+        Color::from_rgba(220, 220, 220, 255)
+    } else {
+        Color::from_rgba(160, 160, 160, 255)
+    };
+
+    // Draw arrow using chevron icons
+    let icon = if is_left {
+        crate::ui::icons::icon::CHEVRON_LEFT
+    } else {
+        crate::ui::icons::icon::CHEVRON_RIGHT
+    };
+    let icon_size = (rect.h * 0.5).min(14.0);
+    draw_icon_centered(icon_font, icon, &rect, icon_size, arrow_color);
+
+    clicked
+}
+
+/// Draw a letter button with active state (for object type picker)
+pub fn letter_button_active(ctx: &mut UiContext, rect: Rect, letter: char, tooltip: &str, is_active: bool) -> bool {
+    let id = ctx.next_id();
+    let hovered = ctx.mouse.inside(&rect);
+    let pressed = ctx.mouse.clicking(&rect);
+    let clicked = ctx.mouse.clicked(&rect);
+
+    if hovered {
+        ctx.set_hot(id);
+        if !tooltip.is_empty() {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+    }
+
+    let corner_radius = 4.0;
+
+    // Draw background
+    if is_active {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, ACCENT_COLOR);
+    } else if pressed {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(60, 60, 70, 255));
+    } else if hovered {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(50, 50, 60, 255));
+    }
+
+    // Letter color
+    let letter_color = if is_active {
+        WHITE
+    } else if hovered {
+        Color::from_rgba(220, 220, 220, 255)
+    } else {
+        Color::from_rgba(180, 180, 180, 255)
+    };
+
+    // Draw letter centered
+    let text = letter.to_string();
+    let font_size = (rect.h * 0.6).min(14.0) as u16;
+    let text_dims = measure_text(&text, None, font_size, 1.0);
+    let text_x = rect.x + (rect.w - text_dims.width) / 2.0;
+    let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+    draw_text(&text, text_x, text_y, font_size as f32, letter_color);
+
+    clicked
 }
 
 // =============================================================================

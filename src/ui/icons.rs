@@ -82,6 +82,9 @@ pub mod icon {
     // Browser / Examples
     pub const BOOK_OPEN: char = '\u{e05f}';       // Examples browser
 
+    // Level objects
+    pub const MAP_PIN: char = '\u{e110}';         // Object placement (map-pin)
+
     // UV editing
     pub const FLIP_HORIZONTAL: char = '\u{e219}'; // flip-horizontal-2
     pub const FLIP_VERTICAL: char = '\u{e21a}';   // flip-vertical-2

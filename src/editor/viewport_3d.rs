@@ -214,7 +214,7 @@ pub fn draw_viewport_3d(
     let mut preview_wall: Option<(f32, f32, crate::world::Direction, f32, f32, bool)> = None; // (x, z, direction, y_bottom, y_top, is_occupied)
 
     let hover = if inside_viewport && !ctx.mouse.right_down &&
-        (state.tool == EditorTool::Select || state.tool == EditorTool::PlaceLight) {
+        (state.tool == EditorTool::Select || state.tool == EditorTool::PlaceObject) {
         screen_to_fb(mouse_pos.0, mouse_pos.1)
             .map(|mouse_fb| find_hovered_elements(state, mouse_fb, fb_width, fb_height, &all_vertices))
             .unwrap_or_default()
@@ -226,6 +226,7 @@ pub fn draw_viewport_3d(
     let hovered_edge = hover.edge;
     let hovered_face = hover.face;
     let hovered_light = hover.light;
+    let hovered_object = hover.object;
 
     // In drawing modes, find preview sector position
     if inside_viewport && (state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling) {
@@ -709,6 +710,26 @@ pub fn draw_viewport_3d(
                     if height_count > 0 {
                         state.viewport_drag_plane_y = avg_height / height_count as f32;
                     }
+                } else if let Some((obj_idx, _)) = hovered_object {
+                    // Object selection/dragging - checked before lights and faces
+                    let is_already_selected = matches!(&state.selection,
+                        Selection::Object { index } if *index == obj_idx);
+
+                    if is_already_selected {
+                        // Start dragging the object (Y-axis)
+                        if let Some(obj) = state.level.objects.get(obj_idx) {
+                            if let Some(room) = state.level.rooms.get(obj.room) {
+                                let world_pos = obj.world_position(room);
+                                state.dragging_object = Some(obj_idx);
+                                state.dragging_object_initial_y = world_pos.y;
+                                state.dragging_object_plane_y = world_pos.y;
+                            }
+                        }
+                    } else {
+                        // Select object
+                        state.selection = Selection::Object { index: obj_idx };
+                        state.set_status("Object selected", 1.0);
+                    }
                 } else if let Some((room_idx, light_idx, _)) = hovered_light {
                     // Light selection/dragging - checked before faces so lights are clickable
                     let is_already_selected = matches!(&state.selection,
@@ -1020,13 +1041,13 @@ pub fn draw_viewport_3d(
                     }
                 }
             }
-            // PlaceLight mode - select existing lights (placement is in 2D grid view)
-            else if state.tool == EditorTool::PlaceLight {
+            // PlaceObject mode - select existing lights in 3D (placement is in 2D grid view)
+            else if state.tool == EditorTool::PlaceObject {
                 if let Some((room_idx, light_idx, _)) = hovered_light {
                     state.selection = Selection::Light { room: room_idx, light: light_idx };
                     state.set_status("Light selected", 1.0);
                 } else {
-                    state.set_status("Use 2D grid view to place lights", 2.0);
+                    state.set_status("Use 2D grid view to place objects", 2.0);
                 }
             }
         }
@@ -1130,6 +1151,44 @@ pub fn draw_viewport_3d(
             }
         }
 
+        // Continue dragging object (Y-axis only)
+        if ctx.mouse.left_down && state.dragging_object.is_some() {
+            use super::CLICK_HEIGHT;
+
+            if !state.viewport_drag_started {
+                state.save_undo();
+                state.viewport_drag_started = true;
+            }
+
+            // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
+            let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
+            let y_sensitivity = 5.0;
+            let y_delta = mouse_delta_y * y_sensitivity;
+
+            // Accumulate delta
+            state.dragging_object_plane_y += y_delta;
+
+            // Calculate snapped height
+            let delta_from_initial = state.dragging_object_plane_y - state.dragging_object_initial_y;
+            let new_y = state.dragging_object_initial_y + delta_from_initial;
+            let snapped_y = (new_y / CLICK_HEIGHT).round() * CLICK_HEIGHT;
+
+            // Apply to object's height offset
+            if let Some(obj_idx) = state.dragging_object {
+                if let Some(obj) = state.level.objects.get_mut(obj_idx) {
+                    // Convert world Y to relative offset from sector floor
+                    if let Some(room) = state.level.rooms.get(obj.room) {
+                        // Get floor height at this sector (average if sloped)
+                        let sector_floor_y = room.get_sector(obj.sector_x, obj.sector_z)
+                            .and_then(|s| s.floor.as_ref())
+                            .map(|f| f.avg_height())
+                            .unwrap_or(room.position.y);
+                        obj.height = snapped_y - sector_floor_y;
+                    }
+                }
+            }
+        }
+
         // End dragging on release
         if ctx.mouse.left_released {
             // If we actually dragged geometry, recalculate room bounds
@@ -1142,6 +1201,7 @@ pub fn draw_viewport_3d(
             state.dragging_sector_vertices.clear();
             state.drag_initial_heights.clear();
             state.dragging_light = None;
+            state.dragging_object = None;
             state.viewport_drag_started = false;
         }
     }
@@ -1568,6 +1628,105 @@ pub fn draw_viewport_3d(
                             let x1 = fb_x as i32 + dx * ray_len;
                             let y1 = fb_y as i32 + dy * ray_len;
                             fb.draw_line_3d(x0, y0, 0.0, x1, y1, 0.0, light_color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw LevelObject gizmos (spawns, object-based lights, triggers, etc.)
+    for (obj_idx, obj) in state.level.objects.iter().enumerate() {
+        if let Some(room) = state.level.rooms.get(obj.room) {
+            let world_pos = obj.world_position(room);
+
+            // Project to screen
+            if let Some((fb_x, fb_y)) = world_to_screen(
+                world_pos,
+                state.camera_3d.position,
+                state.camera_3d.basis_x,
+                state.camera_3d.basis_y,
+                state.camera_3d.basis_z,
+                fb.width,
+                fb.height,
+            ) {
+                use crate::world::{ObjectType, SpawnPointType};
+
+                // Check if this object is selected
+                let is_selected = matches!(&state.selection, Selection::Object { index } if *index == obj_idx);
+
+                // Get color and radius based on object type (letter unused in 3D view)
+                let (color, _letter, draw_radius) = match &obj.object_type {
+                    ObjectType::Spawn(spawn_type) => {
+                        let (r, g, b, ch) = match spawn_type {
+                            SpawnPointType::PlayerStart => (100, 255, 100, 'P'),
+                            SpawnPointType::Checkpoint => (100, 200, 255, 'C'),
+                            SpawnPointType::Enemy => (255, 100, 100, 'E'),
+                            SpawnPointType::Item => (255, 200, 100, 'I'),
+                        };
+                        (RasterColor::new(r, g, b), ch, None)
+                    }
+                    ObjectType::Light { color: light_color, radius, .. } => {
+                        let c = if obj.enabled {
+                            RasterColor::new(light_color.r, light_color.g, light_color.b)
+                        } else {
+                            RasterColor::new(80, 80, 80)
+                        };
+                        (c, 'L', Some(*radius))
+                    }
+                    ObjectType::Prop(_) => (RasterColor::new(180, 130, 255), 'M', None),
+                    ObjectType::Trigger { .. } => (RasterColor::new(255, 100, 200), 'T', None),
+                    ObjectType::Particle { .. } => (RasterColor::new(255, 180, 100), '*', None),
+                    ObjectType::Audio { .. } => (RasterColor::new(100, 200, 255), '~', None),
+                };
+
+                let base_radius = if is_selected { 8 } else { 5 };
+
+                // Selection highlight (white circle behind)
+                if is_selected {
+                    fb.draw_circle(fb_x as i32, fb_y as i32, base_radius + 3, RasterColor::new(255, 255, 255));
+                }
+
+                // Main circle
+                fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
+
+                // For lights, draw radius indicator and sun rays
+                if let Some(radius) = draw_radius {
+                    // Calculate screen-space radius (approximate)
+                    let cam_dist = (world_pos - state.camera_3d.position).len();
+                    if cam_dist > 0.1 {
+                        // Simple perspective approximation for radius visualization
+                        let screen_radius = (radius / cam_dist * fb.width as f32 * 0.3).min(200.0);
+                        if screen_radius > 10.0 && obj.enabled {
+                            // Draw radius circle (hollow)
+                            let r = screen_radius as i32;
+                            let dim_color = RasterColor::new(
+                                (color.r as u16 / 2) as u8,
+                                (color.g as u16 / 2) as u8,
+                                (color.b as u16 / 2) as u8,
+                            );
+                            // Draw dashed circle approximation (8 points)
+                            for i in 0..16 {
+                                let angle = (i as f32) * std::f32::consts::PI / 8.0;
+                                let px = fb_x as i32 + (angle.cos() * r as f32) as i32;
+                                let py = fb_y as i32 + (angle.sin() * r as f32) as i32;
+                                if i % 2 == 0 {
+                                    fb.draw_circle(px, py, 1, dim_color);
+                                }
+                            }
+                        }
+                    }
+
+                    // Sun rays for enabled lights
+                    if obj.enabled {
+                        let ray_len = base_radius as i32 + 4;
+                        let offsets = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+                        for (dx, dy) in offsets {
+                            let x0 = fb_x as i32 + dx * (base_radius as i32 + 1);
+                            let y0 = fb_y as i32 + dy * (base_radius as i32 + 1);
+                            let x1 = fb_x as i32 + dx * ray_len;
+                            let y1 = fb_y as i32 + dy * ray_len;
+                            fb.draw_line_3d(x0, y0, 0.0, x1, y1, 0.0, color);
                         }
                     }
                 }
@@ -2348,6 +2507,8 @@ pub struct HoverResult {
     pub face: Option<(usize, usize, usize, SectorFace)>,
     /// Hovered light: (room_idx, light_idx, screen_dist)
     pub light: Option<(usize, usize, f32)>,
+    /// Hovered object: (object_idx, screen_dist)
+    pub object: Option<(usize, f32)>,
 }
 
 impl Default for HoverResult {
@@ -2357,6 +2518,7 @@ impl Default for HoverResult {
             edge: None,
             face: None,
             light: None,
+            object: None,
         }
     }
 }
@@ -2670,6 +2832,30 @@ fn find_hovered_elements(
                 if dist < LIGHT_THRESHOLD {
                     if result.light.map_or(true, |(_, _, best_dist)| dist < best_dist) {
                         result.light = Some((room_idx, light_idx, dist));
+                    }
+                }
+            }
+        }
+    }
+
+    // Check objects (level objects like spawns, triggers, etc.)
+    const OBJECT_THRESHOLD: f32 = 12.0;
+    for (obj_idx, obj) in state.level.objects.iter().enumerate() {
+        if let Some(room) = state.level.rooms.get(obj.room) {
+            let world_pos = obj.world_position(room);
+            if let Some((sx, sy)) = world_to_screen(
+                world_pos,
+                state.camera_3d.position,
+                state.camera_3d.basis_x,
+                state.camera_3d.basis_y,
+                state.camera_3d.basis_z,
+                fb_width,
+                fb_height,
+            ) {
+                let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                if dist < OBJECT_THRESHOLD {
+                    if result.object.map_or(true, |(_, best_dist)| dist < best_dist) {
+                        result.object = Some((obj_idx, dist));
                     }
                 }
             }

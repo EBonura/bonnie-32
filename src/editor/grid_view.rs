@@ -393,6 +393,93 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
     }
 
+    // Draw level objects (spawns, triggers, etc.) for current room and detect hover
+    let mut hovered_object: Option<usize> = None;
+    for (obj_idx, obj) in state.level.objects.iter().enumerate() {
+        // Only draw objects in current room (or all rooms if not hidden)
+        if obj.room != current_room_idx {
+            continue;
+        }
+
+        // Calculate world position (center of sector)
+        let world_x = room.position.x + (obj.sector_x as f32 + 0.5) * SECTOR_SIZE;
+        let world_z = room.position.z + (obj.sector_z as f32 + 0.5) * SECTOR_SIZE;
+        let (sx, sy) = world_to_screen(world_x, world_z);
+
+        // Check if this object is selected
+        let is_selected = matches!(&state.selection, super::Selection::Object { index } if *index == obj_idx);
+
+        // Check if mouse is hovering over this object
+        let center_radius = if is_selected { 10.0 } else { 7.0 };
+        let dist_to_mouse = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
+        if inside && dist_to_mouse < center_radius + 4.0 {
+            hovered_object = Some(obj_idx);
+        }
+
+        // Color based on object type
+        let (fill_color, outline_color, icon_char) = match &obj.object_type {
+            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::PlayerStart) =>
+                (Color::from_rgba(50, 200, 50, 200), Color::from_rgba(100, 255, 100, 255), 'P'),
+            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::Checkpoint) =>
+                (Color::from_rgba(50, 50, 200, 200), Color::from_rgba(100, 100, 255, 255), 'C'),
+            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::Enemy) =>
+                (Color::from_rgba(200, 50, 50, 200), Color::from_rgba(255, 100, 100, 255), 'E'),
+            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::Item) =>
+                (Color::from_rgba(200, 200, 50, 200), Color::from_rgba(255, 255, 100, 255), 'I'),
+            crate::world::ObjectType::Light { .. } =>
+                (Color::from_rgba(255, 200, 50, 200), Color::from_rgba(255, 255, 150, 255), 'L'),
+            crate::world::ObjectType::Prop(_) =>
+                (Color::from_rgba(150, 100, 200, 200), Color::from_rgba(200, 150, 255, 255), 'M'),
+            crate::world::ObjectType::Trigger { .. } =>
+                (Color::from_rgba(200, 100, 50, 200), Color::from_rgba(255, 150, 100, 255), 'T'),
+            crate::world::ObjectType::Particle { .. } =>
+                (Color::from_rgba(255, 150, 200, 200), Color::from_rgba(255, 200, 230, 255), '*'),
+            crate::world::ObjectType::Audio { .. } =>
+                (Color::from_rgba(100, 200, 200, 200), Color::from_rgba(150, 255, 255, 255), '~'),
+        };
+
+        // Draw object marker
+        if obj.enabled {
+            draw_circle(sx, sy, center_radius, fill_color);
+            draw_circle_lines(sx, sy, center_radius, 1.5, outline_color);
+
+            // Draw facing direction arrow for spawns
+            if matches!(obj.object_type, crate::world::ObjectType::Spawn(_)) {
+                let arrow_len = center_radius + 6.0;
+                let angle = obj.facing;
+                // In our coordinate system: facing 0 = +Z = screen down
+                let dx = angle.sin() * arrow_len;
+                let dy = angle.cos() * arrow_len;
+                draw_line(sx, sy, sx + dx, sy + dy, 2.0, outline_color);
+                // Arrow head
+                let head_len = 4.0;
+                let head_angle1 = angle + 2.5;
+                let head_angle2 = angle - 2.5;
+                draw_line(sx + dx, sy + dy,
+                    sx + dx - head_angle1.sin() * head_len,
+                    sy + dy - head_angle1.cos() * head_len, 2.0, outline_color);
+                draw_line(sx + dx, sy + dy,
+                    sx + dx - head_angle2.sin() * head_len,
+                    sy + dy - head_angle2.cos() * head_len, 2.0, outline_color);
+            }
+
+            // Draw icon letter
+            let letter = icon_char.to_string();
+            let letter_dims = measure_text(&letter, None, 12, 1.0);
+            draw_text(&letter, sx - letter_dims.width / 2.0, sy + 4.0, 12.0, WHITE);
+        } else {
+            // Disabled objects shown as hollow
+            draw_circle_lines(sx, sy, center_radius, 2.0, Color::from_rgba(100, 100, 100, 200));
+        }
+
+        // Selection/hover highlight
+        if is_selected {
+            draw_circle_lines(sx, sy, center_radius + 4.0, 2.0, WHITE);
+        } else if hovered_object == Some(obj_idx) {
+            draw_circle_lines(sx, sy, center_radius + 4.0, 1.0, Color::from_rgba(255, 255, 200, 180));
+        }
+    }
+
     // Draw room center markers for all rooms (handle for moving the room)
     let mut hovered_room_origin: Option<usize> = None;
     for (room_idx, r) in state.level.rooms.iter().enumerate() {
@@ -523,6 +610,61 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
     }
 
+    // Draw ghost preview when dragging an object
+    if let Some(obj_idx) = state.grid_dragging_object {
+        if state.grid_sector_drag_start.is_some() {
+            let (offset_x, offset_z) = state.grid_sector_drag_offset;
+            // Snap to sector grid
+            let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
+            let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
+
+            if let Some(obj) = state.level.objects.get(obj_idx) {
+                if let Some(room) = state.level.rooms.get(obj.room) {
+                    // Get current world position
+                    let current_pos = obj.world_position(room);
+                    // Calculate ghost position
+                    let new_world_x = current_pos.x + snapped_x;
+                    let new_world_z = current_pos.z + snapped_z;
+                    let (gx, gy) = world_to_screen(new_world_x, new_world_z);
+
+                    // Draw ghost object (semi-transparent)
+                    use crate::world::ObjectType;
+                    let (color, letter) = match &obj.object_type {
+                        ObjectType::Spawn(spawn_type) => {
+                            use crate::world::SpawnPointType;
+                            match spawn_type {
+                                SpawnPointType::PlayerStart => (Color::from_rgba(100, 255, 100, 150), 'P'),
+                                SpawnPointType::Checkpoint => (Color::from_rgba(100, 200, 255, 150), 'C'),
+                                SpawnPointType::Enemy => (Color::from_rgba(255, 100, 100, 150), 'E'),
+                                SpawnPointType::Item => (Color::from_rgba(255, 200, 100, 150), 'I'),
+                            }
+                        }
+                        ObjectType::Light { .. } => (Color::from_rgba(255, 255, 100, 150), 'L'),
+                        ObjectType::Prop { .. } => (Color::from_rgba(180, 130, 255, 150), 'M'),
+                        ObjectType::Trigger { .. } => (Color::from_rgba(255, 100, 200, 150), 'T'),
+                        ObjectType::Particle { .. } => (Color::from_rgba(255, 180, 100, 150), '*'),
+                        ObjectType::Audio { .. } => (Color::from_rgba(100, 200, 255, 150), '~'),
+                    };
+
+                    draw_circle(gx, gy, 10.0, color);
+                    draw_circle_lines(gx, gy, 13.0, 2.0, Color::from_rgba(255, 255, 255, 200));
+
+                    // Draw letter
+                    let text = letter.to_string();
+                    let font_size = 14.0;
+                    let text_dims = measure_text(&text, None, font_size as u16, 1.0);
+                    draw_text(
+                        &text,
+                        gx - text_dims.width * 0.5,
+                        gy + text_dims.height * 0.3,
+                        font_size,
+                        Color::from_rgba(255, 255, 255, 200),
+                    );
+                }
+            }
+        }
+    }
+
     // Draw selection rectangle
     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (state.selection_rect_start, state.selection_rect_end) {
         let rect_x = sx0.min(sx1);
@@ -562,8 +704,41 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         if ctx.mouse.left_released && state.grid_sector_drag_start.is_some() {
             let (offset_x, offset_z) = state.grid_sector_drag_offset;
 
+            // Check if we're dragging an object
+            if let Some(obj_idx) = state.grid_dragging_object {
+                // Object dragging - snap to sector grid
+                let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
+                let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
+
+                // Convert to sector delta
+                let sector_dx = (snapped_x / SECTOR_SIZE).round() as i32;
+                let sector_dz = (snapped_z / SECTOR_SIZE).round() as i32;
+
+                if sector_dx != 0 || sector_dz != 0 {
+                    state.save_undo();
+
+                    if let Some(obj) = state.level.objects.get_mut(obj_idx) {
+                        // Update sector coordinates
+                        let new_sector_x = (obj.sector_x as i32 + sector_dx).max(0) as usize;
+                        let new_sector_z = (obj.sector_z as i32 + sector_dz).max(0) as usize;
+
+                        obj.sector_x = new_sector_x;
+                        obj.sector_z = new_sector_z;
+
+                        state.set_status(
+                            &format!("Moved object to sector ({}, {})", new_sector_x, new_sector_z),
+                            2.0
+                        );
+                    }
+                }
+
+                // Clear drag state
+                state.grid_dragging_object = None;
+                state.grid_sector_drag_offset = (0.0, 0.0);
+                state.grid_sector_drag_start = None;
+            }
             // Check if we're dragging a light (no grid snapping for lights)
-            if let Selection::Light { room: light_room, light: light_idx } = state.selection {
+            else if let Selection::Light { room: light_room, light: light_idx } = state.selection {
                 if !state.grid_dragging_room_origin && state.grid_dragging_sectors.is_empty() {
                     // Light dragging - apply offset directly (snapped to sector center)
                     let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
@@ -769,8 +944,26 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
             match state.tool {
                 EditorTool::Select => {
-                    // Check if clicking on a light first
-                    if let Some(light_idx) = hovered_light {
+                    // Check if clicking on an object first
+                    if let Some(obj_idx) = hovered_object {
+                        // Check if this object is already selected (start drag)
+                        let is_already_selected = matches!(&state.selection,
+                            Selection::Object { index } if *index == obj_idx);
+
+                        if is_already_selected {
+                            // Start dragging the object
+                            let (wx, wz) = screen_to_world(mouse_pos.0, mouse_pos.1);
+                            state.grid_dragging_object = Some(obj_idx);
+                            state.grid_sector_drag_start = Some((wx, wz));
+                            state.grid_sector_drag_offset = (0.0, 0.0);
+                        } else {
+                            // Select the object
+                            state.clear_multi_selection();
+                            state.set_selection(Selection::Object { index: obj_idx });
+                        }
+                    }
+                    // Check if clicking on a light
+                    else if let Some(light_idx) = hovered_light {
                         // Check if this light is already selected (start drag)
                         let is_already_selected = matches!(&state.selection,
                             Selection::Light { room, light } if *room == current_room_idx && *light == light_idx);
@@ -927,14 +1120,13 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     state.set_status("Wall tool: not yet implemented", 3.0);
                 }
 
-                EditorTool::PlaceLight => {
+                EditorTool::PlaceObject => {
                     let (wx, wz) = screen_to_world(mouse_pos.0, mouse_pos.1);
                     let snapped_x = (wx / SECTOR_SIZE).floor() * SECTOR_SIZE;
                     let snapped_z = (wz / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
-                    // Gather data first (immutable borrow)
-                    // Returns: (light_pos, has_existing_light)
-                    let light_data = state.level.rooms.get(current_room_idx).and_then(|room| {
+                    // Gather sector data first (immutable borrow)
+                    let sector_data = state.level.rooms.get(current_room_idx).and_then(|room| {
                         let local_x = snapped_x - room.position.x;
                         let local_z = snapped_z - room.position.z;
                         let gx = (local_x / SECTOR_SIZE).floor() as i32;
@@ -943,53 +1135,42 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         if gx >= 0 && gz >= 0 {
                             let gx = gx as usize;
                             let gz = gz as usize;
-                            room.get_sector(gx, gz).map(|sector| {
-                                let floor_y = sector.floor.as_ref()
-                                    .map(|f| (f.heights[0] + f.heights[1] + f.heights[2] + f.heights[3]) / 4.0)
-                                    .unwrap_or(0.0);
-                                let ceil_y = sector.ceiling.as_ref()
-                                    .map(|c| (c.heights[0] + c.heights[1] + c.heights[2] + c.heights[3]) / 4.0)
-                                    .unwrap_or(CEILING_HEIGHT);
-                                let light_y = (floor_y + ceil_y) / 2.0;
-                                let light_pos = crate::rasterizer::Vec3::new(
-                                    (gx as f32 + 0.5) * SECTOR_SIZE,
-                                    light_y,
-                                    (gz as f32 + 0.5) * SECTOR_SIZE,
-                                );
-
-                                // Check if a light already exists in this sector
-                                let sector_center_x = (gx as f32 + 0.5) * SECTOR_SIZE;
-                                let sector_center_z = (gz as f32 + 0.5) * SECTOR_SIZE;
-                                let has_existing = room.lights.iter().any(|l| {
-                                    // Check if light is within this sector (within half sector size of center)
-                                    let dx = (l.position.x - sector_center_x).abs();
-                                    let dz = (l.position.z - sector_center_z).abs();
-                                    dx < SECTOR_SIZE * 0.5 && dz < SECTOR_SIZE * 0.5
-                                });
-
-                                (light_pos, has_existing)
-                            })
+                            // Just check if sector exists
+                            if room.get_sector(gx, gz).is_some() {
+                                Some((gx, gz))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
                     });
 
-                    // Now mutate (mutable borrow)
-                    if let Some((light_pos, has_existing)) = light_data {
-                        if has_existing {
-                            state.set_status("Sector already has a light", 2.0);
-                        } else {
-                            state.save_undo();
-                            let new_light = crate::world::RoomLight::new(light_pos);
-                            if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
-                                let light_idx = room.lights.len();
-                                room.lights.push(new_light);
-                                state.selection = super::Selection::Light { room: current_room_idx, light: light_idx };
-                                state.set_status("Light placed", 1.0);
+                    if let Some((gx, gz)) = sector_data {
+                        // Check if we can place this object type
+                        let can_place = state.level.can_add_object(
+                            current_room_idx, gx, gz, &state.selected_object_type
+                        );
+
+                        match can_place {
+                            Ok(()) => {
+                                state.save_undo();
+                                let new_object = crate::world::LevelObject::new(
+                                    current_room_idx, gx, gz,
+                                    state.selected_object_type.clone()
+                                );
+                                let obj_name = state.selected_object_type.display_name();
+                                if let Ok(idx) = state.level.add_object(new_object) {
+                                    state.selection = super::Selection::Object { index: idx };
+                                    state.set_status(&format!("{} placed", obj_name), 1.0);
+                                }
+                            }
+                            Err(msg) => {
+                                state.set_status(msg, 2.0);
                             }
                         }
                     } else {
-                        state.set_status("Click on a sector to place light", 2.0);
+                        state.set_status("Click on a sector to place object", 2.0);
                     }
                 }
 

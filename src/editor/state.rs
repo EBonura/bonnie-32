@@ -1,8 +1,8 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::Level;
-use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings};
+use crate::world::{Level, ObjectType, SpawnPointType};
+use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings, Color};
 use super::texture_pack::TexturePack;
 
 /// TRLE grid constraints
@@ -29,7 +29,6 @@ pub enum EditorTool {
     DrawCeiling,
     PlacePortal,
     PlaceObject,
-    PlaceLight,
 }
 
 /// Which face within a sector is selected
@@ -61,6 +60,8 @@ pub enum Selection {
     Portal { room: usize, portal: usize },
     /// Light selected
     Light { room: usize, light: usize },
+    /// Level object selected (spawn, light, prop, etc.)
+    Object { index: usize },
 }
 
 impl Selection {
@@ -181,6 +182,8 @@ pub struct EditorState {
     pub grid_sector_drag_start: Option<(f32, f32)>,
     /// True if dragging the room origin marker (moves entire room position)
     pub grid_dragging_room_origin: bool,
+    /// Object being dragged in 2D grid view (object index)
+    pub grid_dragging_object: Option<usize>,
 
     /// 3D viewport vertex dragging state (legacy - kept for compatibility)
     pub viewport_dragging_vertices: Vec<(usize, usize)>, // List of (room_idx, vertex_idx)
@@ -199,6 +202,11 @@ pub struct EditorState {
     pub dragging_light: Option<(usize, usize)>, // (room_idx, light_idx)
     pub dragging_light_initial_y: f32,          // Initial Y when drag started
     pub dragging_light_plane_y: f32,            // Current accumulated drag plane Y
+
+    /// 3D viewport object dragging state
+    pub dragging_object: Option<usize>,         // Object index
+    pub dragging_object_initial_y: f32,         // Initial Y when drag started
+    pub dragging_object_plane_y: f32,           // Current accumulated drag plane Y
 
     /// Texture palette state
     pub texture_packs: Vec<TexturePack>,
@@ -245,6 +253,9 @@ pub struct EditorState {
 
     /// Portals need recalculation (set when geometry changes)
     pub portals_dirty: bool,
+
+    /// Selected object type to place (when PlaceObject tool is active)
+    pub selected_object_type: ObjectType,
 }
 
 impl EditorState {
@@ -317,6 +328,7 @@ impl EditorState {
             grid_sector_drag_offset: (0.0, 0.0),
             grid_sector_drag_start: None,
             grid_dragging_room_origin: false,
+            grid_dragging_object: None,
             viewport_dragging_vertices: Vec::new(),
             viewport_drag_started: false,
             viewport_drag_plane_y: 0.0,
@@ -326,6 +338,9 @@ impl EditorState {
             dragging_light: None,
             dragging_light_initial_y: 0.0,
             dragging_light_plane_y: 0.0,
+            dragging_object: None,
+            dragging_object_initial_y: 0.0,
+            dragging_object_plane_y: 0.0,
             texture_packs,
             selected_pack: 0,
             texture_scroll: 0.0,
@@ -348,6 +363,7 @@ impl EditorState {
             vertex_color_slider: None,
             hidden_rooms: std::collections::HashSet::new(),
             portals_dirty: true, // Recalculate on first frame
+            selected_object_type: ObjectType::Spawn(SpawnPointType::PlayerStart), // Default to player start
         }
     }
 
@@ -567,6 +583,13 @@ impl EditorState {
                             r.position.y + l.position.y,
                             r.position.z + l.position.z,
                         )
+                    })
+                })
+            }
+            Selection::Object { index } => {
+                self.level.objects.get(*index).and_then(|obj| {
+                    self.level.rooms.get(obj.room).map(|room| {
+                        obj.world_position(room)
                     })
                 })
             }

@@ -21,6 +21,8 @@ pub mod world;
 pub mod event;
 pub mod transform;
 pub mod components;
+pub mod runtime;
+pub mod renderer;
 
 // Re-export main types
 pub use entity::{Entity, EntityAllocator};
@@ -29,3 +31,5 @@ pub use world::World;
 pub use event::{Events, EventQueue};
 pub use transform::{Transform, GlobalTransform, propagate_transforms};
 pub use components::*;
+pub use runtime::GameToolState;
+pub use renderer::draw_game_viewport;

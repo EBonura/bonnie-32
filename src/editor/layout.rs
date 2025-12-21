@@ -210,13 +210,49 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         (icon::BOX, "Wall", EditorTool::DrawWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
         (icon::DOOR_CLOSED, "Portal", EditorTool::PlacePortal),
-        (icon::SUN, "Light", EditorTool::PlaceLight),
+        (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
 
     for (icon_char, tooltip, tool) in tools {
         let is_active = state.tool == tool;
         if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_active) {
             state.tool = tool;
+        }
+    }
+
+    // Object type picker (only show when PlaceObject tool is active)
+    // Shows "< Type >" with arrows to cycle through object types
+    if state.tool == EditorTool::PlaceObject {
+        toolbar.separator();
+
+        use crate::world::{ObjectType, SpawnPointType};
+        let object_types: [(&str, ObjectType); 6] = [
+            ("Player", ObjectType::Spawn(SpawnPointType::PlayerStart)),
+            ("Checkpoint", ObjectType::Spawn(SpawnPointType::Checkpoint)),
+            ("Enemy", ObjectType::Spawn(SpawnPointType::Enemy)),
+            ("Item", ObjectType::Spawn(SpawnPointType::Item)),
+            ("Light", ObjectType::Light {
+                color: crate::rasterizer::Color::new(255, 240, 200),
+                intensity: 1.0,
+                radius: 2048.0,
+            }),
+            ("Trigger", ObjectType::Trigger {
+                trigger_id: String::new(),
+                trigger_type: "on_enter".to_string(),
+            }),
+        ];
+
+        // Find current index
+        let current_idx = object_types.iter().position(|(_, obj_type)| {
+            std::mem::discriminant(&state.selected_object_type) == std::mem::discriminant(obj_type)
+        }).unwrap_or(0);
+
+        // Draw "< Type >" navigation
+        if toolbar.arrow_picker(ctx, icon_font, object_types[current_idx].0, &mut |delta: i32| {
+            let new_idx = (current_idx as i32 + delta).rem_euclid(object_types.len() as i32) as usize;
+            state.selected_object_type = object_types[new_idx].1.clone();
+        }) {
+            // Arrow was clicked, selection already changed via callback
         }
     }
 
@@ -2019,6 +2055,51 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 draw_text("Light not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
             }
         }
+        super::Selection::Object { index } => {
+            // Object properties
+            let obj_idx = *index;
+
+            if let Some(obj) = state.level.objects.get(obj_idx) {
+                let obj_name = obj.object_type.display_name();
+                draw_text(obj_name, x, (y + 14.0).floor(), 16.0, WHITE);
+                y += 24.0;
+
+                // Location
+                draw_text("Location:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                y += 18.0;
+                draw_text(&format!("  Room: {}  Sector: ({}, {})",
+                    obj.room, obj.sector_x, obj.sector_z),
+                    x, (y + 12.0).floor(), 13.0, WHITE);
+                y += 18.0;
+                draw_text(&format!("  Height: {:.0}  Facing: {:.1}°",
+                    obj.height, obj.facing.to_degrees()),
+                    x, (y + 12.0).floor(), 13.0, WHITE);
+                y += 24.0;
+
+                // Delete button (same pattern as Light delete)
+                let delete_btn_rect = Rect::new(x, y, container_width - 8.0, 22.0);
+                let delete_hovered = delete_btn_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                let delete_color = if delete_hovered {
+                    Color::from_rgba(180, 60, 60, 255)
+                } else {
+                    Color::from_rgba(120, 40, 40, 255)
+                };
+                draw_rectangle(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, delete_color);
+                if delete_hovered {
+                    draw_rectangle_lines(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, 1.0, WHITE);
+                }
+                draw_text("Delete Object", x + 10.0, (y + 15.0).floor(), 13.0, WHITE);
+
+                if delete_hovered && ctx.mouse.left_pressed {
+                    state.save_undo();
+                    state.level.remove_object(obj_idx);
+                    state.set_selection(super::Selection::None);
+                    state.set_status("Object deleted", 2.0);
+                }
+            } else {
+                draw_text("Object not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+            }
+        }
     }
 
     // Disable scissor
@@ -2120,6 +2201,7 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
             }
             height
         }
+        super::Selection::Object { .. } => 150.0, // Object header + location + height/facing + delete button
     }
 }
 
