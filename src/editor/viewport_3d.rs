@@ -520,15 +520,16 @@ pub fn draw_viewport_3d(
                         }
                     }
 
-                    // If linking mode is on, find coincident vertices
+                    // If linking mode is on, find coincident vertices across ALL rooms
                     if state.link_coincident_vertices {
                         // Get position of clicked vertex
                         if let Some((world_pos, _, _, _, _, _)) = all_vertices.iter()
                             .find(|(_, ri, vgx, vgz, ci, f)| *ri == room_idx && *vgx == gx && *vgz == gz && *ci == corner_idx && *f == face)
                         {
                             const EPSILON: f32 = 0.1;
-                            // Find all vertices at same position
-                            for (pos, ri, vgx, vgz, ci, vface) in &all_vertices {
+                            // Search ALL rooms for coincident vertices (cross-room boundary linking)
+                            let all_room_vertices = collect_all_room_vertices(state);
+                            for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
                                 if (pos.x - world_pos.x).abs() < EPSILON &&
                                    (pos.y - world_pos.y).abs() < EPSILON &&
                                    (pos.z - world_pos.z).abs() < EPSILON {
@@ -628,7 +629,7 @@ pub fn draw_viewport_3d(
                                             height_count += 1;
                                         }
 
-                                        // If linking, find coincident vertices for the edge
+                                        // If linking, find coincident vertices for the edge across ALL rooms
                                         if state.link_coincident_vertices {
                                             let base_x = room.position.x + (*gx as f32) * SECTOR_SIZE;
                                             let base_z = room.position.z + (*gz as f32) * SECTOR_SIZE;
@@ -651,7 +652,8 @@ pub fn draw_viewport_3d(
                                             ];
 
                                             const EPSILON: f32 = 0.1;
-                                            for (pos, ri, vgx, vgz, ci, vface) in &all_vertices {
+                                            let all_room_vertices = collect_all_room_vertices(state);
+                                            for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
                                                 for ep in &edge_positions {
                                                     if (pos.x - ep.x).abs() < EPSILON &&
                                                        (pos.y - ep.y).abs() < EPSILON &&
@@ -793,7 +795,7 @@ pub fn draw_viewport_3d(
                                         }
                                     }
 
-                                    // If linking, find coincident vertices
+                                    // If linking, find coincident vertices across ALL rooms
                                     if state.link_coincident_vertices {
                                         let base_x = room.position.x + (*gx as f32) * SECTOR_SIZE;
                                         let base_z = room.position.z + (*gz as f32) * SECTOR_SIZE;
@@ -805,7 +807,8 @@ pub fn draw_viewport_3d(
                                         ];
 
                                         const EPSILON: f32 = 0.1;
-                                        for (pos, ri, vgx, vgz, ci, vface) in &all_vertices {
+                                        let all_room_vertices = collect_all_room_vertices(state);
+                                        for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
                                             for fp in &face_positions {
                                                 if (pos.x - fp.x).abs() < EPSILON &&
                                                    (pos.y - fp.y).abs() < EPSILON &&
@@ -2578,51 +2581,67 @@ impl Default for HoverResult {
 /// (world_pos, room_idx, gx, gz, corner_idx, face_type)
 pub type VertexData = Vec<(Vec3, usize, usize, usize, usize, SectorFace)>;
 
-/// Collect all vertex positions for the current room
-fn collect_room_vertices(state: &EditorState) -> VertexData {
-    let mut all_vertices = Vec::new();
+/// Collect vertices from a single room
+fn collect_single_room_vertices(room: &crate::world::Room, room_idx: usize) -> VertexData {
+    let mut vertices = Vec::new();
 
-    if let Some(room) = state.level.rooms.get(state.current_room) {
-        for (gx, gz, sector) in room.iter_sectors() {
-            let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-            let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+    for (gx, gz, sector) in room.iter_sectors() {
+        let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+        let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
 
-            // Floor vertices
-            if let Some(floor) = &sector.floor {
-                all_vertices.push((Vec3::new(base_x, floor.heights[0], base_z), state.current_room, gx, gz, 0, SectorFace::Floor));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z), state.current_room, gx, gz, 1, SectorFace::Floor));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE), state.current_room, gx, gz, 2, SectorFace::Floor));
-                all_vertices.push((Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE), state.current_room, gx, gz, 3, SectorFace::Floor));
-            }
+        // Floor vertices
+        if let Some(floor) = &sector.floor {
+            vertices.push((Vec3::new(base_x, floor.heights[0], base_z), room_idx, gx, gz, 0, SectorFace::Floor));
+            vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[1], base_z), room_idx, gx, gz, 1, SectorFace::Floor));
+            vertices.push((Vec3::new(base_x + SECTOR_SIZE, floor.heights[2], base_z + SECTOR_SIZE), room_idx, gx, gz, 2, SectorFace::Floor));
+            vertices.push((Vec3::new(base_x, floor.heights[3], base_z + SECTOR_SIZE), room_idx, gx, gz, 3, SectorFace::Floor));
+        }
 
-            // Ceiling vertices
-            if let Some(ceiling) = &sector.ceiling {
-                all_vertices.push((Vec3::new(base_x, ceiling.heights[0], base_z), state.current_room, gx, gz, 0, SectorFace::Ceiling));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z), state.current_room, gx, gz, 1, SectorFace::Ceiling));
-                all_vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE), state.current_room, gx, gz, 2, SectorFace::Ceiling));
-                all_vertices.push((Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE), state.current_room, gx, gz, 3, SectorFace::Ceiling));
-            }
+        // Ceiling vertices
+        if let Some(ceiling) = &sector.ceiling {
+            vertices.push((Vec3::new(base_x, ceiling.heights[0], base_z), room_idx, gx, gz, 0, SectorFace::Ceiling));
+            vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[1], base_z), room_idx, gx, gz, 1, SectorFace::Ceiling));
+            vertices.push((Vec3::new(base_x + SECTOR_SIZE, ceiling.heights[2], base_z + SECTOR_SIZE), room_idx, gx, gz, 2, SectorFace::Ceiling));
+            vertices.push((Vec3::new(base_x, ceiling.heights[3], base_z + SECTOR_SIZE), room_idx, gx, gz, 3, SectorFace::Ceiling));
+        }
 
-            // Wall vertices
-            let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-                (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-                (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-                (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-                (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
-            ];
+        // Wall vertices
+        let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
+            (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
+            (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
+            (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
+            (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+        ];
 
-            for (walls, x0, z0, x1, z1, make_face) in wall_configs {
-                for (i, wall) in walls.iter().enumerate() {
-                    // 4 corners of wall: bottom-left, bottom-right, top-right, top-left
-                    all_vertices.push((Vec3::new(x0, wall.heights[0], z0), state.current_room, gx, gz, 0, make_face(i)));
-                    all_vertices.push((Vec3::new(x1, wall.heights[1], z1), state.current_room, gx, gz, 1, make_face(i)));
-                    all_vertices.push((Vec3::new(x1, wall.heights[2], z1), state.current_room, gx, gz, 2, make_face(i)));
-                    all_vertices.push((Vec3::new(x0, wall.heights[3], z0), state.current_room, gx, gz, 3, make_face(i)));
-                }
+        for (walls, x0, z0, x1, z1, make_face) in wall_configs {
+            for (i, wall) in walls.iter().enumerate() {
+                // 4 corners of wall: bottom-left, bottom-right, top-right, top-left
+                vertices.push((Vec3::new(x0, wall.heights[0], z0), room_idx, gx, gz, 0, make_face(i)));
+                vertices.push((Vec3::new(x1, wall.heights[1], z1), room_idx, gx, gz, 1, make_face(i)));
+                vertices.push((Vec3::new(x1, wall.heights[2], z1), room_idx, gx, gz, 2, make_face(i)));
+                vertices.push((Vec3::new(x0, wall.heights[3], z0), room_idx, gx, gz, 3, make_face(i)));
             }
         }
     }
 
+    vertices
+}
+
+/// Collect all vertex positions for the current room (for hover detection)
+fn collect_room_vertices(state: &EditorState) -> VertexData {
+    if let Some(room) = state.level.rooms.get(state.current_room) {
+        collect_single_room_vertices(room, state.current_room)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Collect vertex positions from ALL rooms (for cross-room linking)
+fn collect_all_room_vertices(state: &EditorState) -> VertexData {
+    let mut all_vertices = Vec::new();
+    for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        all_vertices.extend(collect_single_room_vertices(room, room_idx));
+    }
     all_vertices
 }
 
