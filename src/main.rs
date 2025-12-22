@@ -143,7 +143,8 @@ async fn main() {
         last_right_down = right_down;
         ui_ctx.begin_frame(mouse_state);
 
-        // Poll gamepad input
+        // Poll gamepad input (disabled on WASM for testing RefCell conflict)
+        #[cfg(not(target_arch = "wasm32"))]
         app.input.poll();
 
         // Block background input if example browser modal is open
