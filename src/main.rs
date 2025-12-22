@@ -405,8 +405,10 @@ async fn main() {
                 }
 
                 // Run game simulation
+                // Debug logging enabled when options menu is CLOSED (so you can open menu to stop and copy logs)
                 let delta = get_frame_time();
-                app.game.tick(&app.project.level, delta);
+                let debug_log = !app.game.options_menu_open;
+                app.game.tick(&app.project.level, delta, debug_log);
 
                 // Render the test viewport (player settings edited in World Editor)
                 game::draw_test_viewport(

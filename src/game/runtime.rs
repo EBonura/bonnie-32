@@ -330,7 +330,8 @@ impl GameToolState {
     }
 
     /// Run one frame of game simulation
-    pub fn tick(&mut self, level: &Level, delta_time: f32) {
+    /// debug_log: if true, print collision debug info to console
+    pub fn tick(&mut self, level: &Level, delta_time: f32, debug_log: bool) {
         if !self.playing {
             return;
         }
@@ -362,6 +363,7 @@ impl GameToolState {
                 velocity,
                 &mut controller,
                 delta_time,
+                debug_log,
             );
 
             // Update transform
