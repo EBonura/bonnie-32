@@ -424,13 +424,23 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     toolbar.label(&format!("Room: {}", state.current_room));
 
     if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_LEFT, icon_font, "Previous Room") {
-        if state.current_room > 0 {
-            state.current_room -= 1;
+        if !state.level.rooms.is_empty() {
+            if state.current_room > 0 {
+                state.current_room -= 1;
+            } else {
+                // Wrap to last room
+                state.current_room = state.level.rooms.len() - 1;
+            }
         }
     }
     if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_RIGHT, icon_font, "Next Room") {
-        if state.current_room + 1 < state.level.rooms.len() {
-            state.current_room += 1;
+        if !state.level.rooms.is_empty() {
+            if state.current_room + 1 < state.level.rooms.len() {
+                state.current_room += 1;
+            } else {
+                // Wrap to first room
+                state.current_room = 0;
+            }
         }
     }
     if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Add Room") {
@@ -724,7 +734,7 @@ fn draw_container_start(
 }
 
 /// Calculate height needed for a horizontal face container
-fn horizontal_face_container_height(face: &crate::world::HorizontalFace) -> f32 {
+fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floor: bool) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
     let button_row_height = 24.0;
@@ -732,13 +742,14 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace) -> f32 
     let uv_controls_height = 54.0; // offset row + scale row + angle row
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
+    let extrude_button_height = if is_floor { 56.0 } else { 0.0 }; // Extrude button only for floors
     let mut lines = 3; // texture, height, walkable
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    // Add space for UV info, controls, buttons, color, color picker, and normal mode
+    // Add space for UV info, controls, buttons, color, color picker, normal mode, and extrude
     let uv_lines = if face.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + extrude_button_height
 }
 
 /// Calculate height needed for a wall face container
@@ -774,7 +785,7 @@ fn draw_horizontal_face_container(
 ) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
-    let container_height = horizontal_face_container_height(face);
+    let container_height = horizontal_face_container_height(face, is_floor);
 
     // Draw container
     draw_container_start(x, y, width, container_height, label, label_color);
@@ -1138,6 +1149,56 @@ fn draw_horizontal_face_container(
                     };
                 }
             }
+        }
+    }
+
+    // Extrude button (only for floors)
+    if is_floor {
+        content_y += 32.0;
+        let extrude_btn_rect = Rect::new(content_x, content_y, 80.0, 24.0);
+
+        // Draw button background
+        let hovered = ctx.mouse.inside(&extrude_btn_rect);
+        let bg_color = if hovered {
+            Color::from_rgba(60, 80, 100, 255)
+        } else {
+            Color::from_rgba(40, 45, 55, 255)
+        };
+        draw_rectangle(extrude_btn_rect.x, extrude_btn_rect.y, extrude_btn_rect.w, extrude_btn_rect.h, bg_color);
+        draw_rectangle_lines(extrude_btn_rect.x, extrude_btn_rect.y, extrude_btn_rect.w, extrude_btn_rect.h, 1.0,
+            Color::from_rgba(80, 90, 100, 255));
+
+        // Draw icon and label
+        let icon_rect = Rect::new(content_x + 4.0, content_y + 2.0, 20.0, 20.0);
+        crate::ui::draw_icon_centered(icon_font, icon::UNFOLD_VERTICAL, &icon_rect, 14.0, WHITE);
+        draw_text("Extrude", (content_x + 26.0).floor(), (content_y + 16.0).floor(), 13.0, WHITE);
+
+        // Handle click
+        if hovered && ctx.mouse.left_pressed {
+            state.save_undo();
+            // Get wall texture from currently selected texture
+            let wall_texture = state.selected_texture.clone();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    // Extrude by 256 units (quarter sector)
+                    if s.extrude_floor(256.0, wall_texture) {
+                        state.set_status("Extruded floor by 256 units", 2.0);
+                    }
+                }
+            }
+            // Recalculate room bounds
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                r.recalculate_bounds();
+            }
+        }
+
+        // Tooltip
+        if hovered {
+            ctx.tooltip = Some(crate::ui::PendingTooltip {
+                text: String::from("Raise floor and create walls (256 units)"),
+                x: ctx.mouse.x,
+                y: ctx.mouse.y,
+            });
         }
     }
 
@@ -2406,12 +2467,12 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
                 match face {
                     super::SectorFace::Floor => {
                         if let Some(floor) = &sector.floor {
-                            height += horizontal_face_container_height(floor) + CONTAINER_MARGIN;
+                            height += horizontal_face_container_height(floor, true) + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::Ceiling => {
                         if let Some(ceiling) = &sector.ceiling {
-                            height += horizontal_face_container_height(ceiling) + CONTAINER_MARGIN;
+                            height += horizontal_face_container_height(ceiling, false) + CONTAINER_MARGIN;
                         }
                     }
                     super::SectorFace::WallNorth(i) => {
@@ -2447,10 +2508,10 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
 
             if let Some(sector) = sector_data {
                 if let Some(floor) = &sector.floor {
-                    height += horizontal_face_container_height(floor) + CONTAINER_MARGIN;
+                    height += horizontal_face_container_height(floor, true) + CONTAINER_MARGIN;
                 }
                 if let Some(ceiling) = &sector.ceiling {
-                    height += horizontal_face_container_height(ceiling) + CONTAINER_MARGIN;
+                    height += horizontal_face_container_height(ceiling, false) + CONTAINER_MARGIN;
                 }
                 for wall in &sector.walls_north {
                     height += wall_face_container_height(wall) + CONTAINER_MARGIN;

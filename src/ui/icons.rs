@@ -91,6 +91,9 @@ pub mod icon {
     pub const ROTATE_CW: char = '\u{e147}';       // rotate-cw
     pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
 
+    // Geometry operations
+    pub const UNFOLD_VERTICAL: char = '\u{e1a0}'; // unfold-vertical (extrude)
+
     // Camera modes
     pub const EYE: char = '\u{e0ba}';             // Free camera (eye)
     pub const EYE_OFF: char = '\u{e0bb}';         // Hidden (eye-off)

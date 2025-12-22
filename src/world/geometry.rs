@@ -244,6 +244,20 @@ impl VerticalFace {
         }
     }
 
+    /// Create a wall with individual corner heights for sloped surfaces
+    /// Heights order: [bottom-left, bottom-right, top-right, top-left]
+    pub fn new_sloped(bl: f32, br: f32, tr: f32, tl: f32, texture: TextureRef) -> Self {
+        Self {
+            heights: [bl, br, tr, tl],
+            texture,
+            uv: None,
+            solid: true,
+            blend_mode: BlendMode::Opaque,
+            colors: [Color::NEUTRAL; 4],
+            normal_mode: FaceNormalMode::default(),
+        }
+    }
+
     /// Set all vertex colors to the same value (uniform tint)
     pub fn set_uniform_color(&mut self, color: Color) {
         self.colors = [color; 4];
@@ -353,6 +367,87 @@ impl Sector {
             Direction::South => &mut self.walls_south,
             Direction::West => &mut self.walls_west,
         }
+    }
+
+    /// Extrude the floor upward by `amount` units.
+    /// Creates walls around the perimeter connecting the old floor height to the new height.
+    /// Returns true if extrusion was performed, false if no floor exists.
+    pub fn extrude_floor(&mut self, amount: f32, wall_texture: TextureRef) -> bool {
+        let Some(floor) = &mut self.floor else {
+            return false;
+        };
+
+        // Store old heights before modifying
+        let old_heights = floor.heights;
+
+        // Raise all floor corners by the extrusion amount
+        for h in &mut floor.heights {
+            *h += amount;
+        }
+        let new_heights = floor.heights;
+
+        // For each edge: if there's already a wall, extend it; otherwise create a new one
+        // Wall heights: [bottom-left, bottom-right, top-right, top-left]
+        // For extrusion walls facing OUTWARD, we use FaceNormalMode::Back
+
+        // North wall (-Z edge): BL at west (NW), BR at east (NE)
+        if let Some(wall) = self.walls_north.last_mut() {
+            // Raise existing wall's bottom to new floor height
+            wall.heights[0] = new_heights[0];  // BL = NW
+            wall.heights[1] = new_heights[1];  // BR = NE
+        } else {
+            let mut north_wall = VerticalFace::new_sloped(
+                old_heights[0], old_heights[1],  // bottom: BL=NW, BR=NE
+                new_heights[1], new_heights[0],  // top: TR=NE, TL=NW
+                wall_texture.clone(),
+            );
+            north_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_north.push(north_wall);
+        }
+
+        // East wall (+X edge): BL at north (NE), BR at south (SE)
+        if let Some(wall) = self.walls_east.last_mut() {
+            wall.heights[0] = new_heights[1];  // BL = NE
+            wall.heights[1] = new_heights[2];  // BR = SE
+        } else {
+            let mut east_wall = VerticalFace::new_sloped(
+                old_heights[1], old_heights[2],  // bottom: BL=NE, BR=SE
+                new_heights[2], new_heights[1],  // top: TR=SE, TL=NE
+                wall_texture.clone(),
+            );
+            east_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_east.push(east_wall);
+        }
+
+        // South wall (+Z edge): BL at east (SE), BR at west (SW)
+        if let Some(wall) = self.walls_south.last_mut() {
+            wall.heights[0] = new_heights[2];  // BL = SE
+            wall.heights[1] = new_heights[3];  // BR = SW
+        } else {
+            let mut south_wall = VerticalFace::new_sloped(
+                old_heights[2], old_heights[3],  // bottom: BL=SE, BR=SW
+                new_heights[3], new_heights[2],  // top: TR=SW, TL=SE
+                wall_texture.clone(),
+            );
+            south_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_south.push(south_wall);
+        }
+
+        // West wall (-X edge): BL at south (SW), BR at north (NW)
+        if let Some(wall) = self.walls_west.last_mut() {
+            wall.heights[0] = new_heights[3];  // BL = SW
+            wall.heights[1] = new_heights[0];  // BR = NW
+        } else {
+            let mut west_wall = VerticalFace::new_sloped(
+                old_heights[3], old_heights[0],  // bottom: BL=SW, BR=NW
+                new_heights[0], new_heights[3],  // top: TR=NW, TL=SW
+                wall_texture,
+            );
+            west_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_west.push(west_wall);
+        }
+
+        true
     }
 }
 
