@@ -37,8 +37,8 @@ pub mod icon {
     pub const CHEVRON_RIGHT: char = '\u{e070}';
 
     // Link/Unlink (for vertex mode)
-    pub const LINK: char = '\u{e104}';
-    pub const UNLINK: char = '\u{e19a}';
+    pub const LINK: char = '\u{e103}';      // link-2
+    pub const LINK_OFF: char = '\u{e104}';  // link-2-off
 
     // Editor tools
     pub const BOX: char = '\u{e061}';
@@ -81,6 +81,9 @@ pub mod icon {
 
     // Browser / Examples
     pub const BOOK_OPEN: char = '\u{e05f}';       // Examples browser
+
+    // Level objects
+    pub const MAP_PIN: char = '\u{e110}';         // Object placement (map-pin)
 
     // UV editing
     pub const FLIP_HORIZONTAL: char = '\u{e219}'; // flip-horizontal-2

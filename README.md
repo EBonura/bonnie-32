@@ -120,7 +120,6 @@ The editor features a MuseScore-inspired interface design:
 - **Floor**: Place floor sectors (Shift+drag to adjust height)
 - **Wall**: Create walls on sector edges (faces toward camera)
 - **Ceil**: Place ceiling sectors (Shift+drag to adjust height)
-- **Portal**: (WIP) Connect rooms
 - **Link ON/OFF**: Toggle vertex linking mode
 - **Delete/Backspace**: Remove selected faces
 
@@ -181,6 +180,30 @@ This project uses the following free texture packs:
 
 ## Backlog
 
+### Rendering / PS1 Authenticity
+
+- [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
+- [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face
+- [ ] **Face normal flipping**: In properties panel, allow swapping/flipping face normals
+
+---
+
+### World Editor - UI/UX
+
+- [x] **Fix link icon**: Now uses `link-2` and `link-2-off` from Lucide
+- [x] **Rename linking feature**: Renamed to "Geometry Linked/Independent" (works for vertices, edges, and faces)
+- [x] **Per-room ambient light**: Each room now uses its own ambient setting when rendering
+
+---
+
+### World Editor - Geometry
+
+- [x] **Cross-room boundary linking**: Moving vertices/edges/faces now finds and moves coincident vertices across all rooms
+- [ ] **Multiple walls per sector edge**: Currently limited to 1 wall per side. The `Sector` struct already supports multiple walls via `Vec<VerticalFace>`. Implement smart placement where new walls stack on top/bottom of existing walls with configurable start/end heights.
+- [ ] smarter floow/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
+
+---
+
 ### Overall / Meta
 
 - [ ] Remove AI/Claude mentions from git history (use `git filter-branch` or BFG Repo Cleaner - backup first!)
@@ -189,9 +212,6 @@ This project uses the following free texture packs:
 
 ### Rendering Pipeline
 
-- [x] **Per-vertex colors with texture modulation**: RGB color per vertex that multiplies texture
-- [x] **Aspect ratio toggle**: Switch between 4:3 and stretch-to-fill viewport
-- [x] **PS1 SPU reverb**: Authentic reverb emulation with 10 PsyQ SDK presets
 - [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights
 
 ---
@@ -202,19 +222,14 @@ This project uses the following free texture packs:
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
 
 #### Major Features
-- [ ] **Implement portals**: Create and visualize room connections (Portal struct exists in geometry.rs)
+- [x] **Implement portals**: Auto-generated portals between adjacent rooms (supports infinite height for open-air sectors)
 
 #### Future
-- [ ] Entity system design: Research TrenchBroom and TRLE for spawn points, interactables, triggers, lights
+- [x] Entity system design: Tile-based objects (PlayerStart, Light) with properties panel editing
 
 ---
 
 ### Music Editor
-
-#### Completed
-- [x] **37-key piano keyboard** - 3 octaves with full keyboard mapping
-- [x] **PS1 SPU reverb** - 10 authentic PsyQ SDK presets with wet/dry mix
-- [x] **Knob widget fixes** - Thicker borders, correct drag direction
 
 #### Remaining
 - [ ] Configurable pattern length: Currently hardcoded to 64 rows - should be adjustable
@@ -227,10 +242,6 @@ This project uses the following free texture packs:
 ---
 
 ### Assets (Modeler)
-
-#### Completed
-- [x] **Bone selection mode** - Added to modeler toolbar
-- [x] **Aspect ratio toggle** - Same feature as World Editor
 
 #### Remaining
 - [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
@@ -268,12 +279,12 @@ For implementing authentic PS1 constraints:
 
 ### Priority: Map Creation & Basic Gameplay
 - [ ] Fix 2D grid placement precision (sectors not aligning to clicks)
-- [ ] Portal creation and room connectivity
-- [ ] Multi-room support
+- [x] Portal creation and room connectivity (auto-generated portals between adjacent rooms)
+- [x] Multi-room support
 - [ ] Slope/ramp tools
-- [ ] Collision detection and physics
-- [ ] Character controller (movement, jumping)
-- [ ] Camera system (third-person, lock-on)
+- [x] Collision detection and physics (TR-style cylinder collision)
+- [x] Character controller (movement, jumping)
+- [x] Camera system (third-person follow, orbit preview)
 
 ### UI & Settings
 - [x] Editor toolbar: PS1 effects toggles (vertex jitter, affine mapping, dithering, etc.)
@@ -288,7 +299,7 @@ For implementing authentic PS1 constraints:
 - [ ] Fog system (distance-based fade)
 
 ### Core Systems
-- [ ] Entity system (enemies, items, spawn points)
+- [x] Entity system (tile-based objects: PlayerStart, Light, with properties panel)
 - [ ] Inventory system
 - [ ] Save/load game state
 
@@ -364,3 +375,8 @@ The software rasterizer is based on [tipsy](https://github.com/nkanaev/tipsy), a
 ## License
 
 MIT
+
+
+
+
+

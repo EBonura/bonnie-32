@@ -1,8 +1,8 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon};
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height};
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use super::{EditorState, EditorTool, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
@@ -84,6 +84,123 @@ impl EditorLayout {
             orbit_elevation,
         }
     }
+}
+
+/// Result from drawing a player property field
+struct PlayerPropResult {
+    new_y: f32,
+    new_value: Option<f32>,
+}
+
+/// Draw a click-to-edit property field for player settings
+/// Returns the new Y position and optionally a new value if edited
+fn draw_player_prop_field(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    container_width: f32,
+    line_height: f32,
+    label: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    field_id: usize,
+    editing: &mut Option<usize>,
+    buffer: &mut String,
+    label_color: Color,
+) -> PlayerPropResult {
+    let value_color = Color::from_rgba(220, 220, 230, 255);
+    let accent_color = Color::from_rgba(0, 180, 180, 255);
+
+    draw_text(label, x, (y + 13.0).floor(), 12.0, label_color);
+
+    let value_x = x + 80.0;
+    let value_w = container_width - 90.0;
+    let value_rect = Rect::new(value_x, y, value_w, line_height - 2.0);
+
+    let hovered = value_rect.contains(ctx.mouse.x, ctx.mouse.y);
+    let is_editing = *editing == Some(field_id);
+
+    let bg_color = if is_editing {
+        Color::from_rgba(50, 60, 70, 255)
+    } else if hovered {
+        Color::from_rgba(55, 55, 65, 255)
+    } else {
+        Color::from_rgba(45, 45, 55, 255)
+    };
+    let border_color = if is_editing {
+        accent_color
+    } else {
+        Color::from_rgba(60, 60, 65, 255)
+    };
+
+    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, bg_color);
+    draw_rectangle_lines(value_rect.x, value_rect.y, value_rect.w, value_rect.h, 1.0, border_color);
+
+    let mut new_value = None;
+
+    if is_editing {
+        // Text input mode
+        let text_y = y + 13.0;
+        let display_text = if buffer.is_empty() { "0" } else { buffer.as_str() };
+        let text_dims = measure_text(display_text, None, 12, 1.0);
+        let text_x = value_x + 4.0;
+        draw_text(display_text, text_x, text_y.floor(), 12.0, accent_color);
+
+        // Draw cursor (blinking)
+        let time = macroquad::time::get_time();
+        if (time * 2.0) as i32 % 2 == 0 {
+            let cursor_x = text_x + text_dims.width + 1.0;
+            draw_line(cursor_x, y + 3.0, cursor_x, y + line_height - 5.0, 1.0, accent_color);
+        }
+
+        // Handle keyboard input
+        while let Some(c) = get_char_pressed() {
+            if c.is_ascii_digit() || c == '.' || c == '-' {
+                buffer.push(c);
+            }
+        }
+
+        // Handle backspace
+        if is_key_pressed(KeyCode::Backspace) {
+            buffer.pop();
+        }
+
+        // Handle Enter - confirm edit
+        if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+            if let Ok(v) = buffer.parse::<f32>() {
+                new_value = Some(v.clamp(min, max));
+            }
+            *editing = None;
+            buffer.clear();
+        }
+
+        // Handle Escape - cancel edit
+        if is_key_pressed(KeyCode::Escape) {
+            *editing = None;
+            buffer.clear();
+        }
+
+        // Click outside to confirm
+        if ctx.mouse.left_pressed && !hovered {
+            if let Ok(v) = buffer.parse::<f32>() {
+                new_value = Some(v.clamp(min, max));
+            }
+            *editing = None;
+            buffer.clear();
+        }
+    } else {
+        // Display mode
+        draw_text(&format!("{:.0}", value), value_x + 4.0, (y + 13.0).floor(), 12.0, value_color);
+
+        // Click to start editing
+        if hovered && ctx.mouse.left_pressed {
+            *editing = Some(field_id);
+            *buffer = format!("{:.0}", value);
+        }
+    }
+
+    PlayerPropResult { new_y: y + line_height, new_value }
 }
 
 /// Draw the complete editor UI, returns action if triggered
@@ -203,13 +320,13 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
-    // Tool buttons
+    // Tool buttons (Portal removed - portals are now auto-generated)
     let tools = [
         (icon::MOVE, "Select", EditorTool::Select),
         (icon::SQUARE, "Floor", EditorTool::DrawFloor),
         (icon::BOX, "Wall", EditorTool::DrawWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
-        (icon::DOOR_CLOSED, "Portal", EditorTool::PlacePortal),
+        (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
 
     for (icon_char, tooltip, tool) in tools {
@@ -219,11 +336,47 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
 
+    // Object type picker (only show when PlaceObject tool is active)
+    // Shows "< Type >" with arrows to cycle through object types
+    if state.tool == EditorTool::PlaceObject {
+        toolbar.separator();
+
+        use crate::world::{ObjectType, SpawnPointType};
+        let object_types: [(&str, ObjectType); 6] = [
+            ("Player", ObjectType::Spawn(SpawnPointType::PlayerStart)),
+            ("Checkpoint", ObjectType::Spawn(SpawnPointType::Checkpoint)),
+            ("Enemy", ObjectType::Spawn(SpawnPointType::Enemy)),
+            ("Item", ObjectType::Spawn(SpawnPointType::Item)),
+            ("Light", ObjectType::Light {
+                color: crate::rasterizer::Color::new(255, 240, 200),
+                intensity: 1.0,
+                radius: 2048.0,
+            }),
+            ("Trigger", ObjectType::Trigger {
+                trigger_id: String::new(),
+                trigger_type: "on_enter".to_string(),
+            }),
+        ];
+
+        // Find current index
+        let current_idx = object_types.iter().position(|(_, obj_type)| {
+            std::mem::discriminant(&state.selected_object_type) == std::mem::discriminant(obj_type)
+        }).unwrap_or(0);
+
+        // Draw "< Type >" navigation
+        if toolbar.arrow_picker(ctx, icon_font, object_types[current_idx].0, &mut |delta: i32| {
+            let new_idx = (current_idx as i32 + delta).rem_euclid(object_types.len() as i32) as usize;
+            state.selected_object_type = object_types[new_idx].1.clone();
+        }) {
+            // Arrow was clicked, selection already changed via callback
+        }
+    }
+
     toolbar.separator();
 
     // Vertex mode toggle
-    let link_icon = if state.link_coincident_vertices { icon::LINK } else { icon::UNLINK };
-    let link_tooltip = if state.link_coincident_vertices { "Vertices Linked" } else { "Vertices Independent" };
+    let link_icon = if state.link_coincident_vertices { icon::LINK } else { icon::LINK_OFF };
+    let link_tooltip = if state.link_coincident_vertices { "Geometry Linked" } else { "Geometry Independent" };
     if toolbar.icon_button_active(ctx, link_icon, icon_font, link_tooltip, state.link_coincident_vertices) {
         state.link_coincident_vertices = !state.link_coincident_vertices;
         let mode = if state.link_coincident_vertices { "Linked" } else { "Independent" };
@@ -431,6 +584,46 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 14.0).floor(), 16.0, WHITE);
         y += line_height;
 
+        // Count lights in this room from room objects
+        let light_count = room.objects.iter()
+            .filter(|obj| obj.is_light())
+            .count();
+        draw_text(&format!("Lights: {}", light_count), x, (y + 14.0).floor(), 16.0, WHITE);
+        y += line_height;
+
+        // Ambient light knob
+        y += 8.0; // Extra space before knob
+        let knob_radius = 20.0;
+        let knob_center_x = x + rect.w / 2.0 - 4.0; // Center in panel
+        let knob_center_y = y + knob_radius + 12.0; // Account for label above
+
+        // Convert ambient (0.0-1.0) to knob value (0-127)
+        // Scale so 100% ambient = 127 (max knob position)
+        let ambient_value = (room.ambient * 127.0).round() as u8;
+        let knob_result = draw_knob(
+            ctx,
+            knob_center_x,
+            knob_center_y,
+            knob_radius,
+            ambient_value.min(127),
+            "Ambient",
+            false, // Not bipolar
+            false, // Not editing (no text entry mode for now)
+        );
+
+        // Apply knob changes
+        if let Some(new_val) = knob_result.value {
+            let clamped: u8 = new_val.min(127);
+            let new_ambient = (clamped as f32) / 127.0;
+            if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                if (room.ambient - new_ambient).abs() > 0.001 {
+                    room.ambient = new_ambient;
+                }
+            }
+        }
+
+        y += knob_radius * 2.0 + 30.0; // Knob height + label + value box
+
         // Room list
         y += 10.0;
         draw_text("Rooms:", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
@@ -535,13 +728,15 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace) -> f32 
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
     let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
+    let normal_mode_height = 40.0; // Label + 3-way toggle
     let mut lines = 3; // texture, height, walkable
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    // Add space for UV info, controls, buttons, and color
+    // Add space for UV info, controls, buttons, color, color picker, and normal mode
     let uv_lines = if face.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height
 }
 
 /// Calculate height needed for a wall face container
@@ -551,10 +746,12 @@ fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
     let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
+    let normal_mode_height = 40.0; // Label + 3-way toggle
     let lines = 3; // texture, y range, blend
-    // Add space for UV info, controls, buttons, and color
+    // Add space for UV info, controls, buttons, color, color picker, and normal mode
     let uv_lines = if wall.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height
 }
 
 /// Draw properties for a horizontal face inside a container
@@ -867,6 +1064,81 @@ fn draw_horizontal_face_container(
         }
     }
 
+    // PS1 color picker below swatches (for custom colors)
+    content_y += 36.0;
+    let picker_label = if state.selected_vertex_indices.is_empty() {
+        "Custom (all)"
+    } else {
+        "Custom (selected)"
+    };
+
+    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
+    let display_color = if !state.selected_vertex_indices.is_empty() {
+        let idx = state.selected_vertex_indices[0].min(3);
+        face.colors[idx]
+    } else {
+        face.colors[0]
+    };
+
+    let picker_result = draw_ps1_color_picker(
+        ctx,
+        content_x,
+        content_y + 14.0,
+        width - CONTAINER_PADDING * 2.0,
+        display_color,
+        picker_label,
+        &mut state.vertex_color_slider,
+    );
+
+    if let Some(new_color) = picker_result.color {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    if state.selected_vertex_indices.is_empty() {
+                        // No vertices selected - apply to all
+                        f.set_uniform_color(new_color);
+                    } else {
+                        // Apply only to selected vertices
+                        for &idx in &state.selected_vertex_indices {
+                            if idx < 4 {
+                                f.colors[idx] = new_color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Normal mode 3-way toggle
+    content_y += ps1_color_picker_height() + 14.0 + 8.0;
+    draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let toggle_rect = Rect::new(content_x, content_y, width - CONTAINER_PADDING * 2.0, 24.0);
+    let current_mode = match face.normal_mode {
+        crate::world::FaceNormalMode::Front => 0,
+        crate::world::FaceNormalMode::Both => 1,
+        crate::world::FaceNormalMode::Back => 2,
+    };
+    if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    f.normal_mode = match new_mode {
+                        0 => crate::world::FaceNormalMode::Front,
+                        1 => crate::world::FaceNormalMode::Both,
+                        _ => crate::world::FaceNormalMode::Back,
+                    };
+                }
+            }
+        }
+    }
+
     container_height
 }
 
@@ -1051,7 +1323,7 @@ fn draw_uv_controls(
 
     // Row 1: Offset - [Link] Label [X] [Y]
     let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
-    let link_icon = if state.uv_offset_linked { icon::LINK } else { icon::UNLINK };
+    let link_icon = if state.uv_offset_linked { icon::LINK } else { icon::LINK_OFF };
     if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_offset_linked) {
         state.uv_offset_linked = !state.uv_offset_linked;
     }
@@ -1090,7 +1362,7 @@ fn draw_uv_controls(
 
     // Row 2: Scale - [Link] Label [X] [Y]
     let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
-    let link_icon = if state.uv_scale_linked { icon::LINK } else { icon::UNLINK };
+    let link_icon = if state.uv_scale_linked { icon::LINK } else { icon::LINK_OFF };
     if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_scale_linked) {
         state.uv_scale_linked = !state.uv_scale_linked;
     }
@@ -1435,18 +1707,85 @@ fn draw_wall_face_container(
         }
     }
 
+    // PS1 color picker below swatches (for custom colors)
+    content_y += 36.0;
+    let picker_label = if state.selected_vertex_indices.is_empty() {
+        "Custom (all)"
+    } else {
+        "Custom (selected)"
+    };
+
+    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
+    let display_color = if !state.selected_vertex_indices.is_empty() {
+        let idx = state.selected_vertex_indices[0].min(3);
+        wall.colors[idx]
+    } else {
+        wall.colors[0]
+    };
+
+    let picker_result = draw_ps1_color_picker(
+        ctx,
+        content_x,
+        content_y + 14.0,
+        width - CONTAINER_PADDING * 2.0,
+        display_color,
+        picker_label,
+        &mut state.vertex_color_slider,
+    );
+
+    if let Some(new_color) = picker_result.color {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    if state.selected_vertex_indices.is_empty() {
+                        // No vertices selected - apply to all
+                        w.set_uniform_color(new_color);
+                    } else {
+                        // Apply only to selected vertices
+                        for &idx in &state.selected_vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = new_color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Normal mode 3-way toggle
+    content_y += ps1_color_picker_height() + 14.0 + 8.0;
+    draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let toggle_rect = Rect::new(content_x, content_y, width - CONTAINER_PADDING * 2.0, 24.0);
+    let current_mode = match wall.normal_mode {
+        crate::world::FaceNormalMode::Front => 0,
+        crate::world::FaceNormalMode::Both => 1,
+        crate::world::FaceNormalMode::Back => 2,
+    };
+    if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    w.normal_mode = match new_mode {
+                        0 => crate::world::FaceNormalMode::Front,
+                        1 => crate::world::FaceNormalMode::Both,
+                        _ => crate::world::FaceNormalMode::Back,
+                    };
+                }
+            }
+        }
+    }
+
     container_height
 }
 
 fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
     let x = rect.x.floor();
     let container_width = rect.w - 4.0;
-
-    // Handle scroll input
-    let inside = ctx.mouse.inside(&rect);
-    if inside && ctx.mouse.scroll != 0.0 {
-        state.properties_scroll -= ctx.mouse.scroll * 30.0;
-    }
 
     // Clone selection to avoid borrow issues
     let selection = state.selection.clone();
@@ -1729,11 +2068,310 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 }
             }
         }
+        super::Selection::Object { room: room_idx, index } => {
+            // Object properties
+            let obj_room_idx = *room_idx;
+            let obj_idx = *index;
+
+            let obj_opt = state.level.rooms.get(obj_room_idx)
+                .and_then(|room| room.objects.get(obj_idx))
+                .cloned();
+
+            if let Some(obj) = obj_opt {
+                let obj_name = obj.object_type.display_name();
+                draw_text(obj_name, x, (y + 14.0).floor(), 16.0, WHITE);
+                y += 24.0;
+
+                // Location
+                draw_text("Location:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
+                y += 18.0;
+                draw_text(&format!("  Room: {}  Sector: ({}, {})",
+                    obj_room_idx, obj.sector_x, obj.sector_z),
+                    x, (y + 12.0).floor(), 13.0, WHITE);
+                y += 18.0;
+                draw_text(&format!("  Height: {:.0}  Facing: {:.1}°",
+                    obj.height, obj.facing.to_degrees()),
+                    x, (y + 12.0).floor(), 13.0, WHITE);
+                y += 24.0;
+
+                // Type-specific properties
+                match &obj.object_type {
+                    crate::world::ObjectType::Light { color, intensity, radius } => {
+                        // Color picker
+                        let picker_height = ps1_color_picker_height();
+                        let picker_result = draw_ps1_color_picker(
+                            ctx,
+                            x,
+                            y,
+                            container_width - 8.0,
+                            *color,
+                            "Color",
+                            &mut state.light_color_slider,
+                        );
+                        if let Some(new_color) = picker_result.color {
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                if let crate::world::ObjectType::Light { color: c, .. } = &mut obj_mut.object_type {
+                                    *c = new_color;
+                                }
+                            }
+                        }
+                        y += picker_height + 16.0;
+
+                        // Intensity knob
+                        let knob_radius = 18.0;
+                        let knob_center_x = x + container_width * 0.25;
+                        let knob_center_y = y + knob_radius + 12.0;
+
+                        // Convert intensity (0.0-2.0) to knob value (0-127)
+                        let intensity_value = ((*intensity / 2.0) * 127.0).round() as u8;
+                        let intensity_result = draw_knob(
+                            ctx,
+                            knob_center_x,
+                            knob_center_y,
+                            knob_radius,
+                            intensity_value.min(127),
+                            "Intensity",
+                            false,
+                            false,
+                        );
+
+                        if let Some(new_val) = intensity_result.value {
+                            let new_intensity = (new_val as f32 / 127.0) * 2.0;
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                if let crate::world::ObjectType::Light { intensity: i, .. } = &mut obj_mut.object_type {
+                                    *i = new_intensity;
+                                }
+                            }
+                        }
+
+                        // Radius knob
+                        let knob_center_x2 = x + container_width * 0.75;
+
+                        // Convert radius (0-16384) to knob value (0-127)
+                        // 16384 = 16 sectors worth of radius
+                        const MAX_LIGHT_RADIUS: f32 = 16384.0;
+                        let radius_value = ((*radius / MAX_LIGHT_RADIUS) * 127.0).round() as u8;
+                        let radius_result = draw_knob(
+                            ctx,
+                            knob_center_x2,
+                            knob_center_y,
+                            knob_radius,
+                            radius_value.min(127),
+                            "Radius",
+                            false,
+                            false,
+                        );
+
+                        if let Some(new_val) = radius_result.value {
+                            let new_radius = (new_val as f32 / 127.0) * MAX_LIGHT_RADIUS;
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                if let crate::world::ObjectType::Light { radius: r, .. } = &mut obj_mut.object_type {
+                                    *r = new_radius;
+                                }
+                            }
+                        }
+
+                        y += knob_radius * 2.0 + 35.0;
+                    }
+                    crate::world::ObjectType::Spawn(spawn_type) => {
+                        use crate::world::SpawnPointType;
+
+                        match spawn_type {
+                            SpawnPointType::PlayerStart => {
+                                // Player settings - click to edit
+                                let section_color = Color::from_rgba(120, 150, 180, 255);
+                                let line_height = 20.0;
+                                let label_color = Color::from_rgba(180, 180, 190, 255);
+
+                                // === Collision Section ===
+                                draw_text("Collision", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Radius",
+                                    state.level.player_settings.radius, 20.0, 500.0, 0,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.radius = v; }
+                                y = r.new_y;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
+                                    state.level.player_settings.height, 100.0, 2000.0, 1,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.height = v; }
+                                y = r.new_y;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Step",
+                                    state.level.player_settings.step_height, 50.0, 1000.0, 2,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.step_height = v; }
+                                y = r.new_y;
+
+                                y += 6.0;
+
+                                // === Movement Section ===
+                                draw_text("Movement", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Walk",
+                                    state.level.player_settings.walk_speed, 100.0, 3000.0, 3,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.walk_speed = v; }
+                                y = r.new_y;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Run",
+                                    state.level.player_settings.run_speed, 200.0, 5000.0, 4,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.run_speed = v; }
+                                y = r.new_y;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Gravity",
+                                    state.level.player_settings.gravity, 500.0, 10000.0, 5,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.gravity = v; }
+                                y = r.new_y;
+
+                                y += 6.0;
+
+                                // === Camera Section ===
+                                draw_text("Camera", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Distance",
+                                    state.level.player_settings.camera_distance, 200.0, 3000.0, 6,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.camera_distance = v; }
+                                y = r.new_y;
+
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
+                                    state.level.player_settings.camera_height, 100.0, 1500.0, 7,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.camera_height = v; }
+                                y = r.new_y;
+
+                                y += 10.0;
+
+                                // === Camera Preview ===
+                                draw_text("Preview", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                // Calculate player world position
+                                let player_world_pos = if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                                    obj.world_position(room)
+                                } else {
+                                    Vec3::new(0.0, 0.0, 0.0)
+                                };
+
+                                // Camera position: behind and above the player
+                                let settings = &state.level.player_settings;
+                                let cam_pos = Vec3::new(
+                                    player_world_pos.x,
+                                    player_world_pos.y + settings.camera_height,
+                                    player_world_pos.z - settings.camera_distance,
+                                );
+
+                                // Camera looks at player's head height
+                                let look_at = Vec3::new(
+                                    player_world_pos.x,
+                                    player_world_pos.y + settings.height * 0.8, // Look slightly below head
+                                    player_world_pos.z,
+                                );
+
+                                // Preview dimensions (4:3 aspect ratio)
+                                let preview_w = (container_width - 8.0).min(160.0);
+                                let preview_h = preview_w * 0.75;
+
+                                // Render camera preview
+                                draw_player_camera_preview(
+                                    x,
+                                    y,
+                                    preview_w,
+                                    preview_h,
+                                    cam_pos,
+                                    look_at,
+                                    player_world_pos,
+                                    settings.radius,
+                                    settings.height,
+                                    &state.level,
+                                    &state.texture_packs,
+                                );
+
+                                y += preview_h + 8.0;
+                            }
+                            _ => {
+                                // Other spawn types - just show type
+                                draw_text(&format!("Type: {:?}", spawn_type), x, (y + 12.0).floor(), 13.0, WHITE);
+                                y += 24.0;
+                            }
+                        }
+                    }
+                    crate::world::ObjectType::Prop(model_name) => {
+                        draw_text(&format!("Model: {}", model_name), x, (y + 12.0).floor(), 13.0, WHITE);
+                        y += 24.0;
+                    }
+                    _ => {
+                        // Other object types - just show enabled status
+                        y += 8.0;
+                    }
+                }
+
+                // Enabled toggle
+                let enabled_btn_rect = Rect::new(x, y, container_width - 8.0, 22.0);
+                let enabled_hovered = enabled_btn_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                let enabled_color = if obj.enabled {
+                    if enabled_hovered { Color::from_rgba(60, 140, 60, 255) } else { Color::from_rgba(40, 100, 40, 255) }
+                } else {
+                    if enabled_hovered { Color::from_rgba(100, 100, 100, 255) } else { Color::from_rgba(60, 60, 60, 255) }
+                };
+                draw_rectangle(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h, enabled_color);
+                if enabled_hovered {
+                    draw_rectangle_lines(enabled_btn_rect.x, enabled_btn_rect.y, enabled_btn_rect.w, enabled_btn_rect.h, 1.0, WHITE);
+                }
+                let enabled_text = if obj.enabled { "Enabled" } else { "Disabled" };
+                draw_text(enabled_text, x + 10.0, (y + 15.0).floor(), 13.0, WHITE);
+
+                if enabled_hovered && ctx.mouse.left_pressed {
+                    state.save_undo();
+                    if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                        obj_mut.enabled = !obj_mut.enabled;
+                    }
+                }
+                y += 28.0;
+
+                // Delete button
+                let delete_btn_rect = Rect::new(x, y, container_width - 8.0, 22.0);
+                let delete_hovered = delete_btn_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                let delete_color = if delete_hovered {
+                    Color::from_rgba(180, 60, 60, 255)
+                } else {
+                    Color::from_rgba(120, 40, 40, 255)
+                };
+                draw_rectangle(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, delete_color);
+                if delete_hovered {
+                    draw_rectangle_lines(delete_btn_rect.x, delete_btn_rect.y, delete_btn_rect.w, delete_btn_rect.h, 1.0, WHITE);
+                }
+                draw_text("Delete Object", x + 10.0, (y + 15.0).floor(), 13.0, WHITE);
+
+                if delete_hovered && ctx.mouse.left_pressed {
+                    state.save_undo();
+                    state.level.remove_object(obj_room_idx, obj_idx);
+                    state.set_selection(super::Selection::None);
+                    state.set_status("Object deleted", 2.0);
+                }
+            } else {
+                draw_text("Object not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+            }
+        }
     }
 
     // Disable scissor
     unsafe {
         get_internal_gl().quad_gl.scissor(None);
+    }
+
+    // Handle panel scroll
+    let inside = ctx.mouse.inside(&rect);
+    if inside && ctx.mouse.scroll != 0.0 {
+        state.properties_scroll -= ctx.mouse.scroll * 30.0;
+        state.properties_scroll = state.properties_scroll.clamp(0.0, max_scroll);
     }
 
     // Draw scroll indicator if content overflows
@@ -1829,6 +2467,32 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
             }
             height
         }
+        super::Selection::Object { room: room_idx, index } => {
+            // Base height for all objects: header + location + enabled + delete
+            let mut height = 24.0 + 18.0 + 18.0 + 24.0 + 28.0 + 28.0; // header + location lines + type-specific + enabled + delete
+
+            // Add extra height for objects with custom properties
+            let obj_opt = state.level.rooms.get(*room_idx)
+                .and_then(|room| room.objects.get(*index));
+            if let Some(obj) = obj_opt {
+                match &obj.object_type {
+                    crate::world::ObjectType::Light { .. } => {
+                        height += 18.0 + ps1_color_picker_height() + 16.0 + 18.0 * 2.0 + 35.0; // color label + picker + knobs
+                    }
+                    crate::world::ObjectType::Spawn(crate::world::SpawnPointType::PlayerStart) => {
+                        // Player settings: 3 sections with scroll-to-edit rows
+                        // Collision: header 18 + 3 rows at 20 = 78
+                        // Movement: header 18 + 3 rows at 20 = 78 + 6 gap
+                        // Camera: header 18 + 2 rows at 20 = 58 + 6 gap + 8 final
+                        height += 78.0 + 6.0 + 78.0 + 6.0 + 58.0 + 8.0; // = 234
+                    }
+                    _ => {
+                        height += 24.0; // Just the type info line
+                    }
+                }
+            }
+            height
+        }
     }
 }
 
@@ -1854,4 +2518,272 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
         14.0,
         Color::from_rgba(100, 100, 100, 255),
     );
+}
+
+/// Draw a small camera preview showing what the player camera sees
+fn draw_player_camera_preview(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    cam_pos: Vec3,
+    look_at: Vec3,
+    player_pos: Vec3,
+    player_radius: f32,
+    player_height: f32,
+    level: &crate::world::Level,
+    texture_packs: &[super::TexturePack],
+) {
+    // Create a small framebuffer for the preview
+    let fb_w = (width as usize).max(80);
+    let fb_h = (height as usize).max(60);
+    let mut fb = Framebuffer::new(fb_w, fb_h);
+    fb.clear(RasterColor::new(20, 20, 25));
+
+    // Set up camera looking from cam_pos toward look_at
+    let mut camera = Camera::new();
+    camera.position = cam_pos;
+
+    // Calculate direction from camera to look_at point
+    let dir = Vec3::new(
+        look_at.x - cam_pos.x,
+        look_at.y - cam_pos.y,
+        look_at.z - cam_pos.z,
+    );
+    let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+    if len > 0.001 {
+        let nx = dir.x / len;
+        let ny = dir.y / len;
+        let nz = dir.z / len;
+
+        // rotation_x (pitch): from y = -sin(rotation_x)
+        camera.rotation_x = (-ny).asin();
+        // rotation_y (yaw): from x/z = sin(rotation_y)/cos(rotation_y)
+        camera.rotation_y = nx.atan2(nz);
+    }
+    camera.update_basis();
+
+    // Build lighting from level
+    let mut lights = Vec::new();
+    let mut total_ambient = 0.0;
+    let mut room_count = 0;
+    for room in &level.rooms {
+        total_ambient += room.ambient;
+        room_count += 1;
+        // Collect lights from room objects
+        for obj in room.objects.iter().filter(|o| o.enabled) {
+            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                let world_pos = obj.world_position(room);
+                let mut light = Light::point(world_pos, *radius, *intensity);
+                light.color = *color;
+                lights.push(light);
+            }
+        }
+    }
+    let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
+
+    // Render settings
+    let settings = RasterSettings {
+        shading: ShadingMode::Gouraud,
+        lights,
+        ambient,
+        ..RasterSettings::default()
+    };
+
+    // Build texture map
+    let textures: Vec<RasterTexture> = texture_packs
+        .iter()
+        .flat_map(|pack| &pack.textures)
+        .cloned()
+        .collect();
+
+    let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    let mut texture_idx = 0;
+    for pack in texture_packs {
+        for tex in &pack.textures {
+            texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
+            texture_idx += 1;
+        }
+    }
+
+    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<usize> {
+        if !tex_ref.is_valid() {
+            return Some(0);
+        }
+        texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
+    };
+
+    // Render each room
+    for room in &level.rooms {
+        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
+        if !vertices.is_empty() {
+            render_mesh(&mut fb, &vertices, &faces, &textures, &camera, &settings);
+        }
+    }
+
+    // Draw player cylinder wireframe
+    let cylinder_color = RasterColor::new(100, 255, 100); // Green
+    draw_preview_wireframe_cylinder(&mut fb, &camera, player_pos, player_radius, player_height, 12, cylinder_color);
+
+    // Draw framebuffer to screen
+    let fb_texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
+    fb_texture.set_filter(FilterMode::Nearest);
+
+    // Draw border
+    draw_rectangle(x - 1.0, y - 1.0, width + 2.0, height + 2.0, Color::from_rgba(60, 60, 65, 255));
+
+    draw_texture_ex(
+        &fb_texture,
+        x,
+        y,
+        WHITE,
+        DrawTextureParams {
+            dest_size: Some(vec2(width, height)),
+            ..Default::default()
+        },
+    );
+}
+
+/// Draw a wireframe cylinder for the camera preview
+fn draw_preview_wireframe_cylinder(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    center: Vec3,
+    radius: f32,
+    height: f32,
+    segments: usize,
+    color: RasterColor,
+) {
+    use std::f32::consts::PI;
+
+    // Generate circle points at bottom and top
+    let mut bottom_points: Vec<Vec3> = Vec::with_capacity(segments);
+    let mut top_points: Vec<Vec3> = Vec::with_capacity(segments);
+
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let px = center.x + radius * angle.cos();
+        let pz = center.z + radius * angle.sin();
+
+        bottom_points.push(Vec3::new(px, center.y, pz));
+        top_points.push(Vec3::new(px, center.y + height, pz));
+    }
+
+    // Draw bottom circle
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        draw_preview_3d_line(fb, bottom_points[i], bottom_points[next], camera, color);
+    }
+
+    // Draw top circle
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        draw_preview_3d_line(fb, top_points[i], top_points[next], camera, color);
+    }
+
+    // Draw vertical lines connecting top and bottom
+    let skip = if segments > 8 { 2 } else { 1 };
+    for i in (0..segments).step_by(skip) {
+        draw_preview_3d_line(fb, bottom_points[i], top_points[i], camera, color);
+    }
+}
+
+/// Draw a 3D line into the framebuffer for camera preview
+fn draw_preview_3d_line(
+    fb: &mut Framebuffer,
+    p0: Vec3,
+    p1: Vec3,
+    camera: &Camera,
+    color: RasterColor,
+) {
+    const NEAR_PLANE: f32 = 0.1;
+
+    // Transform to camera space
+    let rel0 = p0 - camera.position;
+    let rel1 = p1 - camera.position;
+
+    let z0 = rel0.dot(camera.basis_z);
+    let z1 = rel1.dot(camera.basis_z);
+
+    // Both behind camera - skip entirely
+    if z0 <= NEAR_PLANE && z1 <= NEAR_PLANE {
+        return;
+    }
+
+    // Clip line to near plane if needed
+    let (clipped_p0, clipped_p1) = if z0 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p0 = p0 + (p1 - p0) * t;
+        (new_p0, p1)
+    } else if z1 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p1 = p0 + (p1 - p0) * t;
+        (p0, new_p1)
+    } else {
+        (p0, p1)
+    };
+
+    // Project clipped endpoints
+    let s0 = preview_world_to_screen(clipped_p0, camera, fb.width, fb.height);
+    let s1 = preview_world_to_screen(clipped_p1, camera, fb.width, fb.height);
+
+    let (Some((x0f, y0f)), Some((x1f, y1f))) = (s0, s1) else {
+        return;
+    };
+
+    // Convert to integers for Bresenham
+    let mut x0 = x0f as i32;
+    let mut y0 = y0f as i32;
+    let x1 = x1f as i32;
+    let y1 = y1f as i32;
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    let w = fb.width as i32;
+    let h = fb.height as i32;
+
+    loop {
+        if x0 >= 0 && x0 < w && y0 >= 0 && y0 < h {
+            fb.set_pixel(x0 as usize, y0 as usize, color);
+        }
+
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/// Project world position to screen for camera preview
+fn preview_world_to_screen(pos: Vec3, camera: &Camera, width: usize, height: usize) -> Option<(f32, f32)> {
+    let rel = pos - camera.position;
+
+    // Transform to camera space
+    let cam_x = rel.dot(camera.basis_x);
+    let cam_y = rel.dot(camera.basis_y);
+    let cam_z = rel.dot(camera.basis_z);
+
+    if cam_z < 0.1 {
+        return None;
+    }
+
+    // Project (simple perspective)
+    let scale = (height as f32) / cam_z;
+    let screen_x = (width as f32 / 2.0) + cam_x * scale;
+    let screen_y = (height as f32 / 2.0) - cam_y * scale;
+
+    Some((screen_x, screen_y))
 }

@@ -4,7 +4,7 @@ use super::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// RGBA color (0-255 per channel)
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -73,6 +73,57 @@ impl Color {
     /// Convert to [u8; 4] for framebuffer
     pub fn to_bytes(self) -> [u8; 4] {
         [self.r, self.g, self.b, self.a]
+    }
+
+    // =====================================================
+    // PS1 15-bit color helpers (5 bits per channel, 0-31)
+    // =====================================================
+
+    /// Create color from PS1 5-bit values (0-31 per channel)
+    pub fn from_ps1(r: u8, g: u8, b: u8) -> Self {
+        Self::new((r.min(31)) << 3, (g.min(31)) << 3, (b.min(31)) << 3)
+    }
+
+    /// Get red channel as 5-bit value (0-31)
+    pub fn r5(&self) -> u8 {
+        self.r >> 3
+    }
+
+    /// Get green channel as 5-bit value (0-31)
+    pub fn g5(&self) -> u8 {
+        self.g >> 3
+    }
+
+    /// Get blue channel as 5-bit value (0-31)
+    pub fn b5(&self) -> u8 {
+        self.b >> 3
+    }
+
+    /// Set red channel from 5-bit value (0-31)
+    pub fn set_r5(&mut self, v: u8) {
+        self.r = (v.min(31)) << 3;
+    }
+
+    /// Set green channel from 5-bit value (0-31)
+    pub fn set_g5(&mut self, v: u8) {
+        self.g = (v.min(31)) << 3;
+    }
+
+    /// Set blue channel from 5-bit value (0-31)
+    pub fn set_b5(&mut self, v: u8) {
+        self.b = (v.min(31)) << 3;
+    }
+
+    /// Quantize color to PS1 15-bit (5 bits per channel)
+    /// Uses the same 0xF8 mask as the PS1 hardware to keep top 5 bits
+    #[inline]
+    pub fn quantize_15bit(self) -> Self {
+        Self {
+            r: self.r & 0xF8,
+            g: self.g & 0xF8,
+            b: self.b & 0xF8,
+            a: self.a,
+        }
     }
 
     /// PS1-style blend: combine this color (front) with back color using blend mode
@@ -231,6 +282,14 @@ impl Texture {
             pixels,
             name,
         })
+    }
+
+    /// Quantize all pixels to PS1 15-bit color (5 bits per channel)
+    /// Modifies pixels in-place. Call after loading to simulate PS1 color depth.
+    pub fn quantize_15bit(&mut self) {
+        for pixel in &mut self.pixels {
+            *pixel = pixel.quantize_15bit();
+        }
     }
 
     /// Load all textures from a directory
@@ -467,6 +526,8 @@ pub struct RasterSettings {
     pub shading: ShadingMode,
     /// Backface culling
     pub backface_cull: bool,
+    /// Show wireframe on back-facing polygons (editor feature, disable in game)
+    pub backface_wireframe: bool,
     /// Scene lights (multiple light sources)
     pub lights: Vec<Light>,
     /// Ambient light intensity (0.0-1.0)
@@ -494,6 +555,14 @@ impl RasterSettings {
         }
         Vec3::new(-1.0, -1.0, -1.0).normalize()
     }
+
+    /// Create settings for in-game rendering (no editor debug features)
+    pub fn game() -> Self {
+        Self {
+            backface_wireframe: false, // Disable editor debug wireframe
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for RasterSettings {
@@ -504,6 +573,7 @@ impl Default for RasterSettings {
             use_zbuffer: true,
             shading: ShadingMode::Gouraud,
             backface_cull: true,
+            backface_wireframe: true, // Editor default: show backfaces as wireframe
             lights: vec![Light::directional(Vec3::new(-1.0, -1.0, -1.0), 0.7)],
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240

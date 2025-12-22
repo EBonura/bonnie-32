@@ -18,6 +18,8 @@ mod landing;
 mod modeler;
 mod tracker;
 mod app;
+mod game;
+mod project;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -155,6 +157,7 @@ async fn main() {
         let tabs = [
             TabEntry::new(icon::HOUSE, "Home"),
             TabEntry::new(icon::GLOBE, "World"),
+            TabEntry::new(icon::PLAY, "Game"),
             TabEntry::new(icon::PERSON_STANDING, "Assets"),
             TabEntry::new(icon::MUSIC, "Music"),
         ];
@@ -172,6 +175,10 @@ async fn main() {
         // Content area below tab bar
         let content_rect = Rect::new(0.0, tab_layout::BAR_HEIGHT, screen_w, screen_h - tab_layout::BAR_HEIGHT);
 
+        // Sync level from World Editor to ProjectData for live editing
+        // This ensures Game tab always sees the current editor state
+        app.project.level = app.world_editor.editor_state.level.clone();
+
         // Draw active tool content
         match app.active_tool {
             Tool::Home => {
@@ -180,6 +187,12 @@ async fn main() {
 
             Tool::WorldEditor => {
                 let ws = &mut app.world_editor;
+
+                // Recalculate portals if geometry changed
+                if ws.editor_state.portals_dirty {
+                    ws.editor_state.level.recalculate_portals();
+                    ws.editor_state.portals_dirty = false;
+                }
 
                 // Check for pending import from browser (WASM only)
                 #[cfg(target_arch = "wasm32")]
@@ -362,6 +375,38 @@ async fn main() {
                         BrowserAction::None => {}
                     }
                 }
+            }
+
+            Tool::Test => {
+                // Build textures array from World Editor texture packs
+                let game_textures: Vec<Texture> = app.world_editor.editor_state.texture_packs
+                    .iter()
+                    .flat_map(|pack| &pack.textures)
+                    .cloned()
+                    .collect();
+
+                // Spawn player if playing and no player exists
+                if app.game.playing && app.game.player_entity.is_none() {
+                    if let Some((room_idx, spawn)) = app.project.level.get_player_start() {
+                        if let Some(room) = app.project.level.rooms.get(room_idx) {
+                            let pos = spawn.world_position(room);
+                            app.game.spawn_player(pos, &app.project.level);
+                        }
+                    }
+                }
+
+                // Run game simulation
+                let delta = get_frame_time();
+                app.game.tick(&app.project.level, delta);
+
+                // Render the test viewport (player settings edited in World Editor)
+                game::draw_test_viewport(
+                    content_rect,
+                    &mut app.game,
+                    &app.project.level,
+                    &game_textures,
+                    &mut fb,
+                );
             }
 
             Tool::Modeler => {

@@ -1,0 +1,185 @@
+//! Collision System
+//!
+//! TR-style cylinder collision against sector-based level geometry.
+//! The player is modeled as a vertical cylinder that collides with
+//! floor/ceiling heights in each sector.
+
+use crate::rasterizer::Vec3;
+use crate::world::Level;
+use super::components::{CharacterController, character};
+
+/// Result of a collision check
+#[derive(Debug, Clone, Copy)]
+pub struct CollisionResult {
+    /// Corrected position after collision
+    pub position: Vec3,
+    /// Is the entity on the ground?
+    pub grounded: bool,
+    /// Current room index
+    pub room: usize,
+    /// Did we hit a wall? (horizontal collision)
+    pub hit_wall: bool,
+    /// Did we hit the ceiling?
+    pub hit_ceiling: bool,
+    /// Floor height at final position
+    pub floor_height: f32,
+}
+
+/// Perform cylinder collision against level geometry
+///
+/// This follows the OpenLara approach:
+/// 1. Check floor height at 4 corner points of the cylinder
+/// 2. For each point, check if floor is too high (wall) or too low (drop)
+/// 3. Apply step-up for small height differences
+/// 4. Push back from walls
+pub fn collide_cylinder(
+    level: &Level,
+    position: Vec3,
+    velocity: Vec3,
+    controller: &CharacterController,
+    delta_time: f32,
+) -> CollisionResult {
+    let radius = controller.radius;
+    let height = controller.height;
+    let step_height = controller.step_height;
+    let room_hint = Some(controller.current_room);
+
+    // Proposed new position
+    let mut new_pos = position + velocity * delta_time;
+
+    // Apply gravity to vertical velocity (use level settings)
+    let gravity = level.player_settings.gravity;
+    let mut vert_vel = controller.vertical_velocity;
+    if !controller.grounded {
+        vert_vel -= gravity * delta_time;
+        vert_vel = vert_vel.max(-character::TERMINAL_VELOCITY);
+    }
+    new_pos.y += vert_vel * delta_time;
+
+    let mut grounded = false;
+    let mut hit_wall = false;
+    let mut hit_ceiling = false;
+    let mut current_room = controller.current_room;
+
+    // Check floor at center
+    if let Some(info) = level.get_floor_info(new_pos, room_hint) {
+        current_room = info.room;
+
+        // Floor collision
+        let foot_y = new_pos.y; // Character position is at feet
+        let head_y = new_pos.y + height;
+
+        // Check if we're below the floor
+        if foot_y < info.floor {
+            // Check if it's a steppable height difference
+            let height_diff = info.floor - foot_y;
+            if height_diff <= step_height {
+                // Step up
+                new_pos.y = info.floor;
+                grounded = true;
+            } else {
+                // Wall - push back horizontally
+                new_pos.x = position.x;
+                new_pos.z = position.z;
+                hit_wall = true;
+            }
+        } else if foot_y <= info.floor + 1.0 {
+            // On the ground (with small tolerance)
+            grounded = true;
+            new_pos.y = info.floor;
+        }
+
+        // Ceiling collision
+        if head_y > info.ceiling {
+            new_pos.y = info.ceiling - height;
+            hit_ceiling = true;
+        }
+    } else {
+        // Outside all rooms - keep position, mark as falling
+        // (or we could push back to last known position)
+    }
+
+    // Check 4 corner points for wall collision (like OpenLara)
+    let corners = [
+        Vec3::new(new_pos.x - radius, new_pos.y, new_pos.z - radius),
+        Vec3::new(new_pos.x + radius, new_pos.y, new_pos.z - radius),
+        Vec3::new(new_pos.x + radius, new_pos.y, new_pos.z + radius),
+        Vec3::new(new_pos.x - radius, new_pos.y, new_pos.z + radius),
+    ];
+
+    for corner in &corners {
+        if let Some(info) = level.get_floor_info(*corner, Some(current_room)) {
+            // If corner's floor is significantly higher than our position, it's a wall
+            let height_diff = info.floor - new_pos.y;
+            if height_diff > step_height {
+                // Wall collision - push back in the direction of the collision
+                let push_x = if corner.x < new_pos.x { radius } else { -radius };
+                let push_z = if corner.z < new_pos.z { radius } else { -radius };
+
+                // Only push back the axis that's blocked
+                let corner_x_only = Vec3::new(corner.x, new_pos.y, new_pos.z);
+                let corner_z_only = Vec3::new(new_pos.x, new_pos.y, corner.z);
+
+                if let Some(info_x) = level.get_floor_info(corner_x_only, Some(current_room)) {
+                    if info_x.floor - new_pos.y > step_height {
+                        new_pos.x = position.x;
+                        hit_wall = true;
+                    }
+                }
+
+                if let Some(info_z) = level.get_floor_info(corner_z_only, Some(current_room)) {
+                    if info_z.floor - new_pos.y > step_height {
+                        new_pos.z = position.z;
+                        hit_wall = true;
+                    }
+                }
+            }
+        } else {
+            // Corner is outside rooms - treat as wall
+            let push_x = if corner.x < new_pos.x { radius } else { -radius };
+            let push_z = if corner.z < new_pos.z { radius } else { -radius };
+            new_pos.x = position.x;
+            new_pos.z = position.z;
+            hit_wall = true;
+        }
+    }
+
+    // Get final floor height
+    let floor_height = level.get_floor_height(new_pos, Some(current_room))
+        .unwrap_or(new_pos.y);
+
+    CollisionResult {
+        position: new_pos,
+        grounded,
+        room: current_room,
+        hit_wall,
+        hit_ceiling,
+        floor_height,
+    }
+}
+
+/// Simple move-and-slide collision for entities
+///
+/// Moves the entity by velocity, sliding along walls if blocked.
+pub fn move_and_slide(
+    level: &Level,
+    position: Vec3,
+    velocity: Vec3,
+    controller: &mut CharacterController,
+    delta_time: f32,
+) -> Vec3 {
+    let result = collide_cylinder(level, position, velocity, controller, delta_time);
+
+    // Update controller state
+    controller.grounded = result.grounded;
+    controller.current_room = result.room;
+
+    // Reset vertical velocity if grounded
+    if result.grounded {
+        controller.vertical_velocity = 0.0;
+    } else if result.hit_ceiling {
+        controller.vertical_velocity = 0.0;
+    }
+
+    result.position
+}

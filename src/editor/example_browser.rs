@@ -5,7 +5,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
 use crate::world::Level;
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings};
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use super::example_levels::{ExampleLevelInfo, LevelStats, get_level_stats};
 use super::TexturePack;
 
@@ -396,8 +396,34 @@ fn draw_orbit_preview(
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(15, 15, 20));
 
-    // Render settings
-    let settings = RasterSettings::default();
+    // Build lighting from level
+    let mut lights = Vec::new();
+    let mut total_ambient = 0.0;
+    let mut room_count = 0;
+    for room in &level.rooms {
+        total_ambient += room.ambient;
+        room_count += 1;
+    }
+    // Collect lights from room objects
+    for room in &level.rooms {
+        for obj in room.objects.iter().filter(|o| o.enabled) {
+            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                let world_pos = obj.world_position(room);
+                let mut light = Light::point(world_pos, *radius, *intensity);
+                light.color = *color;
+                lights.push(light);
+            }
+        }
+    }
+    let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
+
+    // Render settings with Gouraud shading and room lights
+    let settings = RasterSettings {
+        shading: ShadingMode::Gouraud,
+        lights,
+        ambient,
+        ..RasterSettings::default()
+    };
 
     // Build flattened textures array and texture map (same as main viewport)
     let textures: Vec<RasterTexture> = texture_packs

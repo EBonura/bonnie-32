@@ -1,8 +1,8 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::Level;
-use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings};
+use crate::world::{Level, ObjectType, SpawnPointType};
+use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings, Color};
 use super::texture_pack::TexturePack;
 
 /// TRLE grid constraints
@@ -27,7 +27,6 @@ pub enum EditorTool {
     DrawFloor,
     DrawWall,
     DrawCeiling,
-    PlacePortal,
     PlaceObject,
 }
 
@@ -58,6 +57,10 @@ pub enum Selection {
     /// wall_face: Some(SectorFace::WallXxx) when face_idx=2
     Edge { room: usize, x: usize, z: usize, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace> },
     Portal { room: usize, portal: usize },
+    /// Level object selected (spawn, light, prop, etc.)
+    /// room: which room the object belongs to
+    /// index: index within that room's objects array
+    Object { room: usize, index: usize },
 }
 
 impl Selection {
@@ -178,6 +181,8 @@ pub struct EditorState {
     pub grid_sector_drag_start: Option<(f32, f32)>,
     /// True if dragging the room origin marker (moves entire room position)
     pub grid_dragging_room_origin: bool,
+    /// Object being dragged in 2D grid view (room_idx, object_idx)
+    pub grid_dragging_object: Option<(usize, usize)>,
 
     /// 3D viewport vertex dragging state (legacy - kept for compatibility)
     pub viewport_dragging_vertices: Vec<(usize, usize)>, // List of (room_idx, vertex_idx)
@@ -191,6 +196,11 @@ pub struct EditorState {
     /// For walls: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
     pub dragging_sector_vertices: Vec<(usize, usize, usize, SectorFace, usize)>,
     pub drag_initial_heights: Vec<f32>, // Initial Y/height values for each vertex
+
+    /// 3D viewport object dragging state
+    pub dragging_object: Option<(usize, usize)>, // (room_idx, object_idx)
+    pub dragging_object_initial_y: f32,          // Initial Y when drag started
+    pub dragging_object_plane_y: f32,            // Current accumulated drag plane Y
 
     /// Texture palette state
     pub texture_packs: Vec<TexturePack>,
@@ -226,8 +236,25 @@ pub struct EditorState {
     /// Selected vertex indices for color editing (0-3 for face corners)
     pub selected_vertex_indices: Vec<usize>,
 
+    /// Color picker active slider (0=R, 1=G, 2=B) for light color editing
+    pub light_color_slider: Option<usize>,
+
+    /// Color picker active slider for vertex color editing
+    pub vertex_color_slider: Option<usize>,
+
     /// Hidden rooms (room indices that should not be rendered in 2D/3D views)
     pub hidden_rooms: std::collections::HashSet<usize>,
+
+    /// Portals need recalculation (set when geometry changes)
+    pub portals_dirty: bool,
+
+    /// Selected object type to place (when PlaceObject tool is active)
+    pub selected_object_type: ObjectType,
+
+    /// Player property editing state (for click-to-edit numeric fields)
+    /// Field IDs: 0=radius, 1=height, 2=step, 3=walk, 4=run, 5=gravity, 6=camera_distance, 7=camera_height
+    pub player_prop_editing: Option<usize>,
+    pub player_prop_buffer: String,
 }
 
 impl EditorState {
@@ -300,12 +327,16 @@ impl EditorState {
             grid_sector_drag_offset: (0.0, 0.0),
             grid_sector_drag_start: None,
             grid_dragging_room_origin: false,
+            grid_dragging_object: None,
             viewport_dragging_vertices: Vec::new(),
             viewport_drag_started: false,
             viewport_drag_plane_y: 0.0,
             viewport_drag_initial_y: Vec::new(),
             dragging_sector_vertices: Vec::new(),
             drag_initial_heights: Vec::new(),
+            dragging_object: None,
+            dragging_object_initial_y: 0.0,
+            dragging_object_plane_y: 0.0,
             texture_packs,
             selected_pack: 0,
             texture_scroll: 0.0,
@@ -324,7 +355,13 @@ impl EditorState {
             height_adjust_locked_pos: None,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
             selected_vertex_indices: Vec::new(),
+            light_color_slider: None,
+            vertex_color_slider: None,
             hidden_rooms: std::collections::HashSet::new(),
+            portals_dirty: true, // Recalculate on first frame
+            selected_object_type: ObjectType::Spawn(SpawnPointType::PlayerStart), // Default to player start
+            player_prop_editing: None,
+            player_prop_buffer: String::new(),
         }
     }
 
@@ -344,6 +381,7 @@ impl EditorState {
         self.redo_stack.clear();
         self.selection = Selection::None;
         self.selected_vertex_indices.clear();
+        self.portals_dirty = true; // Recalculate portals for loaded level
         // Clamp current_room to valid range
         if self.current_room >= self.level.rooms.len() {
             self.current_room = 0;
@@ -534,6 +572,13 @@ impl EditorState {
                     })
                 })
             }
+            Selection::Object { room: room_idx, index } => {
+                self.level.rooms.get(*room_idx).and_then(|room| {
+                    room.objects.get(*index).map(|obj| {
+                        obj.world_position(room)
+                    })
+                })
+            }
         }
     }
 
@@ -546,5 +591,10 @@ impl EditorState {
             // Use last known target if nothing selected
             self.orbit_target = self.last_orbit_target;
         }
+    }
+
+    /// Mark portals as needing recalculation
+    pub fn mark_portals_dirty(&mut self) {
+        self.portals_dirty = true;
     }
 }

@@ -350,9 +350,15 @@ struct Surface {
     pub v1: Vec3, // Screen-space vertex 1
     pub v2: Vec3, // Screen-space vertex 2
     pub v3: Vec3, // Screen-space vertex 3
+    pub w1: Vec3, // World-space vertex 1 (for point light calculations)
+    pub w2: Vec3, // World-space vertex 2
+    pub w3: Vec3, // World-space vertex 3
     pub vn1: Vec3, // Vertex normal 1 (camera space)
     pub vn2: Vec3, // Vertex normal 2
     pub vn3: Vec3, // Vertex normal 3
+    pub wn1: Vec3, // World-space vertex normal 1 (for point light calculations)
+    pub wn2: Vec3, // World-space vertex normal 2
+    pub wn3: Vec3, // World-space vertex normal 3
     pub uv1: super::math::Vec2,
     pub uv2: super::math::Vec2,
     pub uv3: super::math::Vec2,
@@ -371,10 +377,13 @@ fn shade_intensity_directional(normal: Vec3, light_dir: Vec3, ambient: f32) -> f
     (ambient + (1.0 - ambient) * diffuse).clamp(0.0, 1.0)
 }
 
-/// Calculate shading intensity from multiple lights
+/// Calculate shading color from multiple lights (with colored light support)
+/// Returns RGB values 0.0-1.0 for each channel
 /// For per-vertex shading (Gouraud), world_pos can be approximate (vertex position)
-fn shade_multi_light(normal: Vec3, world_pos: Vec3, lights: &[Light], ambient: f32) -> f32 {
-    let mut total = ambient;
+fn shade_multi_light_color(normal: Vec3, world_pos: Vec3, lights: &[Light], ambient: f32) -> (f32, f32, f32) {
+    let mut total_r = ambient;
+    let mut total_g = ambient;
+    let mut total_b = ambient;
 
     for light in lights.iter().filter(|l| l.enabled) {
         let contribution = match &light.light_type {
@@ -418,10 +427,27 @@ fn shade_multi_light(normal: Vec3, world_pos: Vec3, lights: &[Light], ambient: f
                 }
             }
         };
-        total += contribution;
+
+        // Apply light color to contribution
+        let light_r = light.color.r as f32 / 255.0;
+        let light_g = light.color.g as f32 / 255.0;
+        let light_b = light.color.b as f32 / 255.0;
+        total_r += contribution * light_r;
+        total_g += contribution * light_g;
+        total_b += contribution * light_b;
     }
 
-    total.min(1.0)
+    (total_r.min(1.0), total_g.min(1.0), total_b.min(1.0))
+}
+
+/// Apply RGB shading to a color
+fn shade_color_rgb(color: Color, shade_r: f32, shade_g: f32, shade_b: f32) -> Color {
+    Color::with_alpha(
+        (color.r as f32 * shade_r).min(255.0) as u8,
+        (color.g as f32 * shade_g).min(255.0) as u8,
+        (color.b as f32 * shade_b).min(255.0) as u8,
+        color.a,
+    )
 }
 
 /// PS1 4x4 ordered dithering matrix (Bayer pattern)
@@ -467,12 +493,13 @@ fn rasterize_triangle(
     let max_y = (surface.v1.y.max(surface.v2.y).max(surface.v3.y) + 1.0).min(fb.height as f32) as usize;
 
     // Pre-calculate flat shading if needed
-    // Note: Using Vec3::ZERO for world_pos since directional lights don't need position
-    // For point/spot lights, we'd need to add camera-space positions to Surface
+    // Use world-space normal and center position for point/spot lights
     let flat_shade = if settings.shading == ShadingMode::Flat {
-        shade_multi_light(surface.normal, Vec3::ZERO, &settings.lights, settings.ambient)
+        let center_pos = (surface.w1 + surface.w2 + surface.w3).scale(1.0 / 3.0);
+        let world_normal = (surface.wn1 + surface.wn2 + surface.wn3).scale(1.0 / 3.0).normalize();
+        shade_multi_light_color(world_normal, center_pos, &settings.lights, settings.ambient)
     } else {
-        1.0
+        (1.0, 1.0, 1.0)
     };
 
     // Rasterize
@@ -535,21 +562,24 @@ fn rasterize_triangle(
                 // Apply PS1-style texture modulation: (texel * vertex_color) / 128
                 color = color.modulate(vertex_color);
 
-                // Apply shading (lighting)
-                let shade = match settings.shading {
-                    ShadingMode::None => 1.0,
+                // Apply shading (lighting) with colored lights
+                let (shade_r, shade_g, shade_b) = match settings.shading {
+                    ShadingMode::None => (1.0, 1.0, 1.0),
                     ShadingMode::Flat => flat_shade,
                     ShadingMode::Gouraud => {
-                        // Interpolate per-vertex shading from normals
-                        // Note: Using Vec3::ZERO for world_pos since directional lights don't need position
-                        let s1 = shade_multi_light(surface.vn1, Vec3::ZERO, &settings.lights, settings.ambient);
-                        let s2 = shade_multi_light(surface.vn2, Vec3::ZERO, &settings.lights, settings.ambient);
-                        let s3 = shade_multi_light(surface.vn3, Vec3::ZERO, &settings.lights, settings.ambient);
-                        bc.x * s1 + bc.y * s2 + bc.z * s3
+                        // Interpolate per-vertex shading from world-space normals and positions
+                        let (r1, g1, b1) = shade_multi_light_color(surface.wn1, surface.w1, &settings.lights, settings.ambient);
+                        let (r2, g2, b2) = shade_multi_light_color(surface.wn2, surface.w2, &settings.lights, settings.ambient);
+                        let (r3, g3, b3) = shade_multi_light_color(surface.wn3, surface.w3, &settings.lights, settings.ambient);
+                        (
+                            bc.x * r1 + bc.y * r2 + bc.z * r3,
+                            bc.x * g1 + bc.y * g2 + bc.z * g3,
+                            bc.x * b1 + bc.y * b2 + bc.z * b3,
+                        )
                     }
                 };
 
-                color = color.shade(shade);
+                color = shade_color_rgb(color, shade_r, shade_g, shade_b);
 
                 // Apply PS1-style ordered dithering
                 if settings.dithering {
@@ -635,9 +665,15 @@ pub fn render_mesh(
                     v1,
                     v2,
                     v3,
+                    w1: vertices[face.v0].pos,
+                    w2: vertices[face.v1].pos,
+                    w3: vertices[face.v2].pos,
                     vn1: cam_space_normals[face.v0].scale(-1.0),
                     vn2: cam_space_normals[face.v1].scale(-1.0),
                     vn3: cam_space_normals[face.v2].scale(-1.0),
+                    wn1: vertices[face.v0].normal.scale(-1.0),
+                    wn2: vertices[face.v1].normal.scale(-1.0),
+                    wn3: vertices[face.v2].normal.scale(-1.0),
                     uv1: vertices[face.v0].uv,
                     uv2: vertices[face.v1].uv,
                     uv3: vertices[face.v2].uv,
@@ -654,9 +690,15 @@ pub fn render_mesh(
                 v1,
                 v2,
                 v3,
+                w1: vertices[face.v0].pos,
+                w2: vertices[face.v1].pos,
+                w3: vertices[face.v2].pos,
                 vn1: cam_space_normals[face.v0],
                 vn2: cam_space_normals[face.v1],
                 vn3: cam_space_normals[face.v2],
+                wn1: vertices[face.v0].normal,
+                wn2: vertices[face.v1].normal,
+                wn3: vertices[face.v2].normal,
                 uv1: vertices[face.v0].uv,
                 uv2: vertices[face.v1].uv,
                 uv3: vertices[face.v2].uv,
@@ -692,8 +734,8 @@ pub fn render_mesh(
     }
 
     // Draw wireframes for back-faces (visible but not solid)
-    // Only draw if backface culling is enabled (otherwise they're rendered solid above)
-    if settings.backface_cull {
+    // Only draw if backface culling is enabled AND backface wireframe is enabled
+    if settings.backface_cull && settings.backface_wireframe {
         // Deduplicate edges to avoid drawing shared edges twice (which causes double-line artifacts)
         // Include z values for depth testing
         let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();

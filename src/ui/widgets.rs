@@ -285,6 +285,68 @@ impl Toolbar {
         self.cursor_x += size + self.spacing;
         icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active)
     }
+
+    /// Add a letter button with active state (for object type picker)
+    pub fn letter_button_active(&mut self, ctx: &mut UiContext, letter: char, tooltip: &str, is_active: bool) -> bool {
+        let size = (self.rect.h - 4.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), size, size);
+        self.cursor_x += size + self.spacing;
+        letter_button_active(ctx, btn_rect, letter, tooltip, is_active)
+    }
+
+    /// Add an arrow picker widget: "< label >" with clickable arrows
+    /// Returns true if either arrow was clicked. The callback receives -1 (left) or +1 (right).
+    pub fn arrow_picker<F>(&mut self, ctx: &mut UiContext, icon_font: Option<&Font>, label: &str, on_change: &mut F) -> bool
+    where
+        F: FnMut(i32),
+    {
+        let size = (self.rect.h - 4.0).round();
+        let arrow_size = size;
+        let y = (self.rect.y + 2.0).round();
+
+        // Measure label text
+        let font_size = 14.0;
+        let text_dims = measure_text(label, None, font_size as u16, 1.0);
+        let label_width = text_dims.width.max(60.0); // Minimum width for short labels
+
+        // Left arrow button "<"
+        let left_rect = Rect::new(self.cursor_x.round(), y, arrow_size, size);
+        self.cursor_x += arrow_size;
+
+        // Label area (centered text)
+        let label_rect = Rect::new(self.cursor_x.round(), y, label_width + 8.0, size);
+        self.cursor_x += label_width + 8.0;
+
+        // Right arrow button ">"
+        let right_rect = Rect::new(self.cursor_x.round(), y, arrow_size, size);
+        self.cursor_x += arrow_size + self.spacing;
+
+        // Draw left arrow
+        let left_clicked = draw_arrow_button(ctx, left_rect, icon_font, true);
+
+        // Draw label with subtle background
+        draw_rectangle(
+            label_rect.x, label_rect.y, label_rect.w, label_rect.h,
+            Color::from_rgba(50, 50, 55, 255),
+        );
+        // Center label text
+        let text_x = label_rect.x + (label_rect.w - text_dims.width) * 0.5;
+        let text_y = label_rect.y + (label_rect.h + text_dims.height) * 0.5 - 2.0;
+        draw_text(label, text_x.round(), text_y.round(), font_size, WHITE);
+
+        // Draw right arrow
+        let right_clicked = draw_arrow_button(ctx, right_rect, icon_font, false);
+
+        if left_clicked {
+            on_change(-1);
+            true
+        } else if right_clicked {
+            on_change(1);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Accent color (cyan like MuseScore)
@@ -355,6 +417,90 @@ fn draw_rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32, color: Color) {
     draw_circle(x + w - r, y + r, r, color);
     draw_circle(x + r, y + h - r, r, color);
     draw_circle(x + w - r, y + h - r, r, color);
+}
+
+/// Draw an arrow button (< or >) for picker navigation
+fn draw_arrow_button(ctx: &mut UiContext, rect: Rect, icon_font: Option<&Font>, is_left: bool) -> bool {
+    let id = ctx.next_id();
+    let hovered = ctx.mouse.inside(&rect);
+    let pressed = ctx.mouse.clicking(&rect);
+    let clicked = ctx.mouse.clicked(&rect);
+
+    if hovered {
+        ctx.set_hot(id);
+    }
+
+    let corner_radius = 4.0;
+
+    // Draw background on hover/press
+    if pressed {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(60, 60, 70, 255));
+    } else if hovered {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(50, 50, 60, 255));
+    }
+
+    // Arrow color
+    let arrow_color = if hovered {
+        Color::from_rgba(220, 220, 220, 255)
+    } else {
+        Color::from_rgba(160, 160, 160, 255)
+    };
+
+    // Draw arrow using chevron icons
+    let icon = if is_left {
+        crate::ui::icons::icon::CHEVRON_LEFT
+    } else {
+        crate::ui::icons::icon::CHEVRON_RIGHT
+    };
+    let icon_size = (rect.h * 0.5).min(14.0);
+    draw_icon_centered(icon_font, icon, &rect, icon_size, arrow_color);
+
+    clicked
+}
+
+/// Draw a letter button with active state (for object type picker)
+pub fn letter_button_active(ctx: &mut UiContext, rect: Rect, letter: char, tooltip: &str, is_active: bool) -> bool {
+    let id = ctx.next_id();
+    let hovered = ctx.mouse.inside(&rect);
+    let pressed = ctx.mouse.clicking(&rect);
+    let clicked = ctx.mouse.clicked(&rect);
+
+    if hovered {
+        ctx.set_hot(id);
+        if !tooltip.is_empty() {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+    }
+
+    let corner_radius = 4.0;
+
+    // Draw background
+    if is_active {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, ACCENT_COLOR);
+    } else if pressed {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(60, 60, 70, 255));
+    } else if hovered {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(50, 50, 60, 255));
+    }
+
+    // Letter color
+    let letter_color = if is_active {
+        WHITE
+    } else if hovered {
+        Color::from_rgba(220, 220, 220, 255)
+    } else {
+        Color::from_rgba(180, 180, 180, 255)
+    };
+
+    // Draw letter centered
+    let text = letter.to_string();
+    let font_size = (rect.h * 0.6).min(14.0) as u16;
+    let text_dims = measure_text(&text, None, font_size, 1.0);
+    let text_x = rect.x + (rect.w - text_dims.width) / 2.0;
+    let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+    draw_text(&text, text_x, text_y, font_size as f32, letter_color);
+
+    clicked
 }
 
 // =============================================================================
@@ -718,5 +864,289 @@ pub fn draw_drag_value_compact_editable(
     DragValueResult {
         value: new_value,
         dragging: *is_dragging,
+    }
+}
+
+// =============================================================================
+// PS1 Color Picker Widget (15-bit color: 5 bits per channel, 0-31 range)
+// =============================================================================
+
+use crate::rasterizer::Color as RasterColor;
+
+/// Result from the PS1 color picker
+pub struct ColorPickerResult {
+    /// New color if changed
+    pub color: Option<RasterColor>,
+    /// Whether a slider is currently being dragged
+    pub active: bool,
+}
+
+/// PS1 preset colors (5-bit values)
+const PS1_PRESETS: [(u8, u8, u8); 8] = [
+    (31, 31, 31), // White
+    (0, 0, 0),    // Black
+    (31, 0, 0),   // Red
+    (0, 31, 0),   // Green
+    (0, 0, 31),   // Blue
+    (31, 31, 0),  // Yellow
+    (0, 31, 31),  // Cyan
+    (31, 0, 31),  // Magenta
+];
+
+/// Draw a PS1-authentic color picker with RGB sliders (0-31 range) and preset swatches
+///
+/// Layout:
+/// ```text
+/// [Swatch]  R: [====|------] 16
+///           G: [==|--------] 8
+///           B: [======|----] 24
+/// [■][■][■][■][■][■][■][■]  <- presets
+/// ```
+pub fn draw_ps1_color_picker(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    current_color: RasterColor,
+    label: &str,
+    active_slider: &mut Option<usize>, // 0=R, 1=G, 2=B
+) -> ColorPickerResult {
+    let mut result = ColorPickerResult {
+        color: None,
+        active: false,
+    };
+
+    let swatch_size = 32.0;
+    let slider_height = 10.0;
+    let slider_spacing = 1.0;
+    let label_width = 16.0;
+    let value_width = 20.0;
+    let slider_x = x + swatch_size + 8.0 + label_width;
+    let slider_width = width - swatch_size - 8.0 - label_width - value_width - 4.0;
+    let sliders_total_height = 3.0 * slider_height + 2.0 * slider_spacing; // 3 sliders with 2 gaps
+
+    let text_color = Color::new(0.8, 0.8, 0.8, 1.0);
+    let label_color = Color::new(0.6, 0.6, 0.6, 1.0);
+    let track_bg = Color::new(0.15, 0.15, 0.18, 1.0);
+
+    // Draw label above
+    if !label.is_empty() {
+        draw_text(label, x, y - 4.0, 11.0, label_color);
+    }
+
+    // Draw color swatch (current color)
+    let swatch_y = y;
+    draw_rectangle(x, swatch_y, swatch_size, swatch_size, Color::from_rgba(60, 60, 65, 255));
+    draw_rectangle(
+        x + 1.0,
+        swatch_y + 1.0,
+        swatch_size - 2.0,
+        swatch_size - 2.0,
+        Color::from_rgba(current_color.r, current_color.g, current_color.b, 255),
+    );
+
+    // Get current 5-bit values
+    let mut r5 = current_color.r5();
+    let mut g5 = current_color.g5();
+    let mut b5 = current_color.b5();
+
+    // Draw RGB sliders (vertically centered with swatch)
+    let sliders_start_y = y + (swatch_size - sliders_total_height) / 2.0;
+    let channels = [
+        ("R", r5, Color::new(0.8, 0.2, 0.2, 1.0)),
+        ("G", g5, Color::new(0.2, 0.8, 0.2, 1.0)),
+        ("B", b5, Color::new(0.2, 0.4, 0.9, 1.0)),
+    ];
+
+    for (i, (name, value, tint)) in channels.iter().enumerate() {
+        let slider_y = sliders_start_y + (i as f32) * (slider_height + slider_spacing);
+
+        // Label
+        draw_text(name, x + swatch_size + 8.0, slider_y + slider_height - 3.0, 11.0, text_color);
+
+        // Slider track background
+        let track_rect = Rect::new(slider_x, slider_y, slider_width, slider_height);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+        // Filled portion with channel tint
+        let fill_ratio = *value as f32 / 31.0;
+        let fill_width = fill_ratio * slider_width;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, *tint);
+
+        // Thumb indicator
+        let thumb_x = track_rect.x + fill_width - 1.0;
+        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+        // Value text
+        let value_str = format!("{:2}", value);
+        draw_text(
+            &value_str,
+            slider_x + slider_width + 4.0,
+            slider_y + slider_height - 3.0,
+            11.0,
+            text_color,
+        );
+
+        // Handle slider interaction
+        let hovered = ctx.mouse.inside(&track_rect);
+
+        // Start dragging
+        if hovered && ctx.mouse.left_pressed {
+            *active_slider = Some(i);
+        }
+
+        // Continue dragging (even outside the rect)
+        if *active_slider == Some(i) && ctx.mouse.left_down {
+            result.active = true;
+            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+            match i {
+                0 => r5 = new_val,
+                1 => g5 = new_val,
+                2 => b5 = new_val,
+                _ => {}
+            }
+            result.color = Some(RasterColor::from_ps1(r5, g5, b5));
+        }
+
+        // End dragging
+        if *active_slider == Some(i) && !ctx.mouse.left_down {
+            *active_slider = None;
+        }
+    }
+
+    // Draw preset row below sliders
+    let preset_y = y + swatch_size + 6.0;
+    let preset_size = 14.0;
+    let preset_spacing = 2.0;
+
+    for (i, (pr, pg, pb)) in PS1_PRESETS.iter().enumerate() {
+        let preset_x = x + (i as f32) * (preset_size + preset_spacing);
+        let preset_rect = Rect::new(preset_x, preset_y, preset_size, preset_size);
+
+        // Border
+        draw_rectangle(preset_x, preset_y, preset_size, preset_size, Color::from_rgba(60, 60, 65, 255));
+
+        // Color fill
+        let preset_color = RasterColor::from_ps1(*pr, *pg, *pb);
+        draw_rectangle(
+            preset_x + 1.0,
+            preset_y + 1.0,
+            preset_size - 2.0,
+            preset_size - 2.0,
+            Color::from_rgba(preset_color.r, preset_color.g, preset_color.b, 255),
+        );
+
+        // Click to apply preset
+        if ctx.mouse.inside(&preset_rect) && ctx.mouse.left_pressed {
+            result.color = Some(preset_color);
+        }
+    }
+
+    result
+}
+
+/// Calculate the height needed for a PS1 color picker
+pub fn ps1_color_picker_height() -> f32 {
+    // Swatch height (32) + spacing (6) + preset row (14) = 52
+    52.0
+}
+
+// =============================================================================
+// Three-Way Toggle Widget (e.g., Front / Both / Back)
+// =============================================================================
+
+/// Draw a 3-way pill toggle switch
+///
+/// Returns Some(index) if an option was clicked, None otherwise.
+/// The widget is styled as a pill with the selected option having a white circle background.
+pub fn draw_three_way_toggle(
+    ctx: &mut UiContext,
+    rect: Rect,
+    options: [&str; 3],
+    selected: usize,
+) -> Option<usize> {
+    let mut clicked = None;
+
+    // Outer pill background (dark)
+    let corner_radius = rect.h / 2.0;
+    draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(30, 32, 38, 255));
+
+    // Inner border (subtle outline)
+    draw_rounded_rect_outline(rect.x, rect.y, rect.w, rect.h, corner_radius, 1.0, Color::from_rgba(60, 62, 68, 255));
+
+    // Calculate option widths (divide evenly)
+    let option_width = rect.w / 3.0;
+    let padding = 3.0;
+
+    for (i, label) in options.iter().enumerate() {
+        let option_x = rect.x + (i as f32) * option_width;
+        let option_rect = Rect::new(option_x, rect.y, option_width, rect.h);
+
+        let is_selected = i == selected;
+        let is_hovered = ctx.mouse.inside(&option_rect);
+
+        // Draw selection pill (white/light background) for selected option
+        if is_selected {
+            let pill_x = option_x + padding;
+            let pill_y = rect.y + padding;
+            let pill_w = option_width - padding * 2.0;
+            let pill_h = rect.h - padding * 2.0;
+            let pill_radius = pill_h / 2.0;
+            draw_rounded_rect(pill_x, pill_y, pill_w, pill_h, pill_radius, Color::from_rgba(240, 240, 245, 255));
+        }
+
+        // Text color
+        let text_color = if is_selected {
+            Color::from_rgba(30, 32, 38, 255) // Dark text on light background
+        } else if is_hovered {
+            Color::from_rgba(200, 200, 205, 255)
+        } else {
+            Color::from_rgba(140, 142, 148, 255)
+        };
+
+        // Draw label centered in option area
+        let font_size = 12.0;
+        let text_dims = measure_text(label, None, font_size as u16, 1.0);
+        let text_x = option_x + (option_width - text_dims.width) / 2.0;
+        let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 1.0;
+        draw_text(label, text_x, text_y, font_size, text_color);
+
+        // Handle click
+        if is_hovered && ctx.mouse.left_pressed && !is_selected {
+            clicked = Some(i);
+        }
+    }
+
+    clicked
+}
+
+/// Draw a rounded rectangle outline
+fn draw_rounded_rect_outline(x: f32, y: f32, w: f32, h: f32, r: f32, thickness: f32, color: Color) {
+    // Top and bottom lines
+    draw_line(x + r, y, x + w - r, y, thickness, color);
+    draw_line(x + r, y + h, x + w - r, y + h, thickness, color);
+    // Left and right lines
+    draw_line(x, y + r, x, y + h - r, thickness, color);
+    draw_line(x + w, y + r, x + w, y + h - r, thickness, color);
+    // Corner arcs (approximated with multiple line segments)
+    let segments = 8;
+    for corner in 0..4 {
+        let (cx, cy, start_angle) = match corner {
+            0 => (x + r, y + r, std::f32::consts::PI),           // top-left
+            1 => (x + w - r, y + r, std::f32::consts::FRAC_PI_2 * 3.0), // top-right
+            2 => (x + w - r, y + h - r, 0.0),                    // bottom-right
+            3 => (x + r, y + h - r, std::f32::consts::FRAC_PI_2), // bottom-left
+            _ => unreachable!(),
+        };
+        for i in 0..segments {
+            let a1 = start_angle + (i as f32 / segments as f32) * std::f32::consts::FRAC_PI_2;
+            let a2 = start_angle + ((i + 1) as f32 / segments as f32) * std::f32::consts::FRAC_PI_2;
+            let x1 = cx + r * a1.cos();
+            let y1 = cy - r * a1.sin();
+            let x2 = cx + r * a2.cos();
+            let y2 = cy - r * a2.sin();
+            draw_line(x1, y1, x2, y2, thickness, color);
+        }
     }
 }
