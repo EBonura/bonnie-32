@@ -60,6 +60,9 @@ pub struct GameToolState {
     /// Debug menu selected item index
     pub debug_menu_selection: usize,
 
+    /// Show debug overlay (top-right HUD with player stats)
+    pub show_debug_overlay: bool,
+
     /// Free-fly camera parameters (when in FreeFly mode)
     pub freefly_yaw: f32,
     pub freefly_pitch: f32,
@@ -104,6 +107,7 @@ impl GameToolState {
             camera_mode: CameraMode::default(),
             options_menu_open: false,
             debug_menu_selection: 0,
+            show_debug_overlay: false,
             freefly_yaw: 0.0,
             freefly_pitch: 0.0,
             char_cam_yaw: 0.0,

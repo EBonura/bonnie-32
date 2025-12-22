@@ -136,6 +136,48 @@ impl HorizontalFace {
         self.heights.iter().all(|&corner| (corner - h).abs() < 0.001)
     }
 
+    /// Get interpolated height at a position within the sector.
+    /// `u` and `v` are normalized coordinates within the sector (0.0 to 1.0).
+    /// u = 0 is West (-X), u = 1 is East (+X)
+    /// v = 0 is North (-Z), v = 1 is South (+Z)
+    ///
+    /// Heights layout: [NW, NE, SE, SW] = [0, 1, 2, 3]
+    /// NW = (u=0, v=0), NE = (u=1, v=0), SE = (u=1, v=1), SW = (u=0, v=1)
+    ///
+    /// The quad is split into two triangles along the NW-SE diagonal:
+    /// - Triangle 1 (upper-right): NW, NE, SE (u + v <= 1 from NW perspective, or u >= v)
+    /// - Triangle 2 (lower-left): NW, SE, SW (u + v > 1 from NW perspective, or u < v)
+    ///
+    /// We use barycentric interpolation within each triangle to get the exact height.
+    pub fn interpolate_height(&self, u: f32, v: f32) -> f32 {
+        // Clamp to valid range
+        let u = u.clamp(0.0, 1.0);
+        let v = v.clamp(0.0, 1.0);
+
+        // Determine which triangle we're in based on the NW-SE diagonal
+        // The diagonal goes from (0,0) to (1,1), so points where u >= v are in the upper-right triangle
+        if u >= v {
+            // Upper-right triangle: NW (0,0), NE (1,0), SE (1,1)
+            // Using barycentric coordinates for triangle NW-NE-SE:
+            // P = NW + u*(NE-NW) + v*(SE-NE)
+            // Height = h_NW + u*(h_NE - h_NW) + v*(h_SE - h_NE)
+            let h_nw = self.heights[0];
+            let h_ne = self.heights[1];
+            let h_se = self.heights[2];
+            h_nw + u * (h_ne - h_nw) + v * (h_se - h_ne)
+        } else {
+            // Lower-left triangle: NW (0,0), SE (1,1), SW (0,1)
+            // Using barycentric coordinates for triangle NW-SE-SW:
+            // We can parameterize as: P = NW + u*(SE-SW) + v*(SW-NW)
+            // But it's easier to think of it as:
+            // Height = h_NW + u*(h_SE - h_SW) + v*(h_SW - h_NW)
+            let h_nw = self.heights[0];
+            let h_se = self.heights[2];
+            let h_sw = self.heights[3];
+            h_nw + u * (h_se - h_sw) + v * (h_sw - h_nw)
+        }
+    }
+
     /// Get heights at a specific edge (left_corner, right_corner) when looking from inside the sector
     /// Returns (left_height, right_height) for the edge in that direction
     pub fn edge_heights(&self, dir: Direction) -> (f32, f32) {
@@ -1543,14 +1585,22 @@ impl Level {
         // Get sector
         let sector = room.get_sector(sector_x, sector_z)?;
 
-        // Get floor height (interpolated for sloped floors would be ideal, but avg works)
+        // Calculate normalized position within the sector (0.0 to 1.0)
+        // u = 0 is West (-X), u = 1 is East (+X)
+        // v = 0 is North (-Z), v = 1 is South (+Z)
+        let sector_base_x = sector_x as f32 * SECTOR_SIZE;
+        let sector_base_z = sector_z as f32 * SECTOR_SIZE;
+        let u = (local_x - sector_base_x) / SECTOR_SIZE;
+        let v = (local_z - sector_base_z) / SECTOR_SIZE;
+
+        // Get floor height using proper triangle interpolation for slopes
         let floor_y = sector.floor.as_ref()
-            .map(|f| room.position.y + f.avg_height())
+            .map(|f| room.position.y + f.interpolate_height(u, v))
             .unwrap_or(room.position.y);
 
-        // Get ceiling height
+        // Get ceiling height using proper triangle interpolation
         let ceiling_y = sector.ceiling.as_ref()
-            .map(|c| room.position.y + c.avg_height())
+            .map(|c| room.position.y + c.interpolate_height(u, v))
             .unwrap_or(room.position.y + 2048.0); // Default 2 sectors high
 
         Some(FloorInfo {

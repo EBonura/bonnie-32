@@ -7,7 +7,8 @@ use macroquad::prelude::*;
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh,
     Light, RasterSettings, ShadingMode, Color as RasterColor,
-    Vec3, project, perspective_transform, WIDTH, HEIGHT,
+    Vec3, project, perspective_transform,
+    WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
 };
 use crate::ui::Rect;
 use crate::world::Level;
@@ -24,8 +25,13 @@ pub fn draw_test_viewport(
     fb: &mut Framebuffer,
     input: &InputState,
 ) {
-    // Resize framebuffer to match game resolution
-    fb.resize(WIDTH, HEIGHT);
+    // Resize framebuffer to match game resolution (toggle via debug menu)
+    let (fb_w, fb_h) = if game.raster_settings.low_resolution {
+        (WIDTH, HEIGHT)       // 320x240 PS1 native
+    } else {
+        (WIDTH_HI, HEIGHT_HI) // 640x480 high res
+    };
+    fb.resize(fb_w, fb_h);
 
     // Initialize camera from level's player start (only once)
     game.init_from_level(level);
@@ -148,6 +154,11 @@ pub fn draw_test_viewport(
             ..Default::default()
         },
     );
+
+    // Draw debug overlay HUD if enabled (top-right, always visible during gameplay)
+    if game.show_debug_overlay {
+        draw_debug_overlay(game, &rect, input, level);
+    }
 
     // Draw debug menu overlay if open (top-left, blocks gameplay for D-pad navigation)
     if game.options_menu_open {
@@ -322,34 +333,68 @@ fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputStat
     game.viewport_last_mouse = mouse_pos;
 }
 
-/// Draw compact debug menu overlay (top-left, doesn't block gameplay)
+/// Draw compact debug menu overlay (top-left, blocks gameplay for D-pad navigation)
 fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, level: &Level) {
     let menu_x = rect.x + 10.0;
     let menu_y = rect.y + 10.0;
     let menu_w = 180.0;
-    let menu_h = 80.0;
     let row_height = 20.0;
+
+    // Menu items: Camera, Overlay, PS1 features, Reset
+    let items = [
+        "Camera",
+        "Overlay",
+        "---",           // Separator
+        "Affine UV",     // PS1 texture warping
+        "Vertex Snap",   // PS1 vertex jitter
+        "Low Res",       // 320x240
+        "Dithering",     // 4x4 Bayer
+        "Shading",       // None/Flat/Gouraud
+        "---",           // Separator
+        "Reset",
+    ];
+    let menu_h = 20.0 + items.len() as f32 * row_height + 14.0;
+    let selected = game.debug_menu_selection;
 
     // Semi-transparent background
     draw_rectangle(menu_x, menu_y, menu_w, menu_h, Color::from_rgba(20, 22, 28, 220));
     draw_rectangle_lines(menu_x, menu_y, menu_w, menu_h, 1.0, Color::from_rgba(60, 65, 75, 255));
 
-    // Menu items
-    let items = ["Camera", "Reset"];
-    let selected = game.debug_menu_selection;
-
-    // Handle D-Pad up/down navigation
+    // Handle D-Pad up/down navigation (skip separators)
     if input.action_pressed(Action::SwitchSpell) || is_key_pressed(KeyCode::Up) {
-        game.debug_menu_selection = game.debug_menu_selection.saturating_sub(1);
+        let mut new_sel = game.debug_menu_selection.saturating_sub(1);
+        // Skip separators
+        while new_sel > 0 && items[new_sel] == "---" {
+            new_sel = new_sel.saturating_sub(1);
+        }
+        game.debug_menu_selection = new_sel;
     }
     if input.action_pressed(Action::SwitchItem) || is_key_pressed(KeyCode::Down) {
-        game.debug_menu_selection = (game.debug_menu_selection + 1).min(items.len() - 1);
+        let mut new_sel = (game.debug_menu_selection + 1).min(items.len() - 1);
+        // Skip separators
+        while new_sel < items.len() - 1 && items[new_sel] == "---" {
+            new_sel = (new_sel + 1).min(items.len() - 1);
+        }
+        game.debug_menu_selection = new_sel;
     }
 
     // Draw each menu item
     for (i, item) in items.iter().enumerate() {
         let y = menu_y + 18.0 + i as f32 * row_height;
         let is_selected = i == selected;
+
+        // Separator line
+        if *item == "---" {
+            draw_line(
+                menu_x + 8.0,
+                y - 6.0,
+                menu_x + menu_w - 8.0,
+                y - 6.0,
+                1.0,
+                Color::from_rgba(60, 65, 75, 255),
+            );
+            continue;
+        }
 
         // Selection indicator
         let label_color = if is_selected {
@@ -372,9 +417,8 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     CameraMode::Character => "Character",
                     CameraMode::FreeFly => "Free-Fly",
                 };
-                draw_text(mode_name, menu_x + 80.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+                draw_text(mode_name, menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
 
-                // Handle left/right to change camera mode (only when this row is selected)
                 if is_selected {
                     if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
                         game.camera_mode = CameraMode::Character;
@@ -382,7 +426,6 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right) {
                         game.camera_mode = CameraMode::FreeFly;
                     }
-                    // A/Enter toggles between modes
                     if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
                         game.camera_mode = match game.camera_mode {
                             CameraMode::Character => CameraMode::FreeFly,
@@ -392,22 +435,82 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                 }
             }
             1 => {
+                // Debug overlay toggle
+                draw_toggle(menu_x, y, game.show_debug_overlay);
+                if is_selected && toggle_pressed(input) {
+                    game.show_debug_overlay = !game.show_debug_overlay;
+                }
+            }
+            3 => {
+                // Affine textures (PS1 UV warping)
+                draw_toggle(menu_x, y, game.raster_settings.affine_textures);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.affine_textures = !game.raster_settings.affine_textures;
+                }
+            }
+            4 => {
+                // Vertex snap (PS1 jitter)
+                draw_toggle(menu_x, y, game.raster_settings.vertex_snap);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.vertex_snap = !game.raster_settings.vertex_snap;
+                }
+            }
+            5 => {
+                // Low resolution (320x240)
+                draw_toggle(menu_x, y, game.raster_settings.low_resolution);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.low_resolution = !game.raster_settings.low_resolution;
+                }
+            }
+            6 => {
+                // Dithering (4x4 Bayer)
+                draw_toggle(menu_x, y, game.raster_settings.dithering);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.dithering = !game.raster_settings.dithering;
+                }
+            }
+            7 => {
+                // Shading mode (cycle: None -> Flat -> Gouraud)
+                let mode_name = match game.raster_settings.shading {
+                    ShadingMode::None => "None",
+                    ShadingMode::Flat => "Flat",
+                    ShadingMode::Gouraud => "Gouraud",
+                };
+                draw_text(mode_name, menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+
+                if is_selected {
+                    if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
+                        game.raster_settings.shading = match game.raster_settings.shading {
+                            ShadingMode::None => ShadingMode::Gouraud,
+                            ShadingMode::Flat => ShadingMode::None,
+                            ShadingMode::Gouraud => ShadingMode::Flat,
+                        };
+                    }
+                    if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right)
+                        || input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter)
+                    {
+                        game.raster_settings.shading = match game.raster_settings.shading {
+                            ShadingMode::None => ShadingMode::Flat,
+                            ShadingMode::Flat => ShadingMode::Gouraud,
+                            ShadingMode::Gouraud => ShadingMode::None,
+                        };
+                    }
+                }
+            }
+            9 => {
                 // Reset game
-                draw_text("[Press A]", menu_x + 80.0, y, 12.0, Color::from_rgba(80, 80, 90, 255));
+                draw_text("[Press A]", menu_x + 100.0, y, 12.0, Color::from_rgba(80, 80, 90, 255));
 
                 if is_selected {
                     if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
-                        // Reset the game
                         game.reset();
                         game.options_menu_open = false;
-                        // Re-spawn player at start position
                         if let Some((room_idx, spawn)) = level.get_player_start() {
                             if let Some(room) = level.rooms.get(room_idx) {
                                 let spawn_pos = spawn.world_position(room);
                                 game.spawn_player(spawn_pos, level);
                             }
                         }
-                        // Start playing again
                         game.playing = true;
                     }
                 }
@@ -417,7 +520,118 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
     }
 
     // Hint at bottom
-    draw_text("Up/Down: Select  A: Confirm", menu_x + 8.0, menu_y + menu_h - 8.0, 10.0, Color::from_rgba(80, 80, 90, 255));
+    draw_text("D-Pad: Navigate  A: Toggle", menu_x + 8.0, menu_y + menu_h - 8.0, 10.0, Color::from_rgba(80, 80, 90, 255));
+}
+
+/// Helper: draw ON/OFF toggle at position
+fn draw_toggle(menu_x: f32, y: f32, enabled: bool) {
+    let state = if enabled { "ON" } else { "OFF" };
+    let color = if enabled {
+        Color::from_rgba(100, 255, 100, 255)
+    } else {
+        Color::from_rgba(100, 180, 255, 255)
+    };
+    draw_text(state, menu_x + 100.0, y, 12.0, color);
+}
+
+/// Helper: check if toggle action was pressed
+fn toggle_pressed(input: &InputState) -> bool {
+    input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter)
+        || input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left)
+        || input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right)
+}
+
+/// Draw debug overlay HUD (top-right, shows player/collision stats)
+fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, level: &Level) {
+    let line_height = 12.0;
+    let overlay_w = 160.0;
+    let overlay_x = rect.x + rect.w - overlay_w - 10.0;
+    let overlay_y = rect.y + 10.0;
+
+    let label_color = Color::from_rgba(120, 120, 130, 255);
+    let value_color = Color::from_rgba(200, 200, 210, 255);
+    let good_color = Color::from_rgba(100, 255, 100, 255);
+    let warn_color = Color::from_rgba(255, 180, 80, 255);
+
+    let mut lines: Vec<(String, Color)> = Vec::new();
+
+    // FPS
+    let fps = get_fps();
+    let fps_color = if fps >= 55 { good_color } else if fps >= 30 { warn_color } else { Color::from_rgba(255, 100, 100, 255) };
+    lines.push((format!("FPS: {}", fps), fps_color));
+
+    // Player state
+    if let Some(player) = game.player_entity {
+        // Position
+        if let Some(transform) = game.world.transforms.get(player) {
+            let p = transform.position;
+            lines.push((format!("Pos: {:.0}, {:.0}, {:.0}", p.x, p.y, p.z), value_color));
+        }
+
+        // Velocity
+        if let Some(velocity) = game.world.velocities.get(player) {
+            let v = velocity.0;
+            let speed = (v.x * v.x + v.z * v.z).sqrt();
+            lines.push((format!("Speed: {:.0}", speed), value_color));
+            lines.push((format!("Vel Y: {:.1}", v.y), value_color));
+        }
+
+        // Controller state
+        if let Some(ctrl) = game.world.controllers.get(player) {
+            // Grounded
+            let grounded_str = if ctrl.grounded { "YES" } else { "NO" };
+            let grounded_color = if ctrl.grounded { good_color } else { warn_color };
+            lines.push((format!("Grounded: {}", grounded_str), grounded_color));
+
+            // Vertical velocity (gravity accumulation)
+            lines.push((format!("Vert Vel: {:.1}", ctrl.vertical_velocity), value_color));
+
+            // Room
+            lines.push((format!("Room: {}", ctrl.current_room), value_color));
+
+            // Facing
+            let facing_deg = ctrl.facing.to_degrees();
+            lines.push((format!("Facing: {:.0}°", facing_deg), value_color));
+        }
+
+        // Floor height at player position
+        if let Some(transform) = game.world.transforms.get(player) {
+            if let Some(floor) = level.get_floor_height(transform.position, None) {
+                lines.push((format!("Floor: {:.0}", floor), value_color));
+            }
+        }
+    } else {
+        lines.push(("No Player".to_string(), warn_color));
+    }
+
+    // Separator
+    lines.push(("---".to_string(), label_color));
+
+    // Input state
+    let left_stick = input.left_stick();
+    lines.push((format!("L Stick: {:.2}, {:.2}", left_stick.x, left_stick.y), value_color));
+
+    let right_stick = input.right_stick();
+    lines.push((format!("R Stick: {:.2}, {:.2}", right_stick.x, right_stick.y), value_color));
+
+    // Sprint state
+    let sprinting = input.action_down(Action::Dodge) && left_stick.length() > 0.1;
+    if sprinting {
+        lines.push(("SPRINTING".to_string(), good_color));
+    }
+
+    // Calculate overlay height
+    let overlay_h = 8.0 + lines.len() as f32 * line_height + 4.0;
+
+    // Draw background
+    draw_rectangle(overlay_x, overlay_y, overlay_w, overlay_h, Color::from_rgba(20, 22, 28, 200));
+    draw_rectangle_lines(overlay_x, overlay_y, overlay_w, overlay_h, 1.0, Color::from_rgba(60, 65, 75, 255));
+
+    // Draw lines
+    for (i, (text, color)) in lines.iter().enumerate() {
+        let y = overlay_y + 12.0 + i as f32 * line_height;
+        draw_text(text, overlay_x + 6.0, y, 10.0, *color);
+    }
 }
 
 /// Draw a wireframe cylinder in the 3D view
