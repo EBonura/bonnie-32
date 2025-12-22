@@ -100,7 +100,7 @@ pub mod icon {
     pub const ORBIT: char = '\u{e12e}';           // Orbit camera (orbit icon)
 
     // Input / Controller
-    pub const GAMEPAD_2: char = '\u{e0db}';       // Gamepad controller
+    pub const GAMEPAD_2: char = '\u{e0df}';       // Gamepad controller
 }
 
 /// Draw a Lucide icon centered in a rect
