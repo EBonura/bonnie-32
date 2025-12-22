@@ -37,8 +37,8 @@ pub mod icon {
     pub const CHEVRON_RIGHT: char = '\u{e070}';
 
     // Link/Unlink (for vertex mode)
-    pub const LINK: char = '\u{e104}';
-    pub const UNLINK: char = '\u{e19a}';
+    pub const LINK: char = '\u{e103}';      // link-2
+    pub const LINK_OFF: char = '\u{e104}';  // link-2-off
 
     // Editor tools
     pub const BOX: char = '\u{e061}';

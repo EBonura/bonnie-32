@@ -1051,3 +1051,102 @@ pub fn ps1_color_picker_height() -> f32 {
     // Swatch height (32) + spacing (6) + preset row (14) = 52
     52.0
 }
+
+// =============================================================================
+// Three-Way Toggle Widget (e.g., Front / Both / Back)
+// =============================================================================
+
+/// Draw a 3-way pill toggle switch
+///
+/// Returns Some(index) if an option was clicked, None otherwise.
+/// The widget is styled as a pill with the selected option having a white circle background.
+pub fn draw_three_way_toggle(
+    ctx: &mut UiContext,
+    rect: Rect,
+    options: [&str; 3],
+    selected: usize,
+) -> Option<usize> {
+    let mut clicked = None;
+
+    // Outer pill background (dark)
+    let corner_radius = rect.h / 2.0;
+    draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(30, 32, 38, 255));
+
+    // Inner border (subtle outline)
+    draw_rounded_rect_outline(rect.x, rect.y, rect.w, rect.h, corner_radius, 1.0, Color::from_rgba(60, 62, 68, 255));
+
+    // Calculate option widths (divide evenly)
+    let option_width = rect.w / 3.0;
+    let padding = 3.0;
+
+    for (i, label) in options.iter().enumerate() {
+        let option_x = rect.x + (i as f32) * option_width;
+        let option_rect = Rect::new(option_x, rect.y, option_width, rect.h);
+
+        let is_selected = i == selected;
+        let is_hovered = ctx.mouse.inside(&option_rect);
+
+        // Draw selection pill (white/light background) for selected option
+        if is_selected {
+            let pill_x = option_x + padding;
+            let pill_y = rect.y + padding;
+            let pill_w = option_width - padding * 2.0;
+            let pill_h = rect.h - padding * 2.0;
+            let pill_radius = pill_h / 2.0;
+            draw_rounded_rect(pill_x, pill_y, pill_w, pill_h, pill_radius, Color::from_rgba(240, 240, 245, 255));
+        }
+
+        // Text color
+        let text_color = if is_selected {
+            Color::from_rgba(30, 32, 38, 255) // Dark text on light background
+        } else if is_hovered {
+            Color::from_rgba(200, 200, 205, 255)
+        } else {
+            Color::from_rgba(140, 142, 148, 255)
+        };
+
+        // Draw label centered in option area
+        let font_size = 12.0;
+        let text_dims = measure_text(label, None, font_size as u16, 1.0);
+        let text_x = option_x + (option_width - text_dims.width) / 2.0;
+        let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 1.0;
+        draw_text(label, text_x, text_y, font_size, text_color);
+
+        // Handle click
+        if is_hovered && ctx.mouse.left_pressed && !is_selected {
+            clicked = Some(i);
+        }
+    }
+
+    clicked
+}
+
+/// Draw a rounded rectangle outline
+fn draw_rounded_rect_outline(x: f32, y: f32, w: f32, h: f32, r: f32, thickness: f32, color: Color) {
+    // Top and bottom lines
+    draw_line(x + r, y, x + w - r, y, thickness, color);
+    draw_line(x + r, y + h, x + w - r, y + h, thickness, color);
+    // Left and right lines
+    draw_line(x, y + r, x, y + h - r, thickness, color);
+    draw_line(x + w, y + r, x + w, y + h - r, thickness, color);
+    // Corner arcs (approximated with multiple line segments)
+    let segments = 8;
+    for corner in 0..4 {
+        let (cx, cy, start_angle) = match corner {
+            0 => (x + r, y + r, std::f32::consts::PI),           // top-left
+            1 => (x + w - r, y + r, std::f32::consts::FRAC_PI_2 * 3.0), // top-right
+            2 => (x + w - r, y + h - r, 0.0),                    // bottom-right
+            3 => (x + r, y + h - r, std::f32::consts::FRAC_PI_2), // bottom-left
+            _ => unreachable!(),
+        };
+        for i in 0..segments {
+            let a1 = start_angle + (i as f32 / segments as f32) * std::f32::consts::FRAC_PI_2;
+            let a2 = start_angle + ((i + 1) as f32 / segments as f32) * std::f32::consts::FRAC_PI_2;
+            let x1 = cx + r * a1.cos();
+            let y1 = cy - r * a1.sin();
+            let x2 = cx + r * a2.cos();
+            let y2 = cy - r * a2.sin();
+            draw_line(x1, y1, x2, y2, thickness, color);
+        }
+    }
+}

@@ -190,8 +190,8 @@ This project uses the following free texture packs:
 
 ### World Editor - UI/UX
 
-- [ ] **Fix link icon**: The "vertices independent" toolbar icon is wrong - should use `link-2` from Lucide
-- [ ] **Rename linking feature**: "Vertex linking" is misleading since it now works for edges and faces too. Needs better naming (e.g., "Geometry Linking" or "Coincident Linking")
+- [x] **Fix link icon**: Now uses `link-2` and `link-2-off` from Lucide
+- [x] **Rename linking feature**: Renamed to "Geometry Linked/Independent" (works for vertices, edges, and faces)
 - [x] **Per-room ambient light**: Each room now uses its own ambient setting when rendering
 
 ---

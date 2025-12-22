@@ -258,8 +258,8 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     toolbar.separator();
 
     // Vertex mode toggle
-    let link_icon = if state.link_coincident_vertices { icon::LINK } else { icon::UNLINK };
-    let link_tooltip = if state.link_coincident_vertices { "Vertices Linked" } else { "Vertices Independent" };
+    let link_icon = if state.link_coincident_vertices { icon::LINK } else { icon::LINK_OFF };
+    let link_tooltip = if state.link_coincident_vertices { "Geometry Linked" } else { "Geometry Independent" };
     if toolbar.icon_button_active(ctx, link_icon, icon_font, link_tooltip, state.link_coincident_vertices) {
         state.link_coincident_vertices = !state.link_coincident_vertices;
         let mode = if state.link_coincident_vertices { "Linked" } else { "Independent" };
@@ -612,13 +612,14 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace) -> f32 
     let color_row_height = 20.0; // Color preview + label
     let uv_controls_height = 54.0; // offset row + scale row + angle row
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
+    let normal_mode_height = 40.0; // Label + 3-way toggle
     let mut lines = 3; // texture, height, walkable
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    // Add space for UV info, controls, buttons, color, and color picker
+    // Add space for UV info, controls, buttons, color, color picker, and normal mode
     let uv_lines = if face.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height
 }
 
 /// Calculate height needed for a wall face container
@@ -629,10 +630,11 @@ fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
     let color_row_height = 20.0; // Color preview + label
     let uv_controls_height = 54.0; // offset row + scale row + angle row
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
+    let normal_mode_height = 40.0; // Label + 3-way toggle
     let lines = 3; // texture, y range, blend
-    // Add space for UV info, controls, buttons, color, and color picker
+    // Add space for UV info, controls, buttons, color, color picker, and normal mode
     let uv_lines = if wall.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height
 }
 
 /// Draw properties for a horizontal face inside a container
@@ -993,6 +995,33 @@ fn draw_horizontal_face_container(
         }
     }
 
+    // Normal mode 3-way toggle
+    content_y += ps1_color_picker_height() + 14.0 + 8.0;
+    draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let toggle_rect = Rect::new(content_x, content_y, width - CONTAINER_PADDING * 2.0, 24.0);
+    let current_mode = match face.normal_mode {
+        crate::world::FaceNormalMode::Front => 0,
+        crate::world::FaceNormalMode::Both => 1,
+        crate::world::FaceNormalMode::Back => 2,
+    };
+    if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    f.normal_mode = match new_mode {
+                        0 => crate::world::FaceNormalMode::Front,
+                        1 => crate::world::FaceNormalMode::Both,
+                        _ => crate::world::FaceNormalMode::Back,
+                    };
+                }
+            }
+        }
+    }
+
     container_height
 }
 
@@ -1177,7 +1206,7 @@ fn draw_uv_controls(
 
     // Row 1: Offset - [Link] Label [X] [Y]
     let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
-    let link_icon = if state.uv_offset_linked { icon::LINK } else { icon::UNLINK };
+    let link_icon = if state.uv_offset_linked { icon::LINK } else { icon::LINK_OFF };
     if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_offset_linked) {
         state.uv_offset_linked = !state.uv_offset_linked;
     }
@@ -1216,7 +1245,7 @@ fn draw_uv_controls(
 
     // Row 2: Scale - [Link] Label [X] [Y]
     let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
-    let link_icon = if state.uv_scale_linked { icon::LINK } else { icon::UNLINK };
+    let link_icon = if state.uv_scale_linked { icon::LINK } else { icon::LINK_OFF };
     if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_scale_linked) {
         state.uv_scale_linked = !state.uv_scale_linked;
     }
@@ -1603,6 +1632,32 @@ fn draw_wall_face_container(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Normal mode 3-way toggle
+    content_y += ps1_color_picker_height() + 14.0 + 8.0;
+    draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let toggle_rect = Rect::new(content_x, content_y, width - CONTAINER_PADDING * 2.0, 24.0);
+    let current_mode = match wall.normal_mode {
+        crate::world::FaceNormalMode::Front => 0,
+        crate::world::FaceNormalMode::Both => 1,
+        crate::world::FaceNormalMode::Back => 2,
+    };
+    if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    w.normal_mode = match new_mode {
+                        0 => crate::world::FaceNormalMode::Front,
+                        1 => crate::world::FaceNormalMode::Both,
+                        _ => crate::world::FaceNormalMode::Back,
+                    };
                 }
             }
         }

@@ -50,6 +50,15 @@ fn default_true() -> bool { true }
 fn default_neutral_color() -> Color { Color::NEUTRAL }
 fn default_neutral_colors_4() -> [Color; 4] { [Color::NEUTRAL; 4] }
 
+/// Face normal rendering mode
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FaceNormalMode {
+    #[default]
+    Front,  // Normal faces outward (default)
+    Both,   // Double-sided (render both sides)
+    Back,   // Normal faces inward (flipped)
+}
+
 /// A horizontal face (floor or ceiling)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizontalFace {
@@ -72,6 +81,9 @@ pub struct HorizontalFace {
     /// Per-vertex colors enable Gouraud-style color gradients across the face
     #[serde(default = "default_neutral_colors_4")]
     pub colors: [Color; 4],
+    /// Normal rendering mode (front, both, or back)
+    #[serde(default)]
+    pub normal_mode: FaceNormalMode,
 }
 
 impl HorizontalFace {
@@ -84,6 +96,7 @@ impl HorizontalFace {
             walkable: true,
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
+            normal_mode: FaceNormalMode::default(),
         }
     }
 
@@ -96,6 +109,7 @@ impl HorizontalFace {
             walkable: true,
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
+            normal_mode: FaceNormalMode::default(),
         }
     }
 
@@ -169,6 +183,9 @@ pub struct VerticalFace {
     /// Per-vertex colors enable Gouraud-style color gradients across the wall
     #[serde(default = "default_neutral_colors_4")]
     pub colors: [Color; 4],
+    /// Normal rendering mode (front, both, or back)
+    #[serde(default)]
+    pub normal_mode: FaceNormalMode,
 }
 
 impl VerticalFace {
@@ -181,6 +198,7 @@ impl VerticalFace {
             solid: true,
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
+            normal_mode: FaceNormalMode::default(),
         }
     }
 
@@ -1019,8 +1037,6 @@ impl Room {
     where
         F: Fn(&TextureRef) -> Option<usize>,
     {
-        let base_idx = vertices.len();
-
         // Corner positions: NW, NE, SE, SW
         let corners = [
             Vec3::new(base_x, face.heights[0], base_z),                         // NW
@@ -1034,7 +1050,7 @@ impl Room {
         // For ceiling (facing down): use edge1 x edge2 to get -Y normal
         let edge1 = corners[1] - corners[0]; // NW -> NE (along +X)
         let edge2 = corners[3] - corners[0]; // NW -> SW (along +Z)
-        let normal = if is_floor {
+        let front_normal = if is_floor {
             edge2.cross(edge1).normalize() // +Z x +X = +Y (up)
         } else {
             edge1.cross(edge2).normalize() // +X x +Z = -Y (down)
@@ -1048,20 +1064,43 @@ impl Room {
             Vec2::new(0.0, 1.0),
         ]);
 
-        // Add vertices with per-vertex colors for PS1-style texture modulation
-        for i in 0..4 {
-            vertices.push(Vertex::with_color(corners[i], uvs[i], normal, face.colors[i]));
-        }
-
         let texture_id = resolve_texture(&face.texture).unwrap_or(0);
 
-        // Winding order: floor = CCW from above, ceiling = CW from above (so it faces down)
-        if is_floor {
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
-        } else {
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
+        // Handle normal mode: Front, Back, or Both
+        let render_front = face.normal_mode != FaceNormalMode::Back;
+        let render_back = face.normal_mode != FaceNormalMode::Front;
+
+        // Add front-facing face
+        if render_front {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, face.colors[i]));
+            }
+            // Winding order: floor = CCW from above, ceiling = CW from above (so it faces down)
+            if is_floor {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
+            } else {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
+            }
+        }
+
+        // Add back-facing face (flipped normal and winding)
+        if render_back {
+            let base_idx = vertices.len();
+            let back_normal = front_normal.scale(-1.0);
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, face.colors[i]));
+            }
+            // Reverse winding order for back face
+            if is_floor {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
+            } else {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
+            }
         }
     }
 
@@ -1079,12 +1118,10 @@ impl Room {
     where
         F: Fn(&TextureRef) -> Option<usize>,
     {
-        let base_idx = vertices.len();
-
         // Wall corners based on direction
         // Each wall has 4 corners: bottom-left, bottom-right, top-right, top-left (from inside room)
         // wall.heights = [bottom-left, bottom-right, top-right, top-left]
-        let (corners, normal) = match direction {
+        let (corners, front_normal) = match direction {
             Direction::North => {
                 // Wall at -Z edge, facing +Z (into room)
                 let corners = [
@@ -1135,16 +1172,34 @@ impl Room {
             Vec2::new(0.0, 0.0),  // top-left
         ]);
 
-        // Add vertices with per-vertex colors for PS1-style texture modulation
-        for i in 0..4 {
-            vertices.push(Vertex::with_color(corners[i], uvs[i], normal, wall.colors[i]));
-        }
-
         let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
 
-        // Two triangles for the quad (CCW winding when viewed from inside room)
-        faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
-        faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
+        // Handle normal mode: Front, Back, or Both
+        let render_front = wall.normal_mode != FaceNormalMode::Back;
+        let render_back = wall.normal_mode != FaceNormalMode::Front;
+
+        // Add front-facing face
+        if render_front {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
+            }
+            // Two triangles for the quad (CCW winding when viewed from inside room)
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
+        }
+
+        // Add back-facing face (flipped normal and winding)
+        if render_back {
+            let base_idx = vertices.len();
+            let back_normal = front_normal.scale(-1.0);
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, wall.colors[i]));
+            }
+            // Reverse winding order for back face
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
+        }
     }
 }
 
