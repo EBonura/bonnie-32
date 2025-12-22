@@ -591,13 +591,19 @@ async fn main() {
         }
 
         // FPS limiting (only when in game tab)
+        // Uses spin-wait for last 2ms to avoid sleep() overshooting
         #[cfg(not(target_arch = "wasm32"))]
         if let Tool::Test = app.active_tool {
             if let Some(target_frame_time) = app.game.fps_limit.frame_time() {
-                let elapsed = frame_start.elapsed().as_secs_f64();
-                if elapsed < target_frame_time {
-                    let sleep_time = target_frame_time - elapsed;
-                    std::thread::sleep(std::time::Duration::from_secs_f64(sleep_time));
+                let target_duration = std::time::Duration::from_secs_f64(target_frame_time);
+                // Sleep for bulk of remaining time (leave 2ms margin for spin-wait)
+                let spin_margin = std::time::Duration::from_millis(2);
+                while frame_start.elapsed() + spin_margin < target_duration {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                // Spin-wait for precise timing
+                while frame_start.elapsed() < target_duration {
+                    std::hint::spin_loop();
                 }
             }
         }
