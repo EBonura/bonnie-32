@@ -851,6 +851,20 @@ impl Room {
         }
     }
 
+    /// Remove sectors that have no geometry (no floor, ceiling, or walls).
+    /// Call this after deleting faces to clean up orphaned sectors.
+    pub fn cleanup_empty_sectors(&mut self) {
+        for x in 0..self.width {
+            for z in 0..self.depth {
+                if let Some(sector) = &self.sectors[x][z] {
+                    if !sector.has_geometry() {
+                        self.sectors[x][z] = None;
+                    }
+                }
+            }
+        }
+    }
+
     /// Trim empty rows and columns from the edges of the room grid.
     /// Adjusts room position to keep sectors in the same world position.
     pub fn trim_empty_edges(&mut self) {

@@ -137,6 +137,7 @@ pub fn draw_viewport_3d(
                             if let Some(sector) = room.get_sector_mut(gx, gz) {
                                 sector.floor = None;
                             }
+                            room.cleanup_empty_sectors();
                             room.recalculate_bounds();
                             Some("floor")
                         } else { None }
@@ -146,6 +147,7 @@ pub fn draw_viewport_3d(
                             if let Some(sector) = room.get_sector_mut(gx, gz) {
                                 sector.ceiling = None;
                             }
+                            room.cleanup_empty_sectors();
                             room.recalculate_bounds();
                             Some("ceiling")
                         } else { None }
@@ -157,6 +159,7 @@ pub fn draw_viewport_3d(
                                     sector.walls_north.remove(i);
                                 }
                             }
+                            room.cleanup_empty_sectors();
                             room.recalculate_bounds();
                             Some("north wall")
                         } else { None }
@@ -168,6 +171,7 @@ pub fn draw_viewport_3d(
                                     sector.walls_east.remove(i);
                                 }
                             }
+                            room.cleanup_empty_sectors();
                             room.recalculate_bounds();
                             Some("east wall")
                         } else { None }
@@ -179,6 +183,7 @@ pub fn draw_viewport_3d(
                                     sector.walls_south.remove(i);
                                 }
                             }
+                            room.cleanup_empty_sectors();
                             room.recalculate_bounds();
                             Some("south wall")
                         } else { None }
@@ -190,6 +195,7 @@ pub fn draw_viewport_3d(
                                     sector.walls_west.remove(i);
                                 }
                             }
+                            room.cleanup_empty_sectors();
                             room.recalculate_bounds();
                             Some("west wall")
                         } else { None }

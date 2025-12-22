@@ -174,6 +174,13 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             // Dimmed colors for non-current rooms
             let has_floor = sector.floor.is_some();
             let has_ceiling = sector.ceiling.is_some();
+            let has_walls = !sector.walls_north.is_empty() || !sector.walls_east.is_empty()
+                || !sector.walls_south.is_empty() || !sector.walls_west.is_empty();
+
+            // Skip empty sectors in non-current rooms
+            if !has_floor && !has_ceiling && !has_walls {
+                continue;
+            }
 
             let fill_color = if has_floor && has_ceiling {
                 Color::from_rgba(40, 60, 55, 60) // Dim full sector
@@ -182,7 +189,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             } else if has_ceiling {
                 Color::from_rgba(55, 40, 60, 60) // Dim ceiling only
             } else {
-                Color::from_rgba(50, 50, 50, 40) // Dim empty sector
+                Color::from_rgba(50, 50, 50, 40) // Walls only
             };
 
             // Draw sector fill
@@ -242,8 +249,14 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         // Determine fill color based on sector contents
         let has_floor = sector.floor.is_some();
         let has_ceiling = sector.ceiling.is_some();
-        let _has_walls = !sector.walls_north.is_empty() || !sector.walls_east.is_empty()
+        let has_walls = !sector.walls_north.is_empty() || !sector.walls_east.is_empty()
             || !sector.walls_south.is_empty() || !sector.walls_west.is_empty();
+        let has_geometry = has_floor || has_ceiling || has_walls;
+
+        // Skip rendering empty sectors unless they're being interacted with
+        if !has_geometry && !is_selected && !is_multi_selected && !is_hovered {
+            continue;
+        }
 
         let fill_color = if is_selected || is_multi_selected {
             Color::from_rgba(255, 200, 100, 150)
@@ -256,7 +269,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         } else if has_ceiling {
             Color::from_rgba(100, 60, 120, 100) // Ceiling only
         } else {
-            Color::from_rgba(80, 80, 80, 60) // Empty sector
+            Color::from_rgba(80, 80, 80, 60) // Empty sector (only shown when selected/hovered)
         };
 
         // Draw sector fill
