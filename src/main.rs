@@ -102,6 +102,9 @@ async fn main() {
     println!("=== Bonnie Engine ===");
 
     loop {
+        // Track frame start time for FPS limiting
+        let frame_start = std::time::Instant::now();
+
         // Update UI context with mouse state
         let mouse_pos = mouse_position();
         let left_down = is_mouse_button_down(MouseButton::Left);
@@ -583,6 +586,18 @@ async fn main() {
                     ws.example_browser.set_preview(level);
                 } else {
                     ws.editor_state.set_status("Failed to load level preview", 3.0);
+                }
+            }
+        }
+
+        // FPS limiting (only when in game tab)
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Tool::Test = app.active_tool {
+            if let Some(target_frame_time) = app.game.fps_limit.frame_time() {
+                let elapsed = frame_start.elapsed().as_secs_f64();
+                if elapsed < target_frame_time {
+                    let sleep_time = target_frame_time - elapsed;
+                    std::thread::sleep(std::time::Duration::from_secs_f64(sleep_time));
                 }
             }
         }

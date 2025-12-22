@@ -18,6 +18,56 @@ pub enum CameraMode {
     FreeFly,
 }
 
+/// FPS limit setting
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FpsLimit {
+    /// 30 FPS (authentic PS1 for many games)
+    Fps30,
+    /// 60 FPS (smooth gameplay)
+    #[default]
+    Fps60,
+    /// Unlocked (as fast as possible)
+    Unlocked,
+}
+
+impl FpsLimit {
+    /// Get the target frame time in seconds (None = unlocked)
+    pub fn frame_time(&self) -> Option<f64> {
+        match self {
+            FpsLimit::Fps30 => Some(1.0 / 30.0),
+            FpsLimit::Fps60 => Some(1.0 / 60.0),
+            FpsLimit::Unlocked => None,
+        }
+    }
+
+    /// Cycle to next value
+    pub fn next(self) -> Self {
+        match self {
+            FpsLimit::Fps30 => FpsLimit::Fps60,
+            FpsLimit::Fps60 => FpsLimit::Unlocked,
+            FpsLimit::Unlocked => FpsLimit::Fps30,
+        }
+    }
+
+    /// Cycle to previous value
+    pub fn prev(self) -> Self {
+        match self {
+            FpsLimit::Fps30 => FpsLimit::Unlocked,
+            FpsLimit::Fps60 => FpsLimit::Fps30,
+            FpsLimit::Unlocked => FpsLimit::Fps60,
+        }
+    }
+
+    /// Display name
+    pub fn label(&self) -> &'static str {
+        match self {
+            FpsLimit::Fps30 => "30",
+            FpsLimit::Fps60 => "60",
+            FpsLimit::Unlocked => "Unlocked",
+        }
+    }
+}
+
 /// State for the Test tool (play mode)
 pub struct GameToolState {
     /// ECS world containing all dynamic entities
@@ -71,6 +121,9 @@ pub struct GameToolState {
     pub char_cam_yaw: f32,
     /// Character mode: camera orbit pitch (elevation)
     pub char_cam_pitch: f32,
+
+    /// FPS limit setting (30/60/Unlocked)
+    pub fps_limit: FpsLimit,
 }
 
 impl GameToolState {
@@ -112,6 +165,7 @@ impl GameToolState {
             freefly_pitch: 0.0,
             char_cam_yaw: 0.0,
             char_cam_pitch: 0.2, // Slight downward pitch by default
+            fps_limit: FpsLimit::default(),
         }
     }
 

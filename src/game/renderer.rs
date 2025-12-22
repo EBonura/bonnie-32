@@ -342,16 +342,17 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
 
     // Menu items: Camera, Overlay, PS1 features, Reset
     let items = [
-        "Camera",
-        "Overlay",
-        "---",           // Separator
-        "Affine UV",     // PS1 texture warping
-        "Vertex Snap",   // PS1 vertex jitter
-        "Low Res",       // 320x240
-        "Dithering",     // 4x4 Bayer
-        "Shading",       // None/Flat/Gouraud
-        "---",           // Separator
-        "Reset",
+        "Camera",        // 0
+        "Overlay",       // 1
+        "---",           // 2 - Separator
+        "Affine UV",     // 3 - PS1 texture warping
+        "Vertex Snap",   // 4 - PS1 vertex jitter
+        "Low Res",       // 5 - 320x240
+        "Dithering",     // 6 - 4x4 Bayer
+        "Shading",       // 7 - None/Flat/Gouraud
+        "FPS",           // 8 - 30/60/Unlocked
+        "---",           // 9 - Separator
+        "Reset",         // 10
     ];
     let menu_h = 20.0 + items.len() as f32 * row_height + 14.0;
     let selected = game.debug_menu_selection;
@@ -497,7 +498,22 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     }
                 }
             }
-            9 => {
+            8 => {
+                // FPS limit (cycle: 30 -> 60 -> Unlocked)
+                draw_text(game.fps_limit.label(), menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+
+                if is_selected {
+                    if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
+                        game.fps_limit = game.fps_limit.prev();
+                    }
+                    if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right)
+                        || input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter)
+                    {
+                        game.fps_limit = game.fps_limit.next();
+                    }
+                }
+            }
+            10 => {
                 // Reset game
                 draw_text("[Press A]", menu_x + 100.0, y, 12.0, Color::from_rgba(80, 80, 90, 255));
 
