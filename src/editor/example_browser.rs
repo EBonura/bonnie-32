@@ -404,10 +404,10 @@ fn draw_orbit_preview(
         total_ambient += room.ambient;
         room_count += 1;
     }
-    // Collect lights from level objects
-    for obj in &level.objects {
-        if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-            if let Some(room) = level.rooms.get(obj.room) {
+    // Collect lights from room objects
+    for room in &level.rooms {
+        for obj in room.objects.iter().filter(|o| o.enabled) {
+            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
                 let world_pos = obj.world_position(room);
                 let mut light = Light::point(world_pos, *radius, *intensity);
                 light.color = *color;

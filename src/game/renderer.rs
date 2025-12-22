@@ -51,21 +51,22 @@ pub fn draw_test_viewport(
         textures.iter().position(|t| t.name == tex_ref.name)
     };
 
-    // Build lighting settings
-    // Collect all lights from level objects (shared across rooms)
+    // Collect all lights from room objects
     let lights: Vec<Light> = if game.raster_settings.shading != ShadingMode::None {
-        level.objects.iter()
-            .filter_map(|obj| {
-                if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                    level.rooms.get(obj.room).map(|room| {
-                        let world_pos = obj.world_position(room);
-                        let mut light = Light::point(world_pos, *radius, *intensity);
-                        light.color = *color;
-                        light
+        level.rooms.iter()
+            .flat_map(|room| {
+                room.objects.iter()
+                    .filter(|obj| obj.enabled)
+                    .filter_map(|obj| {
+                        if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                            let world_pos = obj.world_position(room);
+                            let mut light = Light::point(world_pos, *radius, *intensity);
+                            light.color = *color;
+                            Some(light)
+                        } else {
+                            None
+                        }
                     })
-                } else {
-                    None
-                }
             })
             .collect()
     } else {

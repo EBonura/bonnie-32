@@ -467,9 +467,9 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 14.0).floor(), 16.0, WHITE);
         y += line_height;
 
-        // Count lights in this room from level objects
-        let light_count = state.level.objects.iter()
-            .filter(|obj| obj.room == state.current_room && obj.is_light())
+        // Count lights in this room from room objects
+        let light_count = room.objects.iter()
+            .filter(|obj| obj.is_light())
             .count();
         draw_text(&format!("Lights: {}", light_count), x, (y + 14.0).floor(), 16.0, WHITE);
         y += line_height;
@@ -1957,11 +1957,16 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 }
             }
         }
-        super::Selection::Object { index } => {
+        super::Selection::Object { room: room_idx, index } => {
             // Object properties
+            let obj_room_idx = *room_idx;
             let obj_idx = *index;
 
-            if let Some(obj) = state.level.objects.get(obj_idx).cloned() {
+            let obj_opt = state.level.rooms.get(obj_room_idx)
+                .and_then(|room| room.objects.get(obj_idx))
+                .cloned();
+
+            if let Some(obj) = obj_opt {
                 let obj_name = obj.object_type.display_name();
                 draw_text(obj_name, x, (y + 14.0).floor(), 16.0, WHITE);
                 y += 24.0;
@@ -1970,7 +1975,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 draw_text("Location:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
                 y += 18.0;
                 draw_text(&format!("  Room: {}  Sector: ({}, {})",
-                    obj.room, obj.sector_x, obj.sector_z),
+                    obj_room_idx, obj.sector_x, obj.sector_z),
                     x, (y + 12.0).floor(), 13.0, WHITE);
                 y += 18.0;
                 draw_text(&format!("  Height: {:.0}  Facing: {:.1}°",
@@ -1993,7 +1998,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             &mut state.light_color_slider,
                         );
                         if let Some(new_color) = picker_result.color {
-                            if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
                                 if let crate::world::ObjectType::Light { color: c, .. } = &mut obj_mut.object_type {
                                     *c = new_color;
                                 }
@@ -2007,7 +2012,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                         let knob_center_y = y + knob_radius + 12.0;
 
                         // Convert intensity (0.0-2.0) to knob value (0-127)
-                        let intensity_value = ((intensity / 2.0) * 127.0).round() as u8;
+                        let intensity_value = ((*intensity / 2.0) * 127.0).round() as u8;
                         let intensity_result = draw_knob(
                             ctx,
                             knob_center_x,
@@ -2021,7 +2026,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
                         if let Some(new_val) = intensity_result.value {
                             let new_intensity = (new_val as f32 / 127.0) * 2.0;
-                            if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
                                 if let crate::world::ObjectType::Light { intensity: i, .. } = &mut obj_mut.object_type {
                                     *i = new_intensity;
                                 }
@@ -2034,7 +2039,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                         // Convert radius (0-16384) to knob value (0-127)
                         // 16384 = 16 sectors worth of radius
                         const MAX_LIGHT_RADIUS: f32 = 16384.0;
-                        let radius_value = ((radius / MAX_LIGHT_RADIUS) * 127.0).round() as u8;
+                        let radius_value = ((*radius / MAX_LIGHT_RADIUS) * 127.0).round() as u8;
                         let radius_result = draw_knob(
                             ctx,
                             knob_center_x2,
@@ -2048,7 +2053,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
                         if let Some(new_val) = radius_result.value {
                             let new_radius = (new_val as f32 / 127.0) * MAX_LIGHT_RADIUS;
-                            if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
                                 if let crate::world::ObjectType::Light { radius: r, .. } = &mut obj_mut.object_type {
                                     *r = new_radius;
                                 }
@@ -2181,7 +2186,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
                 if enabled_hovered && ctx.mouse.left_pressed {
                     state.save_undo();
-                    if let Some(obj_mut) = state.level.objects.get_mut(obj_idx) {
+                    if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
                         obj_mut.enabled = !obj_mut.enabled;
                     }
                 }
@@ -2203,7 +2208,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
                 if delete_hovered && ctx.mouse.left_pressed {
                     state.save_undo();
-                    state.level.remove_object(obj_idx);
+                    state.level.remove_object(obj_room_idx, obj_idx);
                     state.set_selection(super::Selection::None);
                     state.set_status("Object deleted", 2.0);
                 }
@@ -2311,12 +2316,14 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
             }
             height
         }
-        super::Selection::Object { index } => {
+        super::Selection::Object { room: room_idx, index } => {
             // Base height for all objects: header + location + enabled + delete
             let mut height = 24.0 + 18.0 + 18.0 + 24.0 + 28.0 + 28.0; // header + location lines + type-specific + enabled + delete
 
             // Add extra height for objects with custom properties
-            if let Some(obj) = state.level.objects.get(*index) {
+            let obj_opt = state.level.rooms.get(*room_idx)
+                .and_then(|room| room.objects.get(*index));
+            if let Some(obj) = obj_opt {
                 match &obj.object_type {
                     crate::world::ObjectType::Light { .. } => {
                         height += 18.0 + ps1_color_picker_height() + 16.0 + 18.0 * 2.0 + 35.0; // color label + picker + knobs

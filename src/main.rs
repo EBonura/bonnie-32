@@ -387,8 +387,8 @@ async fn main() {
 
                 // Spawn player if playing and no player exists
                 if app.game.playing && app.game.player_entity.is_none() {
-                    if let Some(spawn) = app.project.level.get_player_start() {
-                        if let Some(room) = app.project.level.rooms.get(spawn.room) {
+                    if let Some((room_idx, spawn)) = app.project.level.get_player_start() {
+                        if let Some(room) = app.project.level.rooms.get(room_idx) {
                             let pos = spawn.world_position(room);
                             app.game.spawn_player(pos, &app.project.level);
                         }

@@ -349,19 +349,14 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
     // Draw level objects (spawns, lights, triggers, etc.) for current room and detect hover
     let mut hovered_object: Option<usize> = None;
-    for (obj_idx, obj) in state.level.objects.iter().enumerate() {
-        // Only draw objects in current room (or all rooms if not hidden)
-        if obj.room != current_room_idx {
-            continue;
-        }
-
+    for (obj_idx, obj) in room.objects.iter().enumerate() {
         // Calculate world position (center of sector)
         let world_x = room.position.x + (obj.sector_x as f32 + 0.5) * SECTOR_SIZE;
         let world_z = room.position.z + (obj.sector_z as f32 + 0.5) * SECTOR_SIZE;
         let (sx, sy) = world_to_screen(world_x, world_z);
 
         // Check if this object is selected
-        let is_selected = matches!(&state.selection, super::Selection::Object { index } if *index == obj_idx);
+        let is_selected = matches!(&state.selection, super::Selection::Object { room: r, index } if *r == current_room_idx && *index == obj_idx);
 
         // Check if mouse is hovering over this object
         let center_radius = if is_selected { 10.0 } else { 7.0 };
@@ -534,17 +529,17 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     }
 
     // Draw ghost preview when dragging an object
-    if let Some(obj_idx) = state.grid_dragging_object {
+    if let Some((drag_room_idx, obj_idx)) = state.grid_dragging_object {
         if state.grid_sector_drag_start.is_some() {
             let (offset_x, offset_z) = state.grid_sector_drag_offset;
             // Snap to sector grid
             let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
             let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
 
-            if let Some(obj) = state.level.objects.get(obj_idx) {
-                if let Some(room) = state.level.rooms.get(obj.room) {
+            if let Some(drag_room) = state.level.rooms.get(drag_room_idx) {
+                if let Some(obj) = drag_room.objects.get(obj_idx) {
                     // Get current world position
-                    let current_pos = obj.world_position(room);
+                    let current_pos = obj.world_position(drag_room);
                     // Calculate ghost position
                     let new_world_x = current_pos.x + snapped_x;
                     let new_world_z = current_pos.z + snapped_z;
@@ -628,7 +623,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             let (offset_x, offset_z) = state.grid_sector_drag_offset;
 
             // Check if we're dragging an object
-            if let Some(obj_idx) = state.grid_dragging_object {
+            if let Some((drag_room_idx, obj_idx)) = state.grid_dragging_object {
                 // Object dragging - snap to sector grid
                 let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
                 let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
@@ -640,7 +635,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 if sector_dx != 0 || sector_dz != 0 {
                     state.save_undo();
 
-                    if let Some(obj) = state.level.objects.get_mut(obj_idx) {
+                    if let Some(obj) = state.level.get_object_mut(drag_room_idx, obj_idx) {
                         // Update sector coordinates
                         let new_sector_x = (obj.sector_x as i32 + sector_dx).max(0) as usize;
                         let new_sector_z = (obj.sector_z as i32 + sector_dz).max(0) as usize;
@@ -846,18 +841,18 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     if let Some(obj_idx) = hovered_object {
                         // Check if this object is already selected (start drag)
                         let is_already_selected = matches!(&state.selection,
-                            Selection::Object { index } if *index == obj_idx);
+                            Selection::Object { room: r, index } if *r == current_room_idx && *index == obj_idx);
 
                         if is_already_selected {
                             // Start dragging the object
                             let (wx, wz) = screen_to_world(mouse_pos.0, mouse_pos.1);
-                            state.grid_dragging_object = Some(obj_idx);
+                            state.grid_dragging_object = Some((current_room_idx, obj_idx));
                             state.grid_sector_drag_start = Some((wx, wz));
                             state.grid_sector_drag_offset = (0.0, 0.0);
                         } else {
                             // Select the object
                             state.clear_multi_selection();
-                            state.set_selection(Selection::Object { index: obj_idx });
+                            state.set_selection(Selection::Object { room: current_room_idx, index: obj_idx });
                         }
                     }
                     // Check if clicking on room origin
@@ -1037,12 +1032,12 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             Ok(()) => {
                                 state.save_undo();
                                 let new_object = crate::world::LevelObject::new(
-                                    current_room_idx, gx, gz,
+                                    gx, gz,
                                     state.selected_object_type.clone()
                                 );
                                 let obj_name = state.selected_object_type.display_name();
-                                if let Ok(idx) = state.level.add_object(new_object) {
-                                    state.selection = super::Selection::Object { index: idx };
+                                if let Ok(idx) = state.level.add_object(current_room_idx, new_object) {
+                                    state.selection = super::Selection::Object { room: current_room_idx, index: idx };
                                     state.set_status(&format!("{} placed", obj_name), 1.0);
                                 }
                             }

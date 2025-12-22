@@ -509,14 +509,12 @@ impl ObjectType {
     }
 }
 
-/// A tile-based object placed in the level
+/// A tile-based object placed in a room
 ///
-/// Objects are tied to sectors (tiles) using room + grid coordinates.
+/// Objects are tied to sectors (tiles) using grid coordinates within the room.
 /// Height offset allows vertical positioning within the sector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LevelObject {
-    /// Room this object belongs to
-    pub room: usize,
     /// Sector X coordinate within the room
     pub sector_x: usize,
     /// Sector Z coordinate within the room
@@ -539,9 +537,8 @@ pub struct LevelObject {
 
 impl LevelObject {
     /// Create a new object at a sector position
-    pub fn new(room: usize, sector_x: usize, sector_z: usize, object_type: ObjectType) -> Self {
+    pub fn new(sector_x: usize, sector_z: usize, object_type: ObjectType) -> Self {
         Self {
-            room,
             sector_x,
             sector_z,
             height: 0.0,
@@ -553,18 +550,18 @@ impl LevelObject {
     }
 
     /// Create a player start object
-    pub fn player_start(room: usize, sector_x: usize, sector_z: usize) -> Self {
-        Self::new(room, sector_x, sector_z, ObjectType::Spawn(SpawnPointType::PlayerStart))
+    pub fn player_start(sector_x: usize, sector_z: usize) -> Self {
+        Self::new(sector_x, sector_z, ObjectType::Spawn(SpawnPointType::PlayerStart))
     }
 
     /// Create a light object
-    pub fn light(room: usize, sector_x: usize, sector_z: usize, color: Color, intensity: f32, radius: f32) -> Self {
-        Self::new(room, sector_x, sector_z, ObjectType::Light { color, intensity, radius })
+    pub fn light(sector_x: usize, sector_z: usize, color: Color, intensity: f32, radius: f32) -> Self {
+        Self::new(sector_x, sector_z, ObjectType::Light { color, intensity, radius })
     }
 
     /// Create a prop object
-    pub fn prop(room: usize, sector_x: usize, sector_z: usize, model_name: impl Into<String>) -> Self {
-        Self::new(room, sector_x, sector_z, ObjectType::Prop(model_name.into()))
+    pub fn prop(sector_x: usize, sector_z: usize, model_name: impl Into<String>) -> Self {
+        Self::new(sector_x, sector_z, ObjectType::Prop(model_name.into()))
     }
 
     /// Set height offset
@@ -671,6 +668,9 @@ pub struct Room {
     /// Ambient light level (0.0 = dark, 1.0 = bright)
     #[serde(default = "default_ambient")]
     pub ambient: f32,
+    /// Tile-based objects in this room (spawns, lights, props, triggers, etc.)
+    #[serde(default)]
+    pub objects: Vec<LevelObject>,
 }
 
 fn default_ambient() -> f32 {
@@ -694,6 +694,7 @@ impl Room {
             portals: Vec::new(),
             bounds: Aabb::default(),
             ambient: 0.5,
+            objects: Vec::new(),
         }
     }
 
@@ -926,9 +927,28 @@ impl Room {
             self.position.x += (first_col as f32) * SECTOR_SIZE;
             self.position.z += (first_row as f32) * SECTOR_SIZE;
 
-            // Extract the trimmed portion
+            // Adjust object sector coordinates to account for trimmed rows/columns
+            // Objects need their sector_x/sector_z reduced by the trimmed amount
+            // and any objects outside the new bounds should be removed
             let new_width = last_col - first_col;
             let new_depth = last_row - first_row;
+
+            self.objects.retain_mut(|obj| {
+                // Check if object is within the kept portion
+                if obj.sector_x >= first_col && obj.sector_x < last_col
+                    && obj.sector_z >= first_row && obj.sector_z < last_row
+                {
+                    // Adjust coordinates relative to new grid origin
+                    obj.sector_x -= first_col;
+                    obj.sector_z -= first_row;
+                    true
+                } else {
+                    // Object is in a trimmed area - remove it
+                    false
+                }
+            });
+
+            // Extract the trimmed portion
             let mut new_sectors = Vec::with_capacity(new_width);
 
             for x in first_col..last_col {
@@ -1307,9 +1327,6 @@ pub struct FloorInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Level {
     pub rooms: Vec<Room>,
-    /// Tile-based objects (spawns, lights, props, triggers, etc.)
-    #[serde(default)]
-    pub objects: Vec<LevelObject>,
     /// Editor layout configuration (optional, uses default if missing)
     #[serde(default)]
     pub editor_layout: EditorLayoutConfig,
@@ -1322,61 +1339,61 @@ impl Level {
     pub fn new() -> Self {
         Self {
             rooms: Vec::new(),
-            objects: Vec::new(),
             editor_layout: EditorLayoutConfig::default(),
             player_settings: PlayerSettings::default(),
         }
     }
 
     // ========================================================================
-    // Tile-based object system
+    // Tile-based object system (objects are now stored per-room)
     // ========================================================================
 
-    /// Get the player start object
-    pub fn get_player_start(&self) -> Option<&LevelObject> {
-        self.objects.iter()
-            .find(|obj| obj.enabled && matches!(obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)))
+    /// Get the player start object and its room index
+    pub fn get_player_start(&self) -> Option<(usize, &LevelObject)> {
+        for (room_idx, room) in self.rooms.iter().enumerate() {
+            if let Some(obj) = room.objects.iter()
+                .find(|obj| obj.enabled && matches!(obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)))
+            {
+                return Some((room_idx, obj));
+            }
+        }
+        None
     }
 
-    /// Get all objects at a specific sector
-    pub fn objects_at(&self, room: usize, sector_x: usize, sector_z: usize) -> impl Iterator<Item = &LevelObject> {
-        self.objects.iter()
-            .filter(move |obj| obj.room == room && obj.sector_x == sector_x && obj.sector_z == sector_z)
+    /// Get all objects at a specific sector in a room
+    pub fn objects_at(&self, room_idx: usize, sector_x: usize, sector_z: usize) -> impl Iterator<Item = &LevelObject> {
+        self.rooms.get(room_idx)
+            .map(|room| room.objects.iter()
+                .filter(move |obj| obj.sector_x == sector_x && obj.sector_z == sector_z))
+            .into_iter()
+            .flatten()
     }
 
     /// Get all objects in a room
-    pub fn objects_in_room(&self, room: usize) -> impl Iterator<Item = &LevelObject> {
-        self.objects.iter()
-            .filter(move |obj| obj.room == room)
-    }
-
-    /// Get all light objects
-    pub fn lights(&self) -> impl Iterator<Item = &LevelObject> {
-        self.objects.iter()
-            .filter(|obj| obj.is_light() && obj.enabled)
-    }
-
-    /// Get all spawn objects
-    pub fn spawns(&self) -> impl Iterator<Item = &LevelObject> {
-        self.objects.iter()
-            .filter(|obj| obj.is_spawn() && obj.enabled)
+    pub fn objects_in_room(&self, room_idx: usize) -> impl Iterator<Item = &LevelObject> {
+        self.rooms.get(room_idx)
+            .map(|room| room.objects.iter())
+            .into_iter()
+            .flatten()
     }
 
     /// Check if an object can be added at a sector (validates restrictions)
-    pub fn can_add_object(&self, room: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Result<(), &'static str> {
+    pub fn can_add_object(&self, room_idx: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Result<(), &'static str> {
         // Check per-level uniqueness (e.g., only one PlayerStart)
         if object_type.is_unique_per_level() {
-            let exists = self.objects.iter().any(|obj| {
-                std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type)
-            });
-            if exists {
-                return Err("Only one of this object type allowed per level");
+            for room in &self.rooms {
+                let exists = room.objects.iter().any(|obj| {
+                    std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type)
+                });
+                if exists {
+                    return Err("Only one of this object type allowed per level");
+                }
             }
         }
 
         // Check per-tile uniqueness (e.g., only one light per tile)
         if object_type.is_unique_per_tile() {
-            let tile_objects = self.objects_at(room, sector_x, sector_z);
+            let tile_objects = self.objects_at(room_idx, sector_x, sector_z);
             for obj in tile_objects {
                 // Check if same category exists
                 let same_category = match (&obj.object_type, object_type) {
@@ -1394,53 +1411,64 @@ impl Level {
         Ok(())
     }
 
-    /// Add an object to the level (validates restrictions)
-    pub fn add_object(&mut self, object: LevelObject) -> Result<usize, &'static str> {
-        self.can_add_object(object.room, object.sector_x, object.sector_z, &object.object_type)?;
-        let idx = self.objects.len();
-        self.objects.push(object);
-        Ok(idx)
+    /// Add an object to a room (validates restrictions)
+    pub fn add_object(&mut self, room_idx: usize, object: LevelObject) -> Result<usize, &'static str> {
+        self.can_add_object(room_idx, object.sector_x, object.sector_z, &object.object_type)?;
+        if let Some(room) = self.rooms.get_mut(room_idx) {
+            let idx = room.objects.len();
+            room.objects.push(object);
+            Ok(idx)
+        } else {
+            Err("Invalid room index")
+        }
     }
 
     /// Add an object without validation (for internal use or loading)
-    pub fn add_object_unchecked(&mut self, object: LevelObject) -> usize {
-        let idx = self.objects.len();
-        self.objects.push(object);
-        idx
-    }
-
-    /// Remove an object by index
-    pub fn remove_object(&mut self, index: usize) -> Option<LevelObject> {
-        if index < self.objects.len() {
-            Some(self.objects.remove(index))
+    pub fn add_object_unchecked(&mut self, room_idx: usize, object: LevelObject) -> Option<usize> {
+        if let Some(room) = self.rooms.get_mut(room_idx) {
+            let idx = room.objects.len();
+            room.objects.push(object);
+            Some(idx)
         } else {
             None
         }
     }
 
-    /// Remove all objects at a specific sector
-    pub fn remove_objects_at(&mut self, room: usize, sector_x: usize, sector_z: usize) {
-        self.objects.retain(|obj| !(obj.room == room && obj.sector_x == sector_x && obj.sector_z == sector_z));
+    /// Remove an object by room and index
+    pub fn remove_object(&mut self, room_idx: usize, object_idx: usize) -> Option<LevelObject> {
+        if let Some(room) = self.rooms.get_mut(room_idx) {
+            if object_idx < room.objects.len() {
+                return Some(room.objects.remove(object_idx));
+            }
+        }
+        None
     }
 
-    /// Find object index by position and type
-    pub fn find_object(&self, room: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Option<usize> {
-        self.objects.iter().position(|obj| {
-            obj.room == room
-                && obj.sector_x == sector_x
+    /// Remove all objects at a specific sector in a room
+    pub fn remove_objects_at(&mut self, room_idx: usize, sector_x: usize, sector_z: usize) {
+        if let Some(room) = self.rooms.get_mut(room_idx) {
+            room.objects.retain(|obj| !(obj.sector_x == sector_x && obj.sector_z == sector_z));
+        }
+    }
+
+    /// Find object index by position and type in a room
+    pub fn find_object(&self, room_idx: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Option<usize> {
+        self.rooms.get(room_idx)?.objects.iter().position(|obj| {
+            obj.sector_x == sector_x
                 && obj.sector_z == sector_z
                 && std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type)
         })
     }
 
-    /// Get mutable reference to an object by index
-    pub fn get_object_mut(&mut self, index: usize) -> Option<&mut LevelObject> {
-        self.objects.get_mut(index)
+    /// Get mutable reference to an object by room and index
+    pub fn get_object_mut(&mut self, room_idx: usize, object_idx: usize) -> Option<&mut LevelObject> {
+        self.rooms.get_mut(room_idx)?.objects.get_mut(object_idx)
     }
 
-    /// Count objects of a specific type
+    /// Count objects of a specific type across all rooms
     pub fn count_objects_of_type(&self, object_type: &ObjectType) -> usize {
-        self.objects.iter()
+        self.rooms.iter()
+            .flat_map(|room| room.objects.iter())
             .filter(|obj| std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type))
             .count()
     }

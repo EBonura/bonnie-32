@@ -84,9 +84,9 @@ impl GameToolState {
         }
 
         // Try to get player start position from tile-based objects
-        if let Some(spawn) = level.get_player_start() {
+        if let Some((room_idx, spawn)) = level.get_player_start() {
             // Get the room to calculate world position
-            if let Some(room) = level.rooms.get(spawn.room) {
+            if let Some(room) = level.rooms.get(room_idx) {
                 let spawn_pos = spawn.world_position(room);
                 // Position camera to look at spawn point from above and behind
                 self.orbit_target = spawn_pos + Vec3::new(0.0, 200.0, 0.0); // Slightly above ground

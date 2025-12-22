@@ -58,7 +58,9 @@ pub enum Selection {
     Edge { room: usize, x: usize, z: usize, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace> },
     Portal { room: usize, portal: usize },
     /// Level object selected (spawn, light, prop, etc.)
-    Object { index: usize },
+    /// room: which room the object belongs to
+    /// index: index within that room's objects array
+    Object { room: usize, index: usize },
 }
 
 impl Selection {
@@ -179,8 +181,8 @@ pub struct EditorState {
     pub grid_sector_drag_start: Option<(f32, f32)>,
     /// True if dragging the room origin marker (moves entire room position)
     pub grid_dragging_room_origin: bool,
-    /// Object being dragged in 2D grid view (object index)
-    pub grid_dragging_object: Option<usize>,
+    /// Object being dragged in 2D grid view (room_idx, object_idx)
+    pub grid_dragging_object: Option<(usize, usize)>,
 
     /// 3D viewport vertex dragging state (legacy - kept for compatibility)
     pub viewport_dragging_vertices: Vec<(usize, usize)>, // List of (room_idx, vertex_idx)
@@ -196,9 +198,9 @@ pub struct EditorState {
     pub drag_initial_heights: Vec<f32>, // Initial Y/height values for each vertex
 
     /// 3D viewport object dragging state
-    pub dragging_object: Option<usize>,         // Object index
-    pub dragging_object_initial_y: f32,         // Initial Y when drag started
-    pub dragging_object_plane_y: f32,           // Current accumulated drag plane Y
+    pub dragging_object: Option<(usize, usize)>, // (room_idx, object_idx)
+    pub dragging_object_initial_y: f32,          // Initial Y when drag started
+    pub dragging_object_plane_y: f32,            // Current accumulated drag plane Y
 
     /// Texture palette state
     pub texture_packs: Vec<TexturePack>,
@@ -563,9 +565,9 @@ impl EditorState {
                     })
                 })
             }
-            Selection::Object { index } => {
-                self.level.objects.get(*index).and_then(|obj| {
-                    self.level.rooms.get(obj.room).map(|room| {
+            Selection::Object { room: room_idx, index } => {
+                self.level.rooms.get(*room_idx).and_then(|room| {
+                    room.objects.get(*index).map(|obj| {
                         obj.world_position(room)
                     })
                 })

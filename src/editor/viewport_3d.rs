@@ -717,24 +717,24 @@ pub fn draw_viewport_3d(
                     if height_count > 0 {
                         state.viewport_drag_plane_y = avg_height / height_count as f32;
                     }
-                } else if let Some((obj_idx, _)) = hovered_object {
+                } else if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
                     // Object selection/dragging - checked before lights and faces
                     let is_already_selected = matches!(&state.selection,
-                        Selection::Object { index } if *index == obj_idx);
+                        Selection::Object { room, index } if *room == obj_room_idx && *index == obj_idx);
 
                     if is_already_selected {
                         // Start dragging the object (Y-axis)
-                        if let Some(obj) = state.level.objects.get(obj_idx) {
-                            if let Some(room) = state.level.rooms.get(obj.room) {
+                        if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                            if let Some(obj) = room.objects.get(obj_idx) {
                                 let world_pos = obj.world_position(room);
-                                state.dragging_object = Some(obj_idx);
+                                state.dragging_object = Some((obj_room_idx, obj_idx));
                                 state.dragging_object_initial_y = world_pos.y;
                                 state.dragging_object_plane_y = world_pos.y;
                             }
                         }
                     } else {
                         // Select object
-                        state.selection = Selection::Object { index: obj_idx };
+                        state.selection = Selection::Object { room: obj_room_idx, index: obj_idx };
                         state.set_status("Object selected", 1.0);
                     }
                 } else if let Some((room_idx, gx, gz, face)) = hovered_face {
@@ -1032,8 +1032,8 @@ pub fn draw_viewport_3d(
             }
             // PlaceObject mode - select existing objects in 3D (placement is in 2D grid view)
             else if state.tool == EditorTool::PlaceObject {
-                if let Some((obj_idx, _)) = hovered_object {
-                    state.selection = Selection::Object { index: obj_idx };
+                if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
+                    state.selection = Selection::Object { room: obj_room_idx, index: obj_idx };
                     state.set_status("Object selected", 1.0);
                 } else {
                     state.set_status("Use 2D grid view to place objects", 2.0);
@@ -1131,16 +1131,21 @@ pub fn draw_viewport_3d(
             let snapped_y = (new_y / CLICK_HEIGHT).round() * CLICK_HEIGHT;
 
             // Apply to object's height offset
-            if let Some(obj_idx) = state.dragging_object {
-                if let Some(obj) = state.level.objects.get_mut(obj_idx) {
-                    // Convert world Y to relative offset from sector floor
-                    if let Some(room) = state.level.rooms.get(obj.room) {
-                        // Get floor height at this sector (average if sloped)
-                        let sector_floor_y = room.get_sector(obj.sector_x, obj.sector_z)
-                            .and_then(|s| s.floor.as_ref())
-                            .map(|f| f.avg_height())
-                            .unwrap_or(room.position.y);
-                        obj.height = snapped_y - sector_floor_y;
+            if let Some((obj_room_idx, obj_idx)) = state.dragging_object {
+                // We need sector info first, then we can update the object
+                let sector_floor_y = state.level.rooms.get(obj_room_idx)
+                    .and_then(|room| {
+                        room.objects.get(obj_idx).and_then(|obj| {
+                            room.get_sector(obj.sector_x, obj.sector_z)
+                                .and_then(|s| s.floor.as_ref())
+                                .map(|f| f.avg_height())
+                                .or(Some(room.position.y))
+                        })
+                    });
+
+                if let Some(floor_y) = sector_floor_y {
+                    if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                        obj.height = snapped_y - floor_y;
                     }
                 }
             }
@@ -1394,20 +1399,22 @@ pub fn draw_viewport_3d(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
-    // Collect all lights from level objects (shared across rooms)
+    // Collect all lights from room objects
     let lights: Vec<Light> = if state.raster_settings.shading != crate::rasterizer::ShadingMode::None {
-        state.level.objects.iter()
-            .filter_map(|obj| {
-                if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                    state.level.rooms.get(obj.room).map(|room| {
-                        let world_pos = obj.world_position(room);
-                        let mut light = Light::point(world_pos, *radius, *intensity);
-                        light.color = *color;
-                        light
+        state.level.rooms.iter()
+            .flat_map(|room| {
+                room.objects.iter()
+                    .filter(|obj| obj.enabled)
+                    .filter_map(|obj| {
+                        if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                            let world_pos = obj.world_position(room);
+                            let mut light = Light::point(world_pos, *radius, *intensity);
+                            light.color = *color;
+                            Some(light)
+                        } else {
+                            None
+                        }
                     })
-                } else {
-                    None
-                }
             })
             .collect()
     } else {
@@ -1528,8 +1535,8 @@ pub fn draw_viewport_3d(
     }
 
     // Draw LevelObject gizmos (spawns, object-based lights, triggers, etc.)
-    for (obj_idx, obj) in state.level.objects.iter().enumerate() {
-        if let Some(room) = state.level.rooms.get(obj.room) {
+    for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        for (obj_idx, obj) in room.objects.iter().enumerate() {
             let world_pos = obj.world_position(room);
 
             // Project to screen
@@ -1545,7 +1552,7 @@ pub fn draw_viewport_3d(
                 use crate::world::{ObjectType, SpawnPointType};
 
                 // Check if this object is selected
-                let is_selected = matches!(&state.selection, Selection::Object { index } if *index == obj_idx);
+                let is_selected = matches!(&state.selection, Selection::Object { room: r, index } if *r == room_idx && *index == obj_idx);
 
                 // Get color and radius based on object type (letter unused in 3D view)
                 let (color, _letter, draw_radius) = match &obj.object_type {
@@ -2568,8 +2575,8 @@ pub struct HoverResult {
     pub edge: Option<(usize, usize, usize, usize, usize, Option<SectorFace>, f32)>,
     /// Hovered face: (room_idx, gx, gz, face)
     pub face: Option<(usize, usize, usize, SectorFace)>,
-    /// Hovered object: (object_idx, screen_dist)
-    pub object: Option<(usize, f32)>,
+    /// Hovered object: (room_idx, object_idx, screen_dist)
+    pub object: Option<(usize, usize, f32)>,
 }
 
 impl Default for HoverResult {
@@ -2888,8 +2895,8 @@ fn find_hovered_elements(
 
     // Check objects (level objects like spawns, lights, triggers, etc.)
     const OBJECT_THRESHOLD: f32 = 12.0;
-    for (obj_idx, obj) in state.level.objects.iter().enumerate() {
-        if let Some(room) = state.level.rooms.get(obj.room) {
+    for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        for (obj_idx, obj) in room.objects.iter().enumerate() {
             let world_pos = obj.world_position(room);
             if let Some((sx, sy)) = world_to_screen(
                 world_pos,
@@ -2902,8 +2909,8 @@ fn find_hovered_elements(
             ) {
                 let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
                 if dist < OBJECT_THRESHOLD {
-                    if result.object.map_or(true, |(_, best_dist)| dist < best_dist) {
-                        result.object = Some((obj_idx, dist));
+                    if result.object.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                        result.object = Some((room_idx, obj_idx, dist));
                     }
                 }
             }
