@@ -35,24 +35,24 @@ pub fn draw_test_viewport(
         game.options_menu_open = !game.options_menu_open;
     }
 
-    // Handle input (camera, player movement) when menu is closed
+    // Auto-start playing when entering game tab
+    if !game.playing {
+        game.toggle_playing();
+    }
+
+    // Handle input (camera, player movement) - blocked when debug menu is open
     if !game.options_menu_open {
-        if game.playing {
-            match game.camera_mode {
-                CameraMode::Character => {
-                    // Third-person camera follows player
-                    game.update_camera_follow_player(level);
-                    // Handle Elden Ring style player input
-                    handle_player_input(game, level, &rect, input);
-                }
-                CameraMode::FreeFly => {
-                    // Free-fly noclip camera
-                    handle_freefly_input(game, &rect, input);
-                }
+        match game.camera_mode {
+            CameraMode::Character => {
+                // Third-person camera follows player
+                game.update_camera_follow_player(level);
+                // Handle Dark Souls style player input
+                handle_player_input(game, level, &rect, input);
             }
-        } else {
-            // Orbit camera for preview mode
-            handle_camera_input(game, &rect, input);
+            CameraMode::FreeFly => {
+                // Free-fly noclip camera
+                handle_freefly_input(game, &rect, input);
+            }
         }
     }
 
@@ -149,122 +149,10 @@ pub fn draw_test_viewport(
         },
     );
 
-    // Draw options menu if open
+    // Draw debug menu overlay if open (top-left, blocks gameplay for D-pad navigation)
     if game.options_menu_open {
-        draw_options_menu(game, &rect, input);
+        draw_debug_menu(game, &rect, input, level);
     }
-
-    // Draw play/pause indicator
-    let status = if game.options_menu_open {
-        "OPTIONS MENU"
-    } else if game.playing {
-        match game.camera_mode {
-            CameraMode::Character => "PLAYING - Character Mode",
-            CameraMode::FreeFly => "PLAYING - Free-Fly Mode",
-        }
-    } else {
-        "PAUSED (Space to play)"
-    };
-    let status_dims = measure_text(status, None, 14, 1.0);
-    draw_text(
-        status,
-        rect.x + (rect.w - status_dims.width) / 2.0,
-        rect.y + rect.h - 20.0,
-        14.0,
-        Color::from_rgba(150, 150, 160, 200),
-    );
-
-    // Draw controls hint
-    let has_gamepad = input.has_gamepad();
-    let hint = if game.options_menu_open {
-        if has_gamepad {
-            "D-Pad: Select | A: Confirm | B/Start: Close"
-        } else {
-            "Up/Down: Select | Enter: Confirm | Escape: Close"
-        }
-    } else if game.playing {
-        match game.camera_mode {
-            CameraMode::Character => {
-                if has_gamepad {
-                    "LS: Move | RS: Look | B: Dodge | Start: Options"
-                } else {
-                    "WASD: Move | Shift: Run | RMB: Look | Esc: Options"
-                }
-            }
-            CameraMode::FreeFly => {
-                if has_gamepad {
-                    "LS: Move | RS: Look | LB/LT: Up/Down | Start: Options"
-                } else {
-                    "WASD: Move | QE: Up/Down | RMB: Look | Esc: Options"
-                }
-            }
-        }
-    } else {
-        if has_gamepad {
-            "RS: Rotate | Start: Play"
-        } else {
-            "RMB: Rotate | Scroll: Zoom | Space: Play"
-        }
-    };
-    let hint_dims = measure_text(hint, None, 12, 1.0);
-    draw_text(
-        hint,
-        rect.x + (rect.w - hint_dims.width) / 2.0,
-        rect.y + 20.0,
-        12.0,
-        Color::from_rgba(100, 100, 110, 180),
-    );
-}
-
-/// Handle camera input for the preview mode (orbit camera)
-fn handle_camera_input(game: &mut GameToolState, rect: &Rect, input: &InputState) {
-    let mouse_pos = mouse_position();
-    let inside = mouse_pos.0 >= rect.x
-        && mouse_pos.0 < rect.x + rect.w
-        && mouse_pos.1 >= rect.y
-        && mouse_pos.1 < rect.y + rect.h;
-
-    // Toggle play with space or gamepad Start
-    if inside && is_key_pressed(KeyCode::Space) {
-        game.toggle_playing();
-    }
-
-    // Orbit camera controls (right-click drag)
-    if inside && is_mouse_button_down(MouseButton::Right) {
-        let dx = mouse_pos.0 - game.viewport_last_mouse.0;
-        let dy = mouse_pos.1 - game.viewport_last_mouse.1;
-
-        game.orbit_azimuth -= dx * 0.005;
-        game.orbit_elevation = (game.orbit_elevation + dy * 0.005)
-            .clamp(-1.4, 1.4);
-
-        game.sync_camera_from_orbit();
-        game.viewport_mouse_captured = true;
-    } else {
-        game.viewport_mouse_captured = false;
-    }
-
-    // Gamepad right stick for orbit rotation
-    let right_stick = input.right_stick();
-    if right_stick.length() > 0.0 {
-        let delta = get_frame_time();
-        game.orbit_azimuth -= right_stick.x * 2.0 * delta;
-        game.orbit_elevation = (game.orbit_elevation + right_stick.y * 1.5 * delta)
-            .clamp(-1.4, 1.4);
-        game.sync_camera_from_orbit();
-    }
-
-    // Zoom with scroll wheel
-    if inside {
-        let scroll = mouse_wheel().1;
-        if scroll.abs() > 0.1 {
-            game.orbit_distance *= 1.0 - scroll * 0.1;
-            game.orbit_distance = game.orbit_distance.clamp(500.0, 20000.0);
-            game.sync_camera_from_orbit();
-        }
-    }
-
-    game.viewport_last_mouse = mouse_pos;
 }
 
 /// Handle player input during gameplay (Dark Souls style character controls)
@@ -434,92 +322,102 @@ fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputStat
     game.viewport_last_mouse = mouse_pos;
 }
 
-/// Draw the options menu overlay
-fn draw_options_menu(game: &mut GameToolState, rect: &Rect, input: &InputState) {
-    // Dark semi-transparent overlay
-    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(0, 0, 0, 180));
+/// Draw compact debug menu overlay (top-left, doesn't block gameplay)
+fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, level: &Level) {
+    let menu_x = rect.x + 10.0;
+    let menu_y = rect.y + 10.0;
+    let menu_w = 180.0;
+    let menu_h = 80.0;
+    let row_height = 20.0;
 
-    // Menu box dimensions
-    let menu_w = 300.0;
-    let menu_h = 120.0;
-    let menu_x = rect.x + (rect.w - menu_w) / 2.0;
-    let menu_y = rect.y + (rect.h - menu_h) / 2.0;
+    // Semi-transparent background
+    draw_rectangle(menu_x, menu_y, menu_w, menu_h, Color::from_rgba(20, 22, 28, 220));
+    draw_rectangle_lines(menu_x, menu_y, menu_w, menu_h, 1.0, Color::from_rgba(60, 65, 75, 255));
 
-    // Menu background
-    draw_rectangle(menu_x, menu_y, menu_w, menu_h, Color::from_rgba(30, 32, 38, 240));
-    draw_rectangle_lines(menu_x, menu_y, menu_w, menu_h, 2.0, Color::from_rgba(80, 85, 95, 255));
+    // Menu items
+    let items = ["Camera", "Reset"];
+    let selected = game.debug_menu_selection;
 
-    // Title
-    let title = "OPTIONS";
-    let title_dims = measure_text(title, None, 18, 1.0);
-    draw_text(
-        title,
-        menu_x + (menu_w - title_dims.width) / 2.0,
-        menu_y + 30.0,
-        18.0,
-        Color::from_rgba(200, 200, 210, 255),
-    );
-
-    // Camera mode option
-    let mode_label = "Camera Mode:";
-    draw_text(
-        mode_label,
-        menu_x + 20.0,
-        menu_y + 65.0,
-        14.0,
-        Color::from_rgba(150, 150, 160, 255),
-    );
-
-    // Mode buttons
-    let char_selected = game.camera_mode == CameraMode::Character;
-    let fly_selected = game.camera_mode == CameraMode::FreeFly;
-
-    let char_color = if char_selected {
-        Color::from_rgba(100, 180, 255, 255)
-    } else {
-        Color::from_rgba(100, 100, 110, 255)
-    };
-    let fly_color = if fly_selected {
-        Color::from_rgba(100, 180, 255, 255)
-    } else {
-        Color::from_rgba(100, 100, 110, 255)
-    };
-
-    draw_text("[Character]", menu_x + 120.0, menu_y + 65.0, 14.0, char_color);
-    draw_text("[Free-Fly]", menu_x + 210.0, menu_y + 65.0, 14.0, fly_color);
-
-    // Instructions
-    let close_hint = "Press Escape or Start to close";
-    let close_dims = measure_text(close_hint, None, 11, 1.0);
-    draw_text(
-        close_hint,
-        menu_x + (menu_w - close_dims.width) / 2.0,
-        menu_y + menu_h - 15.0,
-        11.0,
-        Color::from_rgba(80, 80, 90, 255),
-    );
-
-    // Handle input to toggle camera mode
-    // D-Pad left/right or keyboard left/right arrows
-    if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
-        game.camera_mode = CameraMode::Character;
+    // Handle D-Pad up/down navigation
+    if input.action_pressed(Action::SwitchSpell) || is_key_pressed(KeyCode::Up) {
+        game.debug_menu_selection = game.debug_menu_selection.saturating_sub(1);
     }
-    if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right) {
-        game.camera_mode = CameraMode::FreeFly;
+    if input.action_pressed(Action::SwitchItem) || is_key_pressed(KeyCode::Down) {
+        game.debug_menu_selection = (game.debug_menu_selection + 1).min(items.len() - 1);
     }
 
-    // Also allow A/Enter to toggle between modes
-    if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
-        game.camera_mode = match game.camera_mode {
-            CameraMode::Character => CameraMode::FreeFly,
-            CameraMode::FreeFly => CameraMode::Character,
+    // Draw each menu item
+    for (i, item) in items.iter().enumerate() {
+        let y = menu_y + 18.0 + i as f32 * row_height;
+        let is_selected = i == selected;
+
+        // Selection indicator
+        let label_color = if is_selected {
+            Color::from_rgba(255, 255, 255, 255)
+        } else {
+            Color::from_rgba(120, 120, 130, 255)
         };
+
+        if is_selected {
+            draw_text(">", menu_x + 4.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+        }
+
+        draw_text(item, menu_x + 16.0, y, 12.0, label_color);
+
+        // Item-specific value/action
+        match i {
+            0 => {
+                // Camera mode
+                let mode_name = match game.camera_mode {
+                    CameraMode::Character => "Character",
+                    CameraMode::FreeFly => "Free-Fly",
+                };
+                draw_text(mode_name, menu_x + 80.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+
+                // Handle left/right to change camera mode (only when this row is selected)
+                if is_selected {
+                    if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
+                        game.camera_mode = CameraMode::Character;
+                    }
+                    if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right) {
+                        game.camera_mode = CameraMode::FreeFly;
+                    }
+                    // A/Enter toggles between modes
+                    if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
+                        game.camera_mode = match game.camera_mode {
+                            CameraMode::Character => CameraMode::FreeFly,
+                            CameraMode::FreeFly => CameraMode::Character,
+                        };
+                    }
+                }
+            }
+            1 => {
+                // Reset game
+                draw_text("[Press A]", menu_x + 80.0, y, 12.0, Color::from_rgba(80, 80, 90, 255));
+
+                if is_selected {
+                    if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
+                        // Reset the game
+                        game.reset();
+                        game.options_menu_open = false;
+                        // Re-spawn player at start position
+                        if let Some((room_idx, spawn)) = level.get_player_start() {
+                            if let Some(room) = level.rooms.get(room_idx) {
+                                let spawn_pos = spawn.world_position(room);
+                                game.spawn_player(spawn_pos, level);
+                            }
+                        }
+                        // Start playing again
+                        game.playing = true;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    // B button closes menu (in addition to Start which is handled in main function)
-    if input.action_pressed(Action::Dodge) {
-        game.options_menu_open = false;
-    }
+    // Hint at bottom
+    draw_text("Up/Down: Select  A: Confirm", menu_x + 8.0, menu_y + menu_h - 8.0, 10.0, Color::from_rgba(80, 80, 90, 255));
 }
 
 /// Draw a wireframe cylinder in the 3D view

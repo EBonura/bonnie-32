@@ -57,6 +57,9 @@ pub struct GameToolState {
     /// Is the options menu currently open?
     pub options_menu_open: bool,
 
+    /// Debug menu selected item index
+    pub debug_menu_selection: usize,
+
     /// Free-fly camera parameters (when in FreeFly mode)
     pub freefly_yaw: f32,
     pub freefly_pitch: f32,
@@ -100,6 +103,7 @@ impl GameToolState {
             camera_initialized: false,
             camera_mode: CameraMode::default(),
             options_menu_open: false,
+            debug_menu_selection: 0,
             freefly_yaw: 0.0,
             freefly_pitch: 0.0,
             char_cam_yaw: 0.0,
