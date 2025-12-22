@@ -86,6 +86,123 @@ impl EditorLayout {
     }
 }
 
+/// Result from drawing a player property field
+struct PlayerPropResult {
+    new_y: f32,
+    new_value: Option<f32>,
+}
+
+/// Draw a click-to-edit property field for player settings
+/// Returns the new Y position and optionally a new value if edited
+fn draw_player_prop_field(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    container_width: f32,
+    line_height: f32,
+    label: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    field_id: usize,
+    editing: &mut Option<usize>,
+    buffer: &mut String,
+    label_color: Color,
+) -> PlayerPropResult {
+    let value_color = Color::from_rgba(220, 220, 230, 255);
+    let accent_color = Color::from_rgba(0, 180, 180, 255);
+
+    draw_text(label, x, (y + 13.0).floor(), 12.0, label_color);
+
+    let value_x = x + 80.0;
+    let value_w = container_width - 90.0;
+    let value_rect = Rect::new(value_x, y, value_w, line_height - 2.0);
+
+    let hovered = value_rect.contains(ctx.mouse.x, ctx.mouse.y);
+    let is_editing = *editing == Some(field_id);
+
+    let bg_color = if is_editing {
+        Color::from_rgba(50, 60, 70, 255)
+    } else if hovered {
+        Color::from_rgba(55, 55, 65, 255)
+    } else {
+        Color::from_rgba(45, 45, 55, 255)
+    };
+    let border_color = if is_editing {
+        accent_color
+    } else {
+        Color::from_rgba(60, 60, 65, 255)
+    };
+
+    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, bg_color);
+    draw_rectangle_lines(value_rect.x, value_rect.y, value_rect.w, value_rect.h, 1.0, border_color);
+
+    let mut new_value = None;
+
+    if is_editing {
+        // Text input mode
+        let text_y = y + 13.0;
+        let display_text = if buffer.is_empty() { "0" } else { buffer.as_str() };
+        let text_dims = measure_text(display_text, None, 12, 1.0);
+        let text_x = value_x + 4.0;
+        draw_text(display_text, text_x, text_y.floor(), 12.0, accent_color);
+
+        // Draw cursor (blinking)
+        let time = macroquad::time::get_time();
+        if (time * 2.0) as i32 % 2 == 0 {
+            let cursor_x = text_x + text_dims.width + 1.0;
+            draw_line(cursor_x, y + 3.0, cursor_x, y + line_height - 5.0, 1.0, accent_color);
+        }
+
+        // Handle keyboard input
+        while let Some(c) = get_char_pressed() {
+            if c.is_ascii_digit() || c == '.' || c == '-' {
+                buffer.push(c);
+            }
+        }
+
+        // Handle backspace
+        if is_key_pressed(KeyCode::Backspace) {
+            buffer.pop();
+        }
+
+        // Handle Enter - confirm edit
+        if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+            if let Ok(v) = buffer.parse::<f32>() {
+                new_value = Some(v.clamp(min, max));
+            }
+            *editing = None;
+            buffer.clear();
+        }
+
+        // Handle Escape - cancel edit
+        if is_key_pressed(KeyCode::Escape) {
+            *editing = None;
+            buffer.clear();
+        }
+
+        // Click outside to confirm
+        if ctx.mouse.left_pressed && !hovered {
+            if let Ok(v) = buffer.parse::<f32>() {
+                new_value = Some(v.clamp(min, max));
+            }
+            *editing = None;
+            buffer.clear();
+        }
+    } else {
+        // Display mode
+        draw_text(&format!("{:.0}", value), value_x + 4.0, (y + 13.0).floor(), 12.0, value_color);
+
+        // Click to start editing
+        if hovered && ctx.mouse.left_pressed {
+            *editing = Some(field_id);
+            *buffer = format!("{:.0}", value);
+        }
+    }
+
+    PlayerPropResult { new_y: y + line_height, new_value }
+}
+
 /// Draw the complete editor UI, returns action if triggered
 pub fn draw_editor(
     ctx: &mut UiContext,
@@ -1670,12 +1787,6 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
     let x = rect.x.floor();
     let container_width = rect.w - 4.0;
 
-    // Handle scroll input
-    let inside = ctx.mouse.inside(&rect);
-    if inside && ctx.mouse.scroll != 0.0 {
-        state.properties_scroll -= ctx.mouse.scroll * 30.0;
-    }
-
     // Clone selection to avoid borrow issues
     let selection = state.selection.clone();
 
@@ -2067,56 +2178,32 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
                         match spawn_type {
                             SpawnPointType::PlayerStart => {
-                                // Player settings - editable with scroll-to-edit
+                                // Player settings - click to edit
                                 let section_color = Color::from_rgba(120, 150, 180, 255);
                                 let line_height = 20.0;
-
-                                // Helper to draw a property row with scroll-to-edit
-                                let draw_prop = |ctx: &UiContext, x: f32, y: f32, w: f32, label: &str, value: f32, min: f32, max: f32, step: f32| -> (f32, Option<f32>) {
-                                    let label_color = Color::from_rgba(180, 180, 190, 255);
-                                    let value_color = Color::from_rgba(220, 220, 230, 255);
-
-                                    draw_text(label, x, (y + 13.0).floor(), 12.0, label_color);
-
-                                    let value_x = x + 80.0;
-                                    let value_w = w - 90.0;
-                                    let value_rect = Rect::new(value_x, y, value_w, line_height - 2.0);
-
-                                    let hovered = value_rect.contains(ctx.mouse.x, ctx.mouse.y);
-                                    let bg_color = if hovered {
-                                        Color::from_rgba(55, 55, 65, 255)
-                                    } else {
-                                        Color::from_rgba(45, 45, 55, 255)
-                                    };
-                                    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, bg_color);
-
-                                    draw_text(&format!("{:.0}", value), value_x + 4.0, (y + 13.0).floor(), 12.0, value_color);
-
-                                    let new_val = if hovered {
-                                        let scroll = mouse_wheel().1;
-                                        if scroll.abs() > 0.1 {
-                                            Some((value + scroll * step).clamp(min, max))
-                                        } else { None }
-                                    } else { None };
-
-                                    (y + line_height, new_val)
-                                };
+                                let label_color = Color::from_rgba(180, 180, 190, 255);
 
                                 // === Collision Section ===
                                 draw_text("Collision", x, (y + 12.0).floor(), 11.0, section_color);
                                 y += 18.0;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Radius", state.level.player_settings.radius, 20.0, 500.0, 5.0);
-                                if let Some(v) = nv { state.level.player_settings.radius = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Radius",
+                                    state.level.player_settings.radius, 20.0, 500.0, 0,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.radius = v; }
+                                y = r.new_y;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Height", state.level.player_settings.height, 100.0, 2000.0, 20.0);
-                                if let Some(v) = nv { state.level.player_settings.height = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
+                                    state.level.player_settings.height, 100.0, 2000.0, 1,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.height = v; }
+                                y = r.new_y;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Step", state.level.player_settings.step_height, 50.0, 1000.0, 10.0);
-                                if let Some(v) = nv { state.level.player_settings.step_height = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Step",
+                                    state.level.player_settings.step_height, 50.0, 1000.0, 2,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.step_height = v; }
+                                y = r.new_y;
 
                                 y += 6.0;
 
@@ -2124,17 +2211,23 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 draw_text("Movement", x, (y + 12.0).floor(), 11.0, section_color);
                                 y += 18.0;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Walk", state.level.player_settings.walk_speed, 100.0, 3000.0, 50.0);
-                                if let Some(v) = nv { state.level.player_settings.walk_speed = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Walk",
+                                    state.level.player_settings.walk_speed, 100.0, 3000.0, 3,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.walk_speed = v; }
+                                y = r.new_y;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Run", state.level.player_settings.run_speed, 200.0, 5000.0, 50.0);
-                                if let Some(v) = nv { state.level.player_settings.run_speed = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Run",
+                                    state.level.player_settings.run_speed, 200.0, 5000.0, 4,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.run_speed = v; }
+                                y = r.new_y;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Gravity", state.level.player_settings.gravity, 500.0, 10000.0, 100.0);
-                                if let Some(v) = nv { state.level.player_settings.gravity = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Gravity",
+                                    state.level.player_settings.gravity, 500.0, 10000.0, 5,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.gravity = v; }
+                                y = r.new_y;
 
                                 y += 6.0;
 
@@ -2142,13 +2235,17 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 draw_text("Camera", x, (y + 12.0).floor(), 11.0, section_color);
                                 y += 18.0;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Distance", state.level.player_settings.camera_distance, 200.0, 3000.0, 25.0);
-                                if let Some(v) = nv { state.level.player_settings.camera_distance = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Distance",
+                                    state.level.player_settings.camera_distance, 200.0, 3000.0, 6,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.camera_distance = v; }
+                                y = r.new_y;
 
-                                let (ny, nv) = draw_prop(ctx, x, y, container_width, "Height", state.level.player_settings.camera_height, 100.0, 1500.0, 25.0);
-                                if let Some(v) = nv { state.level.player_settings.camera_height = v; }
-                                y = ny;
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
+                                    state.level.player_settings.camera_height, 100.0, 1500.0, 7,
+                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                                if let Some(v) = r.new_value { state.level.player_settings.camera_height = v; }
+                                y = r.new_y;
 
                                 y += 8.0;
                             }
@@ -2221,6 +2318,13 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
     // Disable scissor
     unsafe {
         get_internal_gl().quad_gl.scissor(None);
+    }
+
+    // Handle panel scroll
+    let inside = ctx.mouse.inside(&rect);
+    if inside && ctx.mouse.scroll != 0.0 {
+        state.properties_scroll -= ctx.mouse.scroll * 30.0;
+        state.properties_scroll = state.properties_scroll.clamp(0.0, max_scroll);
     }
 
     // Draw scroll indicator if content overflows

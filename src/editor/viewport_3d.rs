@@ -1588,26 +1588,13 @@ pub fn draw_viewport_3d(
                         color
                     };
                     draw_filled_octahedron(fb, &state.camera_3d, world_pos, octa_size, octa_color);
-                } else {
-                    // Non-light objects: use 2D circles
-                    let base_radius = if is_selected { 8 } else { 5 };
-
-                    // Selection highlight (white circle behind)
-                    if is_selected {
-                        fb.draw_circle(fb_x as i32, fb_y as i32, base_radius + 3, RasterColor::new(255, 255, 255));
-                    }
-
-                    // Main circle
-                    fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
-                }
-
-                // For PlayerStart, draw collision cylinder wireframe
-                if matches!(&obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)) {
+                } else if matches!(&obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)) {
+                    // PlayerStart: draw collision cylinder wireframe only (no dot)
                     let settings = &state.level.player_settings;
                     let cylinder_color = if is_selected {
-                        RasterColor::new(150, 255, 150) // Brighter green when selected
+                        RasterColor::new(100, 255, 100) // Green when selected
                     } else {
-                        RasterColor::new(80, 200, 80) // Normal green
+                        RasterColor::new(100, 100, 100) // Grey when not selected
                     };
                     draw_wireframe_cylinder(
                         fb,
@@ -1618,6 +1605,34 @@ pub fn draw_viewport_3d(
                         12, // segments
                         cylinder_color,
                     );
+
+                    // Draw camera position indicator
+                    let cam_pos = Vec3::new(
+                        world_pos.x,
+                        world_pos.y + settings.camera_height,
+                        world_pos.z - settings.camera_distance,
+                    );
+                    let cam_color = if is_selected {
+                        RasterColor::new(255, 255, 100) // Yellow when selected
+                    } else {
+                        RasterColor::new(120, 120, 80) // Dark yellow/grey when not
+                    };
+                    // Draw small wireframe sphere for camera
+                    draw_wireframe_sphere(fb, &state.camera_3d, cam_pos, 30.0, 6, cam_color);
+                    // Draw line from player head to camera
+                    let head_pos = Vec3::new(world_pos.x, world_pos.y + settings.height, world_pos.z);
+                    draw_wireframe_line(fb, &state.camera_3d, head_pos, cam_pos, cam_color);
+                } else {
+                    // Other non-light objects: use 2D circles
+                    let base_radius = if is_selected { 8 } else { 5 };
+
+                    // Selection highlight (white circle behind)
+                    if is_selected {
+                        fb.draw_circle(fb_x as i32, fb_y as i32, base_radius + 3, RasterColor::new(255, 255, 255));
+                    }
+
+                    // Main circle
+                    fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
                 }
             }
         }
@@ -2328,6 +2343,57 @@ fn draw_wireframe_cylinder(
     for i in (0..segments).step_by(skip) {
         draw_3d_line(fb, bottom_points[i], top_points[i], camera, color);
     }
+}
+
+/// Draw a wireframe sphere in 3D (for camera gizmo)
+fn draw_wireframe_sphere(
+    fb: &mut Framebuffer,
+    camera: &crate::rasterizer::Camera,
+    center: Vec3,
+    radius: f32,
+    segments: usize,
+    color: RasterColor,
+) {
+    use std::f32::consts::PI;
+
+    // Draw 3 orthogonal circles (XY, XZ, YZ planes)
+    // XZ plane (horizontal circle)
+    let mut prev_xz = Vec3::new(center.x + radius, center.y, center.z);
+    for i in 1..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let curr = Vec3::new(center.x + radius * angle.cos(), center.y, center.z + radius * angle.sin());
+        draw_3d_line(fb, prev_xz, curr, camera, color);
+        prev_xz = curr;
+    }
+
+    // XY plane (vertical circle facing Z)
+    let mut prev_xy = Vec3::new(center.x + radius, center.y, center.z);
+    for i in 1..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let curr = Vec3::new(center.x + radius * angle.cos(), center.y + radius * angle.sin(), center.z);
+        draw_3d_line(fb, prev_xy, curr, camera, color);
+        prev_xy = curr;
+    }
+
+    // YZ plane (vertical circle facing X)
+    let mut prev_yz = Vec3::new(center.x, center.y + radius, center.z);
+    for i in 1..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let curr = Vec3::new(center.x, center.y + radius * angle.cos(), center.z + radius * angle.sin());
+        draw_3d_line(fb, prev_yz, curr, camera, color);
+        prev_yz = curr;
+    }
+}
+
+/// Draw a wireframe line in 3D between two points
+fn draw_wireframe_line(
+    fb: &mut Framebuffer,
+    camera: &crate::rasterizer::Camera,
+    start: Vec3,
+    end: Vec3,
+    color: RasterColor,
+) {
+    draw_3d_line(fb, start, end, camera, color);
 }
 
 /// Draw a filled octahedron in 3D (classic light gizmo)

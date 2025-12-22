@@ -250,6 +250,11 @@ pub struct EditorState {
 
     /// Selected object type to place (when PlaceObject tool is active)
     pub selected_object_type: ObjectType,
+
+    /// Player property editing state (for click-to-edit numeric fields)
+    /// Field IDs: 0=radius, 1=height, 2=step, 3=walk, 4=run, 5=gravity, 6=camera_distance, 7=camera_height
+    pub player_prop_editing: Option<usize>,
+    pub player_prop_buffer: String,
 }
 
 impl EditorState {
@@ -355,6 +360,8 @@ impl EditorState {
             hidden_rooms: std::collections::HashSet::new(),
             portals_dirty: true, // Recalculate on first frame
             selected_object_type: ObjectType::Spawn(SpawnPointType::PlayerStart), // Default to player start
+            player_prop_editing: None,
+            player_prop_buffer: String::new(),
         }
     }
 

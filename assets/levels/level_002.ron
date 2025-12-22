@@ -73,13 +73,13 @@
     orbit_elevation: 0.4,
   ),
   player_settings: (
-    radius: 100.0,
+    radius: 200.0,
     height: 762.0,
     step_height: 384.0,
-    walk_speed: 800.0,
+    walk_speed: 1600.0,
     run_speed: 1600.0,
     gravity: 2400.0,
-    camera_distance: 800.0,
-    camera_height: 610.0,
+    camera_distance: 2000.0,
+    camera_height: 1500.0,
   ),
 )
