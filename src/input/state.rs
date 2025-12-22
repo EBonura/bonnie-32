@@ -2,13 +2,18 @@
 //!
 //! Polls both keyboard (macroquad) and gamepad (gamepads crate) input,
 //! combining them into a unified action-based API.
+//!
+//! Note: Gamepad support is only available on native builds due to WASM
+//! compatibility issues with the gamepads crate and miniquad's event loop.
 
+#[cfg(not(target_arch = "wasm32"))]
 use gamepads::{Gamepads, Button};
 use macroquad::prelude::*;
 use super::Action;
 
 /// Unified input state that handles both keyboard/mouse and gamepad
 pub struct InputState {
+    #[cfg(not(target_arch = "wasm32"))]
     gamepads: Gamepads,
     /// Analog stick deadzone (0.0-1.0)
     pub stick_deadzone: f32,
@@ -17,6 +22,7 @@ pub struct InputState {
 impl InputState {
     pub fn new() -> Self {
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
             gamepads: Gamepads::new(),
             stick_deadzone: 0.15,
         }
@@ -24,6 +30,7 @@ impl InputState {
 
     /// Call once per frame before checking actions
     pub fn poll(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         self.gamepads.poll();
     }
 
@@ -38,7 +45,8 @@ impl InputState {
         if is_key_down(KeyCode::A) { result.x -= 1.0; }
         if is_key_down(KeyCode::D) { result.x += 1.0; }
 
-        // Gamepad left stick (take if larger magnitude)
+        // Gamepad left stick (take if larger magnitude) - native only
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(gp) = self.gamepads.all().next() {
             let gp_stick = self.apply_deadzone(gp.left_stick());
             if gp_stick.length() > result.length() {
@@ -56,6 +64,7 @@ impl InputState {
     /// Get right stick as Vec2 (camera look)
     /// Only from gamepad - mouse handled separately
     pub fn right_stick(&self) -> Vec2 {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(gp) = self.gamepads.all().next() {
             return self.apply_deadzone(gp.right_stick());
         }
@@ -63,6 +72,7 @@ impl InputState {
     }
 
     /// Apply radial deadzone with linear rescaling
+    #[cfg(not(target_arch = "wasm32"))]
     fn apply_deadzone(&self, (x, y): (f32, f32)) -> Vec2 {
         let len = (x * x + y * y).sqrt();
         if len < self.stick_deadzone {
@@ -75,12 +85,18 @@ impl InputState {
 
     /// Check if action is currently held down
     pub fn action_down(&self, action: Action) -> bool {
-        self.keyboard_down(action) || self.gamepad_down(action)
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.keyboard_down(action) || self.gamepad_down(action) }
+        #[cfg(target_arch = "wasm32")]
+        { self.keyboard_down(action) }
     }
 
     /// Check if action was just pressed this frame
     pub fn action_pressed(&self, action: Action) -> bool {
-        self.keyboard_pressed(action) || self.gamepad_pressed(action)
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.keyboard_pressed(action) || self.gamepad_pressed(action) }
+        #[cfg(target_arch = "wasm32")]
+        { self.keyboard_pressed(action) }
     }
 
     fn keyboard_down(&self, action: Action) -> bool {
@@ -114,6 +130,7 @@ impl InputState {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn gamepad_down(&self, action: Action) -> bool {
         let Some(gp) = self.gamepads.all().next() else { return false };
 
@@ -166,6 +183,7 @@ impl InputState {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn gamepad_pressed(&self, action: Action) -> bool {
         let Some(gp) = self.gamepads.all().next() else { return false };
 
@@ -191,7 +209,10 @@ impl InputState {
 
     /// Check if any gamepad is connected
     pub fn has_gamepad(&self) -> bool {
-        self.gamepads.all().next().is_some()
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.gamepads.all().next().is_some() }
+        #[cfg(target_arch = "wasm32")]
+        { false }
     }
 }
 
