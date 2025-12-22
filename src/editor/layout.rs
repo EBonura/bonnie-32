@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height};
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture};
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use super::{EditorState, EditorTool, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
@@ -2247,7 +2247,54 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 if let Some(v) = r.new_value { state.level.player_settings.camera_height = v; }
                                 y = r.new_y;
 
-                                y += 8.0;
+                                y += 10.0;
+
+                                // === Camera Preview ===
+                                draw_text("Preview", x, (y + 12.0).floor(), 11.0, section_color);
+                                y += 18.0;
+
+                                // Calculate player world position
+                                let player_world_pos = if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                                    obj.world_position(room)
+                                } else {
+                                    Vec3::new(0.0, 0.0, 0.0)
+                                };
+
+                                // Camera position: behind and above the player
+                                let settings = &state.level.player_settings;
+                                let cam_pos = Vec3::new(
+                                    player_world_pos.x,
+                                    player_world_pos.y + settings.camera_height,
+                                    player_world_pos.z - settings.camera_distance,
+                                );
+
+                                // Camera looks at player's head height
+                                let look_at = Vec3::new(
+                                    player_world_pos.x,
+                                    player_world_pos.y + settings.height * 0.8, // Look slightly below head
+                                    player_world_pos.z,
+                                );
+
+                                // Preview dimensions (4:3 aspect ratio)
+                                let preview_w = (container_width - 8.0).min(160.0);
+                                let preview_h = preview_w * 0.75;
+
+                                // Render camera preview
+                                draw_player_camera_preview(
+                                    x,
+                                    y,
+                                    preview_w,
+                                    preview_h,
+                                    cam_pos,
+                                    look_at,
+                                    player_world_pos,
+                                    settings.radius,
+                                    settings.height,
+                                    &state.level,
+                                    &state.texture_packs,
+                                );
+
+                                y += preview_h + 8.0;
                             }
                             _ => {
                                 // Other spawn types - just show type
@@ -2471,4 +2518,272 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
         14.0,
         Color::from_rgba(100, 100, 100, 255),
     );
+}
+
+/// Draw a small camera preview showing what the player camera sees
+fn draw_player_camera_preview(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    cam_pos: Vec3,
+    look_at: Vec3,
+    player_pos: Vec3,
+    player_radius: f32,
+    player_height: f32,
+    level: &crate::world::Level,
+    texture_packs: &[super::TexturePack],
+) {
+    // Create a small framebuffer for the preview
+    let fb_w = (width as usize).max(80);
+    let fb_h = (height as usize).max(60);
+    let mut fb = Framebuffer::new(fb_w, fb_h);
+    fb.clear(RasterColor::new(20, 20, 25));
+
+    // Set up camera looking from cam_pos toward look_at
+    let mut camera = Camera::new();
+    camera.position = cam_pos;
+
+    // Calculate direction from camera to look_at point
+    let dir = Vec3::new(
+        look_at.x - cam_pos.x,
+        look_at.y - cam_pos.y,
+        look_at.z - cam_pos.z,
+    );
+    let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+    if len > 0.001 {
+        let nx = dir.x / len;
+        let ny = dir.y / len;
+        let nz = dir.z / len;
+
+        // rotation_x (pitch): from y = -sin(rotation_x)
+        camera.rotation_x = (-ny).asin();
+        // rotation_y (yaw): from x/z = sin(rotation_y)/cos(rotation_y)
+        camera.rotation_y = nx.atan2(nz);
+    }
+    camera.update_basis();
+
+    // Build lighting from level
+    let mut lights = Vec::new();
+    let mut total_ambient = 0.0;
+    let mut room_count = 0;
+    for room in &level.rooms {
+        total_ambient += room.ambient;
+        room_count += 1;
+        // Collect lights from room objects
+        for obj in room.objects.iter().filter(|o| o.enabled) {
+            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
+                let world_pos = obj.world_position(room);
+                let mut light = Light::point(world_pos, *radius, *intensity);
+                light.color = *color;
+                lights.push(light);
+            }
+        }
+    }
+    let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
+
+    // Render settings
+    let settings = RasterSettings {
+        shading: ShadingMode::Gouraud,
+        lights,
+        ambient,
+        ..RasterSettings::default()
+    };
+
+    // Build texture map
+    let textures: Vec<RasterTexture> = texture_packs
+        .iter()
+        .flat_map(|pack| &pack.textures)
+        .cloned()
+        .collect();
+
+    let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    let mut texture_idx = 0;
+    for pack in texture_packs {
+        for tex in &pack.textures {
+            texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
+            texture_idx += 1;
+        }
+    }
+
+    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<usize> {
+        if !tex_ref.is_valid() {
+            return Some(0);
+        }
+        texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
+    };
+
+    // Render each room
+    for room in &level.rooms {
+        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
+        if !vertices.is_empty() {
+            render_mesh(&mut fb, &vertices, &faces, &textures, &camera, &settings);
+        }
+    }
+
+    // Draw player cylinder wireframe
+    let cylinder_color = RasterColor::new(100, 255, 100); // Green
+    draw_preview_wireframe_cylinder(&mut fb, &camera, player_pos, player_radius, player_height, 12, cylinder_color);
+
+    // Draw framebuffer to screen
+    let fb_texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
+    fb_texture.set_filter(FilterMode::Nearest);
+
+    // Draw border
+    draw_rectangle(x - 1.0, y - 1.0, width + 2.0, height + 2.0, Color::from_rgba(60, 60, 65, 255));
+
+    draw_texture_ex(
+        &fb_texture,
+        x,
+        y,
+        WHITE,
+        DrawTextureParams {
+            dest_size: Some(vec2(width, height)),
+            ..Default::default()
+        },
+    );
+}
+
+/// Draw a wireframe cylinder for the camera preview
+fn draw_preview_wireframe_cylinder(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    center: Vec3,
+    radius: f32,
+    height: f32,
+    segments: usize,
+    color: RasterColor,
+) {
+    use std::f32::consts::PI;
+
+    // Generate circle points at bottom and top
+    let mut bottom_points: Vec<Vec3> = Vec::with_capacity(segments);
+    let mut top_points: Vec<Vec3> = Vec::with_capacity(segments);
+
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let px = center.x + radius * angle.cos();
+        let pz = center.z + radius * angle.sin();
+
+        bottom_points.push(Vec3::new(px, center.y, pz));
+        top_points.push(Vec3::new(px, center.y + height, pz));
+    }
+
+    // Draw bottom circle
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        draw_preview_3d_line(fb, bottom_points[i], bottom_points[next], camera, color);
+    }
+
+    // Draw top circle
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        draw_preview_3d_line(fb, top_points[i], top_points[next], camera, color);
+    }
+
+    // Draw vertical lines connecting top and bottom
+    let skip = if segments > 8 { 2 } else { 1 };
+    for i in (0..segments).step_by(skip) {
+        draw_preview_3d_line(fb, bottom_points[i], top_points[i], camera, color);
+    }
+}
+
+/// Draw a 3D line into the framebuffer for camera preview
+fn draw_preview_3d_line(
+    fb: &mut Framebuffer,
+    p0: Vec3,
+    p1: Vec3,
+    camera: &Camera,
+    color: RasterColor,
+) {
+    const NEAR_PLANE: f32 = 0.1;
+
+    // Transform to camera space
+    let rel0 = p0 - camera.position;
+    let rel1 = p1 - camera.position;
+
+    let z0 = rel0.dot(camera.basis_z);
+    let z1 = rel1.dot(camera.basis_z);
+
+    // Both behind camera - skip entirely
+    if z0 <= NEAR_PLANE && z1 <= NEAR_PLANE {
+        return;
+    }
+
+    // Clip line to near plane if needed
+    let (clipped_p0, clipped_p1) = if z0 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p0 = p0 + (p1 - p0) * t;
+        (new_p0, p1)
+    } else if z1 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p1 = p0 + (p1 - p0) * t;
+        (p0, new_p1)
+    } else {
+        (p0, p1)
+    };
+
+    // Project clipped endpoints
+    let s0 = preview_world_to_screen(clipped_p0, camera, fb.width, fb.height);
+    let s1 = preview_world_to_screen(clipped_p1, camera, fb.width, fb.height);
+
+    let (Some((x0f, y0f)), Some((x1f, y1f))) = (s0, s1) else {
+        return;
+    };
+
+    // Convert to integers for Bresenham
+    let mut x0 = x0f as i32;
+    let mut y0 = y0f as i32;
+    let x1 = x1f as i32;
+    let y1 = y1f as i32;
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    let w = fb.width as i32;
+    let h = fb.height as i32;
+
+    loop {
+        if x0 >= 0 && x0 < w && y0 >= 0 && y0 < h {
+            fb.set_pixel(x0 as usize, y0 as usize, color);
+        }
+
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/// Project world position to screen for camera preview
+fn preview_world_to_screen(pos: Vec3, camera: &Camera, width: usize, height: usize) -> Option<(f32, f32)> {
+    let rel = pos - camera.position;
+
+    // Transform to camera space
+    let cam_x = rel.dot(camera.basis_x);
+    let cam_y = rel.dot(camera.basis_y);
+    let cam_z = rel.dot(camera.basis_z);
+
+    if cam_z < 0.1 {
+        return None;
+    }
+
+    // Project (simple perspective)
+    let scale = (height as f32) / cam_z;
+    let screen_x = (width as f32 / 2.0) + cam_x * scale;
+    let screen_y = (height as f32 / 2.0) - cam_y * scale;
+
+    Some((screen_x, screen_y))
 }
