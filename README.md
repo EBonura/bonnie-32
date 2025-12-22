@@ -42,6 +42,11 @@ Answer the question: **"How would a Souls-like have looked on a PS1?"**
 - **TRLE sector grid** - 1024-unit sectors for precise alignment
 - **Textured geometry** - Multiple texture pack support
 
+### Controller Support
+- **Gamepad input** - Full controller support via `gamepads` crate
+- **Elden Ring controls** - Familiar Souls-like button layout
+- **Unified input** - Seamlessly switch between keyboard and controller
+
 ### Modern Editor UI
 
 The editor features a MuseScore-inspired interface design:
@@ -124,14 +129,20 @@ The editor features a MuseScore-inspired interface design:
 - **Delete/Backspace**: Remove selected faces
 
 ### Game Mode
-- Press **Esc** to return to editor
-- Right-click + drag: Look around
-- WASD: Move camera
-- Q/E: Move up/down
-- **1/2/3**: Shading mode (None/Flat/Gouraud)
-- **P**: Toggle perspective correction
-- **J**: Toggle vertex jitter
-- **Z**: Toggle Z-buffer
+
+#### Controller (Elden Ring style)
+- **Left Stick**: Move (relative to camera)
+- **Right Stick**: Rotate camera
+- **A**: Jump
+- **B (hold)**: Sprint
+- **Start**: Options menu
+
+#### Keyboard/Mouse
+- **WASD**: Move
+- **Space**: Jump
+- **Shift (hold)**: Sprint
+- **Right-click + drag**: Rotate camera
+- **Esc/Start**: Options menu
 
 ### Music Editor
 - **37-key piano** - 3 octaves with full keyboard mapping
@@ -188,20 +199,12 @@ This project uses the following free texture packs:
 
 ---
 
-### World Editor - UI/UX
-
-- [x] **Fix link icon**: Now uses `link-2` and `link-2-off` from Lucide
-- [x] **Rename linking feature**: Renamed to "Geometry Linked/Independent" (works for vertices, edges, and faces)
-- [x] **Per-room ambient light**: Each room now uses its own ambient setting when rendering
-
----
-
 ### World Editor - Geometry
-
-- [x] **Cross-room boundary linking**: Moving vertices/edges/faces now finds and moves coincident vertices across all rooms
+- A way to "extrude" a face, aka raising it and creating side walls
 - [ ] **Multiple walls per sector edge**: Currently limited to 1 wall per side. The `Sector` struct already supports multiple walls via `Vec<VerticalFace>`. Implement smart placement where new walls stack on top/bottom of existing walls with configurable start/end heights.
-- [ ] smarter floow/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
-- [ ] the room selector in the top bar should wrap around 
+- [ ] Smarter floor/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
+- [ ] The room selector in the top bar should wrap around
+
 ---
 
 ### Overall / Meta
@@ -218,14 +221,7 @@ This project uses the following free texture packs:
 
 ### World Editor - 3D Viewport
 
-#### Bugs/Polish
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
-
-#### Major Features
-- [x] **Implement portals**: Auto-generated portals between adjacent rooms (supports infinite height for open-air sectors)
-
-#### Future
-- [x] Entity system design: Tile-based objects (PlayerStart, Light) with properties panel editing
 
 ---
 
@@ -279,16 +275,9 @@ For implementing authentic PS1 constraints:
 
 ### Priority: Map Creation & Basic Gameplay
 - [ ] Fix 2D grid placement precision (sectors not aligning to clicks)
-- [x] Portal creation and room connectivity (auto-generated portals between adjacent rooms)
-- [x] Multi-room support
 - [ ] Slope/ramp tools
-- [x] Collision detection and physics (TR-style cylinder collision)
-- [x] Character controller (movement, jumping)
-- [x] Camera system (third-person follow, orbit preview)
 
 ### UI & Settings
-- [x] Editor toolbar: PS1 effects toggles (vertex jitter, affine mapping, dithering, etc.)
-- [x] Level browser with example levels
 - [ ] Options menu in-game (resolution, PS1 effects toggles)
 - [ ] Resolution selector (240p, 480p, native)
 - [ ] HUD system (health, stamina bars)
@@ -299,7 +288,6 @@ For implementing authentic PS1 constraints:
 - [ ] Fog system (distance-based fade)
 
 ### Core Systems
-- [x] Entity system (tile-based objects: PlayerStart, Light, with properties panel)
 - [ ] Inventory system
 - [ ] Save/load game state
 
@@ -313,10 +301,6 @@ For implementing authentic PS1 constraints:
 - [ ] Estus flask / healing system
 
 ### Editor QoL
-- [x] Multi-selection (Shift+click)
-- [x] Texture applies to all multi-selected faces
-- [x] UV mapping controls (offset, scale, rotation)
-- [x] Orbit camera mode
 - [ ] Copy/paste sectors
 - [ ] Grid snapping toggles
 - [ ] Vertex welding/merging tool
