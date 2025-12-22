@@ -136,6 +136,48 @@ impl HorizontalFace {
         self.heights.iter().all(|&corner| (corner - h).abs() < 0.001)
     }
 
+    /// Get interpolated height at a position within the sector.
+    /// `u` and `v` are normalized coordinates within the sector (0.0 to 1.0).
+    /// u = 0 is West (-X), u = 1 is East (+X)
+    /// v = 0 is North (-Z), v = 1 is South (+Z)
+    ///
+    /// Heights layout: [NW, NE, SE, SW] = [0, 1, 2, 3]
+    /// NW = (u=0, v=0), NE = (u=1, v=0), SE = (u=1, v=1), SW = (u=0, v=1)
+    ///
+    /// The quad is split into two triangles along the NW-SE diagonal:
+    /// - Triangle 1 (upper-right): NW, NE, SE (u + v <= 1 from NW perspective, or u >= v)
+    /// - Triangle 2 (lower-left): NW, SE, SW (u + v > 1 from NW perspective, or u < v)
+    ///
+    /// We use barycentric interpolation within each triangle to get the exact height.
+    pub fn interpolate_height(&self, u: f32, v: f32) -> f32 {
+        // Clamp to valid range
+        let u = u.clamp(0.0, 1.0);
+        let v = v.clamp(0.0, 1.0);
+
+        // Determine which triangle we're in based on the NW-SE diagonal
+        // The diagonal goes from (0,0) to (1,1), so points where u >= v are in the upper-right triangle
+        if u >= v {
+            // Upper-right triangle: NW (0,0), NE (1,0), SE (1,1)
+            // Using barycentric coordinates for triangle NW-NE-SE:
+            // P = NW + u*(NE-NW) + v*(SE-NE)
+            // Height = h_NW + u*(h_NE - h_NW) + v*(h_SE - h_NE)
+            let h_nw = self.heights[0];
+            let h_ne = self.heights[1];
+            let h_se = self.heights[2];
+            h_nw + u * (h_ne - h_nw) + v * (h_se - h_ne)
+        } else {
+            // Lower-left triangle: NW (0,0), SE (1,1), SW (0,1)
+            // Using barycentric coordinates for triangle NW-SE-SW:
+            // We can parameterize as: P = NW + u*(SE-SW) + v*(SW-NW)
+            // But it's easier to think of it as:
+            // Height = h_NW + u*(h_SE - h_SW) + v*(h_SW - h_NW)
+            let h_nw = self.heights[0];
+            let h_se = self.heights[2];
+            let h_sw = self.heights[3];
+            h_nw + u * (h_se - h_sw) + v * (h_sw - h_nw)
+        }
+    }
+
     /// Get heights at a specific edge (left_corner, right_corner) when looking from inside the sector
     /// Returns (left_height, right_height) for the edge in that direction
     pub fn edge_heights(&self, dir: Direction) -> (f32, f32) {
@@ -193,6 +235,20 @@ impl VerticalFace {
     pub fn new(y_bottom: f32, y_top: f32, texture: TextureRef) -> Self {
         Self {
             heights: [y_bottom, y_bottom, y_top, y_top],
+            texture,
+            uv: None,
+            solid: true,
+            blend_mode: BlendMode::Opaque,
+            colors: [Color::NEUTRAL; 4],
+            normal_mode: FaceNormalMode::default(),
+        }
+    }
+
+    /// Create a wall with individual corner heights for sloped surfaces
+    /// Heights order: [bottom-left, bottom-right, top-right, top-left]
+    pub fn new_sloped(bl: f32, br: f32, tr: f32, tl: f32, texture: TextureRef) -> Self {
+        Self {
+            heights: [bl, br, tr, tl],
             texture,
             uv: None,
             solid: true,
@@ -312,6 +368,87 @@ impl Sector {
             Direction::West => &mut self.walls_west,
         }
     }
+
+    /// Extrude the floor upward by `amount` units.
+    /// Creates walls around the perimeter connecting the old floor height to the new height.
+    /// Returns true if extrusion was performed, false if no floor exists.
+    pub fn extrude_floor(&mut self, amount: f32, wall_texture: TextureRef) -> bool {
+        let Some(floor) = &mut self.floor else {
+            return false;
+        };
+
+        // Store old heights before modifying
+        let old_heights = floor.heights;
+
+        // Raise all floor corners by the extrusion amount
+        for h in &mut floor.heights {
+            *h += amount;
+        }
+        let new_heights = floor.heights;
+
+        // For each edge: if there's already a wall, extend it; otherwise create a new one
+        // Wall heights: [bottom-left, bottom-right, top-right, top-left]
+        // For extrusion walls facing OUTWARD, we use FaceNormalMode::Back
+
+        // North wall (-Z edge): BL at west (NW), BR at east (NE)
+        if let Some(wall) = self.walls_north.last_mut() {
+            // Raise existing wall's bottom to new floor height
+            wall.heights[0] = new_heights[0];  // BL = NW
+            wall.heights[1] = new_heights[1];  // BR = NE
+        } else {
+            let mut north_wall = VerticalFace::new_sloped(
+                old_heights[0], old_heights[1],  // bottom: BL=NW, BR=NE
+                new_heights[1], new_heights[0],  // top: TR=NE, TL=NW
+                wall_texture.clone(),
+            );
+            north_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_north.push(north_wall);
+        }
+
+        // East wall (+X edge): BL at north (NE), BR at south (SE)
+        if let Some(wall) = self.walls_east.last_mut() {
+            wall.heights[0] = new_heights[1];  // BL = NE
+            wall.heights[1] = new_heights[2];  // BR = SE
+        } else {
+            let mut east_wall = VerticalFace::new_sloped(
+                old_heights[1], old_heights[2],  // bottom: BL=NE, BR=SE
+                new_heights[2], new_heights[1],  // top: TR=SE, TL=NE
+                wall_texture.clone(),
+            );
+            east_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_east.push(east_wall);
+        }
+
+        // South wall (+Z edge): BL at east (SE), BR at west (SW)
+        if let Some(wall) = self.walls_south.last_mut() {
+            wall.heights[0] = new_heights[2];  // BL = SE
+            wall.heights[1] = new_heights[3];  // BR = SW
+        } else {
+            let mut south_wall = VerticalFace::new_sloped(
+                old_heights[2], old_heights[3],  // bottom: BL=SE, BR=SW
+                new_heights[3], new_heights[2],  // top: TR=SW, TL=SE
+                wall_texture.clone(),
+            );
+            south_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_south.push(south_wall);
+        }
+
+        // West wall (-X edge): BL at south (SW), BR at north (NW)
+        if let Some(wall) = self.walls_west.last_mut() {
+            wall.heights[0] = new_heights[3];  // BL = SW
+            wall.heights[1] = new_heights[0];  // BR = NW
+        } else {
+            let mut west_wall = VerticalFace::new_sloped(
+                old_heights[3], old_heights[0],  // bottom: BL=SW, BR=NW
+                new_heights[0], new_heights[3],  // top: TR=NW, TL=SW
+                wall_texture,
+            );
+            west_wall.normal_mode = FaceNormalMode::Back;
+            self.walls_west.push(west_wall);
+        }
+
+        true
+    }
 }
 
 /// Cardinal direction for sector edges
@@ -399,6 +536,7 @@ pub enum SpawnPointType {
 
 /// Player settings for the level (TR-style character controller parameters)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlayerSettings {
     /// Collision cylinder radius
     pub radius: f32,
@@ -412,9 +550,19 @@ pub struct PlayerSettings {
     pub run_speed: f32,
     /// Gravity acceleration (units per second squared)
     pub gravity: f32,
-    /// Camera distance behind player
+    /// Jump velocity (initial upward velocity when jumping)
+    pub jump_velocity: f32,
+    /// Sprint jump velocity multiplier (1.0 = same as normal, 1.2 = 20% higher)
+    pub sprint_jump_multiplier: f32,
+    /// Camera distance from player (orbit radius)
     pub camera_distance: f32,
-    /// Camera height offset
+    /// Camera vertical offset above player feet (look-at target height)
+    pub camera_vertical_offset: f32,
+    /// Minimum camera pitch (looking up, radians, negative = up)
+    pub camera_pitch_min: f32,
+    /// Maximum camera pitch (looking down, radians, positive = down)
+    pub camera_pitch_max: f32,
+    /// Camera height offset (legacy, kept for compatibility)
     pub camera_height: f32,
 }
 
@@ -427,8 +575,13 @@ impl Default for PlayerSettings {
             walk_speed: 800.0,
             run_speed: 1600.0,
             gravity: 2400.0,
+            jump_velocity: 1200.0,          // Initial upward velocity for jump
+            sprint_jump_multiplier: 1.15,   // 15% higher jump when sprinting
             camera_distance: 800.0,
-            camera_height: 610.0,
+            camera_vertical_offset: 500.0,  // Shoulder/upper chest height
+            camera_pitch_min: -0.8,         // Can look up ~45 degrees
+            camera_pitch_max: 0.8,          // Can look down ~45 degrees
+            camera_height: 610.0,           // Legacy, kept for compatibility
         }
     }
 }
@@ -1533,14 +1686,22 @@ impl Level {
         // Get sector
         let sector = room.get_sector(sector_x, sector_z)?;
 
-        // Get floor height (interpolated for sloped floors would be ideal, but avg works)
+        // Calculate normalized position within the sector (0.0 to 1.0)
+        // u = 0 is West (-X), u = 1 is East (+X)
+        // v = 0 is North (-Z), v = 1 is South (+Z)
+        let sector_base_x = sector_x as f32 * SECTOR_SIZE;
+        let sector_base_z = sector_z as f32 * SECTOR_SIZE;
+        let u = (local_x - sector_base_x) / SECTOR_SIZE;
+        let v = (local_z - sector_base_z) / SECTOR_SIZE;
+
+        // Get floor height using proper triangle interpolation for slopes
         let floor_y = sector.floor.as_ref()
-            .map(|f| room.position.y + f.avg_height())
+            .map(|f| room.position.y + f.interpolate_height(u, v))
             .unwrap_or(room.position.y);
 
-        // Get ceiling height
+        // Get ceiling height using proper triangle interpolation
         let ceiling_y = sector.ceiling.as_ref()
-            .map(|c| room.position.y + c.avg_height())
+            .map(|c| room.position.y + c.interpolate_height(u, v))
             .unwrap_or(room.position.y + 2048.0); // Default 2 sectors high
 
         Some(FloorInfo {

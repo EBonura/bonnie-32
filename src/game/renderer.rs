@@ -7,11 +7,13 @@ use macroquad::prelude::*;
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh,
     Light, RasterSettings, ShadingMode, Color as RasterColor,
-    Vec3, project, perspective_transform, WIDTH, HEIGHT,
+    Vec3, project, perspective_transform,
+    WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
 };
 use crate::ui::Rect;
 use crate::world::Level;
-use super::runtime::GameToolState;
+use crate::input::{InputState, Action};
+use super::runtime::{GameToolState, CameraMode};
 
 /// Draw the test viewport (full area, no properties panel)
 /// Player settings are now edited in the World Editor properties panel when PlayerStart is selected.
@@ -21,22 +23,43 @@ pub fn draw_test_viewport(
     level: &Level,
     textures: &[RasterTexture],
     fb: &mut Framebuffer,
+    input: &InputState,
 ) {
-    // Resize framebuffer to match game resolution
-    fb.resize(WIDTH, HEIGHT);
+    // Resize framebuffer to match game resolution (toggle via debug menu)
+    let (fb_w, fb_h) = if game.raster_settings.low_resolution {
+        (WIDTH, HEIGHT)       // 320x240 PS1 native
+    } else {
+        (WIDTH_HI, HEIGHT_HI) // 640x480 high res
+    };
+    fb.resize(fb_w, fb_h);
 
     // Initialize camera from level's player start (only once)
     game.init_from_level(level);
 
-    // Handle camera based on play state
-    if game.playing {
-        // Third-person camera follows player
-        game.update_camera_follow_player(level);
-        // Still allow mouse look to rotate player facing
-        handle_player_input(game, level, &rect);
-    } else {
-        // Orbit camera for preview mode
-        handle_camera_input(game, &rect);
+    // Check for options menu toggle (Start button / Escape)
+    if input.action_pressed(Action::OpenMenu) {
+        game.options_menu_open = !game.options_menu_open;
+    }
+
+    // Auto-start playing when entering game tab
+    if !game.playing {
+        game.toggle_playing();
+    }
+
+    // Handle input (camera, player movement) - blocked when debug menu is open
+    if !game.options_menu_open {
+        match game.camera_mode {
+            CameraMode::Character => {
+                // Third-person camera follows player
+                game.update_camera_follow_player(level);
+                // Handle Dark Souls style player input
+                handle_player_input(game, level, &rect, input);
+            }
+            CameraMode::FreeFly => {
+                // Free-fly noclip camera
+                handle_freefly_input(game, &rect, input);
+            }
+        }
     }
 
     // Clear framebuffer to dark gray
@@ -132,154 +155,531 @@ pub fn draw_test_viewport(
         },
     );
 
-    // Draw play/pause indicator
-    let status = if game.playing { "PLAYING" } else { "PAUSED (Space to play)" };
-    let status_dims = measure_text(status, None, 14, 1.0);
-    draw_text(
-        status,
-        rect.x + (rect.w - status_dims.width) / 2.0,
-        rect.y + rect.h - 20.0,
-        14.0,
-        Color::from_rgba(150, 150, 160, 200),
-    );
+    // Draw debug overlay HUD if enabled (top-right, always visible during gameplay)
+    if game.show_debug_overlay {
+        draw_debug_overlay(game, &rect, input, level);
+    }
 
-    // Draw controls hint
-    let hint = if game.playing {
-        "WASD: Move | Shift: Run | RMB: Look | Space: Stop"
-    } else {
-        "RMB: Rotate | Scroll: Zoom | Space: Play"
-    };
-    let hint_dims = measure_text(hint, None, 12, 1.0);
-    draw_text(
-        hint,
-        rect.x + (rect.w - hint_dims.width) / 2.0,
-        rect.y + 20.0,
-        12.0,
-        Color::from_rgba(100, 100, 110, 180),
-    );
+    // Draw debug menu overlay if open (top-left, blocks gameplay for D-pad navigation)
+    if game.options_menu_open {
+        draw_debug_menu(game, &rect, input, level);
+    }
 }
 
-/// Handle camera input for the preview mode (orbit camera)
-fn handle_camera_input(game: &mut GameToolState, rect: &Rect) {
+/// Handle player input during gameplay (Dark Souls style character controls)
+/// Camera orbits around player with right stick, movement is relative to camera direction.
+fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, input: &InputState) {
     let mouse_pos = mouse_position();
     let inside = mouse_pos.0 >= rect.x
         && mouse_pos.0 < rect.x + rect.w
         && mouse_pos.1 >= rect.y
         && mouse_pos.1 < rect.y + rect.h;
 
-    // Toggle play with space
-    if inside && is_key_pressed(KeyCode::Space) {
-        game.toggle_playing();
-    }
+    let delta = get_frame_time();
+    let settings = &level.player_settings;
+    let look_sensitivity = 2.5;
 
-    // Orbit camera controls (right-click drag)
+    // Mouse look to rotate camera around player (RMB drag)
     if inside && is_mouse_button_down(MouseButton::Right) {
         let dx = mouse_pos.0 - game.viewport_last_mouse.0;
         let dy = mouse_pos.1 - game.viewport_last_mouse.1;
 
-        game.orbit_azimuth -= dx * 0.005;
-        game.orbit_elevation = (game.orbit_elevation + dy * 0.005)
-            .clamp(-1.4, 1.4);
+        game.char_cam_yaw -= dx * 0.005;
+        game.char_cam_pitch = (game.char_cam_pitch + dy * 0.005)
+            .clamp(settings.camera_pitch_min, settings.camera_pitch_max);
 
-        game.sync_camera_from_orbit();
         game.viewport_mouse_captured = true;
     } else {
         game.viewport_mouse_captured = false;
     }
 
-    // Zoom with scroll wheel
-    if inside {
-        let scroll = mouse_wheel().1;
-        if scroll.abs() > 0.1 {
-            game.orbit_distance *= 1.0 - scroll * 0.1;
-            game.orbit_distance = game.orbit_distance.clamp(500.0, 20000.0);
-            game.sync_camera_from_orbit();
+    // Gamepad right stick: orbit camera around player (Y inverted for natural feel)
+    let right_stick = input.right_stick();
+    if right_stick.length() > 0.0 {
+        game.char_cam_yaw -= right_stick.x * look_sensitivity * delta;
+        game.char_cam_pitch = (game.char_cam_pitch - right_stick.y * look_sensitivity * delta)
+            .clamp(settings.camera_pitch_min, settings.camera_pitch_max);
+    }
+
+    // Get camera-relative directions for movement
+    let cam_forward = game.get_camera_forward_xz();
+    let cam_right = game.get_camera_right_xz();
+
+    // Movement input: combine keyboard WASD with gamepad left stick
+    let left_stick = input.left_stick();
+    if let Some(player) = game.player_entity {
+        let mut move_dir = Vec3::ZERO;
+
+        // Movement relative to camera direction (Dark Souls style)
+        if left_stick.length() > 0.1 {
+            // Forward/back relative to where camera is facing
+            move_dir = move_dir + cam_forward * left_stick.y;
+            // Strafe left/right relative to camera (X inverted for natural feel)
+            move_dir = move_dir + cam_right * -left_stick.x;
+        }
+
+        // Check sprint state (Elden Ring: hold B to run)
+        let move_len = move_dir.len();
+        let sprinting = input.action_down(Action::Dodge) && move_len > 0.1;
+
+        // Apply movement to velocity
+        if move_len > 0.1 {
+            move_dir = move_dir.normalize();
+
+            // Update player facing to match movement direction (Dark Souls: character turns to face movement)
+            if let Some(controller) = game.world.controllers.get_mut(player) {
+                let target_facing = move_dir.x.atan2(move_dir.z);
+                // Smooth rotation toward movement direction
+                let facing_diff = (target_facing - controller.facing).rem_euclid(std::f32::consts::TAU);
+                let facing_diff = if facing_diff > std::f32::consts::PI {
+                    facing_diff - std::f32::consts::TAU
+                } else {
+                    facing_diff
+                };
+                controller.facing += facing_diff * 10.0 * delta; // Smooth turn speed
+            }
+
+            let speed = if sprinting {
+                settings.run_speed
+            } else {
+                settings.walk_speed
+            };
+
+            if let Some(velocity) = game.world.velocities.get_mut(player) {
+                velocity.0.x = move_dir.x * speed;
+                velocity.0.z = move_dir.z * speed;
+            }
+        } else {
+            // No input: stop horizontal movement
+            if let Some(velocity) = game.world.velocities.get_mut(player) {
+                velocity.0.x = 0.0;
+                velocity.0.z = 0.0;
+            }
+        }
+
+        // Jump (Elden Ring: A button / Space key)
+        // Can only jump when grounded
+        if input.action_pressed(Action::Jump) {
+            if let Some(controller) = game.world.controllers.get_mut(player) {
+                if controller.grounded {
+                    // Calculate jump velocity (sprint-jump is higher)
+                    let jump_vel = if sprinting {
+                        settings.jump_velocity * settings.sprint_jump_multiplier
+                    } else {
+                        settings.jump_velocity
+                    };
+                    controller.vertical_velocity = jump_vel;
+                    controller.grounded = false; // Immediately leave ground
+                }
+            }
         }
     }
 
     game.viewport_last_mouse = mouse_pos;
 }
 
-/// Handle player input during gameplay
-fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect) {
+/// Handle free-fly camera input (noclip spectator mode)
+fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputState) {
     let mouse_pos = mouse_position();
     let inside = mouse_pos.0 >= rect.x
         && mouse_pos.0 < rect.x + rect.w
         && mouse_pos.1 >= rect.y
         && mouse_pos.1 < rect.y + rect.h;
 
-    // Toggle play with space
-    if inside && is_key_pressed(KeyCode::Space) {
-        game.toggle_playing();
-        return;
-    }
+    let delta = get_frame_time();
+    let fly_speed = 1500.0; // Units per second
+    let look_sensitivity = 2.5;
 
-    // Mouse look to rotate player facing
+    // Mouse look (RMB drag)
     if inside && is_mouse_button_down(MouseButton::Right) {
         let dx = mouse_pos.0 - game.viewport_last_mouse.0;
+        let dy = mouse_pos.1 - game.viewport_last_mouse.1;
 
-        // Update player facing direction
-        if let Some(player) = game.player_entity {
-            if let Some(controller) = game.world.controllers.get_mut(player) {
-                controller.facing -= dx * 0.005;
-            }
-        }
+        game.freefly_yaw -= dx * 0.005;
+        game.freefly_pitch = (game.freefly_pitch + dy * 0.005).clamp(-1.5, 1.5);
         game.viewport_mouse_captured = true;
     } else {
         game.viewport_mouse_captured = false;
     }
 
-    // Get player settings from level
-    let settings = &level.player_settings;
+    // Gamepad right stick: look around (Y inverted for natural feel)
+    let right_stick = input.right_stick();
+    if right_stick.length() > 0.0 {
+        game.freefly_yaw -= right_stick.x * look_sensitivity * delta;
+        game.freefly_pitch = (game.freefly_pitch - right_stick.y * look_sensitivity * delta)
+            .clamp(-1.5, 1.5);
+    }
 
-    // WASD movement
-    if let Some(player) = game.player_entity {
-        if let Some(controller) = game.world.controllers.get(player) {
-            let facing = controller.facing;
-            let mut move_dir = Vec3::ZERO;
+    // Calculate forward/right vectors from yaw/pitch
+    let forward = Vec3::new(
+        game.freefly_pitch.cos() * game.freefly_yaw.sin(),
+        -game.freefly_pitch.sin(),
+        game.freefly_pitch.cos() * game.freefly_yaw.cos(),
+    ).normalize();
+    let right = Vec3::new(
+        game.freefly_yaw.cos(),
+        0.0,
+        -game.freefly_yaw.sin(),
+    );
 
-            if is_key_down(KeyCode::W) {
-                move_dir.x += facing.sin();
-                move_dir.z += facing.cos();
-            }
-            if is_key_down(KeyCode::S) {
-                move_dir.x -= facing.sin();
-                move_dir.z -= facing.cos();
-            }
-            if is_key_down(KeyCode::A) {
-                move_dir.x += facing.cos();
-                move_dir.z -= facing.sin();
-            }
-            if is_key_down(KeyCode::D) {
-                move_dir.x -= facing.cos();
-                move_dir.z += facing.sin();
-            }
+    // Movement input
+    let left_stick = input.left_stick();
+    let mut move_delta = Vec3::ZERO;
 
-            // Apply movement to velocity
-            let move_len = move_dir.len();
-            if move_len > 0.1 {
-                move_dir = move_dir.normalize();
-                let speed = if is_key_down(KeyCode::LeftShift) {
-                    settings.run_speed
-                } else {
-                    settings.walk_speed
+    // Gamepad left stick: move forward/back, strafe left/right (X inverted for natural feel)
+    if left_stick.length() > 0.1 {
+        move_delta = move_delta + forward * left_stick.y * fly_speed * delta;
+        move_delta = move_delta + right * -left_stick.x * fly_speed * delta;
+    }
+
+    // Vertical movement: LB up, LT down (or Q/E on keyboard)
+    if input.action_down(Action::FlyUp) {
+        move_delta.y += fly_speed * delta;
+    }
+    if input.action_down(Action::FlyDown) {
+        move_delta.y -= fly_speed * delta;
+    }
+
+    // Apply movement
+    game.camera.position = game.camera.position + move_delta;
+
+    // Update camera orientation
+    game.camera.rotation_y = game.freefly_yaw;
+    game.camera.rotation_x = game.freefly_pitch;
+    game.camera.update_basis();
+
+    game.viewport_last_mouse = mouse_pos;
+}
+
+/// Draw compact debug menu overlay (top-left, blocks gameplay for D-pad navigation)
+fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, level: &Level) {
+    let menu_x = rect.x + 10.0;
+    let menu_y = rect.y + 10.0;
+    let menu_w = 180.0;
+    let row_height = 20.0;
+
+    // Menu items: Camera, Overlay, PS1 features, Reset
+    let items = [
+        "Camera",        // 0
+        "Overlay",       // 1
+        "---",           // 2 - Separator
+        "Affine UV",     // 3 - PS1 texture warping
+        "Vertex Snap",   // 4 - PS1 vertex jitter
+        "Low Res",       // 5 - 320x240
+        "Dithering",     // 6 - 4x4 Bayer
+        "Shading",       // 7 - None/Flat/Gouraud
+        "FPS",           // 8 - 30/60/Unlocked
+        "---",           // 9 - Separator
+        "Reset",         // 10
+    ];
+    let menu_h = 20.0 + items.len() as f32 * row_height + 14.0;
+    let selected = game.debug_menu_selection;
+
+    // Semi-transparent background
+    draw_rectangle(menu_x, menu_y, menu_w, menu_h, Color::from_rgba(20, 22, 28, 220));
+    draw_rectangle_lines(menu_x, menu_y, menu_w, menu_h, 1.0, Color::from_rgba(60, 65, 75, 255));
+
+    // Handle D-Pad up/down navigation (skip separators)
+    if input.action_pressed(Action::SwitchSpell) || is_key_pressed(KeyCode::Up) {
+        let mut new_sel = game.debug_menu_selection.saturating_sub(1);
+        // Skip separators
+        while new_sel > 0 && items[new_sel] == "---" {
+            new_sel = new_sel.saturating_sub(1);
+        }
+        game.debug_menu_selection = new_sel;
+    }
+    if input.action_pressed(Action::SwitchItem) || is_key_pressed(KeyCode::Down) {
+        let mut new_sel = (game.debug_menu_selection + 1).min(items.len() - 1);
+        // Skip separators
+        while new_sel < items.len() - 1 && items[new_sel] == "---" {
+            new_sel = (new_sel + 1).min(items.len() - 1);
+        }
+        game.debug_menu_selection = new_sel;
+    }
+
+    // Draw each menu item
+    for (i, item) in items.iter().enumerate() {
+        let y = menu_y + 18.0 + i as f32 * row_height;
+        let is_selected = i == selected;
+
+        // Separator line
+        if *item == "---" {
+            draw_line(
+                menu_x + 8.0,
+                y - 6.0,
+                menu_x + menu_w - 8.0,
+                y - 6.0,
+                1.0,
+                Color::from_rgba(60, 65, 75, 255),
+            );
+            continue;
+        }
+
+        // Selection indicator
+        let label_color = if is_selected {
+            Color::from_rgba(255, 255, 255, 255)
+        } else {
+            Color::from_rgba(120, 120, 130, 255)
+        };
+
+        if is_selected {
+            draw_text(">", menu_x + 4.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+        }
+
+        draw_text(item, menu_x + 16.0, y, 12.0, label_color);
+
+        // Item-specific value/action
+        match i {
+            0 => {
+                // Camera mode
+                let mode_name = match game.camera_mode {
+                    CameraMode::Character => "Character",
+                    CameraMode::FreeFly => "Free-Fly",
                 };
+                draw_text(mode_name, menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
 
-                if let Some(velocity) = game.world.velocities.get_mut(player) {
-                    velocity.0.x = move_dir.x * speed;
-                    velocity.0.z = move_dir.z * speed;
+                if is_selected {
+                    if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
+                        game.camera_mode = CameraMode::Character;
+                    }
+                    if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right) {
+                        game.camera_mode = CameraMode::FreeFly;
+                    }
+                    if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
+                        game.camera_mode = match game.camera_mode {
+                            CameraMode::Character => CameraMode::FreeFly,
+                            CameraMode::FreeFly => CameraMode::Character,
+                        };
+                    }
                 }
-            } else {
-                // No input: stop horizontal movement
-                if let Some(velocity) = game.world.velocities.get_mut(player) {
-                    velocity.0.x = 0.0;
-                    velocity.0.z = 0.0;
+            }
+            1 => {
+                // Debug overlay toggle
+                draw_toggle(menu_x, y, game.show_debug_overlay);
+                if is_selected && toggle_pressed(input) {
+                    game.show_debug_overlay = !game.show_debug_overlay;
                 }
+            }
+            3 => {
+                // Affine textures (PS1 UV warping)
+                draw_toggle(menu_x, y, game.raster_settings.affine_textures);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.affine_textures = !game.raster_settings.affine_textures;
+                }
+            }
+            4 => {
+                // Vertex snap (PS1 jitter)
+                draw_toggle(menu_x, y, game.raster_settings.vertex_snap);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.vertex_snap = !game.raster_settings.vertex_snap;
+                }
+            }
+            5 => {
+                // Low resolution (320x240)
+                draw_toggle(menu_x, y, game.raster_settings.low_resolution);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.low_resolution = !game.raster_settings.low_resolution;
+                }
+            }
+            6 => {
+                // Dithering (4x4 Bayer)
+                draw_toggle(menu_x, y, game.raster_settings.dithering);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.dithering = !game.raster_settings.dithering;
+                }
+            }
+            7 => {
+                // Shading mode (cycle: None -> Flat -> Gouraud)
+                let mode_name = match game.raster_settings.shading {
+                    ShadingMode::None => "None",
+                    ShadingMode::Flat => "Flat",
+                    ShadingMode::Gouraud => "Gouraud",
+                };
+                draw_text(mode_name, menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+
+                if is_selected {
+                    if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
+                        game.raster_settings.shading = match game.raster_settings.shading {
+                            ShadingMode::None => ShadingMode::Gouraud,
+                            ShadingMode::Flat => ShadingMode::None,
+                            ShadingMode::Gouraud => ShadingMode::Flat,
+                        };
+                    }
+                    if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right)
+                        || input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter)
+                    {
+                        game.raster_settings.shading = match game.raster_settings.shading {
+                            ShadingMode::None => ShadingMode::Flat,
+                            ShadingMode::Flat => ShadingMode::Gouraud,
+                            ShadingMode::Gouraud => ShadingMode::None,
+                        };
+                    }
+                }
+            }
+            8 => {
+                // FPS limit (cycle: 30 -> 60 -> Unlocked)
+                draw_text(game.fps_limit.label(), menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
+
+                if is_selected {
+                    if input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left) {
+                        game.fps_limit = game.fps_limit.prev();
+                    }
+                    if input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right)
+                        || input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter)
+                    {
+                        game.fps_limit = game.fps_limit.next();
+                    }
+                }
+            }
+            10 => {
+                // Reset game
+                draw_text("[Press A]", menu_x + 100.0, y, 12.0, Color::from_rgba(80, 80, 90, 255));
+
+                if is_selected {
+                    if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
+                        game.reset();
+                        game.options_menu_open = false;
+                        if let Some((room_idx, spawn)) = level.get_player_start() {
+                            if let Some(room) = level.rooms.get(room_idx) {
+                                let spawn_pos = spawn.world_position(room);
+                                game.spawn_player(spawn_pos, level);
+                            }
+                        }
+                        game.playing = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Hint at bottom
+    draw_text("D-Pad: Navigate  A: Toggle", menu_x + 8.0, menu_y + menu_h - 8.0, 10.0, Color::from_rgba(80, 80, 90, 255));
+}
+
+/// Helper: draw ON/OFF toggle at position
+fn draw_toggle(menu_x: f32, y: f32, enabled: bool) {
+    let state = if enabled { "ON" } else { "OFF" };
+    let color = if enabled {
+        Color::from_rgba(100, 255, 100, 255)
+    } else {
+        Color::from_rgba(100, 180, 255, 255)
+    };
+    draw_text(state, menu_x + 100.0, y, 12.0, color);
+}
+
+/// Helper: check if toggle action was pressed
+fn toggle_pressed(input: &InputState) -> bool {
+    input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter)
+        || input.action_pressed(Action::SwitchLeftWeapon) || is_key_pressed(KeyCode::Left)
+        || input.action_pressed(Action::SwitchRightWeapon) || is_key_pressed(KeyCode::Right)
+}
+
+/// Draw debug overlay HUD (top-right, shows player/collision stats)
+fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, level: &Level) {
+    let line_height = 12.0;
+    let overlay_w = 160.0;
+    let overlay_x = rect.x + rect.w - overlay_w - 10.0;
+    let overlay_y = rect.y + 10.0;
+
+    let label_color = Color::from_rgba(120, 120, 130, 255);
+    let value_color = Color::from_rgba(200, 200, 210, 255);
+    let good_color = Color::from_rgba(100, 255, 100, 255);
+    let warn_color = Color::from_rgba(255, 180, 80, 255);
+
+    let mut lines: Vec<(String, Color)> = Vec::new();
+
+    // FPS
+    let fps = get_fps();
+    let fps_color = if fps >= 55 { good_color } else if fps >= 30 { warn_color } else { Color::from_rgba(255, 100, 100, 255) };
+    lines.push((format!("FPS: {}", fps), fps_color));
+
+    // Player state
+    if let Some(player) = game.player_entity {
+        // Position
+        if let Some(transform) = game.world.transforms.get(player) {
+            let p = transform.position;
+            lines.push((format!("Pos: {:.0}, {:.0}, {:.0}", p.x, p.y, p.z), value_color));
+        }
+
+        // Velocity
+        if let Some(velocity) = game.world.velocities.get(player) {
+            let v = velocity.0;
+            let speed = (v.x * v.x + v.z * v.z).sqrt();
+            lines.push((format!("Speed: {:.0}", speed), value_color));
+            lines.push((format!("Vel Y: {:.1}", v.y), value_color));
+        }
+
+        // Controller state
+        if let Some(ctrl) = game.world.controllers.get(player) {
+            // Grounded
+            let grounded_str = if ctrl.grounded { "YES" } else { "NO" };
+            let grounded_color = if ctrl.grounded { good_color } else { warn_color };
+            lines.push((format!("Grounded: {}", grounded_str), grounded_color));
+
+            // Vertical velocity (gravity accumulation)
+            lines.push((format!("Vert Vel: {:.1}", ctrl.vertical_velocity), value_color));
+
+            // Room
+            lines.push((format!("Room: {}", ctrl.current_room), value_color));
+
+            // Facing
+            let facing_deg = ctrl.facing.to_degrees();
+            lines.push((format!("Facing: {:.0}°", facing_deg), value_color));
+        }
+
+        // Floor height at player position
+        if let Some(transform) = game.world.transforms.get(player) {
+            if let Some(floor) = level.get_floor_height(transform.position, None) {
+                lines.push((format!("Floor: {:.0}", floor), value_color));
+            }
+        }
+    } else {
+        lines.push(("No Player".to_string(), warn_color));
+    }
+
+    // Separator
+    lines.push(("---".to_string(), label_color));
+
+    // Input state
+    let left_stick = input.left_stick();
+    lines.push((format!("L Stick: {:.2}, {:.2}", left_stick.x, left_stick.y), value_color));
+
+    let right_stick = input.right_stick();
+    lines.push((format!("R Stick: {:.2}, {:.2}", right_stick.x, right_stick.y), value_color));
+
+    // Movement state - show B button status for debugging
+    let b_down = input.action_down(Action::Dodge);
+    if b_down {
+        lines.push(("B: DOWN".to_string(), good_color));
+    }
+
+    let sprinting = b_down && left_stick.length() > 0.1;
+    if sprinting {
+        lines.push(("SPRINTING".to_string(), good_color));
+    }
+
+    // Check if player is jumping (not grounded and positive vertical velocity)
+    if let Some(player) = game.player_entity {
+        if let Some(ctrl) = game.world.controllers.get(player) {
+            if !ctrl.grounded && ctrl.vertical_velocity > 0.0 {
+                lines.push(("JUMPING".to_string(), Color::from_rgba(255, 200, 100, 255)));
             }
         }
     }
 
-    game.viewport_last_mouse = mouse_pos;
+    // Calculate overlay height
+    let overlay_h = 8.0 + lines.len() as f32 * line_height + 4.0;
+
+    // Draw background
+    draw_rectangle(overlay_x, overlay_y, overlay_w, overlay_h, Color::from_rgba(20, 22, 28, 200));
+    draw_rectangle_lines(overlay_x, overlay_y, overlay_w, overlay_h, 1.0, Color::from_rgba(60, 65, 75, 255));
+
+    // Draw lines
+    for (i, (text, color)) in lines.iter().enumerate() {
+        let y = overlay_y + 12.0 + i as f32 * line_height;
+        draw_text(text, overlay_x + 6.0, y, 10.0, *color);
+    }
 }
 
 /// Draw a wireframe cylinder in the 3D view

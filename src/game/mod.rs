@@ -33,5 +33,5 @@ pub use event::{Events, EventQueue};
 pub use transform::{Transform, GlobalTransform, propagate_transforms};
 pub use components::*;
 pub use collision::{collide_cylinder, move_and_slide, CollisionResult};
-pub use runtime::GameToolState;
+pub use runtime::{GameToolState, CameraMode, FpsLimit};
 pub use renderer::draw_test_viewport;

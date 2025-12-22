@@ -20,6 +20,7 @@ use crate::rasterizer::{
     Light, RasterSettings,
 };
 use crate::world::SECTOR_SIZE;
+use crate::input::{InputState, Action};
 use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode};
 
 /// Draw the 3D viewport using the software rasterizer
@@ -29,6 +30,7 @@ pub fn draw_viewport_3d(
     state: &mut EditorState,
     textures: &[RasterTexture],
     fb: &mut Framebuffer,
+    input: &InputState,
 ) {
     // Resize framebuffer based on resolution setting
     let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
@@ -80,7 +82,7 @@ pub fn draw_viewport_3d(
     };
 
     // Camera controls - depend on camera mode
-    let should_update_orbit_target = handle_camera_input(ctx, state, inside_viewport, mouse_pos);
+    let should_update_orbit_target = handle_camera_input(ctx, state, inside_viewport, mouse_pos, input);
 
     // Toggle link coincident vertices mode with L key
     if inside_viewport && is_key_pressed(KeyCode::L) {
@@ -2544,8 +2546,16 @@ fn handle_camera_input(
     state: &mut EditorState,
     inside_viewport: bool,
     mouse_pos: (f32, f32),
+    input: &InputState,
 ) -> bool {
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let delta = get_frame_time();
+
+    // Gamepad input
+    let left_stick = input.left_stick();
+    let right_stick = input.right_stick();
+    let has_gamepad_input = left_stick.length() > 0.0 || right_stick.length() > 0.0
+        || input.action_down(Action::FlyUp) || input.action_down(Action::FlyDown);
 
     match state.camera_mode {
         CameraMode::Free => {
@@ -2562,11 +2572,20 @@ fn handle_camera_input(
                 state.viewport_mouse_captured = false;
             }
 
+            // Gamepad right stick: look around
+            if right_stick.length() > 0.0 {
+                let look_sensitivity = 2.5;
+                state.camera_3d.rotate(
+                    right_stick.y * look_sensitivity * delta,
+                    -right_stick.x * look_sensitivity * delta,
+                );
+            }
+
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
             let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
             let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() {
+            if (inside_viewport || state.viewport_mouse_captured || has_gamepad_input) && state.dragging_sector_vertices.is_empty() {
                 if is_key_down(KeyCode::W) {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
                 }
@@ -2584,6 +2603,21 @@ fn handle_camera_input(
                 }
                 if is_key_down(KeyCode::E) {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
+                }
+
+                // Gamepad left stick: move forward/back, strafe left/right
+                let gamepad_speed = 1500.0 * delta; // Frame-rate independent
+                if left_stick.length() > 0.1 {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * left_stick.y * gamepad_speed;
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * left_stick.x * gamepad_speed;
+                }
+
+                // Gamepad vertical movement: LB up, LT down
+                if input.action_down(Action::FlyUp) {
+                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * gamepad_speed;
+                }
+                if input.action_down(Action::FlyDown) {
+                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * gamepad_speed;
                 }
             }
         }
@@ -2611,6 +2645,33 @@ fn handle_camera_input(
                 state.viewport_mouse_captured = true;
             } else if !ctx.mouse.right_down {
                 state.viewport_mouse_captured = false;
+            }
+
+            // Gamepad right stick: orbit rotation
+            if right_stick.length() > 0.0 {
+                state.orbit_azimuth -= right_stick.x * 2.0 * delta;
+                state.orbit_elevation = (state.orbit_elevation + right_stick.y * 1.5 * delta)
+                    .clamp(-1.4, 1.4);
+                state.sync_camera_from_orbit();
+            }
+
+            // Gamepad left stick: pan the orbit target
+            if left_stick.length() > 0.1 {
+                let pan_speed = state.orbit_distance * 0.002 * 60.0 * delta; // 60 = normalize for typical framerate
+                state.orbit_target = state.orbit_target - state.camera_3d.basis_x * left_stick.x * pan_speed;
+                state.orbit_target = state.orbit_target + state.camera_3d.basis_z * left_stick.y * pan_speed;
+                state.last_orbit_target = state.orbit_target;
+                state.sync_camera_from_orbit();
+            }
+
+            // Gamepad LB/LT: zoom in/out
+            if input.action_down(Action::FlyUp) {
+                state.orbit_distance = (state.orbit_distance * (1.0 - 1.5 * delta)).clamp(100.0, 20000.0);
+                state.sync_camera_from_orbit();
+            }
+            if input.action_down(Action::FlyDown) {
+                state.orbit_distance = (state.orbit_distance * (1.0 + 1.5 * delta)).clamp(100.0, 20000.0);
+                state.sync_camera_from_orbit();
             }
 
             // Mouse wheel: zoom in/out (change orbit distance)

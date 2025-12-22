@@ -20,6 +20,7 @@ mod tracker;
 mod app;
 mod game;
 mod project;
+mod input;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -101,6 +102,9 @@ async fn main() {
     println!("=== Bonnie Engine ===");
 
     loop {
+        // Track frame start time for FPS limiting
+        let frame_start = std::time::Instant::now();
+
         // Update UI context with mouse state
         let mouse_pos = mouse_position();
         let left_down = is_mouse_button_down(MouseButton::Left);
@@ -139,6 +143,9 @@ async fn main() {
         last_right_down = right_down;
         ui_ctx.begin_frame(mouse_state);
 
+        // Poll gamepad input
+        app.input.poll();
+
         // Block background input if example browser modal is open
         // Save the real mouse state so we can restore it for the modal
         let real_mouse = mouse_state;
@@ -160,6 +167,7 @@ async fn main() {
             TabEntry::new(icon::PLAY, "Game"),
             TabEntry::new(icon::PERSON_STANDING, "Assets"),
             TabEntry::new(icon::MUSIC, "Music"),
+            TabEntry::new(icon::GAMEPAD_2, "Input"),
         ];
         if let Some(clicked) = draw_fixed_tabs(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref()) {
             if let Some(tool) = Tool::from_index(clicked) {
@@ -280,6 +288,7 @@ async fn main() {
                     &mut fb,
                     content_rect,
                     app.icon_font.as_ref(),
+                    &app.input,
                 );
 
                 // Handle editor actions (including opening example browser)
@@ -406,6 +415,7 @@ async fn main() {
                     &app.project.level,
                     &game_textures,
                     &mut fb,
+                    &app.input,
                 );
             }
 
@@ -556,6 +566,11 @@ async fn main() {
                 // Draw tracker UI
                 tracker::draw_tracker(&mut ui_ctx, content_rect, &mut app.tracker, app.icon_font.as_ref());
             }
+
+            Tool::InputTest => {
+                // Draw controller debug view
+                input::draw_controller_debug(content_rect, &app.input);
+            }
         }
 
         // Draw tooltips last (on top of everything)
@@ -571,6 +586,24 @@ async fn main() {
                     ws.example_browser.set_preview(level);
                 } else {
                     ws.editor_state.set_status("Failed to load level preview", 3.0);
+                }
+            }
+        }
+
+        // FPS limiting (only when in game tab)
+        // Uses spin-wait for last 2ms to avoid sleep() overshooting
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Tool::Test = app.active_tool {
+            if let Some(target_frame_time) = app.game.fps_limit.frame_time() {
+                let target_duration = std::time::Duration::from_secs_f64(target_frame_time);
+                // Sleep for bulk of remaining time (leave 2ms margin for spin-wait)
+                let spin_margin = std::time::Duration::from_millis(2);
+                while frame_start.elapsed() + spin_margin < target_duration {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                // Spin-wait for precise timing
+                while frame_start.elapsed() < target_duration {
+                    std::hint::spin_loop();
                 }
             }
         }

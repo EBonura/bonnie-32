@@ -23,6 +23,8 @@ pub struct CollisionResult {
     pub hit_ceiling: bool,
     /// Floor height at final position
     pub floor_height: f32,
+    /// Updated vertical velocity (accumulated gravity)
+    pub vertical_velocity: f32,
 }
 
 /// Perform cylinder collision against level geometry
@@ -44,17 +46,19 @@ pub fn collide_cylinder(
     let step_height = controller.step_height;
     let room_hint = Some(controller.current_room);
 
-    // Proposed new position
-    let mut new_pos = position + velocity * delta_time;
+    // Proposed new position (horizontal only - vertical handled separately)
+    let mut new_pos = position + Vec3::new(velocity.x, 0.0, velocity.z) * delta_time;
 
-    // Apply gravity to vertical velocity (use level settings)
+    // Apply gravity to vertical velocity (accumulates over time like OpenLara)
     let gravity = level.player_settings.gravity;
     let mut vert_vel = controller.vertical_velocity;
     if !controller.grounded {
+        // Accumulate gravity into velocity
         vert_vel -= gravity * delta_time;
         vert_vel = vert_vel.max(-character::TERMINAL_VELOCITY);
     }
-    new_pos.y += vert_vel * delta_time;
+    // Apply accumulated vertical velocity to position
+    new_pos.y = position.y + vert_vel * delta_time;
 
     let mut grounded = false;
     let mut hit_wall = false;
@@ -88,6 +92,7 @@ pub fn collide_cylinder(
             grounded = true;
             new_pos.y = info.floor;
         }
+        // else: Falling - above ground with no contact
 
         // Ceiling collision
         if head_y > info.ceiling {
@@ -95,8 +100,14 @@ pub fn collide_cylinder(
             hit_ceiling = true;
         }
     } else {
-        // Outside all rooms - keep position, mark as falling
-        // (or we could push back to last known position)
+        // Outside all rooms - treat as wall collision (like OpenLara)
+        // Revert to original position entirely to prevent falling into void
+        new_pos = position;
+        hit_wall = true;
+        // Preserve grounded state from previous frame to prevent gravity accumulation
+        grounded = controller.grounded;
+        // Reset vertical velocity to prevent fall-through
+        vert_vel = 0.0;
     }
 
     // Check 4 corner points for wall collision (like OpenLara)
@@ -112,10 +123,6 @@ pub fn collide_cylinder(
             // If corner's floor is significantly higher than our position, it's a wall
             let height_diff = info.floor - new_pos.y;
             if height_diff > step_height {
-                // Wall collision - push back in the direction of the collision
-                let push_x = if corner.x < new_pos.x { radius } else { -radius };
-                let push_z = if corner.z < new_pos.z { radius } else { -radius };
-
                 // Only push back the axis that's blocked
                 let corner_x_only = Vec3::new(corner.x, new_pos.y, new_pos.z);
                 let corner_z_only = Vec3::new(new_pos.x, new_pos.y, corner.z);
@@ -136,8 +143,6 @@ pub fn collide_cylinder(
             }
         } else {
             // Corner is outside rooms - treat as wall
-            let push_x = if corner.x < new_pos.x { radius } else { -radius };
-            let push_z = if corner.z < new_pos.z { radius } else { -radius };
             new_pos.x = position.x;
             new_pos.z = position.z;
             hit_wall = true;
@@ -155,6 +160,7 @@ pub fn collide_cylinder(
         hit_wall,
         hit_ceiling,
         floor_height,
+        vertical_velocity: vert_vel,
     }
 }
 
@@ -174,11 +180,13 @@ pub fn move_and_slide(
     controller.grounded = result.grounded;
     controller.current_room = result.room;
 
-    // Reset vertical velocity if grounded
-    if result.grounded {
+    // Update vertical velocity from collision result
+    // Reset if grounded or hit ceiling, otherwise use accumulated value
+    if result.grounded || result.hit_ceiling {
         controller.vertical_velocity = 0.0;
-    } else if result.hit_ceiling {
-        controller.vertical_velocity = 0.0;
+    } else {
+        // Keep accumulated velocity for next frame
+        controller.vertical_velocity = result.vertical_velocity;
     }
 
     result.position
