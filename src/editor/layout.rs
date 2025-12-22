@@ -3,6 +3,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
+use crate::input::InputState;
 use super::{EditorState, EditorTool, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
@@ -212,6 +213,7 @@ pub fn draw_editor(
     fb: &mut Framebuffer,
     bounds: Rect,
     icon_font: Option<&Font>,
+    input: &InputState,
 ) -> EditorAction {
     let screen = bounds;
 
@@ -248,7 +250,7 @@ pub fn draw_editor(
     draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);
 
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
-    draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb);
+    draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input);
 
     draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
     draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
@@ -2241,10 +2243,10 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 if let Some(v) = r.new_value { state.level.player_settings.camera_distance = v; }
                                 y = r.new_y;
 
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
-                                    state.level.player_settings.camera_height, 100.0, 1500.0, 7,
+                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Y Offset",
+                                    state.level.player_settings.camera_vertical_offset, 100.0, 1500.0, 7,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.camera_height = v; }
+                                if let Some(v) = r.new_value { state.level.player_settings.camera_vertical_offset = v; }
                                 y = r.new_y;
 
                                 y += 10.0;
@@ -2260,19 +2262,17 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                     Vec3::new(0.0, 0.0, 0.0)
                                 };
 
-                                // Camera position: behind and above the player
+                                // Camera position: behind and above the player (orbit style preview)
                                 let settings = &state.level.player_settings;
-                                let cam_pos = Vec3::new(
-                                    player_world_pos.x,
-                                    player_world_pos.y + settings.camera_height,
-                                    player_world_pos.z - settings.camera_distance,
-                                );
-
-                                // Camera looks at player's head height
                                 let look_at = Vec3::new(
                                     player_world_pos.x,
-                                    player_world_pos.y + settings.height * 0.8, // Look slightly below head
+                                    player_world_pos.y + settings.camera_vertical_offset,
                                     player_world_pos.z,
+                                );
+                                let cam_pos = Vec3::new(
+                                    player_world_pos.x,
+                                    player_world_pos.y + settings.camera_vertical_offset + settings.camera_distance * 0.2,
+                                    player_world_pos.z - settings.camera_distance,
                                 );
 
                                 // Preview dimensions (4:3 aspect ratio)

@@ -20,6 +20,7 @@ mod tracker;
 mod app;
 mod game;
 mod project;
+mod input;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -139,6 +140,9 @@ async fn main() {
         last_right_down = right_down;
         ui_ctx.begin_frame(mouse_state);
 
+        // Poll gamepad input
+        app.input.poll();
+
         // Block background input if example browser modal is open
         // Save the real mouse state so we can restore it for the modal
         let real_mouse = mouse_state;
@@ -160,6 +164,7 @@ async fn main() {
             TabEntry::new(icon::PLAY, "Game"),
             TabEntry::new(icon::PERSON_STANDING, "Assets"),
             TabEntry::new(icon::MUSIC, "Music"),
+            TabEntry::new(icon::GAMEPAD_2, "Input"),
         ];
         if let Some(clicked) = draw_fixed_tabs(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref()) {
             if let Some(tool) = Tool::from_index(clicked) {
@@ -280,6 +285,7 @@ async fn main() {
                     &mut fb,
                     content_rect,
                     app.icon_font.as_ref(),
+                    &app.input,
                 );
 
                 // Handle editor actions (including opening example browser)
@@ -406,6 +412,7 @@ async fn main() {
                     &app.project.level,
                     &game_textures,
                     &mut fb,
+                    &app.input,
                 );
             }
 
@@ -555,6 +562,11 @@ async fn main() {
 
                 // Draw tracker UI
                 tracker::draw_tracker(&mut ui_ctx, content_rect, &mut app.tracker, app.icon_font.as_ref());
+            }
+
+            Tool::InputTest => {
+                // Draw controller debug view
+                input::draw_controller_debug(content_rect, &app.input);
             }
         }
 

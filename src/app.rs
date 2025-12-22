@@ -5,6 +5,7 @@
 
 use crate::editor::{EditorState, EditorLayout, ExampleBrowser};
 use crate::game::GameToolState;
+use crate::input::InputState;
 use crate::landing::LandingState;
 use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, MeshBrowser};
 use crate::project::ProjectData;
@@ -21,15 +22,17 @@ pub enum Tool {
     Test = 2,
     Modeler = 3,
     Tracker = 4,
+    InputTest = 5,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [
+    pub const ALL: [Tool; 6] = [
         Tool::Home,
         Tool::WorldEditor,
         Tool::Test,
         Tool::Modeler,
         Tool::Tracker,
+        Tool::InputTest,
     ];
 
     /// Get the display label for this tool
@@ -41,18 +44,20 @@ impl Tool {
             Tool::Test => "Test",
             Tool::Modeler => "Assets",
             Tool::Tracker => "Music",
+            Tool::InputTest => "Input",
         }
     }
 
     /// Get all tool labels (for tab bar)
     #[allow(dead_code)]
-    pub fn labels() -> [&'static str; 5] {
+    pub fn labels() -> [&'static str; 6] {
         [
             Tool::Home.label(),
             Tool::WorldEditor.label(),
             Tool::Test.label(),
             Tool::Modeler.label(),
             Tool::Tracker.label(),
+            Tool::InputTest.label(),
         ]
     }
 
@@ -103,6 +108,9 @@ pub struct AppState {
 
     /// Icon font (Lucide)
     pub icon_font: Option<Font>,
+
+    /// Unified input state (keyboard + gamepad)
+    pub input: InputState,
 }
 
 impl AppState {
@@ -132,6 +140,7 @@ impl AppState {
             },
             tracker: TrackerState::new(),
             icon_font,
+            input: InputState::new(),
         }
     }
 

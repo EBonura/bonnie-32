@@ -95,6 +95,9 @@ pub mod icon {
     pub const EYE: char = '\u{e0ba}';             // Free camera (eye)
     pub const EYE_OFF: char = '\u{e0bb}';         // Hidden (eye-off)
     pub const ORBIT: char = '\u{e12e}';           // Orbit camera (orbit icon)
+
+    // Input / Controller
+    pub const GAMEPAD_2: char = '\u{e0db}';       // Gamepad controller
 }
 
 /// Draw a Lucide icon centered in a rect

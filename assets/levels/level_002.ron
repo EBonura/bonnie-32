@@ -79,7 +79,10 @@
     walk_speed: 1600.0,
     run_speed: 1600.0,
     gravity: 2400.0,
-    camera_distance: 1000.0,
+    camera_distance: 2000.0,
+    camera_vertical_offset: 500.0,
+    camera_pitch_min: -0.8,
+    camera_pitch_max: 0.8,
     camera_height: 1500.0,
   ),
 )

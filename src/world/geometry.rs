@@ -399,6 +399,7 @@ pub enum SpawnPointType {
 
 /// Player settings for the level (TR-style character controller parameters)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlayerSettings {
     /// Collision cylinder radius
     pub radius: f32,
@@ -412,9 +413,15 @@ pub struct PlayerSettings {
     pub run_speed: f32,
     /// Gravity acceleration (units per second squared)
     pub gravity: f32,
-    /// Camera distance behind player
+    /// Camera distance from player (orbit radius)
     pub camera_distance: f32,
-    /// Camera height offset
+    /// Camera vertical offset above player feet (look-at target height)
+    pub camera_vertical_offset: f32,
+    /// Minimum camera pitch (looking up, radians, negative = up)
+    pub camera_pitch_min: f32,
+    /// Maximum camera pitch (looking down, radians, positive = down)
+    pub camera_pitch_max: f32,
+    /// Camera height offset (legacy, kept for compatibility)
     pub camera_height: f32,
 }
 
@@ -428,7 +435,10 @@ impl Default for PlayerSettings {
             run_speed: 1600.0,
             gravity: 2400.0,
             camera_distance: 800.0,
-            camera_height: 610.0,
+            camera_vertical_offset: 500.0,  // Shoulder/upper chest height
+            camera_pitch_min: -0.8,         // Can look up ~45 degrees
+            camera_pitch_max: 0.8,          // Can look down ~45 degrees
+            camera_height: 610.0,           // Legacy, kept for compatibility
         }
     }
 }

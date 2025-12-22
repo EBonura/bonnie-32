@@ -201,7 +201,7 @@ This project uses the following free texture packs:
 - [x] **Cross-room boundary linking**: Moving vertices/edges/faces now finds and moves coincident vertices across all rooms
 - [ ] **Multiple walls per sector edge**: Currently limited to 1 wall per side. The `Sector` struct already supports multiple walls via `Vec<VerticalFace>`. Implement smart placement where new walls stack on top/bottom of existing walls with configurable start/end heights.
 - [ ] smarter floow/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
-
+- [ ] the room selector in the top bar should wrap around 
 ---
 
 ### Overall / Meta

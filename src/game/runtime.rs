@@ -8,6 +8,16 @@ use crate::rasterizer::{Camera, Vec3, RasterSettings};
 use crate::world::Level;
 use super::{World, Events, Entity, components::character};
 
+/// Camera control mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraMode {
+    /// Third-person camera following player (Elden Ring style)
+    #[default]
+    Character,
+    /// Free-flying spectator camera (noclip)
+    FreeFly,
+}
+
 /// State for the Test tool (play mode)
 pub struct GameToolState {
     /// ECS world containing all dynamic entities
@@ -40,6 +50,21 @@ pub struct GameToolState {
 
     /// Has the camera been initialized from the level?
     pub camera_initialized: bool,
+
+    /// Camera control mode (character follow vs free-fly)
+    pub camera_mode: CameraMode,
+
+    /// Is the options menu currently open?
+    pub options_menu_open: bool,
+
+    /// Free-fly camera parameters (when in FreeFly mode)
+    pub freefly_yaw: f32,
+    pub freefly_pitch: f32,
+
+    /// Character mode: camera orbit yaw (azimuth around player)
+    pub char_cam_yaw: f32,
+    /// Character mode: camera orbit pitch (elevation)
+    pub char_cam_pitch: f32,
 }
 
 impl GameToolState {
@@ -73,6 +98,12 @@ impl GameToolState {
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
             camera_initialized: false,
+            camera_mode: CameraMode::default(),
+            options_menu_open: false,
+            freefly_yaw: 0.0,
+            freefly_pitch: 0.0,
+            char_cam_yaw: 0.0,
+            char_cam_pitch: 0.2, // Slight downward pitch by default
         }
     }
 
@@ -152,8 +183,9 @@ impl GameToolState {
         );
     }
 
-    /// Update camera to follow player in third-person view
-    /// Returns the player position if player exists
+    /// Update camera to follow player in Dark Souls-style orbit view.
+    /// Camera orbits around player independently of player facing.
+    /// Returns the player position if player exists.
     pub fn update_camera_follow_player(&mut self, level: &Level) -> Option<Vec3> {
         let player = self.player_entity?;
         let transform = self.world.transforms.get(player)?;
@@ -162,29 +194,46 @@ impl GameToolState {
         // Get camera settings from level
         let settings = &level.player_settings;
 
-        // Get player facing direction from controller
-        let facing = self.world.controllers.get(player)
-            .map(|c| c.facing)
-            .unwrap_or(0.0);
+        // Target point: player position + vertical offset (shoulder/chest height)
+        let look_at = player_pos + Vec3::new(0.0, settings.camera_vertical_offset, 0.0);
 
-        // Camera looks at player's head height
-        let look_at = player_pos + Vec3::new(0.0, settings.camera_height, 0.0);
+        // Calculate camera position using spherical coordinates around player
+        // yaw = horizontal rotation, pitch = vertical angle
+        let yaw = self.char_cam_yaw;
+        let pitch = self.char_cam_pitch;
 
-        // Position camera behind player based on facing direction
+        // Spherical to cartesian: camera position relative to target
+        // Pitch: 0 = level, positive = looking down (camera above), negative = looking up (camera below)
+        let horizontal_dist = settings.camera_distance * pitch.cos();
+        let vertical_offset = settings.camera_distance * pitch.sin();
+
         let cam_offset = Vec3::new(
-            -facing.sin() * settings.camera_distance,
-            settings.camera_height * 0.5, // Camera slightly above head
-            -facing.cos() * settings.camera_distance,
+            -yaw.sin() * horizontal_dist,
+            vertical_offset,
+            -yaw.cos() * horizontal_dist,
         );
+
         self.camera.position = look_at + cam_offset;
 
-        // Point camera at player
-        let to_player = (look_at - self.camera.position).normalize();
-        self.camera.rotation_y = to_player.x.atan2(to_player.z);
-        self.camera.rotation_x = (-to_player.y).asin();
+        // Point camera at target
+        let to_target = (look_at - self.camera.position).normalize();
+        self.camera.rotation_y = to_target.x.atan2(to_target.z);
+        self.camera.rotation_x = (-to_target.y).asin();
         self.camera.update_basis();
 
         Some(player_pos)
+    }
+
+    /// Get the camera forward direction projected onto XZ plane (for movement)
+    pub fn get_camera_forward_xz(&self) -> Vec3 {
+        let yaw = self.char_cam_yaw;
+        Vec3::new(yaw.sin(), 0.0, yaw.cos()).normalize()
+    }
+
+    /// Get the camera right direction on XZ plane (for strafing)
+    pub fn get_camera_right_xz(&self) -> Vec3 {
+        let yaw = self.char_cam_yaw;
+        Vec3::new(yaw.cos(), 0.0, -yaw.sin()).normalize()
     }
 
     /// Get player position if playing and player exists
