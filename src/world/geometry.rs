@@ -455,6 +455,10 @@ pub struct PlayerSettings {
     pub run_speed: f32,
     /// Gravity acceleration (units per second squared)
     pub gravity: f32,
+    /// Jump velocity (initial upward velocity when jumping)
+    pub jump_velocity: f32,
+    /// Sprint jump velocity multiplier (1.0 = same as normal, 1.2 = 20% higher)
+    pub sprint_jump_multiplier: f32,
     /// Camera distance from player (orbit radius)
     pub camera_distance: f32,
     /// Camera vertical offset above player feet (look-at target height)
@@ -476,6 +480,8 @@ impl Default for PlayerSettings {
             walk_speed: 800.0,
             run_speed: 1600.0,
             gravity: 2400.0,
+            jump_velocity: 1200.0,          // Initial upward velocity for jump
+            sprint_jump_multiplier: 1.15,   // 15% higher jump when sprinting
             camera_distance: 800.0,
             camera_vertical_offset: 500.0,  // Shoulder/upper chest height
             camera_pitch_min: -0.8,         // Can look up ~45 degrees

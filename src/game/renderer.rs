@@ -218,8 +218,11 @@ fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, inp
             move_dir = move_dir + cam_right * -left_stick.x;
         }
 
-        // Apply movement to velocity
+        // Check sprint state (Elden Ring: hold B to run)
         let move_len = move_dir.len();
+        let sprinting = input.action_down(Action::Dodge) && move_len > 0.1;
+
+        // Apply movement to velocity
         if move_len > 0.1 {
             move_dir = move_dir.normalize();
 
@@ -236,8 +239,6 @@ fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, inp
                 controller.facing += facing_diff * 10.0 * delta; // Smooth turn speed
             }
 
-            // Sprint when Dodge held + moving (Elden Ring: hold B to run)
-            let sprinting = input.action_down(Action::Dodge) && move_len > 0.1;
             let speed = if sprinting {
                 settings.run_speed
             } else {
@@ -253,6 +254,23 @@ fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, inp
             if let Some(velocity) = game.world.velocities.get_mut(player) {
                 velocity.0.x = 0.0;
                 velocity.0.z = 0.0;
+            }
+        }
+
+        // Jump (Elden Ring: A button / Space key)
+        // Can only jump when grounded
+        if input.action_pressed(Action::Jump) {
+            if let Some(controller) = game.world.controllers.get_mut(player) {
+                if controller.grounded {
+                    // Calculate jump velocity (sprint-jump is higher)
+                    let jump_vel = if sprinting {
+                        settings.jump_velocity * settings.sprint_jump_multiplier
+                    } else {
+                        settings.jump_velocity
+                    };
+                    controller.vertical_velocity = jump_vel;
+                    controller.grounded = false; // Immediately leave ground
+                }
             }
         }
     }
@@ -630,10 +648,24 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     let right_stick = input.right_stick();
     lines.push((format!("R Stick: {:.2}, {:.2}", right_stick.x, right_stick.y), value_color));
 
-    // Sprint state
-    let sprinting = input.action_down(Action::Dodge) && left_stick.length() > 0.1;
+    // Movement state - show B button status for debugging
+    let b_down = input.action_down(Action::Dodge);
+    if b_down {
+        lines.push(("B: DOWN".to_string(), good_color));
+    }
+
+    let sprinting = b_down && left_stick.length() > 0.1;
     if sprinting {
         lines.push(("SPRINTING".to_string(), good_color));
+    }
+
+    // Check if player is jumping (not grounded and positive vertical velocity)
+    if let Some(player) = game.player_entity {
+        if let Some(ctrl) = game.world.controllers.get(player) {
+            if !ctrl.grounded && ctrl.vertical_velocity > 0.0 {
+                lines.push(("JUMPING".to_string(), Color::from_rgba(255, 200, 100, 255)));
+            }
+        }
     }
 
     // Calculate overlay height

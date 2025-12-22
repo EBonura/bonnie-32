@@ -6,7 +6,7 @@
 
 use crate::rasterizer::{Camera, Vec3, RasterSettings};
 use crate::world::Level;
-use super::{World, Events, Entity, components::character};
+use super::{World, Events, Entity};
 
 /// Camera control mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -330,8 +330,7 @@ impl GameToolState {
     }
 
     /// Run one frame of game simulation
-    /// debug_log: if true, print collision debug info to console
-    pub fn tick(&mut self, level: &Level, delta_time: f32, debug_log: bool) {
+    pub fn tick(&mut self, level: &Level, delta_time: f32) {
         if !self.playing {
             return;
         }
@@ -363,7 +362,6 @@ impl GameToolState {
                 velocity,
                 &mut controller,
                 delta_time,
-                debug_log,
             );
 
             // Update transform

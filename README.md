@@ -181,7 +181,7 @@ This project uses the following free texture packs:
 ## Backlog
 
 ### Rendering / PS1 Authenticity
-
+ - Controls page should have the "joystick" icon, currently there's just a sad face
 - [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
 - [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face
 - [ ] **Face normal flipping**: In properties panel, allow swapping/flipping face normals
