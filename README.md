@@ -189,6 +189,11 @@ This project uses the following free texture packs:
 - **Dark Fantasy Townhouse 64x64 Texture Pack** by Level Eleven Games
   https://level-eleven-games.itch.io/dark-fantasy-townhouse-64x64-texture-pack
 
+- **Tiny Texture Pack 1, 2, 3** by Screaming Brain Studios
+  https://screamingbrainstudios.itch.io/tiny-texture-pack
+  https://screamingbrainstudios.itch.io/tiny-texture-pack-2
+  https://screamingbrainstudios.itch.io/tiny-texture-pack-3
+
 ## Backlog
 
 ### Rendering / PS1 Authenticity

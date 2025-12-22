@@ -2,6 +2,9 @@
 //!
 //! Polls both keyboard (macroquad) and gamepad (gamepads crate) input,
 //! combining them into a unified action-based API.
+//!
+//! Gamepad support works on both native and WASM builds. For WASM, the
+//! gamepads crate uses a JavaScript plugin that bridges to the Web Gamepad API.
 
 use gamepads::{Gamepads, Button};
 use macroquad::prelude::*;
