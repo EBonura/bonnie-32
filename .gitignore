@@ -1,1 +1,7 @@
 /target
+
+# Local WASM testing (copied assets for python http server)
+docs/assets/
+docs/fonts/
+docs/levels/
+docs/textures/

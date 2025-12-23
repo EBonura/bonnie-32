@@ -484,12 +484,148 @@
         };
 
         // =============================================================================
+        // Gamepad Input (Web Gamepad API)
+        // =============================================================================
+
+        var GamepadInput = {
+            // Standard gamepad button mapping (same order as gilrs/gamepads crate)
+            // Index: Button name (Xbox layout)
+            // 0: A (ActionDown)
+            // 1: B (ActionRight)
+            // 2: X (ActionLeft)
+            // 3: Y (ActionUp)
+            // 4: LB (FrontLeftUpper)
+            // 5: RB (FrontRightUpper)
+            // 6: LT (FrontLeftLower)
+            // 7: RT (FrontRightLower)
+            // 8: Back/Select
+            // 9: Start
+            // 10: L3 (LeftStick click)
+            // 11: R3 (RightStick click)
+            // 12: DPad Up
+            // 13: DPad Down
+            // 14: DPad Left
+            // 15: DPad Right
+            // 16: Guide (Xbox button)
+
+            lastButtonStates: new Array(17).fill(false),
+
+            hasGamepad: function() {
+                var gamepads = navigator.getGamepads();
+                for (var i = 0; i < gamepads.length; i++) {
+                    if (gamepads[i] && gamepads[i].connected) return 1;
+                }
+                return 0;
+            },
+
+            // Get first connected gamepad
+            getGamepad: function() {
+                var gamepads = navigator.getGamepads();
+                for (var i = 0; i < gamepads.length; i++) {
+                    if (gamepads[i] && gamepads[i].connected) return gamepads[i];
+                }
+                return null;
+            },
+
+            // Get button state as bitmask (buttons 0-16)
+            getButtonMask: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp) return 0;
+                var mask = 0;
+                for (var i = 0; i < Math.min(gp.buttons.length, 17); i++) {
+                    if (gp.buttons[i].pressed) {
+                        mask |= (1 << i);
+                    }
+                }
+                return mask;
+            },
+
+            // Get "just pressed" buttons as bitmask (rising edge detection)
+            getButtonPressedMask: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp) {
+                    // Reset last states if no gamepad
+                    GamepadInput.lastButtonStates.fill(false);
+                    return 0;
+                }
+
+                var mask = 0;
+                for (var i = 0; i < Math.min(gp.buttons.length, 17); i++) {
+                    var nowPressed = gp.buttons[i].pressed;
+                    var wasPressed = GamepadInput.lastButtonStates[i];
+                    if (nowPressed && !wasPressed) {
+                        mask |= (1 << i);
+                    }
+                    GamepadInput.lastButtonStates[i] = nowPressed;
+                }
+                return mask;
+            },
+
+            // Get left stick X axis (-1.0 to 1.0) as i32 fixed point (*10000)
+            getLeftStickX: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp || gp.axes.length < 1) return 0;
+                return Math.round(gp.axes[0] * 10000);
+            },
+
+            getLeftStickY: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp || gp.axes.length < 2) return 0;
+                return Math.round(gp.axes[1] * 10000);
+            },
+
+            getRightStickX: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp || gp.axes.length < 3) return 0;
+                return Math.round(gp.axes[2] * 10000);
+            },
+
+            getRightStickY: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp || gp.axes.length < 4) return 0;
+                return Math.round(gp.axes[3] * 10000);
+            },
+
+            // Get trigger values (0.0 to 1.0) as i32 fixed point (*10000)
+            getLeftTrigger: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp || gp.buttons.length < 7) return 0;
+                return Math.round(gp.buttons[6].value * 10000);
+            },
+
+            getRightTrigger: function() {
+                var gp = GamepadInput.getGamepad();
+                if (!gp || gp.buttons.length < 8) return 0;
+                return Math.round(gp.buttons[7].value * 10000);
+            }
+        };
+
+        // Listen for gamepad connections (for debugging)
+        window.addEventListener('gamepadconnected', function(e) {
+            console.log('Gamepad connected:', e.gamepad.id);
+        });
+        window.addEventListener('gamepaddisconnected', function(e) {
+            console.log('Gamepad disconnected:', e.gamepad.id);
+        });
+
+        // =============================================================================
         // Register WASM imports
         // =============================================================================
 
         miniquad_add_plugin({
             register_plugin: function(importObject) {
                 var env = importObject.env;
+
+                // Gamepad input
+                env.bonnie_gamepad_has_gamepad = GamepadInput.hasGamepad;
+                env.bonnie_gamepad_get_button_mask = GamepadInput.getButtonMask;
+                env.bonnie_gamepad_get_button_pressed_mask = GamepadInput.getButtonPressedMask;
+                env.bonnie_gamepad_get_left_stick_x = GamepadInput.getLeftStickX;
+                env.bonnie_gamepad_get_left_stick_y = GamepadInput.getLeftStickY;
+                env.bonnie_gamepad_get_right_stick_x = GamepadInput.getRightStickX;
+                env.bonnie_gamepad_get_right_stick_y = GamepadInput.getRightStickY;
+                env.bonnie_gamepad_get_left_trigger = GamepadInput.getLeftTrigger;
+                env.bonnie_gamepad_get_right_trigger = GamepadInput.getRightTrigger;
 
                 // File I/O
                 env.bonnie_import_file = FileIO.import;
