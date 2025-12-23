@@ -920,13 +920,18 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     let snapped_x = (wx / SECTOR_SIZE).floor() * SECTOR_SIZE;
                     let snapped_z = (wz / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
-                    // Check if sector already has a floor
-                    let gx = ((snapped_x - room.position.x) / SECTOR_SIZE) as usize;
-                    let gz = ((snapped_z - room.position.z) / SECTOR_SIZE) as usize;
+                    // Calculate grid coords as signed integers
+                    let local_x = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                    let local_z = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
 
-                    let has_floor = room.get_sector(gx, gz)
-                        .map(|s| s.floor.is_some())
-                        .unwrap_or(false);
+                    // Check if sector already has a floor (only if in current bounds)
+                    let has_floor = if local_x >= 0 && local_z >= 0 {
+                        room.get_sector(local_x as usize, local_z as usize)
+                            .map(|s| s.floor.is_some())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
 
                     if has_floor {
                         state.set_status("Sector already has a floor", 2.0);
@@ -934,7 +939,40 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         state.save_undo();
 
                         if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
-                            // Expand room grid if needed
+                            // Expand room in negative X direction if needed
+                            if local_x < 0 {
+                                let shift = (-local_x) as usize;
+                                // Shift room position
+                                room.position.x -= shift as f32 * SECTOR_SIZE;
+                                // Insert empty columns at the beginning
+                                let mut new_sectors = Vec::with_capacity(room.width + shift);
+                                for _ in 0..shift {
+                                    new_sectors.push((0..room.depth).map(|_| None).collect());
+                                }
+                                new_sectors.append(&mut room.sectors);
+                                room.sectors = new_sectors;
+                                room.width += shift;
+                            }
+
+                            // Expand room in negative Z direction if needed
+                            if local_z < 0 {
+                                let shift = (-local_z) as usize;
+                                // Shift room position
+                                room.position.z -= shift as f32 * SECTOR_SIZE;
+                                // Insert empty rows at the beginning of each column
+                                for col in &mut room.sectors {
+                                    let mut new_col = (0..shift).map(|_| None).collect::<Vec<_>>();
+                                    new_col.append(col);
+                                    *col = new_col;
+                                }
+                                room.depth += shift;
+                            }
+
+                            // Recalculate grid coords after potential shift
+                            let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as usize;
+                            let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as usize;
+
+                            // Expand room grid in positive direction if needed
                             while gx >= room.width {
                                 room.width += 1;
                                 room.sectors.push((0..room.depth).map(|_| None).collect());
@@ -959,12 +997,18 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     let snapped_x = (wx / SECTOR_SIZE).floor() * SECTOR_SIZE;
                     let snapped_z = (wz / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
-                    let gx = ((snapped_x - room.position.x) / SECTOR_SIZE) as usize;
-                    let gz = ((snapped_z - room.position.z) / SECTOR_SIZE) as usize;
+                    // Calculate grid coords as signed integers
+                    let local_x = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                    let local_z = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
 
-                    let has_ceiling = room.get_sector(gx, gz)
-                        .map(|s| s.ceiling.is_some())
-                        .unwrap_or(false);
+                    // Check if sector already has a ceiling (only if in current bounds)
+                    let has_ceiling = if local_x >= 0 && local_z >= 0 {
+                        room.get_sector(local_x as usize, local_z as usize)
+                            .map(|s| s.ceiling.is_some())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
 
                     if has_ceiling {
                         state.set_status("Sector already has a ceiling", 2.0);
@@ -972,7 +1016,36 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         state.save_undo();
 
                         if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
-                            // Expand room grid if needed
+                            // Expand room in negative X direction if needed
+                            if local_x < 0 {
+                                let shift = (-local_x) as usize;
+                                room.position.x -= shift as f32 * SECTOR_SIZE;
+                                let mut new_sectors = Vec::with_capacity(room.width + shift);
+                                for _ in 0..shift {
+                                    new_sectors.push((0..room.depth).map(|_| None).collect());
+                                }
+                                new_sectors.append(&mut room.sectors);
+                                room.sectors = new_sectors;
+                                room.width += shift;
+                            }
+
+                            // Expand room in negative Z direction if needed
+                            if local_z < 0 {
+                                let shift = (-local_z) as usize;
+                                room.position.z -= shift as f32 * SECTOR_SIZE;
+                                for col in &mut room.sectors {
+                                    let mut new_col = (0..shift).map(|_| None).collect::<Vec<_>>();
+                                    new_col.append(col);
+                                    *col = new_col;
+                                }
+                                room.depth += shift;
+                            }
+
+                            // Recalculate grid coords after potential shift
+                            let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as usize;
+                            let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as usize;
+
+                            // Expand room grid in positive direction if needed
                             while gx >= room.width {
                                 room.width += 1;
                                 room.sectors.push((0..room.depth).map(|_| None).collect());

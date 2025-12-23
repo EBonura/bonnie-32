@@ -85,19 +85,13 @@ async fn main() {
     // Track if this is the first time opening World Editor (to show browser)
     let mut world_editor_first_open = true;
 
-    // Load textures and level list from manifest (WASM needs async loading)
+    // Load textures from manifest (WASM needs async loading)
     #[cfg(target_arch = "wasm32")]
-    let preloaded_levels = {
+    {
         use editor::TexturePack;
-        use editor::load_example_list;
         app.world_editor.editor_state.texture_packs = TexturePack::load_from_manifest().await;
         println!("WASM: Loaded {} texture packs", app.world_editor.editor_state.texture_packs.len());
-        let levels = load_example_list().await;
-        println!("WASM: Loaded {} example levels from manifest", levels.len());
-        levels
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let preloaded_levels = discover_examples();
+    }
 
     println!("=== Bonnie Engine ===");
 
@@ -174,7 +168,8 @@ async fn main() {
                 // Open browser on first World Editor visit
                 if tool == Tool::WorldEditor && world_editor_first_open {
                     world_editor_first_open = false;
-                    app.world_editor.example_browser.open(preloaded_levels.clone());
+                    // Fresh scan to pick up any newly saved levels
+                    app.world_editor.example_browser.open(discover_examples());
                 }
                 app.set_active_tool(tool);
             }
@@ -292,7 +287,7 @@ async fn main() {
                 );
 
                 // Handle editor actions (including opening example browser)
-                handle_editor_action(action, ws, &preloaded_levels);
+                handle_editor_action(action, ws);
 
                 // Draw example browser overlay if open
                 if ws.example_browser.open {
@@ -625,7 +620,32 @@ async fn main() {
 }
 
 
-fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, preloaded_levels: &[editor::ExampleLevelInfo]) {
+/// Find the next available level filename with format "level_001", "level_002", etc.
+fn next_available_level_name() -> PathBuf {
+    let levels_dir = PathBuf::from("assets/levels");
+
+    // Find the highest existing level_XXX number
+    let mut highest = 0;
+    if let Ok(entries) = std::fs::read_dir(&levels_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                // Check for pattern "level_XXX"
+                if let Some(num_str) = stem.strip_prefix("level_") {
+                    if let Ok(num) = num_str.parse::<u32>() {
+                        highest = highest.max(num);
+                    }
+                }
+            }
+        }
+    }
+
+    // Generate next filename
+    let next_num = highest + 1;
+    levels_dir.join(format!("level_{:03}.ron", next_num))
+}
+
+fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
     match action {
         EditorAction::Play => {
             ws.editor_state.set_status("Game preview coming soon", 2.0);
@@ -672,7 +692,8 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
                     }
                 }
             } else {
-                let default_path = PathBuf::from("assets/levels/untitled.ron");
+                // Generate next available level_XXX name
+                let default_path = next_available_level_name();
                 if let Some(parent) = default_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -845,8 +866,8 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, pr
             }
         }
         EditorAction::BrowseExamples => {
-            // Open the level browser
-            ws.example_browser.open(preloaded_levels.to_vec());
+            // Open the level browser - fresh scan to pick up newly saved levels
+            ws.example_browser.open(discover_examples());
             ws.editor_state.set_status("Browse levels", 2.0);
         }
         EditorAction::Exit | EditorAction::None => {}

@@ -21,7 +21,7 @@ use crate::rasterizer::{
 };
 use crate::world::SECTOR_SIZE;
 use crate::input::{InputState, Action};
-use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode};
+use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT};
 
 /// Draw the 3D viewport using the software rasterizer
 pub fn draw_viewport_3d(
@@ -219,7 +219,9 @@ pub fn draw_viewport_3d(
     // Find hovered elements using 2D screen-space projection
     // Priority: vertex > edge > face
     let mut preview_sector: Option<(f32, f32, f32, bool)> = None; // (x, z, target_y, is_occupied)
-    let mut preview_wall: Option<(f32, f32, crate::world::Direction, f32, f32, bool)> = None; // (x, z, direction, y_bottom, y_top, is_occupied)
+    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state)
+    // state: 0 = new wall, 1 = filling gap, 2 = fully covered
+    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [f32; 4], u8)> = None;
 
     let hover = if inside_viewport && !ctx.mouse.right_down &&
         (state.tool == EditorTool::Select || state.tool == EditorTool::PlaceObject) {
@@ -457,22 +459,36 @@ pub fn draw_viewport_3d(
 
             if let Some((grid_x, grid_z, dir, dist)) = closest_edge {
                 if dist < 80.0 {
-                    // Check if this edge already has a wall
-                    let occupied = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    // Calculate where the new wall should be placed
+                    // Uses floor/ceiling heights and finds gaps between existing walls
+                    let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
                         if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
                             if let Some(sector) = room.get_sector(gx, gz) {
-                                !sector.walls(dir).is_empty()
+                                let has_existing = !sector.walls(dir).is_empty();
+                                match sector.next_wall_position(dir, default_y_bottom, default_y_top) {
+                                    Some(corner_heights) => {
+                                        // 0 = new wall, 1 = filling gap
+                                        let state = if has_existing { 1u8 } else { 0u8 };
+                                        Some((corner_heights, state))
+                                    }
+                                    None => {
+                                        // Edge is fully covered
+                                        Some(([0.0, 0.0, 0.0, 0.0], 2u8))
+                                    }
+                                }
                             } else {
-                                false
+                                Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
                             }
                         } else {
-                            false
+                            Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
                         }
                     } else {
-                        false
+                        Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
                     };
 
-                    preview_wall = Some((grid_x, grid_z, dir, default_y_bottom, default_y_top, occupied));
+                    if let Some((corner_heights, wall_state)) = wall_info {
+                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state));
+                    }
                 }
             }
         }
@@ -951,13 +967,14 @@ pub fn draw_viewport_3d(
                     }
                 }
             }
-            // DrawWall mode - place wall on sector edge
+            // DrawWall mode - place wall on sector edge (fills gaps between existing walls)
             else if state.tool == EditorTool::DrawWall {
-                if let Some((grid_x, grid_z, dir, y_bottom, y_top, occupied)) = preview_wall {
+                if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
                     use crate::world::{Direction, VerticalFace};
 
-                    if occupied {
-                        state.set_status("Edge already has a wall", 2.0);
+                    // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
+                    if wall_state == 2 {
+                        state.set_status("Edge is fully covered", 2.0);
                     } else {
                         state.save_undo();
 
@@ -1007,8 +1024,13 @@ pub fn draw_viewport_3d(
                                 }
                             }
 
-                            // Create the wall
-                            let wall = VerticalFace::new(y_bottom, y_top, texture);
+                            // Create the wall with sloped corners (fills gap, matching existing wall slant)
+                            // corner_heights: [bottom-left, bottom-right, top-right, top-left]
+                            let wall = VerticalFace::new_sloped(
+                                corner_heights[0], corner_heights[1],
+                                corner_heights[2], corner_heights[3],
+                                texture,
+                            );
 
                             // Ensure sector exists and add wall
                             let sector = room.ensure_sector(gx, gz);
@@ -1028,7 +1050,8 @@ pub fn draw_viewport_3d(
                             Direction::South => "south",
                             Direction::West => "west",
                         };
-                        state.set_status(&format!("Created {} wall", dir_name), 2.0);
+                        let action = if wall_state == 1 { "Filled gap in" } else { "Created" };
+                        state.set_status(&format!("{} {} wall", action, dir_name), 2.0);
                     }
                 }
             }
@@ -1337,49 +1360,82 @@ pub fn draw_viewport_3d(
     }
 
     // Draw wall preview when in DrawWall mode
-    if let Some((grid_x, grid_z, dir, y_bottom, y_top, occupied)) = preview_wall {
+    // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
+    // corner_heights: [bottom-left, bottom-right, top-right, top-left]
+    if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
         use crate::world::Direction;
 
-        // Wall edge corners based on direction
-        let (p0, p1) = match dir {
-            Direction::North => (
-                Vec3::new(grid_x, y_bottom, grid_z),
-                Vec3::new(grid_x + SECTOR_SIZE, y_bottom, grid_z),
-            ),
-            Direction::East => (
-                Vec3::new(grid_x + SECTOR_SIZE, y_bottom, grid_z),
-                Vec3::new(grid_x + SECTOR_SIZE, y_bottom, grid_z + SECTOR_SIZE),
-            ),
-            Direction::South => (
-                Vec3::new(grid_x + SECTOR_SIZE, y_bottom, grid_z + SECTOR_SIZE),
-                Vec3::new(grid_x, y_bottom, grid_z + SECTOR_SIZE),
-            ),
-            Direction::West => (
-                Vec3::new(grid_x, y_bottom, grid_z + SECTOR_SIZE),
-                Vec3::new(grid_x, y_bottom, grid_z),
-            ),
-        };
-
-        let p2 = Vec3::new(p1.x, y_top, p1.z);
-        let p3 = Vec3::new(p0.x, y_top, p0.z);
-
-        // Color: teal for valid, red for occupied
-        let color = if occupied {
-            RasterColor::new(200, 80, 80)
+        // For fully covered edges, show an X at edge center (no rectangle)
+        if wall_state == 2 {
+            // Just show a red X at the edge center to indicate fully covered
+            let mid_y = CEILING_HEIGHT / 2.0;
+            let (center, offset) = match dir {
+                Direction::North => (Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z), Vec3::new(100.0, 100.0, 0.0)),
+                Direction::East => (Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
+                Direction::South => (Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE), Vec3::new(100.0, 100.0, 0.0)),
+                Direction::West => (Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
+            };
+            let color = RasterColor::new(200, 80, 80); // Red
+            draw_3d_line(fb, center - offset, center + offset, &state.camera_3d, color);
+            let offset2 = Vec3::new(offset.x, -offset.y, offset.z);
+            draw_3d_line(fb, center - offset2, center + offset2, &state.camera_3d, color);
         } else {
-            RasterColor::new(80, 200, 180)
-        };
+            // Wall corners with sloped heights based on direction
+            // corner_heights: [bottom-left, bottom-right, top-right, top-left]
+            let (p0, p1, p2, p3) = match dir {
+                Direction::North => (
+                    Vec3::new(grid_x, corner_heights[0], grid_z),                     // BL
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[1], grid_z),       // BR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[2], grid_z),       // TR
+                    Vec3::new(grid_x, corner_heights[3], grid_z),                     // TL
+                ),
+                Direction::East => (
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[0], grid_z),                     // BL
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[1], grid_z + SECTOR_SIZE),       // BR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[2], grid_z + SECTOR_SIZE),       // TR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[3], grid_z),                     // TL
+                ),
+                Direction::South => (
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[0], grid_z + SECTOR_SIZE),       // BL
+                    Vec3::new(grid_x, corner_heights[1], grid_z + SECTOR_SIZE),                     // BR
+                    Vec3::new(grid_x, corner_heights[2], grid_z + SECTOR_SIZE),                     // TR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[3], grid_z + SECTOR_SIZE),       // TL
+                ),
+                Direction::West => (
+                    Vec3::new(grid_x, corner_heights[0], grid_z + SECTOR_SIZE),       // BL
+                    Vec3::new(grid_x, corner_heights[1], grid_z),                     // BR
+                    Vec3::new(grid_x, corner_heights[2], grid_z),                     // TR
+                    Vec3::new(grid_x, corner_heights[3], grid_z + SECTOR_SIZE),       // TL
+                ),
+            };
 
-        // Draw wall outline (rectangle)
-        draw_3d_line(fb, p0, p1, &state.camera_3d, color);
-        draw_3d_line(fb, p1, p2, &state.camera_3d, color);
-        draw_3d_line(fb, p2, p3, &state.camera_3d, color);
-        draw_3d_line(fb, p3, p0, &state.camera_3d, color);
+            // Color: teal for new wall, orange for filling gap
+            let color = if wall_state == 1 {
+                RasterColor::new(255, 180, 80) // Orange - filling gap
+            } else {
+                RasterColor::new(80, 200, 180) // Teal - new
+            };
 
-        // Draw X through it if occupied
-        if occupied {
-            draw_3d_line(fb, p0, p2, &state.camera_3d, color);
-            draw_3d_line(fb, p1, p3, &state.camera_3d, color);
+            // Draw wall outline (quad with potentially sloped edges)
+            draw_3d_line(fb, p0, p1, &state.camera_3d, color);  // bottom edge
+            draw_3d_line(fb, p1, p2, &state.camera_3d, color);  // right edge
+            draw_3d_line(fb, p2, p3, &state.camera_3d, color);  // top edge
+            draw_3d_line(fb, p3, p0, &state.camera_3d, color);  // left edge
+
+            // Draw + through it if filling gap to indicate addition
+            if wall_state == 1 {
+                // Vertical line (center)
+                let mid_x = (p0.x + p1.x) / 2.0;
+                let mid_z = (p0.z + p1.z) / 2.0;
+                let center_bottom = Vec3::new(mid_x, (corner_heights[0] + corner_heights[1]) / 2.0, mid_z);
+                let center_top = Vec3::new(mid_x, (corner_heights[2] + corner_heights[3]) / 2.0, mid_z);
+                draw_3d_line(fb, center_bottom, center_top, &state.camera_3d, color);
+                // Horizontal line (middle height)
+                let mid_y = (corner_heights[0] + corner_heights[1] + corner_heights[2] + corner_heights[3]) / 4.0;
+                let left = Vec3::new(p0.x, mid_y, p0.z);
+                let right = Vec3::new(p1.x, mid_y, p1.z);
+                draw_3d_line(fb, left, right, &state.camera_3d, color);
+            }
         }
     }
 
