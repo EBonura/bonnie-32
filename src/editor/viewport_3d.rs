@@ -1359,86 +1359,6 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Draw wall preview when in DrawWall mode
-    // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
-    // corner_heights: [bottom-left, bottom-right, top-right, top-left]
-    if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
-        use crate::world::Direction;
-
-        // For fully covered edges, show an X at edge center (no rectangle)
-        if wall_state == 2 {
-            // Just show a red X at the edge center to indicate fully covered
-            let mid_y = CEILING_HEIGHT / 2.0;
-            let (center, offset) = match dir {
-                Direction::North => (Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z), Vec3::new(100.0, 100.0, 0.0)),
-                Direction::East => (Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
-                Direction::South => (Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE), Vec3::new(100.0, 100.0, 0.0)),
-                Direction::West => (Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
-            };
-            let color = RasterColor::new(200, 80, 80); // Red
-            draw_3d_line(fb, center - offset, center + offset, &state.camera_3d, color);
-            let offset2 = Vec3::new(offset.x, -offset.y, offset.z);
-            draw_3d_line(fb, center - offset2, center + offset2, &state.camera_3d, color);
-        } else {
-            // Wall corners with sloped heights based on direction
-            // corner_heights: [bottom-left, bottom-right, top-right, top-left]
-            let (p0, p1, p2, p3) = match dir {
-                Direction::North => (
-                    Vec3::new(grid_x, corner_heights[0], grid_z),                     // BL
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[1], grid_z),       // BR
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[2], grid_z),       // TR
-                    Vec3::new(grid_x, corner_heights[3], grid_z),                     // TL
-                ),
-                Direction::East => (
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[0], grid_z),                     // BL
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[1], grid_z + SECTOR_SIZE),       // BR
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[2], grid_z + SECTOR_SIZE),       // TR
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[3], grid_z),                     // TL
-                ),
-                Direction::South => (
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[0], grid_z + SECTOR_SIZE),       // BL
-                    Vec3::new(grid_x, corner_heights[1], grid_z + SECTOR_SIZE),                     // BR
-                    Vec3::new(grid_x, corner_heights[2], grid_z + SECTOR_SIZE),                     // TR
-                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[3], grid_z + SECTOR_SIZE),       // TL
-                ),
-                Direction::West => (
-                    Vec3::new(grid_x, corner_heights[0], grid_z + SECTOR_SIZE),       // BL
-                    Vec3::new(grid_x, corner_heights[1], grid_z),                     // BR
-                    Vec3::new(grid_x, corner_heights[2], grid_z),                     // TR
-                    Vec3::new(grid_x, corner_heights[3], grid_z + SECTOR_SIZE),       // TL
-                ),
-            };
-
-            // Color: teal for new wall, orange for filling gap
-            let color = if wall_state == 1 {
-                RasterColor::new(255, 180, 80) // Orange - filling gap
-            } else {
-                RasterColor::new(80, 200, 180) // Teal - new
-            };
-
-            // Draw wall outline (quad with potentially sloped edges)
-            draw_3d_line(fb, p0, p1, &state.camera_3d, color);  // bottom edge
-            draw_3d_line(fb, p1, p2, &state.camera_3d, color);  // right edge
-            draw_3d_line(fb, p2, p3, &state.camera_3d, color);  // top edge
-            draw_3d_line(fb, p3, p0, &state.camera_3d, color);  // left edge
-
-            // Draw + through it if filling gap to indicate addition
-            if wall_state == 1 {
-                // Vertical line (center)
-                let mid_x = (p0.x + p1.x) / 2.0;
-                let mid_z = (p0.z + p1.z) / 2.0;
-                let center_bottom = Vec3::new(mid_x, (corner_heights[0] + corner_heights[1]) / 2.0, mid_z);
-                let center_top = Vec3::new(mid_x, (corner_heights[2] + corner_heights[3]) / 2.0, mid_z);
-                draw_3d_line(fb, center_bottom, center_top, &state.camera_3d, color);
-                // Horizontal line (middle height)
-                let mid_y = (corner_heights[0] + corner_heights[1] + corner_heights[2] + corner_heights[3]) / 4.0;
-                let left = Vec3::new(p0.x, mid_y, p0.z);
-                let right = Vec3::new(p1.x, mid_y, p1.z);
-                draw_3d_line(fb, left, right, &state.camera_3d, color);
-            }
-        }
-    }
-
     // Build texture map from texture packs
     let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     let mut texture_idx = 0;
@@ -1492,6 +1412,86 @@ pub fn draw_viewport_3d(
         };
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
+    }
+
+    // Draw wall preview when in DrawWall mode (after geometry so depth testing works)
+    // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
+    // corner_heights: [bottom-left, bottom-right, top-right, top-left]
+    if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
+        use crate::world::Direction;
+
+        // For fully covered edges, show an X at edge center (no rectangle)
+        if wall_state == 2 {
+            // Just show a red X at the edge center to indicate fully covered
+            let mid_y = CEILING_HEIGHT / 2.0;
+            let (center, offset) = match dir {
+                Direction::North => (Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z), Vec3::new(100.0, 100.0, 0.0)),
+                Direction::East => (Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
+                Direction::South => (Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE), Vec3::new(100.0, 100.0, 0.0)),
+                Direction::West => (Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
+            };
+            let color = RasterColor::new(200, 80, 80); // Red
+            draw_3d_line_depth(fb, center - offset, center + offset, &state.camera_3d, color);
+            let offset2 = Vec3::new(offset.x, -offset.y, offset.z);
+            draw_3d_line_depth(fb, center - offset2, center + offset2, &state.camera_3d, color);
+        } else {
+            // Wall corners with sloped heights based on direction
+            // corner_heights: [bottom-left, bottom-right, top-right, top-left]
+            let (p0, p1, p2, p3) = match dir {
+                Direction::North => (
+                    Vec3::new(grid_x, corner_heights[0], grid_z),                     // BL
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[1], grid_z),       // BR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[2], grid_z),       // TR
+                    Vec3::new(grid_x, corner_heights[3], grid_z),                     // TL
+                ),
+                Direction::East => (
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[0], grid_z),                     // BL
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[1], grid_z + SECTOR_SIZE),       // BR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[2], grid_z + SECTOR_SIZE),       // TR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[3], grid_z),                     // TL
+                ),
+                Direction::South => (
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[0], grid_z + SECTOR_SIZE),       // BL
+                    Vec3::new(grid_x, corner_heights[1], grid_z + SECTOR_SIZE),                     // BR
+                    Vec3::new(grid_x, corner_heights[2], grid_z + SECTOR_SIZE),                     // TR
+                    Vec3::new(grid_x + SECTOR_SIZE, corner_heights[3], grid_z + SECTOR_SIZE),       // TL
+                ),
+                Direction::West => (
+                    Vec3::new(grid_x, corner_heights[0], grid_z + SECTOR_SIZE),       // BL
+                    Vec3::new(grid_x, corner_heights[1], grid_z),                     // BR
+                    Vec3::new(grid_x, corner_heights[2], grid_z),                     // TR
+                    Vec3::new(grid_x, corner_heights[3], grid_z + SECTOR_SIZE),       // TL
+                ),
+            };
+
+            // Color: teal for new wall, orange for filling gap
+            let color = if wall_state == 1 {
+                RasterColor::new(255, 180, 80) // Orange - filling gap
+            } else {
+                RasterColor::new(80, 200, 180) // Teal - new
+            };
+
+            // Draw wall outline (quad with potentially sloped edges) with depth testing
+            draw_3d_line_depth(fb, p0, p1, &state.camera_3d, color);  // bottom edge
+            draw_3d_line_depth(fb, p1, p2, &state.camera_3d, color);  // right edge
+            draw_3d_line_depth(fb, p2, p3, &state.camera_3d, color);  // top edge
+            draw_3d_line_depth(fb, p3, p0, &state.camera_3d, color);  // left edge
+
+            // Draw + through it if filling gap to indicate addition
+            if wall_state == 1 {
+                // Vertical line (center)
+                let mid_x = (p0.x + p1.x) / 2.0;
+                let mid_z = (p0.z + p1.z) / 2.0;
+                let center_bottom = Vec3::new(mid_x, (corner_heights[0] + corner_heights[1]) / 2.0, mid_z);
+                let center_top = Vec3::new(mid_x, (corner_heights[2] + corner_heights[3]) / 2.0, mid_z);
+                draw_3d_line_depth(fb, center_bottom, center_top, &state.camera_3d, color);
+                // Horizontal line (middle height)
+                let mid_y = (corner_heights[0] + corner_heights[1] + corner_heights[2] + corner_heights[3]) / 4.0;
+                let left = Vec3::new(p0.x, mid_y, p0.z);
+                let right = Vec3::new(p1.x, mid_y, p1.z);
+                draw_3d_line_depth(fb, left, right, &state.camera_3d, color);
+            }
+        }
     }
 
     // Draw room boundary wireframes for all rooms
@@ -1558,7 +1558,8 @@ pub fn draw_viewport_3d(
 
             for (i, j) in edges {
                 if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_corners[i], screen_corners[j]) {
-                    fb.draw_line_3d(x0, y0, z0, x1, y1, z1, room_color);
+                    // Use overlay mode to draw on co-planar geometry surfaces
+                    fb.draw_line_3d_overlay(x0, y0, z0, x1, y1, z1, room_color);
                 }
             }
 
@@ -1581,11 +1582,11 @@ pub fn draw_viewport_3d(
                         .map(|(x, y, z)| (x as i32, y as i32, z)))
                     .collect();
 
-                // Draw portal quad outline
+                // Draw portal quad outline with overlay mode
                 let portal_edges = [(0, 1), (1, 2), (2, 3), (3, 0)];
                 for (i, j) in portal_edges {
                     if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (screen_verts[i], screen_verts[j]) {
-                        fb.draw_line_3d(x0, y0, z0, x1, y1, z1, portal_color);
+                        fb.draw_line_3d_overlay(x0, y0, z0, x1, y1, z1, portal_color);
                     }
                 }
             }
@@ -2280,13 +2281,35 @@ pub fn draw_viewport_3d(
     );
 }
 
-/// Draw a 3D line into the framebuffer using Bresenham's algorithm
+/// Draw a 3D line into the framebuffer using Bresenham's algorithm (no depth testing)
 fn draw_3d_line(
     fb: &mut Framebuffer,
     p0: Vec3,
     p1: Vec3,
     camera: &crate::rasterizer::Camera,
     color: RasterColor,
+) {
+    draw_3d_line_impl(fb, p0, p1, camera, color, false);
+}
+
+/// Draw a 3D line with depth testing (overlay mode - draws on co-planar surfaces)
+fn draw_3d_line_depth(
+    fb: &mut Framebuffer,
+    p0: Vec3,
+    p1: Vec3,
+    camera: &crate::rasterizer::Camera,
+    color: RasterColor,
+) {
+    draw_3d_line_impl(fb, p0, p1, camera, color, true);
+}
+
+fn draw_3d_line_impl(
+    fb: &mut Framebuffer,
+    p0: Vec3,
+    p1: Vec3,
+    camera: &crate::rasterizer::Camera,
+    color: RasterColor,
+    use_depth: bool,
 ) {
     const NEAR_PLANE: f32 = 0.1;
 
@@ -2315,46 +2338,58 @@ fn draw_3d_line(
         (p0, p1)
     };
 
-    // Project clipped endpoints
-    let s0 = world_to_screen(clipped_p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-    let s1 = world_to_screen(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    if use_depth {
+        // Use depth-tested line drawing
+        let s0 = world_to_screen_with_depth(clipped_p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+        let s1 = world_to_screen_with_depth(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
-    let (Some((x0f, y0f)), Some((x1f, y1f))) = (s0, s1) else {
-        return;
-    };
+        let (Some((x0f, y0f, depth0)), Some((x1f, y1f, depth1))) = (s0, s1) else {
+            return;
+        };
 
-    // Convert to integers for Bresenham
-    let mut x0 = x0f as i32;
-    let mut y0 = y0f as i32;
-    let x1 = x1f as i32;
-    let y1 = y1f as i32;
+        fb.draw_line_3d_overlay(x0f as i32, y0f as i32, depth0, x1f as i32, y1f as i32, depth1, color);
+    } else {
+        // No depth testing - draw on top of everything
+        let s0 = world_to_screen(clipped_p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+        let s1 = world_to_screen(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
-    let dx = (x1 - x0).abs();
-    let dy = -(y1 - y0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
+        let (Some((x0f, y0f)), Some((x1f, y1f))) = (s0, s1) else {
+            return;
+        };
 
-    let w = fb.width as i32;
-    let h = fb.height as i32;
+        // Convert to integers for Bresenham
+        let mut x0 = x0f as i32;
+        let mut y0 = y0f as i32;
+        let x1 = x1f as i32;
+        let y1 = y1f as i32;
 
-    loop {
-        if x0 >= 0 && x0 < w && y0 >= 0 && y0 < h {
-            fb.set_pixel(x0 as usize, y0 as usize, color);
-        }
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
 
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
+        let w = fb.width as i32;
+        let h = fb.height as i32;
 
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
+        loop {
+            if x0 >= 0 && x0 < w && y0 >= 0 && y0 < h {
+                fb.set_pixel(x0 as usize, y0 as usize, color);
+            }
+
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
         }
     }
 }
