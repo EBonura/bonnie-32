@@ -425,105 +425,65 @@ impl Sector {
         })
     }
 
-    /// Calculate where a new wall should be placed on this edge
-    /// Uses floor/ceiling as default bounds, finds gaps between existing walls
+    /// Calculate where a new wall should be placed on this edge.
+    ///
+    /// Simplified logic (max 2 walls per edge):
+    /// - 0 walls: fill floor-to-ceiling with slanted heights
+    /// - 1 wall: fill the remaining gap (floor-to-wall or wall-to-ceiling)
+    /// - 2 walls: fully covered, return None
+    ///
     /// Returns corner heights [bottom-left, bottom-right, top-right, top-left] for the new wall,
     /// or None if edge is fully covered.
-    ///
-    /// For slanted walls, the returned corners will match the existing wall's top edge
-    /// so the new wall seamlessly continues the slant.
     pub fn next_wall_position(&self, direction: Direction, fallback_bottom: f32, fallback_top: f32) -> Option<[f32; 4]> {
-        // Get the valid range for walls (floor to ceiling, or fallback values)
-        let floor_y = self.floor_height_at_edge(direction).unwrap_or(fallback_bottom);
-        let ceiling_y = self.ceiling_height_at_edge(direction).unwrap_or(fallback_top);
+        // Get individual corner heights for floor and ceiling (preserves slant)
+        // edge_heights returns (left, right) when looking from INSIDE the sector,
+        // but wall heights are [BL, BR, TR, TL] from the WALL's perspective (facing outward).
+        // So we swap: sector's left = wall's right, sector's right = wall's left.
+        let (floor_right, floor_left) = self.floor.as_ref()
+            .map(|f| f.edge_heights(direction))
+            .unwrap_or((fallback_bottom, fallback_bottom));
+        let (ceiling_right, ceiling_left) = self.ceiling.as_ref()
+            .map(|c| c.edge_heights(direction))
+            .unwrap_or((fallback_top, fallback_top));
 
         let walls = self.walls(direction);
-        if walls.is_empty() {
-            // No walls - fill from floor to ceiling (flat wall)
-            return Some([floor_y, floor_y, ceiling_y, ceiling_y]);
-        }
 
-        // For slanted walls, we need to check both sides of the edge separately.
-        // Collect coverage info for left and right sides, keeping track of which wall covers each side
-        let left_coverages: Vec<(f32, f32, usize)> = walls.iter().enumerate()
-            .map(|(i, w)| {
-                let (bot, top) = w.left_coverage();
-                (bot, top, i)
-            })
-            .collect();
-        let right_coverages: Vec<(f32, f32, usize)> = walls.iter().enumerate()
-            .map(|(i, w)| {
-                let (bot, top) = w.right_coverage();
-                (bot, top, i)
-            })
-            .collect();
+        match walls.len() {
+            0 => {
+                // No walls - fill from floor to ceiling, preserving slant
+                // [bottom-left, bottom-right, top-right, top-left]
+                Some([floor_left, floor_right, ceiling_right, ceiling_left])
+            }
+            1 => {
+                // One wall exists - fill the gap
+                let wall = &walls[0];
+                // Wall heights: [bottom-left, bottom-right, top-right, top-left]
+                let wall_bottom_left = wall.heights[0];
+                let wall_bottom_right = wall.heights[1];
+                let wall_top_right = wall.heights[2];
+                let wall_top_left = wall.heights[3];
 
-        // Find the highest covered point on each side
-        fn find_coverage_top_with_wall(coverages: &[(f32, f32, usize)], start: f32) -> (f32, Option<usize>) {
-            let mut top = start;
-            let mut top_wall = None;
-            for (bot, t, idx) in coverages {
-                if *bot <= top + 1.0 && *t > top {
-                    top = *t;
-                    top_wall = Some(*idx);
+                // Check if gap is at bottom (wall doesn't reach floor)
+                let gap_at_bottom = wall_bottom_left > floor_left + 1.0 || wall_bottom_right > floor_right + 1.0;
+                // Check if gap is at top (wall doesn't reach ceiling)
+                let gap_at_top = wall_top_left < ceiling_left - 1.0 || wall_top_right < ceiling_right - 1.0;
+
+                if gap_at_bottom {
+                    // Fill from floor to bottom of existing wall
+                    Some([floor_left, floor_right, wall_bottom_right, wall_bottom_left])
+                } else if gap_at_top {
+                    // Fill from top of existing wall to ceiling
+                    Some([wall_top_left, wall_top_right, ceiling_right, ceiling_left])
+                } else {
+                    // Wall already covers floor to ceiling
+                    None
                 }
             }
-            (top, top_wall)
-        }
-
-        // Find the lowest wall bottom on each side
-        fn find_lowest_with_wall(coverages: &[(f32, f32, usize)]) -> (f32, Option<usize>) {
-            let mut lowest = f32::INFINITY;
-            let mut lowest_wall = None;
-            for (bot, _, idx) in coverages {
-                if *bot < lowest {
-                    lowest = *bot;
-                    lowest_wall = Some(*idx);
-                }
+            _ => {
+                // 2+ walls - fully covered
+                None
             }
-            (lowest, lowest_wall)
         }
-
-        let (left_lowest, _left_lowest_wall) = find_lowest_with_wall(&left_coverages);
-        let (right_lowest, _right_lowest_wall) = find_lowest_with_wall(&right_coverages);
-
-        // Check for gap at the bottom - need gap on BOTH sides
-        let gap_bottom_left = left_lowest > floor_y + 1.0;
-        let gap_bottom_right = right_lowest > floor_y + 1.0;
-
-        if gap_bottom_left && gap_bottom_right {
-            // Gap at bottom on both sides - fill from floor to lowest wall
-            // The top edge should match the bottom edge of the lowest walls on each side
-            let top_left = left_lowest;
-            let top_right = right_lowest;
-            return Some([floor_y, floor_y, top_right, top_left]);
-        }
-
-        // Check for gap at the top - need gap on BOTH sides
-        let (left_top, left_top_wall) = find_coverage_top_with_wall(&left_coverages, floor_y);
-        let (right_top, right_top_wall) = find_coverage_top_with_wall(&right_coverages, floor_y);
-
-        let gap_top_left = left_top < ceiling_y - 1.0;
-        let gap_top_right = right_top < ceiling_y - 1.0;
-
-        if gap_top_left && gap_top_right {
-            // Gap at top on both sides - fill from highest coverage to ceiling
-            // The bottom edge should match the top edge of the highest walls on each side
-            let bottom_left = if let Some(idx) = left_top_wall {
-                walls[idx].heights[3]  // top-left of the wall that covers the left side
-            } else {
-                left_top
-            };
-            let bottom_right = if let Some(idx) = right_top_wall {
-                walls[idx].heights[2]  // top-right of the wall that covers the right side
-            } else {
-                right_top
-            };
-            return Some([bottom_left, bottom_right, ceiling_y, ceiling_y]);
-        }
-
-        // Edge is fully covered (at least on one side for the full height)
-        None
     }
 
     /// Extrude the floor upward by `amount` units.
