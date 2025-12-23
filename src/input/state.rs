@@ -1,20 +1,14 @@
 //! Input state management
 //!
-//! Polls both keyboard (macroquad) and gamepad (gamepads crate) input,
-//! combining them into a unified action-based API.
-//!
-//! Gamepad support works on native builds. WASM gamepad support is temporarily
-//! disabled due to RefCell conflicts with miniquad.
+//! Polls both keyboard (macroquad) and gamepad input, combining them into
+//! a unified action-based API.
 
-#[cfg(not(target_arch = "wasm32"))]
-use gamepads::{Gamepads, Button};
 use macroquad::prelude::*;
-use super::Action;
+use super::{Action, Gamepad, button};
 
 /// Unified input state that handles both keyboard/mouse and gamepad
 pub struct InputState {
-    #[cfg(not(target_arch = "wasm32"))]
-    gamepads: Gamepads,
+    gamepad: Gamepad,
     /// Analog stick deadzone (0.0-1.0)
     pub stick_deadzone: f32,
 }
@@ -22,16 +16,14 @@ pub struct InputState {
 impl InputState {
     pub fn new() -> Self {
         Self {
-            #[cfg(not(target_arch = "wasm32"))]
-            gamepads: Gamepads::new(),
+            gamepad: Gamepad::new(),
             stick_deadzone: 0.15,
         }
     }
 
     /// Call once per frame before checking actions
     pub fn poll(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.gamepads.poll();
+        self.gamepad.poll();
     }
 
     /// Get left stick as Vec2 (movement)
@@ -45,13 +37,10 @@ impl InputState {
         if is_key_down(KeyCode::A) { result.x -= 1.0; }
         if is_key_down(KeyCode::D) { result.x += 1.0; }
 
-        // Gamepad left stick (take if larger magnitude) - native only
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(gp) = self.gamepads.all().next() {
-            let gp_stick = self.apply_deadzone(gp.left_stick());
-            if gp_stick.length() > result.length() {
-                result = gp_stick;
-            }
+        // Gamepad left stick (take if larger magnitude)
+        let gp_stick = self.gamepad.left_stick();
+        if gp_stick.length() > result.length() {
+            result = gp_stick;
         }
 
         // Normalize if > 1 (diagonal keyboard input)
@@ -64,23 +53,7 @@ impl InputState {
     /// Get right stick as Vec2 (camera look)
     /// Only from gamepad - mouse handled separately
     pub fn right_stick(&self) -> Vec2 {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(gp) = self.gamepads.all().next() {
-            return self.apply_deadzone(gp.right_stick());
-        }
-        Vec2::ZERO
-    }
-
-    /// Apply radial deadzone with linear rescaling
-    #[cfg(not(target_arch = "wasm32"))]
-    fn apply_deadzone(&self, (x, y): (f32, f32)) -> Vec2 {
-        let len = (x * x + y * y).sqrt();
-        if len < self.stick_deadzone {
-            return Vec2::ZERO;
-        }
-        // Rescale from deadzone..1.0 to 0.0..1.0
-        let scale = (len - self.stick_deadzone) / (1.0 - self.stick_deadzone) / len;
-        Vec2::new(x * scale, y * scale)
+        self.gamepad.right_stick()
     }
 
     /// Check if action is currently held down
@@ -124,49 +97,40 @@ impl InputState {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn gamepad_down(&self, action: Action) -> bool {
-        let Some(gp) = self.gamepads.all().next() else { return false };
-
         match action {
             // Face buttons (Elden Ring layout)
-            Action::Jump => gp.is_currently_pressed(Button::ActionDown),        // A
-            Action::Dodge => gp.is_currently_pressed(Button::ActionRight),      // B
-            Action::UseItem => gp.is_currently_pressed(Button::ActionLeft),     // X
-            Action::Interact => gp.is_currently_pressed(Button::ActionUp),      // Y
+            Action::Jump => self.gamepad.is_button_down(button::A),
+            Action::Dodge => self.gamepad.is_button_down(button::B),
+            Action::UseItem => self.gamepad.is_button_down(button::X),
+            Action::Interact => self.gamepad.is_button_down(button::Y),
 
             // Shoulders (Elden Ring layout)
-            Action::Guard => gp.is_currently_pressed(Button::FrontLeftUpper),   // LB
-            Action::Skill => gp.is_currently_pressed(Button::FrontLeftLower),   // LT
-            Action::Attack => gp.is_currently_pressed(Button::FrontRightUpper), // RB
-            Action::StrongAttack => gp.is_currently_pressed(Button::FrontRightLower), // RT
+            Action::Guard => self.gamepad.is_button_down(button::LB),
+            Action::Skill => self.gamepad.is_button_down(button::LT),
+            Action::Attack => self.gamepad.is_button_down(button::RB),
+            Action::StrongAttack => self.gamepad.is_button_down(button::RT),
 
             // Stick clicks
-            Action::Crouch => gp.is_currently_pressed(Button::LeftStick),       // L3
-            Action::LockOn => gp.is_currently_pressed(Button::RightStick),      // R3
+            Action::Crouch => self.gamepad.is_button_down(button::L3),
+            Action::LockOn => self.gamepad.is_button_down(button::R3),
 
             // D-pad
-            Action::SwitchLeftWeapon => gp.is_currently_pressed(Button::DPadLeft),
-            Action::SwitchRightWeapon => gp.is_currently_pressed(Button::DPadRight),
-            Action::SwitchSpell => gp.is_currently_pressed(Button::DPadUp),
-            Action::SwitchItem => gp.is_currently_pressed(Button::DPadDown),
+            Action::SwitchLeftWeapon => self.gamepad.is_button_down(button::DPAD_LEFT),
+            Action::SwitchRightWeapon => self.gamepad.is_button_down(button::DPAD_RIGHT),
+            Action::SwitchSpell => self.gamepad.is_button_down(button::DPAD_UP),
+            Action::SwitchItem => self.gamepad.is_button_down(button::DPAD_DOWN),
 
             // System
-            Action::OpenMenu => gp.is_currently_pressed(Button::RightCenterCluster),  // Start
-            Action::OpenMap => gp.is_currently_pressed(Button::LeftCenterCluster),    // Select
+            Action::OpenMenu => self.gamepad.is_button_down(button::START),
+            Action::OpenMap => self.gamepad.is_button_down(button::SELECT),
 
             // Free-fly mode (reuses LB/LT)
-            Action::FlyUp => gp.is_currently_pressed(Button::FrontLeftUpper),
-            Action::FlyDown => gp.is_currently_pressed(Button::FrontLeftLower),
+            Action::FlyUp => self.gamepad.is_button_down(button::LB),
+            Action::FlyDown => self.gamepad.is_button_down(button::LT),
 
             _ => false,
         }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn gamepad_down(&self, _action: Action) -> bool {
-        // Gamepad disabled on WASM due to RefCell conflicts
-        false
     }
 
     fn keyboard_pressed(&self, action: Action) -> bool {
@@ -183,46 +147,30 @@ impl InputState {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn gamepad_pressed(&self, action: Action) -> bool {
-        let Some(gp) = self.gamepads.all().next() else { return false };
-
         match action {
-            Action::Jump => gp.is_just_pressed(Button::ActionDown),
-            Action::Dodge => gp.is_just_pressed(Button::ActionRight),
-            Action::Attack => gp.is_just_pressed(Button::FrontRightUpper),
-            Action::StrongAttack => gp.is_just_pressed(Button::FrontRightLower),
-            Action::Interact => gp.is_just_pressed(Button::ActionUp),
-            Action::OpenMenu => gp.is_just_pressed(Button::RightCenterCluster),
-            Action::LockOn => gp.is_just_pressed(Button::RightStick),
-            Action::Crouch => gp.is_just_pressed(Button::LeftStick),
-            Action::UseItem => gp.is_just_pressed(Button::ActionLeft),
-            Action::Guard => gp.is_just_pressed(Button::FrontLeftUpper),
-            Action::Skill => gp.is_just_pressed(Button::FrontLeftLower),
-            Action::SwitchLeftWeapon => gp.is_just_pressed(Button::DPadLeft),
-            Action::SwitchRightWeapon => gp.is_just_pressed(Button::DPadRight),
-            Action::SwitchSpell => gp.is_just_pressed(Button::DPadUp),
-            Action::SwitchItem => gp.is_just_pressed(Button::DPadDown),
+            Action::Jump => self.gamepad.is_button_pressed(button::A),
+            Action::Dodge => self.gamepad.is_button_pressed(button::B),
+            Action::Attack => self.gamepad.is_button_pressed(button::RB),
+            Action::StrongAttack => self.gamepad.is_button_pressed(button::RT),
+            Action::Interact => self.gamepad.is_button_pressed(button::Y),
+            Action::OpenMenu => self.gamepad.is_button_pressed(button::START),
+            Action::LockOn => self.gamepad.is_button_pressed(button::R3),
+            Action::Crouch => self.gamepad.is_button_pressed(button::L3),
+            Action::UseItem => self.gamepad.is_button_pressed(button::X),
+            Action::Guard => self.gamepad.is_button_pressed(button::LB),
+            Action::Skill => self.gamepad.is_button_pressed(button::LT),
+            Action::SwitchLeftWeapon => self.gamepad.is_button_pressed(button::DPAD_LEFT),
+            Action::SwitchRightWeapon => self.gamepad.is_button_pressed(button::DPAD_RIGHT),
+            Action::SwitchSpell => self.gamepad.is_button_pressed(button::DPAD_UP),
+            Action::SwitchItem => self.gamepad.is_button_pressed(button::DPAD_DOWN),
             _ => false,
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn gamepad_pressed(&self, _action: Action) -> bool {
-        // Gamepad disabled on WASM due to RefCell conflicts
-        false
-    }
-
     /// Check if any gamepad is connected
     pub fn has_gamepad(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.gamepads.all().next().is_some()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            false
-        }
+        self.gamepad.has_gamepad()
     }
 }
 

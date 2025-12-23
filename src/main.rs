@@ -102,9 +102,8 @@ async fn main() {
     println!("=== Bonnie Engine ===");
 
     loop {
-        // Track frame start time for FPS limiting (native only - WASM doesn't support Instant)
-        #[cfg(not(target_arch = "wasm32"))]
-        let frame_start = std::time::Instant::now();
+        // Track frame start time for FPS limiting
+        let frame_start = get_time();
 
         // Update UI context with mouse state
         let mouse_pos = mouse_position();
@@ -592,19 +591,31 @@ async fn main() {
         }
 
         // FPS limiting (only when in game tab)
-        // Uses spin-wait for last 2ms to avoid sleep() overshooting
-        #[cfg(not(target_arch = "wasm32"))]
         if let Tool::Test = app.active_tool {
             if let Some(target_frame_time) = app.game.fps_limit.frame_time() {
-                let target_duration = std::time::Duration::from_secs_f64(target_frame_time);
-                // Sleep for bulk of remaining time (leave 2ms margin for spin-wait)
-                let spin_margin = std::time::Duration::from_millis(2);
-                while frame_start.elapsed() + spin_margin < target_duration {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                // Spin-wait for precise timing
-                while frame_start.elapsed() < target_duration {
-                    std::hint::spin_loop();
+                let elapsed = get_time() - frame_start;
+                let remaining = target_frame_time - elapsed;
+
+                if remaining > 0.0 {
+                    // Native: use sleep for bulk, then spin-wait for precision
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let spin_margin = 0.002; // 2ms
+                        while get_time() - frame_start + spin_margin < target_frame_time {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        // Spin-wait for precise timing
+                        while get_time() - frame_start < target_frame_time {
+                            std::hint::spin_loop();
+                        }
+                    }
+                    // WASM: just spin-wait (no thread::sleep available)
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        while get_time() - frame_start < target_frame_time {
+                            // Busy wait - browser will handle frame pacing
+                        }
+                    }
                 }
             }
         }

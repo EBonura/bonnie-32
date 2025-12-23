@@ -43,7 +43,7 @@ Answer the question: **"How would a Souls-like have looked on a PS1?"**
 - **Textured geometry** - Multiple texture pack support
 
 ### Controller Support
-- **Gamepad input** - Full controller support via `gamepads` crate
+- **Gamepad input** - Full controller support (gilrs on native, Web Gamepad API on WASM)
 - **Elden Ring controls** - Familiar Souls-like button layout
 - **Unified input** - Seamlessly switch between keyboard and controller
 
@@ -356,29 +356,6 @@ Since WebAssembly can't enumerate directories at runtime, textures are loaded vi
 2. Generates `assets/textures/manifest.txt` listing all packs and files
 3. WASM runtime loads textures async from the manifest
 4. Native builds still use direct filesystem enumeration
-
-## WASM Debugging (Temporary)
-
-Tracking WASM build issues.
-
-### Isolation Tests
-
-| Component | Status | Result |
-|-----------|--------|--------|
-| 1. Gamepads JS plugin (`macroquad-gamepads-0.1.js`) | DISABLED | ✅ Fixed RefCell conflict |
-| 2. Gamepads Rust crate (full cfg guards on WASM) | DISABLED | ✅ Fixed RefCell conflict |
-| 3. `std::time::Instant::now()` in FPS limiter | DISABLED | ✅ Fixed - WASM doesn't support Instant |
-
-### Issues Found
-1. **RefCell conflict** - Gamepads crate causes borrow conflict with miniquad event handlers
-2. **Instant::now() panic** - `std::time::Instant` not supported on WASM, must use `macroquad::time::get_time()`
-
-### Current State
-- Gamepads: Disabled on WASM (full cfg guards)
-- FPS limiter: Disabled on WASM (uses Instant)
-- **TODO**: Re-enable WASM gamepad support using raw Web Gamepad API or alternative crate
-
----
 
 ## Acknowledgments
 
