@@ -4,7 +4,7 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
-use super::{EditorState, EditorTool, SECTOR_SIZE};
+use super::{EditorState, EditorTool, Selection, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -564,6 +564,56 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             state.redo();
         } else {
             state.undo();
+        }
+    }
+
+    // Copy selected object (Ctrl+C)
+    if ctrl && is_key_pressed(KeyCode::C) {
+        if let Selection::Object { room, index } = &state.selection {
+            if let Some(r) = state.level.rooms.get(*room) {
+                if let Some(obj) = r.objects.get(*index) {
+                    state.clipboard = Some(obj.clone());
+                    state.set_status("Object copied to clipboard", 2.0);
+                }
+            }
+        }
+    }
+
+    // Paste object (Ctrl+V) - place at selected sector
+    if ctrl && is_key_pressed(KeyCode::V) {
+        if let Some(copied) = state.clipboard.clone() {
+            // Get target sector from selection
+            let target = match &state.selection {
+                Selection::Sector { room, x, z } => Some((*room, *x, *z)),
+                Selection::SectorFace { room, x, z, .. } => Some((*room, *x, *z)),
+                Selection::Object { room, index } => {
+                    // If an object is selected, paste to that object's sector
+                    state.level.rooms.get(*room).and_then(|r| {
+                        r.objects.get(*index).map(|obj| (*room, obj.sector_x, obj.sector_z))
+                    })
+                }
+                _ => None,
+            };
+
+            if let Some((room_idx, sector_x, sector_z)) = target {
+                // Create a new object with the copied properties but at the target sector
+                let mut new_obj = copied;
+                new_obj.sector_x = sector_x;
+                new_obj.sector_z = sector_z;
+
+                state.save_undo();
+                // Add to the room
+                if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                    let new_index = room.objects.len();
+                    room.objects.push(new_obj);
+                    state.selection = Selection::Object { room: room_idx, index: new_index };
+                    state.set_status("Object pasted", 2.0);
+                }
+            } else {
+                state.set_status("Select a sector to paste into", 2.0);
+            }
+        } else {
+            state.set_status("Nothing in clipboard", 2.0);
         }
     }
 

@@ -52,7 +52,7 @@ pub fn draw_texture_palette(
 
     // Handle scrolling
     if ctx.mouse.inside(&content_rect) {
-        state.texture_scroll -= ctx.mouse.scroll * 30.0;
+        state.texture_scroll -= ctx.mouse.scroll * 12.0;
         // Clamp scroll
         let max_scroll = (total_height - content_rect.h).max(0.0);
         state.texture_scroll = state.texture_scroll.clamp(0.0, max_scroll);

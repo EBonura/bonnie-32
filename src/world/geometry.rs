@@ -287,6 +287,26 @@ impl VerticalFace {
         (self.heights[2] + self.heights[3]) / 2.0
     }
 
+    /// Get the absolute minimum Y of any corner
+    pub fn y_min(&self) -> f32 {
+        self.heights.iter().cloned().fold(f32::INFINITY, f32::min)
+    }
+
+    /// Get the absolute maximum Y of any corner
+    pub fn y_max(&self) -> f32 {
+        self.heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Get the left side coverage (bottom-left to top-left)
+    pub fn left_coverage(&self) -> (f32, f32) {
+        (self.heights[0], self.heights[3])  // bottom-left, top-left
+    }
+
+    /// Get the right side coverage (bottom-right to top-right)
+    pub fn right_coverage(&self) -> (f32, f32) {
+        (self.heights[1], self.heights[2])  // bottom-right, top-right
+    }
+
     /// Check if wall has uniform heights (all bottom same, all top same)
     pub fn is_flat(&self) -> bool {
         let bottom_same = (self.heights[0] - self.heights[1]).abs() < 0.001;
@@ -366,6 +386,103 @@ impl Sector {
             Direction::East => &mut self.walls_east,
             Direction::South => &mut self.walls_south,
             Direction::West => &mut self.walls_west,
+        }
+    }
+
+    /// Find the highest point of all walls on an edge
+    /// Returns None if no walls exist on that edge
+    pub fn walls_max_height(&self, direction: Direction) -> Option<f32> {
+        let walls = self.walls(direction);
+        if walls.is_empty() {
+            return None;
+        }
+        walls.iter().map(|w| w.y_top()).max_by(|a, b| a.partial_cmp(b).unwrap())
+    }
+
+    /// Find the lowest point of all walls on an edge
+    /// Returns None if no walls exist on that edge
+    pub fn walls_min_height(&self, direction: Direction) -> Option<f32> {
+        let walls = self.walls(direction);
+        if walls.is_empty() {
+            return None;
+        }
+        walls.iter().map(|w| w.y_bottom()).min_by(|a, b| a.partial_cmp(b).unwrap())
+    }
+
+    /// Get the floor height at a specific edge (average of the two corners on that edge)
+    pub fn floor_height_at_edge(&self, direction: Direction) -> Option<f32> {
+        self.floor.as_ref().map(|f| {
+            let (h1, h2) = f.edge_heights(direction);
+            (h1 + h2) / 2.0
+        })
+    }
+
+    /// Get the ceiling height at a specific edge (average of the two corners on that edge)
+    pub fn ceiling_height_at_edge(&self, direction: Direction) -> Option<f32> {
+        self.ceiling.as_ref().map(|c| {
+            let (h1, h2) = c.edge_heights(direction);
+            (h1 + h2) / 2.0
+        })
+    }
+
+    /// Calculate where a new wall should be placed on this edge.
+    ///
+    /// Simplified logic (max 2 walls per edge):
+    /// - 0 walls: fill floor-to-ceiling with slanted heights
+    /// - 1 wall: fill the remaining gap (floor-to-wall or wall-to-ceiling)
+    /// - 2 walls: fully covered, return None
+    ///
+    /// Returns corner heights [bottom-left, bottom-right, top-right, top-left] for the new wall,
+    /// or None if edge is fully covered.
+    pub fn next_wall_position(&self, direction: Direction, fallback_bottom: f32, fallback_top: f32) -> Option<[f32; 4]> {
+        // Get individual corner heights for floor and ceiling (preserves slant)
+        // edge_heights returns (left, right) when looking from INSIDE the sector,
+        // but wall heights are [BL, BR, TR, TL] from the WALL's perspective (facing outward).
+        // So we swap: sector's left = wall's right, sector's right = wall's left.
+        let (floor_right, floor_left) = self.floor.as_ref()
+            .map(|f| f.edge_heights(direction))
+            .unwrap_or((fallback_bottom, fallback_bottom));
+        let (ceiling_right, ceiling_left) = self.ceiling.as_ref()
+            .map(|c| c.edge_heights(direction))
+            .unwrap_or((fallback_top, fallback_top));
+
+        let walls = self.walls(direction);
+
+        match walls.len() {
+            0 => {
+                // No walls - fill from floor to ceiling, preserving slant
+                // [bottom-left, bottom-right, top-right, top-left]
+                Some([floor_left, floor_right, ceiling_right, ceiling_left])
+            }
+            1 => {
+                // One wall exists - fill the gap
+                let wall = &walls[0];
+                // Wall heights: [bottom-left, bottom-right, top-right, top-left]
+                let wall_bottom_left = wall.heights[0];
+                let wall_bottom_right = wall.heights[1];
+                let wall_top_right = wall.heights[2];
+                let wall_top_left = wall.heights[3];
+
+                // Check if gap is at bottom (wall doesn't reach floor)
+                let gap_at_bottom = wall_bottom_left > floor_left + 1.0 || wall_bottom_right > floor_right + 1.0;
+                // Check if gap is at top (wall doesn't reach ceiling)
+                let gap_at_top = wall_top_left < ceiling_left - 1.0 || wall_top_right < ceiling_right - 1.0;
+
+                if gap_at_bottom {
+                    // Fill from floor to bottom of existing wall
+                    Some([floor_left, floor_right, wall_bottom_right, wall_bottom_left])
+                } else if gap_at_top {
+                    // Fill from top of existing wall to ceiling
+                    Some([wall_top_left, wall_top_right, ceiling_right, ceiling_left])
+                } else {
+                    // Wall already covers floor to ceiling
+                    None
+                }
+            }
+            _ => {
+                // 2+ walls - fully covered
+                None
+            }
         }
     }
 

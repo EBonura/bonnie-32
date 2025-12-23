@@ -149,7 +149,19 @@ impl Framebuffer {
 
     /// Draw a line with depth testing (respects z-buffer)
     /// z0 and z1 are the depth values at each endpoint (smaller = closer)
+    /// Uses strict less-than comparison - line must be in front of geometry
     pub fn draw_line_3d(&mut self, x0: i32, y0: i32, z0: f32, x1: i32, y1: i32, z1: f32, color: Color) {
+        self.draw_line_3d_impl(x0, y0, z0, x1, y1, z1, color, false);
+    }
+
+    /// Draw a line with depth testing, allowing co-planar drawing
+    /// Uses less-than-or-equal comparison - draws on surfaces at same depth
+    /// Ideal for wireframe overlays on geometry
+    pub fn draw_line_3d_overlay(&mut self, x0: i32, y0: i32, z0: f32, x1: i32, y1: i32, z1: f32, color: Color) {
+        self.draw_line_3d_impl(x0, y0, z0, x1, y1, z1, color, true);
+    }
+
+    fn draw_line_3d_impl(&mut self, x0: i32, y0: i32, z0: f32, x1: i32, y1: i32, z1: f32, color: Color, allow_equal: bool) {
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -168,9 +180,14 @@ impl Framebuffer {
                 let t = step / total_steps;
                 let z = z0 + t * (z1 - z0);
 
-                // Use depth test (only draw if closer than existing pixel)
+                // Use depth test
                 let idx = y as usize * self.width + x as usize;
-                if z < self.zbuffer[idx] {
+                let passes = if allow_equal {
+                    z <= self.zbuffer[idx]  // Draw on co-planar surfaces
+                } else {
+                    z < self.zbuffer[idx]   // Only draw if strictly in front
+                };
+                if passes {
                     self.set_pixel(x as usize, y as usize, color);
                 }
             }

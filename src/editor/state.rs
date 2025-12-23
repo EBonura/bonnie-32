@@ -1,7 +1,7 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::{Level, ObjectType, SpawnPointType};
+use crate::world::{Level, ObjectType, SpawnPointType, LevelObject};
 use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings, Color};
 use super::texture_pack::TexturePack;
 
@@ -255,6 +255,9 @@ pub struct EditorState {
     /// Field IDs: 0=radius, 1=height, 2=step, 3=walk, 4=run, 5=gravity, 6=camera_distance, 7=camera_height
     pub player_prop_editing: Option<usize>,
     pub player_prop_buffer: String,
+
+    /// Clipboard for copy/paste operations (stores copied object)
+    pub clipboard: Option<LevelObject>,
 }
 
 impl EditorState {
@@ -362,6 +365,7 @@ impl EditorState {
             selected_object_type: ObjectType::Spawn(SpawnPointType::PlayerStart), // Default to player start
             player_prop_editing: None,
             player_prop_buffer: String::new(),
+            clipboard: None,
         }
     }
 
