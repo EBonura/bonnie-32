@@ -359,29 +359,24 @@ Since WebAssembly can't enumerate directories at runtime, textures are loaded vi
 
 ## WASM Debugging (Temporary)
 
-Tracking RefCell borrow conflict that crashes WASM build. Error: `panic_already_borrowed` in miniquad's `mouse_move` or `focus` event handlers.
+Tracking WASM build issues.
 
 ### Isolation Tests
 
 | Component | Status | Result |
 |-----------|--------|--------|
-| 1. Gamepads JS plugin (`macroquad-gamepads-0.1.js`) | DISABLED | ? |
-| 2. Gamepads Rust crate (full cfg guards on WASM) | DISABLED | ? |
-| 3. ??? | - | - |
+| 1. Gamepads JS plugin (`macroquad-gamepads-0.1.js`) | DISABLED | ✅ Fixed RefCell conflict |
+| 2. Gamepads Rust crate (full cfg guards on WASM) | DISABLED | ✅ Fixed RefCell conflict |
+| 3. `std::time::Instant::now()` in FPS limiter | DISABLED | ✅ Fixed - WASM doesn't support Instant |
+
+### Issues Found
+1. **RefCell conflict** - Gamepads crate causes borrow conflict with miniquad event handlers
+2. **Instant::now() panic** - `std::time::Instant` not supported on WASM, must use `macroquad::time::get_time()`
 
 ### Current State
-- Branch: `test-wasm-gamepad`
-- JS plugin: Commented out in `docs/index.html`
-- Rust gamepads: Fully cfg-guarded in `src/input/state.rs` (no Gamepads struct on WASM)
-
-### Next Steps
-1. Build and deploy current state (no gamepads at all on WASM)
-2. If works: gamepads crate is the culprit → investigate alternatives
-3. If fails: something else introduced the bug → bisect commits
-
-### Commits to bisect if needed
-- Last known working WASM: `0bae8c6` (before controller-input PR)
-- First potentially broken: `ca9af16` (Add controller input support)
+- Gamepads: Disabled on WASM (full cfg guards)
+- FPS limiter: Disabled on WASM (uses Instant)
+- **TODO**: Re-enable WASM gamepad support using raw Web Gamepad API or alternative crate
 
 ---
 

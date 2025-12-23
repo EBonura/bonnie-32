@@ -102,7 +102,8 @@ async fn main() {
     println!("=== Bonnie Engine ===");
 
     loop {
-        // Track frame start time for FPS limiting
+        // Track frame start time for FPS limiting (native only - WASM doesn't support Instant)
+        #[cfg(not(target_arch = "wasm32"))]
         let frame_start = std::time::Instant::now();
 
         // Update UI context with mouse state
