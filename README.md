@@ -357,6 +357,34 @@ Since WebAssembly can't enumerate directories at runtime, textures are loaded vi
 3. WASM runtime loads textures async from the manifest
 4. Native builds still use direct filesystem enumeration
 
+## WASM Debugging (Temporary)
+
+Tracking RefCell borrow conflict that crashes WASM build. Error: `panic_already_borrowed` in miniquad's `mouse_move` or `focus` event handlers.
+
+### Isolation Tests
+
+| Component | Status | Result |
+|-----------|--------|--------|
+| 1. Gamepads JS plugin (`macroquad-gamepads-0.1.js`) | DISABLED | ? |
+| 2. Gamepads Rust crate (full cfg guards on WASM) | DISABLED | ? |
+| 3. ??? | - | - |
+
+### Current State
+- Branch: `test-wasm-gamepad`
+- JS plugin: Commented out in `docs/index.html`
+- Rust gamepads: Fully cfg-guarded in `src/input/state.rs` (no Gamepads struct on WASM)
+
+### Next Steps
+1. Build and deploy current state (no gamepads at all on WASM)
+2. If works: gamepads crate is the culprit → investigate alternatives
+3. If fails: something else introduced the bug → bisect commits
+
+### Commits to bisect if needed
+- Last known working WASM: `0bae8c6` (before controller-input PR)
+- First potentially broken: `ca9af16` (Add controller input support)
+
+---
+
 ## Acknowledgments
 
 The software rasterizer is based on [tipsy](https://github.com/nkanaev/tipsy), a minimal PS1-style software renderer written in C99 by nkanaev.
