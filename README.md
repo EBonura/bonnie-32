@@ -205,7 +205,7 @@ This project uses the following free texture packs:
 ---
 
 ### World Editor - Geometry
-- [ ] **Multiple walls per sector edge**: Currently limited to 1 wall per side. The `Sector` struct already supports multiple walls via `Vec<VerticalFace>`. Implement smart placement where new walls stack on top/bottom of existing walls with configurable start/end heights.
+
 - [ ] Smarter floor/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
 - [ ] We need a way to place rooms on top of each other, maybe the top view can be toggled with a side view?
 - [ ] bigger effort: Tomb raider 3 introduced diagonals which are indeed supported by Open Lara, we'll need those as well

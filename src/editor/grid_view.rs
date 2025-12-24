@@ -3,9 +3,10 @@
 //! Sector-based geometry system - selection and editing works on sectors.
 
 use macroquad::prelude::*;
+use crate::rasterizer::Vec3;
 use crate::ui::{Rect, UiContext};
 use crate::world::SECTOR_SIZE;
-use super::{EditorState, Selection, CEILING_HEIGHT};
+use super::{EditorState, Selection, GridViewMode, CEILING_HEIGHT, CLICK_HEIGHT};
 
 /// Draw the 2D grid view (top-down view of current room)
 pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
@@ -54,18 +55,41 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     let center_y = rect.y + rect.h * 0.5 + state.grid_offset_y;
     let scale = state.grid_zoom;
 
-    // World to screen conversion (X-Z plane, viewing from top)
-    let world_to_screen = |wx: f32, wz: f32| -> (f32, f32) {
-        let sx = center_x + wx * scale;
-        let sy = center_y - wz * scale; // Negated Z for top-down view
+    // Get the current view mode
+    let view_mode = state.grid_view_mode;
+
+    // World to screen conversion - depends on view mode
+    // Returns (screen_x, screen_y) from (world_a, world_b) where a,b depend on view mode
+    let world_to_screen = |wa: f32, wb: f32| -> (f32, f32) {
+        let sx = center_x + wa * scale;
+        let sy = center_y - wb * scale; // Negated for screen Y (up is negative)
         (sx, sy)
     };
 
     // Screen to world conversion
     let screen_to_world = |sx: f32, sy: f32| -> (f32, f32) {
-        let wx = (sx - center_x) / scale;
-        let wz = -(sy - center_y) / scale;
-        (wx, wz)
+        let wa = (sx - center_x) / scale;
+        let wb = -(sy - center_y) / scale;
+        (wa, wb)
+    };
+
+    // Helper to convert full 3D world position to the 2D plane based on view mode
+    let world_pos_to_plane = |x: f32, y: f32, z: f32| -> (f32, f32) {
+        match view_mode {
+            GridViewMode::Top => (x, z),      // X-Z plane
+            GridViewMode::Front => (x, y),    // X-Y plane
+            GridViewMode::Side => (z, y),     // Z-Y plane
+        }
+    };
+
+    // Helper to convert 2D plane position back to world offset
+    // Returns (dx, dy, dz) offset to apply
+    let plane_to_world_offset = |da: f32, db: f32| -> (f32, f32, f32) {
+        match view_mode {
+            GridViewMode::Top => (da, 0.0, db),    // X-Z plane
+            GridViewMode::Front => (da, db, 0.0),  // X-Y plane
+            GridViewMode::Side => (0.0, db, da),   // Z-Y plane
+        }
     };
 
     // Enable scissor rectangle to clip drawing to viewport bounds
@@ -166,10 +190,34 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             let base_x = r.position.x + (gx as f32) * SECTOR_SIZE;
             let base_z = r.position.z + (gz as f32) * SECTOR_SIZE;
 
-            let (sx0, sy0) = world_to_screen(base_x, base_z);
-            let (sx1, sy1) = world_to_screen(base_x + SECTOR_SIZE, base_z);
-            let (sx2, sy2) = world_to_screen(base_x + SECTOR_SIZE, base_z + SECTOR_SIZE);
-            let (sx3, sy3) = world_to_screen(base_x, base_z + SECTOR_SIZE);
+            // Get floor and ceiling heights for side views
+            let floor_y = r.position.y + sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
+            let ceil_y = r.position.y + sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(CEILING_HEIGHT);
+
+            // Calculate screen corners based on view mode
+            let (sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3) = match view_mode {
+                GridViewMode::Top => {
+                    let (s0, t0) = world_to_screen(base_x, base_z);
+                    let (s1, t1) = world_to_screen(base_x + SECTOR_SIZE, base_z);
+                    let (s2, t2) = world_to_screen(base_x + SECTOR_SIZE, base_z + SECTOR_SIZE);
+                    let (s3, t3) = world_to_screen(base_x, base_z + SECTOR_SIZE);
+                    (s0, t0, s1, t1, s2, t2, s3, t3)
+                }
+                GridViewMode::Front => {
+                    let (s0, t0) = world_to_screen(base_x, floor_y);
+                    let (s1, t1) = world_to_screen(base_x + SECTOR_SIZE, floor_y);
+                    let (s2, t2) = world_to_screen(base_x + SECTOR_SIZE, ceil_y);
+                    let (s3, t3) = world_to_screen(base_x, ceil_y);
+                    (s0, t0, s1, t1, s2, t2, s3, t3)
+                }
+                GridViewMode::Side => {
+                    let (s0, t0) = world_to_screen(base_z, floor_y);
+                    let (s1, t1) = world_to_screen(base_z + SECTOR_SIZE, floor_y);
+                    let (s2, t2) = world_to_screen(base_z + SECTOR_SIZE, ceil_y);
+                    let (s3, t3) = world_to_screen(base_z, ceil_y);
+                    (s0, t0, s1, t1, s2, t2, s3, t3)
+                }
+            };
 
             // Dimmed colors for non-current rooms
             let has_floor = sector.floor.is_some();
@@ -235,10 +283,37 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
         let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
 
-        let (sx0, sy0) = world_to_screen(base_x, base_z);
-        let (sx1, sy1) = world_to_screen(base_x + SECTOR_SIZE, base_z);
-        let (sx2, sy2) = world_to_screen(base_x + SECTOR_SIZE, base_z + SECTOR_SIZE);
-        let (sx3, sy3) = world_to_screen(base_x, base_z + SECTOR_SIZE);
+        // Get floor and ceiling heights for side views
+        let floor_y = room.position.y + sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
+        let ceil_y = room.position.y + sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(CEILING_HEIGHT);
+
+        // Calculate screen corners based on view mode
+        let (sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3) = match view_mode {
+            GridViewMode::Top => {
+                // X-Z footprint (corners: NW, NE, SE, SW)
+                let (s0, t0) = world_to_screen(base_x, base_z);
+                let (s1, t1) = world_to_screen(base_x + SECTOR_SIZE, base_z);
+                let (s2, t2) = world_to_screen(base_x + SECTOR_SIZE, base_z + SECTOR_SIZE);
+                let (s3, t3) = world_to_screen(base_x, base_z + SECTOR_SIZE);
+                (s0, t0, s1, t1, s2, t2, s3, t3)
+            }
+            GridViewMode::Front => {
+                // X-Y rectangle (bottom-left, bottom-right, top-right, top-left)
+                let (s0, t0) = world_to_screen(base_x, floor_y);
+                let (s1, t1) = world_to_screen(base_x + SECTOR_SIZE, floor_y);
+                let (s2, t2) = world_to_screen(base_x + SECTOR_SIZE, ceil_y);
+                let (s3, t3) = world_to_screen(base_x, ceil_y);
+                (s0, t0, s1, t1, s2, t2, s3, t3)
+            }
+            GridViewMode::Side => {
+                // Z-Y rectangle (bottom-left, bottom-right, top-right, top-left)
+                let (s0, t0) = world_to_screen(base_z, floor_y);
+                let (s1, t1) = world_to_screen(base_z + SECTOR_SIZE, floor_y);
+                let (s2, t2) = world_to_screen(base_z + SECTOR_SIZE, ceil_y);
+                let (s3, t3) = world_to_screen(base_z, ceil_y);
+                (s0, t0, s1, t1, s2, t2, s3, t3)
+            }
+        };
 
         let is_hovered = hovered_sector == Some((gx, gz));
         let is_selected = matches!(state.selection, Selection::Sector { x, z, .. } if x == gx && z == gz);
@@ -313,38 +388,84 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
     }
 
-    // Draw portals
+    // Draw portals (view-mode-aware)
     for portal in &room.portals {
         // Portal vertices are room-relative, convert to world space
-        let v0 = portal.vertices[0];
-        let v1 = portal.vertices[1];
-        let v2 = portal.vertices[2];
-        let v3 = portal.vertices[3];
-
-        let (sx0, sy0) = world_to_screen(v0.x + room.position.x, v0.z + room.position.z);
-        let (sx1, sy1) = world_to_screen(v1.x + room.position.x, v1.z + room.position.z);
-        let (sx2, sy2) = world_to_screen(v2.x + room.position.x, v2.z + room.position.z);
-        let (sx3, sy3) = world_to_screen(v3.x + room.position.x, v3.z + room.position.z);
-
-        // Portal fill (magenta)
-        draw_triangle(
-            Vec2::new(sx0, sy0),
-            Vec2::new(sx1, sy1),
-            Vec2::new(sx2, sy2),
-            Color::from_rgba(200, 50, 200, 80),
+        let v0 = Vec3::new(
+            portal.vertices[0].x + room.position.x,
+            portal.vertices[0].y + room.position.y,
+            portal.vertices[0].z + room.position.z,
         );
-        draw_triangle(
-            Vec2::new(sx0, sy0),
-            Vec2::new(sx2, sy2),
-            Vec2::new(sx3, sy3),
-            Color::from_rgba(200, 50, 200, 80),
+        let v1 = Vec3::new(
+            portal.vertices[1].x + room.position.x,
+            portal.vertices[1].y + room.position.y,
+            portal.vertices[1].z + room.position.z,
+        );
+        let v2 = Vec3::new(
+            portal.vertices[2].x + room.position.x,
+            portal.vertices[2].y + room.position.y,
+            portal.vertices[2].z + room.position.z,
+        );
+        let v3 = Vec3::new(
+            portal.vertices[3].x + room.position.x,
+            portal.vertices[3].y + room.position.y,
+            portal.vertices[3].z + room.position.z,
         );
 
-        // Portal outline
-        draw_line(sx0, sy0, sx1, sy1, 2.0, Color::from_rgba(255, 100, 255, 255));
-        draw_line(sx1, sy1, sx2, sy2, 2.0, Color::from_rgba(255, 100, 255, 255));
-        draw_line(sx2, sy2, sx3, sy3, 2.0, Color::from_rgba(255, 100, 255, 255));
-        draw_line(sx3, sy3, sx0, sy0, 2.0, Color::from_rgba(255, 100, 255, 255));
+        // Check if this is a horizontal portal (normal pointing up or down)
+        let is_horizontal = portal.normal.y.abs() > 0.9;
+
+        // Convert to screen coordinates based on view mode
+        let (sx0, sy0) = {
+            let (a, b) = world_pos_to_plane(v0.x, v0.y, v0.z);
+            world_to_screen(a, b)
+        };
+        let (sx1, sy1) = {
+            let (a, b) = world_pos_to_plane(v1.x, v1.y, v1.z);
+            world_to_screen(a, b)
+        };
+        let (sx2, sy2) = {
+            let (a, b) = world_pos_to_plane(v2.x, v2.y, v2.z);
+            world_to_screen(a, b)
+        };
+        let (sx3, sy3) = {
+            let (a, b) = world_pos_to_plane(v3.x, v3.y, v3.z);
+            world_to_screen(a, b)
+        };
+
+        // In top view, horizontal portals appear as filled quads
+        // In side views, horizontal portals appear as horizontal lines
+        // In top view, vertical portals may appear as lines (edges)
+        // In side views, vertical portals appear as filled quads
+        let should_fill = match view_mode {
+            GridViewMode::Top => is_horizontal,      // Horizontal portals fill, vertical appear as lines
+            GridViewMode::Front | GridViewMode::Side => !is_horizontal, // Vertical portals fill
+        };
+
+        let fill_color = Color::from_rgba(200, 50, 200, 80);
+        let outline_color = Color::from_rgba(255, 100, 255, 255);
+
+        if should_fill {
+            // Draw filled quad
+            draw_triangle(
+                Vec2::new(sx0, sy0),
+                Vec2::new(sx1, sy1),
+                Vec2::new(sx2, sy2),
+                fill_color,
+            );
+            draw_triangle(
+                Vec2::new(sx0, sy0),
+                Vec2::new(sx2, sy2),
+                Vec2::new(sx3, sy3),
+                fill_color,
+            );
+        }
+
+        // Portal outline (always draw)
+        draw_line(sx0, sy0, sx1, sy1, 2.0, outline_color);
+        draw_line(sx1, sy1, sx2, sy2, 2.0, outline_color);
+        draw_line(sx2, sy2, sx3, sy3, 2.0, outline_color);
+        draw_line(sx3, sy3, sx0, sy0, 2.0, outline_color);
     }
 
     // Draw level objects (spawns, lights, triggers, etc.) for current room and detect hover
@@ -440,10 +561,16 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             continue;
         }
 
-        // Calculate room center (not origin corner)
+        // Calculate room center (not origin corner) - depends on view mode
         let center_x = r.position.x + (r.width as f32 * SECTOR_SIZE) / 2.0;
         let center_z = r.position.z + (r.depth as f32 * SECTOR_SIZE) / 2.0;
-        let (ox, oy) = world_to_screen(center_x, center_z);
+        let center_y = r.position.y + (r.bounds.max.y + r.bounds.min.y) / 2.0;
+
+        let (ox, oy) = match view_mode {
+            GridViewMode::Top => world_to_screen(center_x, center_z),
+            GridViewMode::Front => world_to_screen(center_x, center_y),
+            GridViewMode::Side => world_to_screen(center_z, center_y),
+        };
         if ox >= rect.x - 10.0 && ox <= rect.right() + 10.0 && oy >= rect.y - 10.0 && oy <= rect.bottom() + 10.0 {
             let dist_to_mouse = ((mouse_pos.0 - ox).powi(2) + (mouse_pos.1 - oy).powi(2)).sqrt();
             let is_hovered = inside && dist_to_mouse < 12.0;
@@ -514,12 +641,18 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
     // Draw ghost preview when dragging room center handle
     if state.grid_dragging_room_origin && state.grid_sector_drag_start.is_some() {
-        let (offset_x, offset_z) = state.grid_sector_drag_offset;
+        let (offset_a, offset_b) = state.grid_sector_drag_offset;
         if let Some(r) = state.level.rooms.get(current_room_idx) {
-            // Ghost at new center position
-            let new_center_x = r.position.x + (r.width as f32 * SECTOR_SIZE) / 2.0 + offset_x;
-            let new_center_z = r.position.z + (r.depth as f32 * SECTOR_SIZE) / 2.0 + offset_z;
-            let (ox, oy) = world_to_screen(new_center_x, new_center_z);
+            // Ghost at new center position - offset applies to the current view plane
+            let center_x = r.position.x + (r.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = r.position.z + (r.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = r.position.y + (r.bounds.max.y + r.bounds.min.y) / 2.0;
+
+            let (ox, oy) = match view_mode {
+                GridViewMode::Top => world_to_screen(center_x + offset_a, center_z + offset_b),
+                GridViewMode::Front => world_to_screen(center_x + offset_a, center_y + offset_b),
+                GridViewMode::Side => world_to_screen(center_z + offset_a, center_y + offset_b),
+            };
 
             // Ghost center crosshair
             draw_circle(ox, oy, 8.0, Color::from_rgba(100, 255, 100, 200));
@@ -657,28 +790,38 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             }
             // Handle sector/room dragging
             else {
-                // Snap offset to sector grid for sectors/rooms
-                let snapped_offset_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
-                let snapped_offset_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
+                // offset_x/offset_z are actually screen-plane offsets (a, b)
+                // Convert to world offsets using view mode
+                let (world_dx, world_dy, world_dz) = plane_to_world_offset(offset_x, offset_z);
 
-                // Only apply if there's actual movement
-                if snapped_offset_x.abs() >= SECTOR_SIZE * 0.5 || snapped_offset_z.abs() >= SECTOR_SIZE * 0.5 {
+                // Snap offsets to appropriate grid
+                let snapped_dx = (world_dx / SECTOR_SIZE).round() * SECTOR_SIZE;
+                let snapped_dy = (world_dy / CLICK_HEIGHT).round() * CLICK_HEIGHT;
+                let snapped_dz = (world_dz / SECTOR_SIZE).round() * SECTOR_SIZE;
+
+                // Only apply if there's actual movement (check all axes)
+                let has_movement = snapped_dx.abs() >= SECTOR_SIZE * 0.5
+                    || snapped_dz.abs() >= SECTOR_SIZE * 0.5
+                    || snapped_dy.abs() >= CLICK_HEIGHT * 0.5;
+
+                if has_movement {
                     state.save_undo();
 
                     if state.grid_dragging_room_origin {
                     // Move entire room position
                     if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
-                        room.position.x += snapped_offset_x;
-                        room.position.z += snapped_offset_z;
+                        room.position.x += snapped_dx;
+                        room.position.y += snapped_dy;
+                        room.position.z += snapped_dz;
                     }
                     if let Some(room) = state.level.rooms.get(current_room_idx) {
-                        state.set_status(&format!("Moved room to ({:.0}, {:.0})", room.position.x, room.position.z), 2.0);
+                        state.set_status(&format!("Moved room to ({:.0}, {:.0}, {:.0})", room.position.x, room.position.y, room.position.z), 2.0);
                     }
                     state.mark_portals_dirty();
                 } else {
-                    // Move selected sectors within the room grid
-                    let grid_dx = (snapped_offset_x / SECTOR_SIZE).round() as i32;
-                    let grid_dz = (snapped_offset_z / SECTOR_SIZE).round() as i32;
+                    // Move selected sectors within the room grid (X-Z only, no Y movement for sectors)
+                    let grid_dx = (snapped_dx / SECTOR_SIZE).round() as i32;
+                    let grid_dz = (snapped_dz / SECTOR_SIZE).round() as i32;
 
                     if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
                         // Collect sectors to move
@@ -984,6 +1127,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 }
                             }
 
+                            // Floor at 0.0 = room-relative base (will render at room.position.y in world space)
                             room.set_floor(gx, gz, 0.0, state.selected_texture.clone());
                             room.recalculate_bounds();
                             state.mark_portals_dirty();
@@ -1057,6 +1201,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 }
                             }
 
+                            // Ceiling at CEILING_HEIGHT = room-relative (will render at room.position.y + CEILING_HEIGHT)
                             room.set_ceiling(gx, gz, CEILING_HEIGHT, state.selected_texture.clone());
                             room.recalculate_bounds();
                             state.mark_portals_dirty();
