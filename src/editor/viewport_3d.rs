@@ -97,118 +97,47 @@ pub fn draw_viewport_3d(
         state.set_status("Selection cleared", 0.5);
     }
 
-    // Delete selected face with Delete or Backspace key
+    // Delete selected faces with Delete or Backspace key (supports multi-selection)
     if inside_viewport && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
-        if let Selection::SectorFace { room, x, z, face } = &state.selection {
-            let (room_idx, gx, gz, face) = (*room, *x, *z, *face);
+        // Collect all selections (primary + multi)
+        let mut all_selections: Vec<Selection> = vec![state.selection.clone()];
+        all_selections.extend(state.multi_selection.clone());
 
-            // Check if there's something to delete before calling save_undo
-            let has_face = match face {
-                SectorFace::Floor => state.level.rooms.get(room_idx)
-                    .and_then(|r| r.get_sector(gx, gz))
-                    .map(|s| s.floor.is_some())
-                    .unwrap_or(false),
-                SectorFace::Ceiling => state.level.rooms.get(room_idx)
-                    .and_then(|r| r.get_sector(gx, gz))
-                    .map(|s| s.ceiling.is_some())
-                    .unwrap_or(false),
-                SectorFace::WallNorth(i) => state.level.rooms.get(room_idx)
-                    .and_then(|r| r.get_sector(gx, gz))
-                    .map(|s| s.walls_north.get(i).is_some())
-                    .unwrap_or(false),
-                SectorFace::WallEast(i) => state.level.rooms.get(room_idx)
-                    .and_then(|r| r.get_sector(gx, gz))
-                    .map(|s| s.walls_east.get(i).is_some())
-                    .unwrap_or(false),
-                SectorFace::WallSouth(i) => state.level.rooms.get(room_idx)
-                    .and_then(|r| r.get_sector(gx, gz))
-                    .map(|s| s.walls_south.get(i).is_some())
-                    .unwrap_or(false),
-                SectorFace::WallWest(i) => state.level.rooms.get(room_idx)
-                    .and_then(|r| r.get_sector(gx, gz))
-                    .map(|s| s.walls_west.get(i).is_some())
-                    .unwrap_or(false),
-            };
+        // Filter to only SectorFace selections
+        let face_selections: Vec<_> = all_selections.into_iter()
+            .filter_map(|s| match s {
+                Selection::SectorFace { room, x, z, face } => Some((room, x, z, face)),
+                _ => None,
+            })
+            .collect();
 
-            if has_face {
-                state.save_undo();
+        if !face_selections.is_empty() {
+            state.save_undo();
+            let mut deleted_count = 0;
+            let mut affected_rooms = std::collections::HashSet::new();
 
-                let deleted = match face {
-                    SectorFace::Floor => {
-                        if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                            if let Some(sector) = room.get_sector_mut(gx, gz) {
-                                sector.floor = None;
-                            }
-                            room.cleanup_empty_sectors();
-                            room.recalculate_bounds();
-                            Some("floor")
-                        } else { None }
-                    }
-                    SectorFace::Ceiling => {
-                        if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                            if let Some(sector) = room.get_sector_mut(gx, gz) {
-                                sector.ceiling = None;
-                            }
-                            room.cleanup_empty_sectors();
-                            room.recalculate_bounds();
-                            Some("ceiling")
-                        } else { None }
-                    }
-                    SectorFace::WallNorth(i) => {
-                        if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                            if let Some(sector) = room.get_sector_mut(gx, gz) {
-                                if i < sector.walls_north.len() {
-                                    sector.walls_north.remove(i);
-                                }
-                            }
-                            room.cleanup_empty_sectors();
-                            room.recalculate_bounds();
-                            Some("north wall")
-                        } else { None }
-                    }
-                    SectorFace::WallEast(i) => {
-                        if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                            if let Some(sector) = room.get_sector_mut(gx, gz) {
-                                if i < sector.walls_east.len() {
-                                    sector.walls_east.remove(i);
-                                }
-                            }
-                            room.cleanup_empty_sectors();
-                            room.recalculate_bounds();
-                            Some("east wall")
-                        } else { None }
-                    }
-                    SectorFace::WallSouth(i) => {
-                        if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                            if let Some(sector) = room.get_sector_mut(gx, gz) {
-                                if i < sector.walls_south.len() {
-                                    sector.walls_south.remove(i);
-                                }
-                            }
-                            room.cleanup_empty_sectors();
-                            room.recalculate_bounds();
-                            Some("south wall")
-                        } else { None }
-                    }
-                    SectorFace::WallWest(i) => {
-                        if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                            if let Some(sector) = room.get_sector_mut(gx, gz) {
-                                if i < sector.walls_west.len() {
-                                    sector.walls_west.remove(i);
-                                }
-                            }
-                            room.cleanup_empty_sectors();
-                            room.recalculate_bounds();
-                            Some("west wall")
-                        } else { None }
-                    }
-                };
-
-                if let Some(type_name) = deleted {
-                    state.set_selection(Selection::None);
-                    state.mark_portals_dirty();
-                    state.set_status(&format!("Deleted {}", type_name), 2.0);
+            for (room_idx, gx, gz, face) in face_selections {
+                let deleted = delete_face(&mut state.level, room_idx, gx, gz, face);
+                if deleted {
+                    deleted_count += 1;
+                    affected_rooms.insert(room_idx);
                 }
+            }
+
+            // Cleanup affected rooms
+            for room_idx in affected_rooms {
+                if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                    room.cleanup_empty_sectors();
+                    room.recalculate_bounds();
+                }
+            }
+
+            if deleted_count > 0 {
+                state.set_selection(Selection::None);
+                state.clear_multi_selection();
+                state.mark_portals_dirty();
+                let msg = if deleted_count == 1 { "Deleted 1 face".to_string() } else { format!("Deleted {} faces", deleted_count) };
+                state.set_status(&msg, 2.0);
             }
         }
     }
@@ -2344,6 +2273,33 @@ pub fn draw_viewport_3d(
         14.0,
         Color::from_rgba(200, 200, 200, 255),
     );
+}
+
+/// Delete a single face from a sector, returns true if something was deleted
+fn delete_face(level: &mut crate::world::Level, room_idx: usize, gx: usize, gz: usize, face: SectorFace) -> bool {
+    let Some(room) = level.rooms.get_mut(room_idx) else { return false };
+    let Some(sector) = room.get_sector_mut(gx, gz) else { return false };
+
+    match face {
+        SectorFace::Floor => {
+            if sector.floor.is_some() { sector.floor = None; true } else { false }
+        }
+        SectorFace::Ceiling => {
+            if sector.ceiling.is_some() { sector.ceiling = None; true } else { false }
+        }
+        SectorFace::WallNorth(i) => {
+            if i < sector.walls_north.len() { sector.walls_north.remove(i); true } else { false }
+        }
+        SectorFace::WallEast(i) => {
+            if i < sector.walls_east.len() { sector.walls_east.remove(i); true } else { false }
+        }
+        SectorFace::WallSouth(i) => {
+            if i < sector.walls_south.len() { sector.walls_south.remove(i); true } else { false }
+        }
+        SectorFace::WallWest(i) => {
+            if i < sector.walls_west.len() { sector.walls_west.remove(i); true } else { false }
+        }
+    }
 }
 
 /// Draw a 3D line into the framebuffer using Bresenham's algorithm (no depth testing)
