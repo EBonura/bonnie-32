@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use crate::world::{Level, ObjectType, SpawnPointType, LevelObject};
-use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings, Color};
+use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings};
 use super::texture_pack::TexturePack;
 
 /// TRLE grid constraints

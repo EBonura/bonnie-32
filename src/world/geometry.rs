@@ -2062,7 +2062,6 @@ impl Level {
     }
 
     /// Detect horizontal portals between two rooms (floor-to-ceiling connections)
-    /// Creates portals where one room's ceiling matches another room's floor at the same X-Z position
     fn detect_horizontal_portals_between(
         &mut self,
         room_a_idx: usize,
@@ -2076,212 +2075,104 @@ impl Level {
     ) {
         const HEIGHT_TOLERANCE: f32 = 1.0;
 
-        // Collect portals to add (to avoid borrow checker issues)
         let mut portals_a: Vec<Portal> = Vec::new();
         let mut portals_b: Vec<Portal> = Vec::new();
 
-        // Check each sector in room A against potentially overlapping sectors in room B
         for gx_a in 0..width_a {
             for gz_a in 0..depth_a {
-                // World position of this sector in room A
-                let world_x_a = pos_a.x + (gx_a as f32) * SECTOR_SIZE;
-                let world_z_a = pos_a.z + (gz_a as f32) * SECTOR_SIZE;
+                let world_x = pos_a.x + (gx_a as f32) * SECTOR_SIZE;
+                let world_z = pos_a.z + (gz_a as f32) * SECTOR_SIZE;
 
-                // Find corresponding sector in room B at same X-Z position
-                let local_x_b = world_x_a - pos_b.x;
-                let local_z_b = world_z_a - pos_b.z;
-
-                // Must be aligned to grid
-                if local_x_b < 0.0 || local_z_b < 0.0 {
-                    continue;
-                }
-                if (local_x_b % SECTOR_SIZE).abs() > 0.1 || (local_z_b % SECTOR_SIZE).abs() > 0.1 {
-                    continue;
-                }
+                // Find corresponding sector in room B
+                let local_x_b = world_x - pos_b.x;
+                let local_z_b = world_z - pos_b.z;
+                if local_x_b < 0.0 || local_z_b < 0.0 { continue; }
+                if (local_x_b % SECTOR_SIZE).abs() > 0.1 || (local_z_b % SECTOR_SIZE).abs() > 0.1 { continue; }
 
                 let gx_b = (local_x_b / SECTOR_SIZE) as usize;
                 let gz_b = (local_z_b / SECTOR_SIZE) as usize;
+                if gx_b >= width_b || gz_b >= depth_b { continue; }
 
-                if gx_b >= width_b || gz_b >= depth_b {
-                    continue;
-                }
-
-                // Get sectors
-                let sector_a = self.rooms[room_a_idx].get_sector(gx_a, gz_a);
-                let sector_b = self.rooms[room_b_idx].get_sector(gx_b, gz_b);
-
-                let (sector_a, sector_b) = match (sector_a, sector_b) {
+                let (sector_a, sector_b) = match (
+                    self.rooms[room_a_idx].get_sector(gx_a, gz_a),
+                    self.rooms[room_b_idx].get_sector(gx_b, gz_b),
+                ) {
                     (Some(a), Some(b)) => (a, b),
                     _ => continue,
                 };
 
-                // Check if A's ceiling meets B's floor (A is below B)
+                // Helper to create portal pair at given Y heights
+                let mut add_portal_pair = |heights: [f32; 4], upper_room_idx: usize, lower_room_idx: usize, upper_pos: Vec3, lower_pos: Vec3| {
+                    let verts = [
+                        Vec3::new(world_x, heights[0], world_z),
+                        Vec3::new(world_x + SECTOR_SIZE, heights[1], world_z),
+                        Vec3::new(world_x + SECTOR_SIZE, heights[2], world_z + SECTOR_SIZE),
+                        Vec3::new(world_x, heights[3], world_z + SECTOR_SIZE),
+                    ];
+
+                    // Portal in lower room pointing up
+                    let lower_verts = [
+                        Vec3::new(verts[0].x - lower_pos.x, verts[0].y - lower_pos.y, verts[0].z - lower_pos.z),
+                        Vec3::new(verts[1].x - lower_pos.x, verts[1].y - lower_pos.y, verts[1].z - lower_pos.z),
+                        Vec3::new(verts[2].x - lower_pos.x, verts[2].y - lower_pos.y, verts[2].z - lower_pos.z),
+                        Vec3::new(verts[3].x - lower_pos.x, verts[3].y - lower_pos.y, verts[3].z - lower_pos.z),
+                    ];
+
+                    // Portal in upper room pointing down (reversed winding)
+                    let upper_verts = [
+                        Vec3::new(verts[0].x - upper_pos.x, verts[0].y - upper_pos.y, verts[0].z - upper_pos.z),
+                        Vec3::new(verts[3].x - upper_pos.x, verts[3].y - upper_pos.y, verts[3].z - upper_pos.z),
+                        Vec3::new(verts[2].x - upper_pos.x, verts[2].y - upper_pos.y, verts[2].z - upper_pos.z),
+                        Vec3::new(verts[1].x - upper_pos.x, verts[1].y - upper_pos.y, verts[1].z - upper_pos.z),
+                    ];
+
+                    if lower_room_idx == room_a_idx {
+                        portals_a.push(Portal::new(upper_room_idx, lower_verts, Vec3::new(0.0, 1.0, 0.0)));
+                        portals_b.push(Portal::new(lower_room_idx, upper_verts, Vec3::new(0.0, -1.0, 0.0)));
+                    } else {
+                        portals_b.push(Portal::new(upper_room_idx, lower_verts, Vec3::new(0.0, 1.0, 0.0)));
+                        portals_a.push(Portal::new(lower_room_idx, upper_verts, Vec3::new(0.0, -1.0, 0.0)));
+                    }
+                };
+
+                // Case 1: A's ceiling meets B's floor (A is below B)
                 if let (Some(ceil_a), Some(floor_b)) = (&sector_a.ceiling, &sector_b.floor) {
-                    // Get absolute heights (including room position.y offset)
-                    let ceil_a_heights: [f32; 4] = [
-                        ceil_a.heights[0] + pos_a.y,
-                        ceil_a.heights[1] + pos_a.y,
-                        ceil_a.heights[2] + pos_a.y,
-                        ceil_a.heights[3] + pos_a.y,
-                    ];
-                    let floor_b_heights: [f32; 4] = [
-                        floor_b.heights[0] + pos_b.y,
-                        floor_b.heights[1] + pos_b.y,
-                        floor_b.heights[2] + pos_b.y,
-                        floor_b.heights[3] + pos_b.y,
-                    ];
+                    let ceil_heights = [ceil_a.heights[0] + pos_a.y, ceil_a.heights[1] + pos_a.y,
+                                        ceil_a.heights[2] + pos_a.y, ceil_a.heights[3] + pos_a.y];
+                    let floor_heights = [floor_b.heights[0] + pos_b.y, floor_b.heights[1] + pos_b.y,
+                                         floor_b.heights[2] + pos_b.y, floor_b.heights[3] + pos_b.y];
 
-                    // Check if all corners match within tolerance
-                    let matches = (0..4).all(|i| (ceil_a_heights[i] - floor_b_heights[i]).abs() < HEIGHT_TOLERANCE);
-
-                    if matches {
-                        // Create horizontal portal from A to B (pointing up through ceiling)
-                        // Portal is at the ceiling height of room A, using each corner's actual height
-                        // Vertices: NW, NE, SE, SW (counter-clockwise when viewed from below)
-                        let vertices_world = [
-                            Vec3::new(world_x_a, ceil_a_heights[0], world_z_a),                          // NW
-                            Vec3::new(world_x_a + SECTOR_SIZE, ceil_a_heights[1], world_z_a),            // NE
-                            Vec3::new(world_x_a + SECTOR_SIZE, ceil_a_heights[2], world_z_a + SECTOR_SIZE), // SE
-                            Vec3::new(world_x_a, ceil_a_heights[3], world_z_a + SECTOR_SIZE),            // SW
-                        ];
-
-                        // Room A portal (pointing up into room B)
-                        let vertices_a = [
-                            Vec3::new(vertices_world[0].x - pos_a.x, vertices_world[0].y - pos_a.y, vertices_world[0].z - pos_a.z),
-                            Vec3::new(vertices_world[1].x - pos_a.x, vertices_world[1].y - pos_a.y, vertices_world[1].z - pos_a.z),
-                            Vec3::new(vertices_world[2].x - pos_a.x, vertices_world[2].y - pos_a.y, vertices_world[2].z - pos_a.z),
-                            Vec3::new(vertices_world[3].x - pos_a.x, vertices_world[3].y - pos_a.y, vertices_world[3].z - pos_a.z),
-                        ];
-                        let normal_a = Vec3::new(0.0, 1.0, 0.0); // Up
-                        portals_a.push(Portal::new(room_b_idx, vertices_a, normal_a));
-
-                        // Room B portal (pointing down into room A)
-                        let vertices_b = [
-                            Vec3::new(vertices_world[0].x - pos_b.x, vertices_world[0].y - pos_b.y, vertices_world[0].z - pos_b.z),
-                            Vec3::new(vertices_world[3].x - pos_b.x, vertices_world[3].y - pos_b.y, vertices_world[3].z - pos_b.z),
-                            Vec3::new(vertices_world[2].x - pos_b.x, vertices_world[2].y - pos_b.y, vertices_world[2].z - pos_b.z),
-                            Vec3::new(vertices_world[1].x - pos_b.x, vertices_world[1].y - pos_b.y, vertices_world[1].z - pos_b.z),
-                        ];
-                        let normal_b = Vec3::new(0.0, -1.0, 0.0); // Down
-                        portals_b.push(Portal::new(room_a_idx, vertices_b, normal_b));
+                    if (0..4).all(|i| (ceil_heights[i] - floor_heights[i]).abs() < HEIGHT_TOLERANCE) {
+                        add_portal_pair(ceil_heights, room_b_idx, room_a_idx, pos_b, pos_a);
                     }
                 }
 
-                // Check if B's ceiling meets A's floor (B is below A)
+                // Case 2: B's ceiling meets A's floor (B is below A)
                 if let (Some(ceil_b), Some(floor_a)) = (&sector_b.ceiling, &sector_a.floor) {
-                    // Get absolute heights (including room position.y offset)
-                    let ceil_b_heights: [f32; 4] = [
-                        ceil_b.heights[0] + pos_b.y,
-                        ceil_b.heights[1] + pos_b.y,
-                        ceil_b.heights[2] + pos_b.y,
-                        ceil_b.heights[3] + pos_b.y,
-                    ];
-                    let floor_a_heights: [f32; 4] = [
-                        floor_a.heights[0] + pos_a.y,
-                        floor_a.heights[1] + pos_a.y,
-                        floor_a.heights[2] + pos_a.y,
-                        floor_a.heights[3] + pos_a.y,
-                    ];
+                    let ceil_heights = [ceil_b.heights[0] + pos_b.y, ceil_b.heights[1] + pos_b.y,
+                                        ceil_b.heights[2] + pos_b.y, ceil_b.heights[3] + pos_b.y];
+                    let floor_heights = [floor_a.heights[0] + pos_a.y, floor_a.heights[1] + pos_a.y,
+                                         floor_a.heights[2] + pos_a.y, floor_a.heights[3] + pos_a.y];
 
-                    // Check if all corners match within tolerance
-                    let matches = (0..4).all(|i| (ceil_b_heights[i] - floor_a_heights[i]).abs() < HEIGHT_TOLERANCE);
-
-                    if matches {
-                        // Create horizontal portal from B to A (pointing up through ceiling)
-                        // Use each corner's actual height for sloped surfaces
-                        let vertices_world = [
-                            Vec3::new(world_x_a, ceil_b_heights[0], world_z_a),
-                            Vec3::new(world_x_a + SECTOR_SIZE, ceil_b_heights[1], world_z_a),
-                            Vec3::new(world_x_a + SECTOR_SIZE, ceil_b_heights[2], world_z_a + SECTOR_SIZE),
-                            Vec3::new(world_x_a, ceil_b_heights[3], world_z_a + SECTOR_SIZE),
-                        ];
-
-                        // Room B portal (pointing up into room A)
-                        let vertices_b = [
-                            Vec3::new(vertices_world[0].x - pos_b.x, vertices_world[0].y - pos_b.y, vertices_world[0].z - pos_b.z),
-                            Vec3::new(vertices_world[1].x - pos_b.x, vertices_world[1].y - pos_b.y, vertices_world[1].z - pos_b.z),
-                            Vec3::new(vertices_world[2].x - pos_b.x, vertices_world[2].y - pos_b.y, vertices_world[2].z - pos_b.z),
-                            Vec3::new(vertices_world[3].x - pos_b.x, vertices_world[3].y - pos_b.y, vertices_world[3].z - pos_b.z),
-                        ];
-                        let normal_b = Vec3::new(0.0, 1.0, 0.0); // Up
-                        portals_b.push(Portal::new(room_a_idx, vertices_b, normal_b));
-
-                        // Room A portal (pointing down into room B)
-                        let vertices_a = [
-                            Vec3::new(vertices_world[0].x - pos_a.x, vertices_world[0].y - pos_a.y, vertices_world[0].z - pos_a.z),
-                            Vec3::new(vertices_world[3].x - pos_a.x, vertices_world[3].y - pos_a.y, vertices_world[3].z - pos_a.z),
-                            Vec3::new(vertices_world[2].x - pos_a.x, vertices_world[2].y - pos_a.y, vertices_world[2].z - pos_a.z),
-                            Vec3::new(vertices_world[1].x - pos_a.x, vertices_world[1].y - pos_a.y, vertices_world[1].z - pos_a.z),
-                        ];
-                        let normal_a = Vec3::new(0.0, -1.0, 0.0); // Down
-                        portals_a.push(Portal::new(room_b_idx, vertices_a, normal_a));
+                    if (0..4).all(|i| (ceil_heights[i] - floor_heights[i]).abs() < HEIGHT_TOLERANCE) {
+                        add_portal_pair(ceil_heights, room_a_idx, room_b_idx, pos_a, pos_b);
                     }
                 }
 
-                // Check for open vertical connection: A has no ceiling, B has no floor, and B is above A
-                // This creates a flat portal at the boundary where the rooms meet
+                // Case 3: Open vertical - A has no ceiling, B has no floor, B is above A
                 if sector_a.ceiling.is_none() && sector_b.floor.is_none() && pos_b.y > pos_a.y {
-                    let boundary_y = pos_b.y;
-
-                    let vertices_world = [
-                        Vec3::new(world_x_a, boundary_y, world_z_a),
-                        Vec3::new(world_x_a + SECTOR_SIZE, boundary_y, world_z_a),
-                        Vec3::new(world_x_a + SECTOR_SIZE, boundary_y, world_z_a + SECTOR_SIZE),
-                        Vec3::new(world_x_a, boundary_y, world_z_a + SECTOR_SIZE),
-                    ];
-
-                    // Room A portal (pointing up)
-                    let vertices_a = [
-                        Vec3::new(vertices_world[0].x - pos_a.x, vertices_world[0].y - pos_a.y, vertices_world[0].z - pos_a.z),
-                        Vec3::new(vertices_world[1].x - pos_a.x, vertices_world[1].y - pos_a.y, vertices_world[1].z - pos_a.z),
-                        Vec3::new(vertices_world[2].x - pos_a.x, vertices_world[2].y - pos_a.y, vertices_world[2].z - pos_a.z),
-                        Vec3::new(vertices_world[3].x - pos_a.x, vertices_world[3].y - pos_a.y, vertices_world[3].z - pos_a.z),
-                    ];
-                    portals_a.push(Portal::new(room_b_idx, vertices_a, Vec3::new(0.0, 1.0, 0.0)));
-
-                    // Room B portal (pointing down)
-                    let vertices_b = [
-                        Vec3::new(vertices_world[0].x - pos_b.x, vertices_world[0].y - pos_b.y, vertices_world[0].z - pos_b.z),
-                        Vec3::new(vertices_world[3].x - pos_b.x, vertices_world[3].y - pos_b.y, vertices_world[3].z - pos_b.z),
-                        Vec3::new(vertices_world[2].x - pos_b.x, vertices_world[2].y - pos_b.y, vertices_world[2].z - pos_b.z),
-                        Vec3::new(vertices_world[1].x - pos_b.x, vertices_world[1].y - pos_b.y, vertices_world[1].z - pos_b.z),
-                    ];
-                    portals_b.push(Portal::new(room_a_idx, vertices_b, Vec3::new(0.0, -1.0, 0.0)));
+                    let h = pos_b.y;
+                    add_portal_pair([h, h, h, h], room_b_idx, room_a_idx, pos_b, pos_a);
                 }
 
-                // Check for open vertical connection: B has no ceiling, A has no floor, and A is above B
+                // Case 4: Open vertical - B has no ceiling, A has no floor, A is above B
                 if sector_b.ceiling.is_none() && sector_a.floor.is_none() && pos_a.y > pos_b.y {
-                    let boundary_y = pos_a.y;
-
-                    let vertices_world = [
-                        Vec3::new(world_x_a, boundary_y, world_z_a),
-                        Vec3::new(world_x_a + SECTOR_SIZE, boundary_y, world_z_a),
-                        Vec3::new(world_x_a + SECTOR_SIZE, boundary_y, world_z_a + SECTOR_SIZE),
-                        Vec3::new(world_x_a, boundary_y, world_z_a + SECTOR_SIZE),
-                    ];
-
-                    // Room B portal (pointing up)
-                    let vertices_b = [
-                        Vec3::new(vertices_world[0].x - pos_b.x, vertices_world[0].y - pos_b.y, vertices_world[0].z - pos_b.z),
-                        Vec3::new(vertices_world[1].x - pos_b.x, vertices_world[1].y - pos_b.y, vertices_world[1].z - pos_b.z),
-                        Vec3::new(vertices_world[2].x - pos_b.x, vertices_world[2].y - pos_b.y, vertices_world[2].z - pos_b.z),
-                        Vec3::new(vertices_world[3].x - pos_b.x, vertices_world[3].y - pos_b.y, vertices_world[3].z - pos_b.z),
-                    ];
-                    portals_b.push(Portal::new(room_a_idx, vertices_b, Vec3::new(0.0, 1.0, 0.0)));
-
-                    // Room A portal (pointing down)
-                    let vertices_a = [
-                        Vec3::new(vertices_world[0].x - pos_a.x, vertices_world[0].y - pos_a.y, vertices_world[0].z - pos_a.z),
-                        Vec3::new(vertices_world[3].x - pos_a.x, vertices_world[3].y - pos_a.y, vertices_world[3].z - pos_a.z),
-                        Vec3::new(vertices_world[2].x - pos_a.x, vertices_world[2].y - pos_a.y, vertices_world[2].z - pos_a.z),
-                        Vec3::new(vertices_world[1].x - pos_a.x, vertices_world[1].y - pos_a.y, vertices_world[1].z - pos_a.z),
-                    ];
-                    portals_a.push(Portal::new(room_b_idx, vertices_a, Vec3::new(0.0, -1.0, 0.0)));
+                    let h = pos_a.y;
+                    add_portal_pair([h, h, h, h], room_a_idx, room_b_idx, pos_a, pos_b);
                 }
             }
         }
 
-        // Add collected portals to rooms
         self.rooms[room_a_idx].portals.extend(portals_a);
         self.rooms[room_b_idx].portals.extend(portals_b);
     }

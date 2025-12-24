@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::path::Path;
-use super::{Level, Room, Sector, HorizontalFace, VerticalFace, TextureRef, LevelObject, ObjectType, SECTOR_SIZE};
+use super::{Level, Room, Sector, HorizontalFace, VerticalFace, TextureRef};
 
 /// Validation limits to prevent resource exhaustion from malicious files
 pub mod limits {
