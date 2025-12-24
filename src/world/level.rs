@@ -14,8 +14,6 @@ pub mod limits {
     pub const MAX_ROOM_SIZE: usize = 128;
     /// Maximum walls per sector edge
     pub const MAX_WALLS_PER_EDGE: usize = 16;
-    /// Maximum portals per room
-    pub const MAX_PORTALS: usize = 64;
     /// Maximum string length for texture names
     pub const MAX_STRING_LEN: usize = 256;
     /// Maximum coordinate value (prevents overflow issues)
@@ -182,11 +180,7 @@ fn validate_room(room: &Room, room_idx: usize, total_rooms: usize) -> Result<(),
         }
     }
 
-    // Validate portals
-    if room.portals.len() > limits::MAX_PORTALS {
-        return Err(format!("{}: too many portals ({} > {})",
-            context, room.portals.len(), limits::MAX_PORTALS));
-    }
+    // Validate portals (no count limit - portals are dynamically calculated)
     for (i, portal) in room.portals.iter().enumerate() {
         if portal.target_room >= total_rooms {
             return Err(format!("{} portal[{}]: invalid target_room {} (only {} rooms)",

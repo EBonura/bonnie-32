@@ -4,7 +4,7 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
-use super::{EditorState, EditorTool, Selection, SECTOR_SIZE};
+use super::{EditorState, EditorTool, Selection, GridViewMode, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -244,7 +244,28 @@ pub fn draw_editor(
 
     // Draw panels
     draw_panel(grid_rect, Some("2D Grid"), Color::from_rgba(35, 35, 40, 255));
-    draw_grid_view(ctx, panel_content_rect(grid_rect, true), state);
+
+    // Add view mode toolbar inside the 2D grid panel
+    let grid_content = panel_content_rect(grid_rect, true);
+    let view_toolbar_height = 22.0;
+    let view_toolbar_rect = Rect::new(grid_content.x, grid_content.y, grid_content.w, view_toolbar_height);
+    let grid_view_rect = Rect::new(grid_content.x, grid_content.y + view_toolbar_height, grid_content.w, grid_content.h - view_toolbar_height);
+
+    // Draw view mode toolbar
+    draw_rectangle(view_toolbar_rect.x, view_toolbar_rect.y, view_toolbar_rect.w, view_toolbar_rect.h, Color::from_rgba(45, 45, 50, 255));
+    let mut view_toolbar = Toolbar::new(view_toolbar_rect);
+
+    if view_toolbar.letter_button_active(ctx, 'T', "Top view (X-Z)", state.grid_view_mode == GridViewMode::Top) {
+        state.grid_view_mode = GridViewMode::Top;
+    }
+    if view_toolbar.letter_button_active(ctx, 'F', "Front view (X-Y)", state.grid_view_mode == GridViewMode::Front) {
+        state.grid_view_mode = GridViewMode::Front;
+    }
+    if view_toolbar.letter_button_active(ctx, 'S', "Side view (Y-Z)", state.grid_view_mode == GridViewMode::Side) {
+        state.grid_view_mode = GridViewMode::Side;
+    }
+
+    draw_grid_view(ctx, grid_view_rect, state);
 
     draw_panel(room_props_rect, Some("Room"), Color::from_rgba(35, 35, 40, 255));
     draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);

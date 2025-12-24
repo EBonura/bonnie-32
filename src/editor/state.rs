@@ -30,6 +30,15 @@ pub enum EditorTool {
     PlaceObject,
 }
 
+/// 2D Grid View projection mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GridViewMode {
+    #[default]
+    Top,    // X-Z plane (looking down Y axis)
+    Front,  // X-Y plane (looking along -Z)
+    Side,   // Y-Z plane (looking along -X)
+}
+
 /// Which face within a sector is selected
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectorFace {
@@ -140,6 +149,9 @@ pub struct EditorState {
     pub grid_offset_x: f32,
     pub grid_offset_y: f32,
     pub grid_zoom: f32,
+
+    /// 2D grid view projection mode (Top/Front/Side)
+    pub grid_view_mode: GridViewMode,
 
     /// Grid settings
     pub grid_size: f32, // World units per grid cell
@@ -311,6 +323,7 @@ impl EditorState {
             grid_offset_x: 0.0,
             grid_offset_y: 0.0,
             grid_zoom: 0.1, // Pixels per world unit (very zoomed out for TRLE 1024-unit sectors)
+            grid_view_mode: GridViewMode::Top,
             grid_size: SECTOR_SIZE, // TRLE sector size
             show_grid: true,
             show_room_bounds: true, // Room boundaries visible by default
