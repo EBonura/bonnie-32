@@ -740,7 +740,7 @@ impl ModelerState {
             selection: ModelerSelection::None,
 
             camera,
-            raster_settings: RasterSettings::default(),
+            raster_settings: RasterSettings::game(), // Use game settings (no backface wireframe)
             orbit_target,
             orbit_distance,
             orbit_azimuth,

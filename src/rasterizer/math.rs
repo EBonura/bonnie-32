@@ -150,9 +150,10 @@ pub fn project(v: Vec3, snap: bool, width: usize, height: usize) -> Vec3 {
 /// Projects camera-space coordinates to screen-space for ortho views
 pub fn project_ortho(v: Vec3, zoom: f32, center_x: f32, center_y: f32, width: usize, height: usize) -> Vec3 {
     // In ortho view, x and y map directly (scaled by zoom), z is depth
+    // center_x/center_y represent the world-space center we're looking at
     Vec3 {
         x: (v.x - center_x) * zoom + (width as f32 / 2.0),
-        y: (-v.y - center_y) * zoom + (height as f32 / 2.0), // Flip Y for screen coords
+        y: -(v.y - center_y) * zoom + (height as f32 / 2.0), // Flip Y for screen coords
         z: v.z, // Keep z for depth sorting/testing
     }
 }

@@ -1218,8 +1218,18 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     }
 
     if !mesh.vertices.is_empty() {
-        // Draw wireframe edges (always in wireframe mode, or as outline in solid mode)
+        // Draw wireframe edges
+        // In wireframe mode: draw all edges
+        // In solid mode: only draw hovered/selected faces
         for (idx, face) in mesh.faces.iter().enumerate() {
+            let is_hovered = state.hovered_face == Some(idx);
+            let is_selected = matches!(&state.selection, super::state::ModelerSelection::Faces(f) if f.contains(&idx));
+
+            // In solid mode, skip unselected/unhovered faces
+            if !wireframe_mode && !is_hovered && !is_selected {
+                continue;
+            }
+
             if let (Some(v0), Some(v1), Some(v2)) = (
                 mesh.vertices.get(face.v0),
                 mesh.vertices.get(face.v1),
@@ -1230,8 +1240,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 let (x2, y2) = project_vertex(v2);
 
                 // Choose color based on hover/selection
-                let is_hovered = state.hovered_face == Some(idx);
-                let is_selected = matches!(&state.selection, super::state::ModelerSelection::Faces(f) if f.contains(&idx));
                 let color = if is_hovered { hover_color } else if is_selected { select_color } else { wire_color };
                 let thickness = if is_hovered || is_selected { 2.0 } else { 1.0 };
 
@@ -1262,14 +1270,21 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         }
 
         // Draw vertices
+        // In wireframe mode: draw all vertices
+        // In solid mode: only draw hovered/selected vertices
         for (idx, vert) in mesh.vertices.iter().enumerate() {
+            let is_hovered = state.hovered_vertex == Some(idx);
+            let is_selected = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if v.contains(&idx));
+
+            // In solid mode, skip unselected/unhovered vertices
+            if !wireframe_mode && !is_hovered && !is_selected {
+                continue;
+            }
+
             let (x, y) = project_vertex(vert);
 
             // Only draw if in viewport
             if x >= rect.x && x <= rect.right() && y >= rect.y && y <= rect.bottom() {
-                let is_hovered = state.hovered_vertex == Some(idx);
-                let is_selected = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if v.contains(&idx));
-
                 let color = if is_hovered { hover_color } else if is_selected { select_color } else { vertex_color };
                 let radius = if is_hovered { 5.0 } else if is_selected { 4.0 } else { 3.0 };
                 draw_circle(x, y, radius, color);
