@@ -451,9 +451,9 @@ async fn main() {
                         ModelBrowserAction::SelectPreview(index) => {
                             if let Some(model_info) = ms.model_browser.models.get(index) {
                                 let path = model_info.path.clone();
-                                match modeler::SpineModel::load_from_file(&path) {
-                                    Ok(model) => {
-                                        ms.model_browser.set_preview(model);
+                                match modeler::EditableMesh::load_from_file(&path) {
+                                    Ok(mesh) => {
+                                        ms.model_browser.set_preview(mesh);
                                     }
                                     Err(e) => {
                                         ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
@@ -462,11 +462,11 @@ async fn main() {
                             }
                         }
                         ModelBrowserAction::OpenModel => {
-                            if let Some(model) = ms.model_browser.preview_model.take() {
+                            if let Some(mesh) = ms.model_browser.preview_model.take() {
                                 let path = ms.model_browser.selected_model()
                                     .map(|m| m.path.clone())
                                     .unwrap_or_else(|| PathBuf::from("assets/models/untitled.ron"));
-                                ms.modeler_state.spine_model = Some(model);
+                                ms.modeler_state.mesh = mesh;
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = false;
                                 ms.modeler_state.selection = modeler::ModelerSelection::None;
@@ -475,7 +475,7 @@ async fn main() {
                             }
                         }
                         ModelBrowserAction::NewModel => {
-                            ms.modeler_state.new_spine_model();
+                            ms.modeler_state.new_mesh();
                             ms.model_browser.close();
                         }
                         ModelBrowserAction::Cancel => {
@@ -529,9 +529,8 @@ async fn main() {
                                     vertex.pos.z *= scale;
                                 }
 
-                                // Set the editable mesh (clears spine model to show only the imported mesh)
-                                ms.modeler_state.editable_mesh = Some(mesh);
-                                ms.modeler_state.spine_model = None;
+                                // Set the editable mesh
+                                ms.modeler_state.mesh = mesh;
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = false;
                                 ms.modeler_state.selection = modeler::ModelerSelection::None;
@@ -882,7 +881,7 @@ fn handle_modeler_action(
 ) {
     match action {
         ModelerAction::New => {
-            state.new_spine_model();
+            state.new_mesh();
         }
         ModelerAction::BrowseModels => {
             let models = discover_models();
@@ -896,7 +895,7 @@ fn handle_modeler_action(
         }
         ModelerAction::Save => {
             if let Some(path) = state.current_file.clone() {
-                if let Err(e) = state.save_spine_model(&path) {
+                if let Err(e) = state.save_mesh(&path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             } else {
@@ -904,7 +903,7 @@ fn handle_modeler_action(
                 let default_dir = PathBuf::from("assets/models");
                 let _ = std::fs::create_dir_all(&default_dir);
                 let default_path = default_dir.join("untitled.ron");
-                if let Err(e) = state.save_spine_model(&default_path) {
+                if let Err(e) = state.save_mesh(&default_path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             }
@@ -920,7 +919,7 @@ fn handle_modeler_action(
                 .set_file_name("model.ron");
 
             if let Some(save_path) = dialog.save_file() {
-                if let Err(e) = state.save_spine_model(&save_path) {
+                if let Err(e) = state.save_mesh(&save_path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             }
@@ -939,7 +938,7 @@ fn handle_modeler_action(
                 .set_directory(&default_dir);
 
             if let Some(path) = dialog.pick_file() {
-                if let Err(e) = state.load_spine_model(&path) {
+                if let Err(e) = state.load_mesh(&path) {
                     state.set_status(&format!("Load failed: {}", e), 5.0);
                 }
             }
@@ -950,41 +949,37 @@ fn handle_modeler_action(
         }
         ModelerAction::Load(path_str) => {
             let path = PathBuf::from(&path_str);
-            if let Err(e) = state.load_spine_model(&path) {
+            if let Err(e) = state.load_mesh(&path) {
                 state.set_status(&format!("Load failed: {}", e), 5.0);
             }
         }
         #[cfg(target_arch = "wasm32")]
         ModelerAction::Export => {
-            if let Some(spine_model) = &state.spine_model {
-                match ron::ser::to_string_pretty(spine_model, ron::ser::PrettyConfig::default()) {
-                    Ok(ron_str) => {
-                        let filename = state.current_file
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "model.ron".to_string());
+            match ron::ser::to_string_pretty(&state.mesh, ron::ser::PrettyConfig::default()) {
+                Ok(ron_str) => {
+                    let filename = state.current_file
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "mesh.ron".to_string());
 
-                        extern "C" {
-                            fn bonnie_set_export_data(ptr: *const u8, len: usize);
-                            fn bonnie_set_export_filename(ptr: *const u8, len: usize);
-                            fn bonnie_trigger_download();
-                        }
-                        unsafe {
-                            bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
-                            bonnie_set_export_filename(filename.as_ptr(), filename.len());
-                            bonnie_trigger_download();
-                        }
+                    extern "C" {
+                        fn bonnie_set_export_data(ptr: *const u8, len: usize);
+                        fn bonnie_set_export_filename(ptr: *const u8, len: usize);
+                        fn bonnie_trigger_download();
+                    }
+                    unsafe {
+                        bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
+                        bonnie_set_export_filename(filename.as_ptr(), filename.len());
+                        bonnie_trigger_download();
+                    }
 
-                        state.dirty = false;
-                        state.set_status(&format!("Downloaded {}", filename), 3.0);
-                    }
-                    Err(e) => {
-                        state.set_status(&format!("Export failed: {}", e), 5.0);
-                    }
+                    state.dirty = false;
+                    state.set_status(&format!("Downloaded {}", filename), 3.0);
                 }
-            } else {
-                state.set_status("No model to export", 3.0);
+                Err(e) => {
+                    state.set_status(&format!("Export failed: {}", e), 5.0);
+                }
             }
         }
         #[cfg(not(target_arch = "wasm32"))]

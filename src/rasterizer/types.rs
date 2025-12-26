@@ -3,31 +3,70 @@
 use super::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
-/// RGBA color (0-255 per channel)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// RGB color with PS1-style blend mode (no 8-bit alpha, just 6 blend states)
+///
+/// Serialization: Always saves with `blend` field (new format).
+/// Deserialization: Accepts both old format `{r, g, b, a}` and new format `{r, g, b, blend}`.
+/// When loading old files with `a` field, converts a=0 to Erase, otherwise Opaque.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
     pub b: u8,
-    pub a: u8,
+    pub blend: BlendMode,
+}
+
+// Custom deserializer for backwards compatibility with old level files that used `a: u8` instead of `blend`
+// TODO: Remove Old format support once all level files have been migrated to the new format
+impl<'de> Deserialize<'de> for Color {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ColorFormat {
+            // New format with blend mode
+            New { r: u8, g: u8, b: u8, blend: BlendMode },
+            // Old format with alpha (for backwards compatibility)
+            Old { r: u8, g: u8, b: u8, a: u8 },
+        }
+
+        match ColorFormat::deserialize(deserializer)? {
+            ColorFormat::New { r, g, b, blend } => Ok(Color { r, g, b, blend }),
+            ColorFormat::Old { r, g, b, a } => {
+                // Convert old alpha to blend mode: 0 = transparent, otherwise opaque
+                let blend = if a == 0 { BlendMode::Erase } else { BlendMode::Opaque };
+                Ok(Color { r, g, b, blend })
+            }
+        }
+    }
 }
 
 impl Color {
-    pub const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 255 };
-    pub const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
-    pub const RED: Color = Color { r: 255, g: 0, b: 0, a: 255 };
-    pub const GREEN: Color = Color { r: 0, g: 255, b: 0, a: 255 };
-    pub const BLUE: Color = Color { r: 0, g: 0, b: 255, a: 255 };
+    pub const BLACK: Color = Color { r: 0, g: 0, b: 0, blend: BlendMode::Opaque };
+    pub const WHITE: Color = Color { r: 255, g: 255, b: 255, blend: BlendMode::Opaque };
+    pub const RED: Color = Color { r: 255, g: 0, b: 0, blend: BlendMode::Opaque };
+    pub const GREEN: Color = Color { r: 0, g: 255, b: 0, blend: BlendMode::Opaque };
+    pub const BLUE: Color = Color { r: 0, g: 0, b: 255, blend: BlendMode::Opaque };
+    /// Transparent color (will not be rendered)
+    pub const TRANSPARENT: Color = Color { r: 0, g: 0, b: 0, blend: BlendMode::Erase };
     /// Neutral color for PS1 texture modulation (128, 128, 128)
     /// When used with modulate(), texture colors remain unchanged
-    pub const NEUTRAL: Color = Color { r: 128, g: 128, b: 128, a: 255 };
+    pub const NEUTRAL: Color = Color { r: 128, g: 128, b: 128, blend: BlendMode::Opaque };
 
     pub fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 255 }
+        Self { r, g, b, blend: BlendMode::Opaque }
     }
 
-    pub fn with_alpha(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self { r, g, b, a }
+    /// Create color with specific blend mode
+    pub fn with_blend(r: u8, g: u8, b: u8, blend: BlendMode) -> Self {
+        Self { r, g, b, blend }
+    }
+
+    /// Check if this color is transparent (should not be rendered)
+    pub fn is_transparent(&self) -> bool {
+        self.blend == BlendMode::Erase
     }
 
     /// Apply shading (multiply by intensity 0.0-1.0)
@@ -37,7 +76,7 @@ impl Color {
             r: (self.r as f32 * i) as u8,
             g: (self.g as f32 * i) as u8,
             b: (self.b as f32 * i) as u8,
-            a: self.a,
+            blend: self.blend,
         }
     }
 
@@ -49,11 +88,11 @@ impl Color {
             r: ((self.r as u16 * vertex_color.r as u16) / 128).min(255) as u8,
             g: ((self.g as u16 * vertex_color.g as u16) / 128).min(255) as u8,
             b: ((self.b as u16 * vertex_color.b as u16) / 128).min(255) as u8,
-            a: self.a,
+            blend: self.blend,
         }
     }
 
-    /// Interpolate between two colors
+    /// Interpolate between two colors (RGB only, keeps self's blend mode)
     pub fn lerp(self, other: Color, t: f32) -> Self {
         let t = t.clamp(0.0, 1.0);
         let inv_t = 1.0 - t;
@@ -61,18 +100,20 @@ impl Color {
             r: (self.r as f32 * inv_t + other.r as f32 * t) as u8,
             g: (self.g as f32 * inv_t + other.g as f32 * t) as u8,
             b: (self.b as f32 * inv_t + other.b as f32 * t) as u8,
-            a: (self.a as f32 * inv_t + other.a as f32 * t) as u8,
+            blend: self.blend,
         }
     }
 
-    /// Convert to u32 (RGBA format for macroquad)
+    /// Convert to u32 (RGBA format for macroquad, uses 255 alpha for opaque, 0 for transparent)
     pub fn to_u32(self) -> u32 {
-        ((self.r as u32) << 24) | ((self.g as u32) << 16) | ((self.b as u32) << 8) | (self.a as u32)
+        let a = if self.blend == BlendMode::Erase { 0u8 } else { 255u8 };
+        ((self.r as u32) << 24) | ((self.g as u32) << 16) | ((self.b as u32) << 8) | (a as u32)
     }
 
-    /// Convert to [u8; 4] for framebuffer
+    /// Convert to [u8; 4] for framebuffer (RGBA, uses 255 alpha for opaque, 0 for transparent)
     pub fn to_bytes(self) -> [u8; 4] {
-        [self.r, self.g, self.b, self.a]
+        let a = if self.blend == BlendMode::Erase { 0u8 } else { 255u8 };
+        [self.r, self.g, self.b, a]
     }
 
     // =====================================================
@@ -122,51 +163,67 @@ impl Color {
             r: self.r & 0xF8,
             g: self.g & 0xF8,
             b: self.b & 0xF8,
-            a: self.a,
+            blend: self.blend,
         }
     }
 
-    /// PS1-style blend: combine this color (front) with back color using blend mode
-    pub fn blend(self, back: Color, mode: BlendMode) -> Color {
-        match mode {
+    /// PS1-style blend: combine this color (front) with back color using the front color's blend mode
+    pub fn blend_with(self, back: Color) -> Color {
+        match self.blend {
             BlendMode::Opaque => self,
             BlendMode::Average => {
                 // Mode 0: 0.5*B + 0.5*F
-                Color::with_alpha(
+                Color::with_blend(
                     ((back.r as u16 + self.r as u16) / 2) as u8,
                     ((back.g as u16 + self.g as u16) / 2) as u8,
                     ((back.b as u16 + self.b as u16) / 2) as u8,
-                    self.a,
+                    BlendMode::Opaque, // Result is opaque
                 )
             }
             BlendMode::Add => {
                 // Mode 1: B + F (clamped to 255)
-                Color::with_alpha(
+                Color::with_blend(
                     (back.r as u16 + self.r as u16).min(255) as u8,
                     (back.g as u16 + self.g as u16).min(255) as u8,
                     (back.b as u16 + self.b as u16).min(255) as u8,
-                    self.a,
+                    BlendMode::Opaque,
                 )
             }
             BlendMode::Subtract => {
                 // Mode 2: B - F (clamped to 0)
-                Color::with_alpha(
+                Color::with_blend(
                     (back.r as i16 - self.r as i16).max(0) as u8,
                     (back.g as i16 - self.g as i16).max(0) as u8,
                     (back.b as i16 - self.b as i16).max(0) as u8,
-                    self.a,
+                    BlendMode::Opaque,
                 )
             }
             BlendMode::AddQuarter => {
                 // Mode 3: B + 0.25*F (clamped to 255)
-                Color::with_alpha(
+                Color::with_blend(
                     (back.r as u16 + self.r as u16 / 4).min(255) as u8,
                     (back.g as u16 + self.g as u16 / 4).min(255) as u8,
                     (back.b as u16 + self.b as u16 / 4).min(255) as u8,
-                    self.a,
+                    BlendMode::Opaque,
                 )
             }
+            BlendMode::Erase => {
+                // Eraser: make transparent
+                Color::TRANSPARENT
+            }
         }
+    }
+
+    /// PS1-style blend: combine this color (front) with back color using explicit blend mode
+    /// (for backwards compatibility with code that passes blend mode separately)
+    pub fn blend(self, back: Color, mode: BlendMode) -> Color {
+        Color::with_blend(self.r, self.g, self.b, mode).blend_with(back)
+    }
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Color::TRANSPARENT
     }
 }
 
@@ -256,6 +313,7 @@ impl Texture {
     }
 
     /// Load texture from a PNG file
+    /// Alpha channel is converted to blend mode: 0 = Erase (transparent), otherwise Opaque
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
         use image::GenericImageView;
 
@@ -268,7 +326,11 @@ impl Texture {
 
         let pixels: Vec<Color> = rgba
             .pixels()
-            .map(|p| Color::with_alpha(p[0], p[1], p[2], p[3]))
+            .map(|p| {
+                // Convert alpha to blend mode: 0 = transparent, otherwise opaque
+                let blend = if p[3] == 0 { BlendMode::Erase } else { BlendMode::Opaque };
+                Color::with_blend(p[0], p[1], p[2], blend)
+            })
             .collect();
 
         let name = path
@@ -371,6 +433,7 @@ impl Texture {
     }
 
     /// Load texture from raw PNG bytes
+    /// Alpha channel is converted to blend mode: 0 = Erase (transparent), otherwise Opaque
     pub fn from_bytes(bytes: &[u8], name: String) -> Result<Self, String> {
         use image::GenericImageView;
 
@@ -382,7 +445,11 @@ impl Texture {
 
         let pixels: Vec<Color> = rgba
             .pixels()
-            .map(|p| Color::with_alpha(p[0], p[1], p[2], p[3]))
+            .map(|p| {
+                // Convert alpha to blend mode: 0 = transparent, otherwise opaque
+                let blend = if p[3] == 0 { BlendMode::Erase } else { BlendMode::Opaque };
+                Color::with_blend(p[0], p[1], p[2], blend)
+            })
             .collect();
 
         Ok(Self {
@@ -511,6 +578,7 @@ pub enum BlendMode {
     Add,       // Mode 1: B + F (additive glow, clamped to 255)
     Subtract,  // Mode 2: B - F (shadows, clamped to 0)
     AddQuarter,// Mode 3: B + 0.25*F (subtle glow)
+    Erase,     // Eraser: Set alpha to 0 (transparent)
 }
 
 /// Rasterizer settings
@@ -538,8 +606,20 @@ pub struct RasterSettings {
     pub dithering: bool,
     /// Stretch to fill viewport (false = maintain 4:3 aspect ratio)
     pub stretch_to_fill: bool,
-    /// Show wireframe overlay on front-facing polygons
+    /// Wireframe-only mode (no solid mesh, just edges)
     pub wireframe_overlay: bool,
+    /// Orthographic projection settings (None = perspective)
+    pub ortho_projection: Option<OrthoProjection>,
+}
+
+/// Orthographic projection settings for ortho views
+#[derive(Debug, Clone)]
+pub struct OrthoProjection {
+    /// Zoom level (pixels per world unit)
+    pub zoom: f32,
+    /// Center offset in world units
+    pub center_x: f32,
+    pub center_y: f32,
 }
 
 impl RasterSettings {
@@ -580,6 +660,7 @@ impl Default for RasterSettings {
             dithering: true,        // PS1 default: ordered dithering enabled
             stretch_to_fill: true,  // Default: use full viewport space
             wireframe_overlay: false, // Default: wireframe off
+            ortho_projection: None,  // Default: perspective projection
         }
     }
 }

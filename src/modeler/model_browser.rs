@@ -1,11 +1,11 @@
 //! Model Browser
 //!
-//! Modal dialog for browsing and previewing saved spine models.
+//! Modal dialog for browsing and previewing saved mesh models.
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh};
-use super::spine::SpineModel;
+use super::mesh_editor::EditableMesh;
 use std::path::PathBuf;
 
 /// Info about a model file
@@ -55,7 +55,7 @@ pub struct ModelBrowser {
     /// Currently selected index
     pub selected_index: Option<usize>,
     /// Currently loaded preview model
-    pub preview_model: Option<SpineModel>,
+    pub preview_model: Option<EditableMesh>,
     /// Orbit camera state for preview
     pub orbit_yaw: f32,
     pub orbit_pitch: f32,
@@ -103,7 +103,7 @@ impl ModelBrowser {
     }
 
     /// Set the preview model
-    pub fn set_preview(&mut self, model: SpineModel) {
+    pub fn set_preview(&mut self, mesh: EditableMesh) {
         // Calculate bounding box to center camera
         let mut min_y = f32::MAX;
         let mut max_y = f32::MIN;
@@ -112,15 +112,13 @@ impl ModelBrowser {
         let mut min_z = f32::MAX;
         let mut max_z = f32::MIN;
 
-        for segment in &model.segments {
-            for joint in &segment.joints {
-                min_x = min_x.min(joint.position.x - joint.radius);
-                max_x = max_x.max(joint.position.x + joint.radius);
-                min_y = min_y.min(joint.position.y - joint.radius);
-                max_y = max_y.max(joint.position.y + joint.radius);
-                min_z = min_z.min(joint.position.z - joint.radius);
-                max_z = max_z.max(joint.position.z + joint.radius);
-            }
+        for vertex in &mesh.vertices {
+            min_x = min_x.min(vertex.pos.x);
+            max_x = max_x.max(vertex.pos.x);
+            min_y = min_y.min(vertex.pos.y);
+            max_y = max_y.max(vertex.pos.y);
+            min_z = min_z.min(vertex.pos.z);
+            max_z = max_z.max(vertex.pos.z);
         }
 
         // Calculate center
@@ -141,7 +139,7 @@ impl ModelBrowser {
             self.orbit_distance = 300.0;
         }
 
-        self.preview_model = Some(model);
+        self.preview_model = Some(mesh);
         self.orbit_yaw = 0.8;
         self.orbit_pitch = 0.3;
     }
@@ -245,14 +243,13 @@ pub fn draw_model_browser(
         draw_orbit_preview(ctx, browser, preview_rect, fb);
 
         // Draw stats at bottom of preview
-        if let Some(model) = &browser.preview_model {
+        if let Some(mesh) = &browser.preview_model {
             let stats_y = preview_rect.bottom() - 24.0;
             draw_rectangle(preview_rect.x, stats_y, preview_rect.w, 24.0, Color::from_rgba(30, 30, 35, 200));
 
-            let total_joints: usize = model.segments.iter().map(|s| s.joints.len()).sum();
             let stats_text = format!(
-                "Segments: {}  Joints: {}",
-                model.segments.len(), total_joints
+                "Vertices: {}  Faces: {}",
+                mesh.vertices.len(), mesh.faces.len()
             );
             draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
         }
@@ -303,7 +300,7 @@ fn draw_orbit_preview(
     rect: Rect,
     fb: &mut Framebuffer,
 ) {
-    let model = match &browser.preview_model {
+    let mesh = match &browser.preview_model {
         Some(m) => m,
         None => return,
     };
@@ -364,9 +361,9 @@ fn draw_orbit_preview(
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(25, 25, 35));
 
-    // Render the model
+    // Render the mesh
     let settings = RasterSettings::default();
-    let (vertices, faces) = model.generate_mesh();
+    let (vertices, faces) = mesh.to_render_data();
 
     if !vertices.is_empty() {
         render_mesh(fb, &vertices, &faces, &[], &camera, &settings);

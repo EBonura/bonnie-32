@@ -257,7 +257,11 @@ mod wasm {
 
             let pixels: Vec<Color> = rgba_buffer
                 .chunks_exact(4)
-                .map(|c| Color::with_alpha(c[0], c[1], c[2], c[3]))
+                .map(|c| {
+                    // Convert alpha to blend mode: 0 = transparent, otherwise opaque
+                    let blend = if c[3] == 0 { crate::rasterizer::BlendMode::Erase } else { crate::rasterizer::BlendMode::Opaque };
+                    Color::with_blend(c[0], c[1], c[2], blend)
+                })
                 .collect();
 
             Some(Texture {

@@ -39,6 +39,30 @@ impl TextureAtlas {
         self.size as usize
     }
 
+    /// Convert u8 to BlendMode
+    fn u8_to_blend(v: u8) -> crate::rasterizer::BlendMode {
+        match v {
+            0 => crate::rasterizer::BlendMode::Opaque,
+            1 => crate::rasterizer::BlendMode::Average,
+            2 => crate::rasterizer::BlendMode::Add,
+            3 => crate::rasterizer::BlendMode::Subtract,
+            4 => crate::rasterizer::BlendMode::AddQuarter,
+            _ => crate::rasterizer::BlendMode::Erase,
+        }
+    }
+
+    /// Convert BlendMode to u8
+    fn blend_to_u8(blend: crate::rasterizer::BlendMode) -> u8 {
+        match blend {
+            crate::rasterizer::BlendMode::Opaque => 0,
+            crate::rasterizer::BlendMode::Average => 1,
+            crate::rasterizer::BlendMode::Add => 2,
+            crate::rasterizer::BlendMode::Subtract => 3,
+            crate::rasterizer::BlendMode::AddQuarter => 4,
+            crate::rasterizer::BlendMode::Erase => 5,
+        }
+    }
+
     /// Get pixel color at coordinates
     pub fn get_pixel(&self, x: usize, y: usize) -> Color {
         let dim = self.dimension();
@@ -46,11 +70,11 @@ impl TextureAtlas {
             return Color::BLACK;
         }
         let idx = (y * dim + x) * 4;
-        Color::with_alpha(
+        Color::with_blend(
             self.pixels[idx],
             self.pixels[idx + 1],
             self.pixels[idx + 2],
-            self.pixels[idx + 3],
+            Self::u8_to_blend(self.pixels[idx + 3]),
         )
     }
 
@@ -64,7 +88,7 @@ impl TextureAtlas {
         self.pixels[idx] = color.r;
         self.pixels[idx + 1] = color.g;
         self.pixels[idx + 2] = color.b;
-        self.pixels[idx + 3] = color.a;
+        self.pixels[idx + 3] = Self::blend_to_u8(color.blend);
     }
 
     /// Sample texture at UV coordinates (no filtering - PS1 style)

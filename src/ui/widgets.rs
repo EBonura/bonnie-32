@@ -871,7 +871,7 @@ pub fn draw_drag_value_compact_editable(
 // PS1 Color Picker Widget (15-bit color: 5 bits per channel, 0-31 range)
 // =============================================================================
 
-use crate::rasterizer::Color as RasterColor;
+use crate::rasterizer::{Color as RasterColor, BlendMode};
 
 /// Result from the PS1 color picker
 pub struct ColorPickerResult {
@@ -1050,6 +1050,468 @@ pub fn draw_ps1_color_picker(
 pub fn ps1_color_picker_height() -> f32 {
     // Swatch height (32) + spacing (6) + preset row (14) = 52
     52.0
+}
+
+/// Draw a PS1-authentic color picker with RGBA sliders (RGB: 0-31 range, Alpha: 0-255)
+/// Includes transparency slider for PS1 semi-transparent effects.
+///
+/// Layout:
+/// ```text
+/// [Swatch]  R: [====|------] 16
+///           G: [==|--------] 8
+///           B: [======|----] 24
+///           A: [=======|---] 200
+/// [■][■][■][■][■][■][■][■]  <- presets
+/// ```
+pub fn draw_ps1_color_picker_with_alpha(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    current_color: RasterColor,
+    label: &str,
+    active_slider: &mut Option<usize>, // 0=R, 1=G, 2=B, 3=A
+) -> ColorPickerResult {
+    let mut result = ColorPickerResult {
+        color: None,
+        active: false,
+    };
+
+    let swatch_size = 40.0; // Slightly larger to fit 4 sliders
+    let slider_height = 9.0;
+    let slider_spacing = 1.0;
+    let label_width = 16.0;
+    let value_width = 24.0;
+    let slider_x = x + swatch_size + 8.0 + label_width;
+    let slider_width = width - swatch_size - 8.0 - label_width - value_width - 4.0;
+    let sliders_total_height = 4.0 * slider_height + 3.0 * slider_spacing; // 4 sliders with 3 gaps
+
+    let text_color = Color::new(0.8, 0.8, 0.8, 1.0);
+    let label_color = Color::new(0.6, 0.6, 0.6, 1.0);
+    let track_bg = Color::new(0.15, 0.15, 0.18, 1.0);
+
+    // Draw label above
+    if !label.is_empty() {
+        draw_text(label, x, y - 4.0, 11.0, label_color);
+    }
+
+    // Draw color swatch (current color) with checkerboard for transparency
+    let swatch_y = y;
+    draw_rectangle(x, swatch_y, swatch_size, swatch_size, Color::from_rgba(60, 60, 65, 255));
+
+    // Checkerboard pattern behind swatch to show transparency
+    let check_size = 6.0;
+    for cy in 0..((swatch_size - 2.0) / check_size) as usize {
+        for cx in 0..((swatch_size - 2.0) / check_size) as usize {
+            let check_color = if (cx + cy) % 2 == 0 {
+                Color::from_rgba(80, 80, 85, 255)
+            } else {
+                Color::from_rgba(50, 50, 55, 255)
+            };
+            let px = x + 1.0 + cx as f32 * check_size;
+            let py = swatch_y + 1.0 + cy as f32 * check_size;
+            draw_rectangle(px, py, check_size, check_size, check_color);
+        }
+    }
+
+    // Draw color (use 255 alpha for display since blend mode is now separate)
+    let display_alpha = if current_color.is_transparent() { 0 } else { 255 };
+    draw_rectangle(
+        x + 1.0,
+        swatch_y + 1.0,
+        swatch_size - 2.0,
+        swatch_size - 2.0,
+        Color::from_rgba(current_color.r, current_color.g, current_color.b, display_alpha),
+    );
+
+    // Get current 5-bit values and blend mode as numeric index for the slider
+    let mut r5 = current_color.r5();
+    let mut g5 = current_color.g5();
+    let mut b5 = current_color.b5();
+    // Map BlendMode to a 0-5 value for the slider (for backward compat with alpha slider position)
+    let mut blend_idx: u8 = match current_color.blend {
+        crate::rasterizer::BlendMode::Opaque => 255,      // Fully opaque
+        crate::rasterizer::BlendMode::Average => 192,     // 75%
+        crate::rasterizer::BlendMode::Add => 160,         // ~63%
+        crate::rasterizer::BlendMode::Subtract => 128,    // 50%
+        crate::rasterizer::BlendMode::AddQuarter => 96,   // ~37%
+        crate::rasterizer::BlendMode::Erase => 0,         // Transparent
+    };
+
+    // Draw RGBA sliders (vertically centered with swatch)
+    // Note: The "A" slider now controls blend mode visually (0=transparent, 255=opaque)
+    let sliders_start_y = y + (swatch_size - sliders_total_height) / 2.0;
+    let channels: [(&str, u8, u8, Color); 4] = [
+        ("R", r5, 31, Color::new(0.8, 0.2, 0.2, 1.0)),
+        ("G", g5, 31, Color::new(0.2, 0.8, 0.2, 1.0)),
+        ("B", b5, 31, Color::new(0.2, 0.4, 0.9, 1.0)),
+        ("A", blend_idx, 255, Color::new(0.7, 0.7, 0.7, 1.0)),
+    ];
+
+    for (i, (name, value, max_val, tint)) in channels.iter().enumerate() {
+        let slider_y = sliders_start_y + (i as f32) * (slider_height + slider_spacing);
+
+        // Label
+        draw_text(name, x + swatch_size + 8.0, slider_y + slider_height - 2.0, 10.0, text_color);
+
+        // Slider track background
+        let track_rect = Rect::new(slider_x, slider_y, slider_width, slider_height);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+        // For alpha slider, draw checkerboard behind to visualize transparency
+        if i == 3 {
+            let check_w = 4.0;
+            for cx in 0..((slider_width / check_w) as usize) {
+                let check_color = if cx % 2 == 0 {
+                    Color::from_rgba(50, 50, 55, 255)
+                } else {
+                    Color::from_rgba(30, 30, 35, 255)
+                };
+                let px = track_rect.x + cx as f32 * check_w;
+                draw_rectangle(px, track_rect.y, check_w, slider_height, check_color);
+            }
+        }
+
+        // Filled portion with channel tint
+        let fill_ratio = *value as f32 / *max_val as f32;
+        let fill_width = fill_ratio * slider_width;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, *tint);
+
+        // Thumb indicator
+        let thumb_x = track_rect.x + fill_width - 1.0;
+        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+        // Value text
+        let value_str = format!("{:3}", value);
+        draw_text(
+            &value_str,
+            slider_x + slider_width + 4.0,
+            slider_y + slider_height - 2.0,
+            10.0,
+            text_color,
+        );
+
+        // Handle slider interaction
+        let hovered = ctx.mouse.inside(&track_rect);
+
+        // Start dragging
+        if hovered && ctx.mouse.left_pressed {
+            *active_slider = Some(i);
+        }
+
+        // Continue dragging (even outside the rect)
+        if *active_slider == Some(i) && ctx.mouse.left_down {
+            result.active = true;
+            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+            let new_val = ((rel_x / slider_width) * *max_val as f32).round() as u8;
+            match i {
+                0 => r5 = new_val,
+                1 => g5 = new_val,
+                2 => b5 = new_val,
+                3 => blend_idx = new_val,
+                _ => {}
+            }
+            // Map slider value back to BlendMode
+            let blend = if blend_idx < 48 {
+                crate::rasterizer::BlendMode::Erase
+            } else if blend_idx < 112 {
+                crate::rasterizer::BlendMode::AddQuarter
+            } else if blend_idx < 144 {
+                crate::rasterizer::BlendMode::Subtract
+            } else if blend_idx < 176 {
+                crate::rasterizer::BlendMode::Add
+            } else if blend_idx < 224 {
+                crate::rasterizer::BlendMode::Average
+            } else {
+                crate::rasterizer::BlendMode::Opaque
+            };
+            let color = RasterColor::with_blend(
+                (r5.min(31)) << 3,
+                (g5.min(31)) << 3,
+                (b5.min(31)) << 3,
+                blend,
+            );
+            result.color = Some(color);
+        }
+
+        // End dragging
+        if *active_slider == Some(i) && !ctx.mouse.left_down {
+            *active_slider = None;
+        }
+    }
+
+    // Draw preset row below sliders
+    let preset_y = y + swatch_size + 6.0;
+    let preset_size = 14.0;
+    let preset_spacing = 2.0;
+
+    for (i, (pr, pg, pb)) in PS1_PRESETS.iter().enumerate() {
+        let preset_x = x + (i as f32) * (preset_size + preset_spacing);
+        let preset_rect = Rect::new(preset_x, preset_y, preset_size, preset_size);
+
+        // Border
+        draw_rectangle(preset_x, preset_y, preset_size, preset_size, Color::from_rgba(60, 60, 65, 255));
+
+        // Color fill
+        let preset_color = RasterColor::from_ps1(*pr, *pg, *pb);
+        draw_rectangle(
+            preset_x + 1.0,
+            preset_y + 1.0,
+            preset_size - 2.0,
+            preset_size - 2.0,
+            Color::from_rgba(preset_color.r, preset_color.g, preset_color.b, 255),
+        );
+
+        // Click to apply preset (keep current blend mode)
+        if ctx.mouse.inside(&preset_rect) && ctx.mouse.left_pressed {
+            let color = RasterColor::with_blend(preset_color.r, preset_color.g, preset_color.b, current_color.blend);
+            result.color = Some(color);
+        }
+    }
+
+    result
+}
+
+/// Calculate the height needed for a PS1 color picker with alpha slider
+pub fn ps1_color_picker_with_alpha_height() -> f32 {
+    // Swatch height (40) + spacing (6) + preset row (14) = 60
+    60.0
+}
+
+// =============================================================================
+// PS1 Color Picker with Blend Mode (for face/texture painting)
+// =============================================================================
+
+/// Result from the PS1 color picker with blend mode
+pub struct ColorBlendPickerResult {
+    /// New color if changed
+    pub color: Option<RasterColor>,
+    /// New blend mode if changed
+    pub blend_mode: Option<BlendMode>,
+    /// Whether the picker is actively being interacted with
+    pub active: bool,
+}
+
+/// Draw a PS1 color picker with blend mode selector instead of alpha
+///
+/// PS1 has discrete blend modes, not continuous alpha:
+/// - Opaque: No blending
+/// - Average: 50% blend (B+F)/2 - glass/water
+/// - Add: Additive glow B+F
+/// - Subtract: B-F shadows
+/// - AddQuarter: B+F/4 subtle glow
+pub fn draw_ps1_color_picker_with_blend_mode(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    current_color: RasterColor,
+    current_blend: BlendMode,
+    label: &str,
+    active_slider: &mut Option<usize>, // 0=R, 1=G, 2=B
+) -> ColorBlendPickerResult {
+    let mut result = ColorBlendPickerResult {
+        color: None,
+        blend_mode: None,
+        active: false,
+    };
+
+    let swatch_size = 32.0;
+    let slider_height = 10.0;
+    let slider_spacing = 1.0;
+    let label_width = 16.0;
+    let value_width = 20.0;
+    let slider_x = x + swatch_size + 8.0 + label_width;
+    let slider_width = width - swatch_size - 8.0 - label_width - value_width - 4.0;
+    let sliders_total_height = 3.0 * slider_height + 2.0 * slider_spacing;
+
+    let text_color = Color::new(0.8, 0.8, 0.8, 1.0);
+    let label_color = Color::new(0.6, 0.6, 0.6, 1.0);
+    let track_bg = Color::new(0.15, 0.15, 0.18, 1.0);
+
+    // Draw label above
+    if !label.is_empty() {
+        draw_text(label, x, y - 4.0, 11.0, label_color);
+    }
+
+    // Draw color swatch (current color)
+    let swatch_y = y;
+    draw_rectangle(x, swatch_y, swatch_size, swatch_size, Color::from_rgba(60, 60, 65, 255));
+    draw_rectangle(
+        x + 1.0,
+        swatch_y + 1.0,
+        swatch_size - 2.0,
+        swatch_size - 2.0,
+        Color::from_rgba(current_color.r, current_color.g, current_color.b, 255),
+    );
+
+    // Get current 5-bit values
+    let mut r5 = current_color.r5();
+    let mut g5 = current_color.g5();
+    let mut b5 = current_color.b5();
+
+    // Draw RGB sliders (vertically centered with swatch)
+    let sliders_start_y = y + (swatch_size - sliders_total_height) / 2.0;
+    let channels = [
+        ("R", r5, Color::new(0.8, 0.2, 0.2, 1.0)),
+        ("G", g5, Color::new(0.2, 0.8, 0.2, 1.0)),
+        ("B", b5, Color::new(0.2, 0.4, 0.9, 1.0)),
+    ];
+
+    for (i, (name, value, tint)) in channels.iter().enumerate() {
+        let slider_y = sliders_start_y + (i as f32) * (slider_height + slider_spacing);
+
+        // Label
+        draw_text(name, x + swatch_size + 8.0, slider_y + slider_height - 3.0, 11.0, text_color);
+
+        // Slider track background
+        let track_rect = Rect::new(slider_x, slider_y, slider_width, slider_height);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+        // Filled portion with channel tint
+        let fill_ratio = *value as f32 / 31.0;
+        let fill_width = fill_ratio * slider_width;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, *tint);
+
+        // Thumb indicator
+        let thumb_x = track_rect.x + fill_width - 1.0;
+        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+        // Value text
+        let value_str = format!("{:2}", value);
+        draw_text(
+            &value_str,
+            slider_x + slider_width + 4.0,
+            slider_y + slider_height - 3.0,
+            11.0,
+            text_color,
+        );
+
+        // Handle slider interaction
+        let hovered = ctx.mouse.inside(&track_rect);
+
+        // Start dragging
+        if hovered && ctx.mouse.left_pressed {
+            *active_slider = Some(i);
+        }
+
+        // Continue dragging
+        if *active_slider == Some(i) && ctx.mouse.left_down {
+            result.active = true;
+            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+            match i {
+                0 => r5 = new_val,
+                1 => g5 = new_val,
+                2 => b5 = new_val,
+                _ => {}
+            }
+            result.color = Some(RasterColor::from_ps1(r5, g5, b5));
+        }
+
+        // End dragging
+        if *active_slider == Some(i) && !ctx.mouse.left_down {
+            *active_slider = None;
+        }
+    }
+
+    // Draw blend mode selector row below sliders (before presets)
+    let blend_y = y + swatch_size + 4.0;
+    let blend_btn_size = 18.0;
+    let blend_spacing = 2.0;
+
+    // Blend mode options with short labels
+    let blend_modes = [
+        (BlendMode::Opaque, "O", "Opaque (solid)"),
+        (BlendMode::Average, "A", "Average (50% blend, glass)"),
+        (BlendMode::Add, "+", "Add (glow)"),
+        (BlendMode::Subtract, "-", "Subtract (shadow)"),
+        (BlendMode::AddQuarter, "Q", "Add Quarter (subtle glow)"),
+        (BlendMode::Erase, "E", "Erase (transparent)"),
+    ];
+
+    draw_text("Blend:", x, blend_y + 13.0, 10.0, label_color);
+
+    for (i, (mode, short_label, tooltip)) in blend_modes.iter().enumerate() {
+        let btn_x = x + 36.0 + (i as f32) * (blend_btn_size + blend_spacing);
+        let btn_rect = Rect::new(btn_x, blend_y, blend_btn_size, blend_btn_size);
+
+        let is_selected = *mode == current_blend;
+        let is_hovered = ctx.mouse.inside(&btn_rect);
+
+        // Button background
+        let bg_color = if is_selected {
+            Color::from_rgba(80, 140, 200, 255)
+        } else if is_hovered {
+            Color::from_rgba(70, 70, 80, 255)
+        } else {
+            Color::from_rgba(45, 47, 55, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg_color);
+        draw_rectangle_lines(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, 1.0,
+            Color::from_rgba(80, 82, 90, 255));
+
+        // Label
+        let text_col = if is_selected { WHITE } else { text_color };
+        let text_dims = measure_text(short_label, None, 11, 1.0);
+        draw_text(
+            short_label,
+            btn_rect.x + (btn_rect.w - text_dims.width) / 2.0,
+            btn_rect.y + btn_rect.h - 5.0,
+            11.0,
+            text_col,
+        );
+
+        // Handle click
+        if is_hovered && ctx.mouse.left_pressed {
+            result.blend_mode = Some(*mode);
+        }
+
+        // Tooltip
+        if is_hovered {
+            ctx.tooltip = Some(crate::ui::PendingTooltip {
+                text: tooltip.to_string(),
+                x: ctx.mouse.x,
+                y: ctx.mouse.y,
+            });
+        }
+    }
+
+    // Draw preset row below blend mode
+    let preset_y = blend_y + blend_btn_size + 4.0;
+    let preset_size = 14.0;
+    let preset_spacing = 2.0;
+
+    for (i, (pr, pg, pb)) in PS1_PRESETS.iter().enumerate() {
+        let preset_x = x + (i as f32) * (preset_size + preset_spacing);
+        let preset_rect = Rect::new(preset_x, preset_y, preset_size, preset_size);
+
+        // Border
+        draw_rectangle(preset_x, preset_y, preset_size, preset_size, Color::from_rgba(60, 60, 65, 255));
+
+        // Color fill
+        let preset_color = RasterColor::from_ps1(*pr, *pg, *pb);
+        draw_rectangle(
+            preset_x + 1.0,
+            preset_y + 1.0,
+            preset_size - 2.0,
+            preset_size - 2.0,
+            Color::from_rgba(preset_color.r, preset_color.g, preset_color.b, 255),
+        );
+
+        // Click to apply preset
+        if ctx.mouse.inside(&preset_rect) && ctx.mouse.left_pressed {
+            result.color = Some(preset_color);
+        }
+    }
+
+    result
+}
+
+/// Calculate the height needed for a PS1 color picker with blend mode
+pub fn ps1_color_picker_with_blend_mode_height() -> f32 {
+    // Swatch height (32) + spacing (4) + blend row (18) + spacing (4) + preset row (14) = 72
+    72.0
 }
 
 // =============================================================================
