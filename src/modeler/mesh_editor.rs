@@ -331,23 +331,25 @@ impl MeshEditorModel {
         }
     }
 
-    /// Save mesh editor model to file (.bmesh format)
+    /// Save mesh editor model to file (.ron format)
     pub fn save_to_file(&self, path: &Path) -> Result<(), MeshEditorError> {
         let config = ron::ser::PrettyConfig::new()
             .depth_limit(4)
             .indentor("  ".to_string());
-        let contents = ron::ser::to_string_pretty(self, config)
+        let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
-        std::fs::write(path, contents)
+
+        std::fs::write(path, ron_data)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
         Ok(())
     }
 
-    /// Load mesh editor model from file (.bmesh format)
+    /// Load mesh editor model from file (.ron format)
     pub fn load_from_file(path: &Path) -> Result<Self, MeshEditorError> {
-        let contents = std::fs::read_to_string(path)
+        let ron_data = std::fs::read_to_string(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
-        let model: MeshEditorModel = ron::from_str(&contents)
+
+        let model: MeshEditorModel = ron::from_str(&ron_data)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
         Ok(model)
     }
@@ -1089,9 +1091,10 @@ impl EditableMesh {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), MeshEditorError> {
         let config = ron::ser::PrettyConfig::default();
-        let contents = ron::ser::to_string_pretty(self, config)
+        let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
-        std::fs::write(path, contents)
+
+        std::fs::write(path, ron_data)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
         Ok(())
     }
@@ -1099,9 +1102,10 @@ impl EditableMesh {
     /// Load mesh from file (.ron format)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, MeshEditorError> {
-        let contents = std::fs::read_to_string(path)
+        let ron_data = std::fs::read_to_string(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
-        let mesh: EditableMesh = ron::from_str(&contents)
+
+        let mesh: EditableMesh = ron::from_str(&ron_data)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
         Ok(mesh)
     }

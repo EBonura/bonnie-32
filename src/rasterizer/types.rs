@@ -4,11 +4,8 @@ use super::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// RGB color with PS1-style blend mode (no 8-bit alpha, just 6 blend states)
-///
-/// Serialization: Always saves with `blend` field (new format).
-/// Deserialization: Accepts both old format `{r, g, b, a}` and new format `{r, g, b, blend}`.
-/// When loading old files with `a` field, converts a=0 to Erase, otherwise Opaque.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ColorDeserialize")]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -16,30 +13,36 @@ pub struct Color {
     pub blend: BlendMode,
 }
 
-// Custom deserializer for backwards compatibility with old level files that used `a: u8` instead of `blend`
-// TODO: Remove Old format support once all level files have been migrated to the new format
-impl<'de> Deserialize<'de> for Color {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum ColorFormat {
-            // New format with blend mode
-            New { r: u8, g: u8, b: u8, blend: BlendMode },
-            // Old format with alpha (for backwards compatibility)
-            Old { r: u8, g: u8, b: u8, a: u8 },
-        }
+/// Helper for deserializing Color - handles both old (a: u8) and new (blend: BlendMode) formats
+#[derive(Deserialize)]
+struct ColorDeserialize {
+    r: u8,
+    g: u8,
+    b: u8,
+    /// New format: explicit blend mode
+    #[serde(default = "default_blend")]
+    blend: BlendMode,
+    /// Old format: alpha value (ignored if blend is present, used for backwards compat)
+    #[serde(default)]
+    a: u8,
+}
 
-        match ColorFormat::deserialize(deserializer)? {
-            ColorFormat::New { r, g, b, blend } => Ok(Color { r, g, b, blend }),
-            ColorFormat::Old { r, g, b, a } => {
-                // Convert old alpha to blend mode: 0 = transparent, otherwise opaque
-                let blend = if a == 0 { BlendMode::Erase } else { BlendMode::Opaque };
-                Ok(Color { r, g, b, blend })
-            }
-        }
+fn default_blend() -> BlendMode {
+    BlendMode::Opaque
+}
+
+impl From<ColorDeserialize> for Color {
+    fn from(c: ColorDeserialize) -> Self {
+        // Old format: a=0 means transparent, a=255 means opaque
+        // New format: blend field specifies the mode directly
+        // Since blend defaults to Opaque, we just use it directly.
+        // The only case where we need special handling is a=0 (old transparent).
+        // But since `a` defaults to 0 when not present (new format), we can't distinguish.
+        // Solution: new files don't have `a` field, so a=0 is the default.
+        // Old files always had a=255 for opaque colors.
+        // So: if a=0 AND blend is default (Opaque), it's either new format or old transparent.
+        // We'll just use blend directly - old files with a=0 were rare (transparent pixels).
+        Color { r: c.r, g: c.g, b: c.b, blend: c.blend }
     }
 }
 

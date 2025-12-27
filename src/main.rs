@@ -456,6 +456,7 @@ async fn main() {
                                         ms.model_browser.set_preview(mesh);
                                     }
                                     Err(e) => {
+                                        eprintln!("Failed to load model: {}", e);
                                         ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
                                     }
                                 }
@@ -507,6 +508,7 @@ async fn main() {
                                         ms.mesh_browser.set_preview(mesh);
                                     }
                                     Err(e) => {
+                                        eprintln!("Failed to load mesh: {}", e);
                                         ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
                                     }
                                 }
@@ -642,6 +644,34 @@ fn next_available_level_name() -> PathBuf {
     // Generate next filename
     let next_num = highest + 1;
     levels_dir.join(format!("level_{:03}.ron", next_num))
+}
+
+/// Find the next available model filename with format "model_001", "model_002", etc.
+fn next_available_model_name() -> PathBuf {
+    let models_dir = PathBuf::from("assets/models");
+
+    // Create directory if it doesn't exist
+    let _ = std::fs::create_dir_all(&models_dir);
+
+    // Find the highest existing model_XXX number
+    let mut highest = 0;
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                // Check for pattern "model_XXX"
+                if let Some(num_str) = stem.strip_prefix("model_") {
+                    if let Ok(num) = num_str.parse::<u32>() {
+                        highest = highest.max(num);
+                    }
+                }
+            }
+        }
+    }
+
+    // Generate next filename
+    let next_num = highest + 1;
+    models_dir.join(format!("model_{:03}.ron", next_num))
 }
 
 fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
@@ -899,12 +929,12 @@ fn handle_modeler_action(
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             } else {
-                // No current file - save to default location
-                let default_dir = PathBuf::from("assets/models");
-                let _ = std::fs::create_dir_all(&default_dir);
-                let default_path = default_dir.join("untitled.ron");
+                // No current file - save with auto-generated name (model_001, model_002, etc.)
+                let default_path = next_available_model_name();
                 if let Err(e) = state.save_mesh(&default_path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
+                } else {
+                    state.current_file = Some(default_path);
                 }
             }
         }
@@ -939,6 +969,7 @@ fn handle_modeler_action(
 
             if let Some(path) = dialog.pick_file() {
                 if let Err(e) = state.load_mesh(&path) {
+                    eprintln!("Load failed: {}", e);
                     state.set_status(&format!("Load failed: {}", e), 5.0);
                 }
             }
@@ -950,6 +981,7 @@ fn handle_modeler_action(
         ModelerAction::Load(path_str) => {
             let path = PathBuf::from(&path_str);
             if let Err(e) = state.load_mesh(&path) {
+                eprintln!("Load failed: {}", e);
                 state.set_status(&format!("Load failed: {}", e), 5.0);
             }
         }

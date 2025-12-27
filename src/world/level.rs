@@ -236,8 +236,31 @@ pub fn validate_level(level: &Level) -> Result<(), LevelError> {
 
 /// Load a level from a RON file
 pub fn load_level<P: AsRef<Path>>(path: P) -> Result<Level, LevelError> {
+    let path = path.as_ref();
     let contents = fs::read_to_string(path)?;
-    let mut level: Level = ron::from_str(&contents)?;
+
+    let mut level: Level = match ron::from_str(&contents) {
+        Ok(l) => l,
+        Err(e) => {
+            // Log detailed error with context
+            eprintln!("RON parse error in {}: {}", path.display(), e);
+            let pos = e.position;
+            // Show context around the error
+            let lines: Vec<&str> = contents.lines().collect();
+            let line_idx = pos.line.saturating_sub(1);
+            if line_idx < lines.len() {
+                let line = lines[line_idx];
+                eprintln!("  Line {}: {}", pos.line, line);
+                if pos.col > 0 && pos.col <= line.len() {
+                    // Show surrounding characters
+                    let start = pos.col.saturating_sub(20);
+                    let end = (pos.col + 30).min(line.len());
+                    eprintln!("  Context: ...{}...", &line[start..end]);
+                }
+            }
+            return Err(e.into());
+        }
+    };
 
     // Validate level to prevent malicious files
     validate_level(&level)?;
