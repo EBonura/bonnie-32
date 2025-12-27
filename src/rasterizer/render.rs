@@ -1,8 +1,9 @@
 //! Core rendering functions
 //! Triangle rasterization with PS1-style effects
 
-use super::math::{barycentric, perspective_transform, project, project_ortho, Vec3, NEAR_PLANE};
-use super::types::{BlendMode, Color, Face, Light, LightType, RasterSettings, ShadingMode, Texture, Vertex};
+use std::time::Instant;
+use super::math::{perspective_transform, project, project_ortho, Vec3, NEAR_PLANE};
+use super::types::{BlendMode, Color, Face, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Vertex};
 
 /// Framebuffer for software rendering
 pub struct Framebuffer {
@@ -546,21 +547,27 @@ fn apply_dither(color: Color, x: usize, y: usize) -> Color {
     Color::with_blend(r, g, b, color.blend)
 }
 
-/// Rasterize a single triangle
+/// Rasterize a single triangle using incremental barycentric stepping.
+/// Uses edge function increments instead of recalculating barycentric
+/// coordinates per-pixel for better performance.
 fn rasterize_triangle(
     fb: &mut Framebuffer,
     surface: &Surface,
     texture: Option<&Texture>,
     settings: &RasterSettings,
 ) {
-    // Bounding box
+    // Bounding box (same as original)
     let min_x = surface.v1.x.min(surface.v2.x).min(surface.v3.x).max(0.0) as usize;
     let max_x = (surface.v1.x.max(surface.v2.x).max(surface.v3.x) + 1.0).min(fb.width as f32) as usize;
     let min_y = surface.v1.y.min(surface.v2.y).min(surface.v3.y).max(0.0) as usize;
     let max_y = (surface.v1.y.max(surface.v2.y).max(surface.v3.y) + 1.0).min(fb.height as f32) as usize;
 
-    // Pre-calculate flat shading if needed
-    // Use world-space normal and center position for point/spot lights
+    // Early exit for degenerate/off-screen triangles
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    // Pre-calculate flat shading if needed (same as original)
     let flat_shade = if settings.shading == ShadingMode::Flat {
         let center_pos = (surface.w1 + surface.w2 + surface.w3).scale(1.0 / 3.0);
         let world_normal = (surface.wn1 + surface.wn2 + surface.wn3).scale(1.0 / 3.0).normalize();
@@ -569,22 +576,82 @@ fn rasterize_triangle(
         (1.0, 1.0, 1.0)
     };
 
-    // Rasterize
-    for y in min_y..max_y {
-        for x in min_x..max_x {
-            let p = Vec3::new(x as f32, y as f32, 0.0);
-            let bc = barycentric(p, surface.v1, surface.v2, surface.v3);
+    // Pre-compute Gouraud vertex shading if needed
+    let gouraud_shades = if settings.shading == ShadingMode::Gouraud {
+        Some((
+            shade_multi_light_color(surface.wn1, surface.w1, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn2, surface.w2, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn3, surface.w3, &settings.lights, settings.ambient),
+        ))
+    } else {
+        None
+    };
 
-            // Check if inside triangle
+    // === EDGE FUNCTION SETUP ===
+    // Edge function: E(x,y) = (y1-y2)*x + (x2-x1)*y + (x1*y2 - x2*y1)
+    // For barycentric: bc.x = E23/area, bc.y = E31/area, bc.z = E12/area
+
+    let v1 = surface.v1;
+    let v2 = surface.v2;
+    let v3 = surface.v3;
+
+    // Triangle area * 2 (used for normalization)
+    let area = (v2.y - v3.y) * (v1.x - v3.x) + (v3.x - v2.x) * (v1.y - v3.y);
+    if area.abs() < 0.00001 {
+        return; // Degenerate triangle
+    }
+    let inv_area = 1.0 / area;
+
+    // Edge function coefficients for barycentric coordinate bc.x (weight for v1)
+    // E23: edge from v2 to v3
+    let a0 = v2.y - v3.y;
+    let b0 = v3.x - v2.x;
+    // Edge function coefficients for barycentric coordinate bc.y (weight for v2)
+    // E31: edge from v3 to v1
+    let a1 = v3.y - v1.y;
+    let b1 = v1.x - v3.x;
+    // bc.z = 1 - bc.x - bc.y (no need to compute separately)
+
+    // Starting point
+    let start_x = min_x as f32;
+    let start_y = min_y as f32;
+
+    // Initial edge function values at (start_x, start_y)
+    let w0_row_start = a0 * (start_x - v3.x) + b0 * (start_y - v3.y);
+    let w1_row_start = a1 * (start_x - v3.x) + b1 * (start_y - v3.y);
+
+    // Step increments
+    let a0_step = a0; // x step for w0
+    let b0_step = b0; // y step for w0
+    let a1_step = a1; // x step for w1
+    let b1_step = b1; // y step for w1
+
+    let mut w0_row = w0_row_start;
+    let mut w1_row = w1_row_start;
+
+    // Rasterize using incremental edge functions
+    for y in min_y..max_y {
+        let mut w0 = w0_row;
+        let mut w1 = w1_row;
+
+        for x in min_x..max_x {
+            // Convert to barycentric coordinates
+            let bc_x = w0 * inv_area;
+            let bc_y = w1 * inv_area;
+            let bc_z = 1.0 - bc_x - bc_y;
+
+            // Check if inside triangle (same threshold as original)
             const ERR: f32 = -0.0001;
-            if bc.x >= ERR && bc.y >= ERR && bc.z >= ERR {
+            if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
                 // Interpolate depth
-                let z = bc.x * surface.v1.z + bc.y * surface.v2.z + bc.z * surface.v3.z;
+                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
 
                 // Z-buffer test
                 if settings.use_zbuffer {
                     let idx = y * fb.width + x;
                     if z >= fb.zbuffer[idx] {
+                        w0 += a0_step;
+                        w1 += a1_step;
                         continue;
                     }
                 }
@@ -592,22 +659,21 @@ fn rasterize_triangle(
                 // Interpolate UV coordinates
                 let (u, v) = if settings.affine_textures {
                     // Affine (PS1 style) - linear interpolation
-                    let u = bc.x * surface.uv1.x + bc.y * surface.uv2.x + bc.z * surface.uv3.x;
-                    let v = bc.x * surface.uv1.y + bc.y * surface.uv2.y + bc.z * surface.uv3.y;
+                    let u = bc_x * surface.uv1.x + bc_y * surface.uv2.x + bc_z * surface.uv3.x;
+                    let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
                     (u, v)
                 } else {
                     // Perspective-correct interpolation
-                    let mut bcc = bc;
-                    bcc.x = bc.x / surface.v1.z;
-                    bcc.y = bc.y / surface.v2.z;
-                    bcc.z = bc.z / surface.v3.z;
-                    let bd = bcc.x + bcc.y + bcc.z;
-                    bcc.x /= bd;
-                    bcc.y /= bd;
-                    bcc.z /= bd;
+                    let bcc_x = bc_x / v1.z;
+                    let bcc_y = bc_y / v2.z;
+                    let bcc_z = bc_z / v3.z;
+                    let bd = bcc_x + bcc_y + bcc_z;
+                    let bcc_x = bcc_x / bd;
+                    let bcc_y = bcc_y / bd;
+                    let bcc_z = bcc_z / bd;
 
-                    let u = bcc.x * surface.uv1.x + bcc.y * surface.uv2.x + bcc.z * surface.uv3.x;
-                    let v = bcc.x * surface.uv1.y + bcc.y * surface.uv2.y + bcc.z * surface.uv3.y;
+                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
+                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
                     (u, v)
                 };
 
@@ -618,35 +684,35 @@ fn rasterize_triangle(
                     Color::WHITE
                 };
 
-                // Skip transparent pixels (Erase blend mode)
+                // Skip transparent pixels
                 if color.is_transparent() {
+                    w0 += a0_step;
+                    w1 += a1_step;
                     continue;
                 }
 
                 // Interpolate vertex colors (PS1-style Gouraud for color)
                 let vertex_color = Color {
-                    r: (bc.x * surface.vc1.r as f32 + bc.y * surface.vc2.r as f32 + bc.z * surface.vc3.r as f32) as u8,
-                    g: (bc.x * surface.vc1.g as f32 + bc.y * surface.vc2.g as f32 + bc.z * surface.vc3.g as f32) as u8,
-                    b: (bc.x * surface.vc1.b as f32 + bc.y * surface.vc2.b as f32 + bc.z * surface.vc3.b as f32) as u8,
+                    r: (bc_x * surface.vc1.r as f32 + bc_y * surface.vc2.r as f32 + bc_z * surface.vc3.r as f32) as u8,
+                    g: (bc_x * surface.vc1.g as f32 + bc_y * surface.vc2.g as f32 + bc_z * surface.vc3.g as f32) as u8,
+                    b: (bc_x * surface.vc1.b as f32 + bc_y * surface.vc2.b as f32 + bc_z * surface.vc3.b as f32) as u8,
                     blend: BlendMode::Opaque,
                 };
 
-                // Apply PS1-style texture modulation: (texel * vertex_color) / 128
+                // Apply PS1-style texture modulation
                 color = color.modulate(vertex_color);
 
-                // Apply shading (lighting) with colored lights
+                // Apply shading (lighting)
                 let (shade_r, shade_g, shade_b) = match settings.shading {
                     ShadingMode::None => (1.0, 1.0, 1.0),
                     ShadingMode::Flat => flat_shade,
                     ShadingMode::Gouraud => {
-                        // Interpolate per-vertex shading from world-space normals and positions
-                        let (r1, g1, b1) = shade_multi_light_color(surface.wn1, surface.w1, &settings.lights, settings.ambient);
-                        let (r2, g2, b2) = shade_multi_light_color(surface.wn2, surface.w2, &settings.lights, settings.ambient);
-                        let (r3, g3, b3) = shade_multi_light_color(surface.wn3, surface.w3, &settings.lights, settings.ambient);
+                        // Use pre-computed vertex shading
+                        let ((r1, g1, b1), (r2, g2, b2), (r3, g3, b3)) = gouraud_shades.unwrap();
                         (
-                            bc.x * r1 + bc.y * r2 + bc.z * r3,
-                            bc.x * g1 + bc.y * g2 + bc.z * g3,
-                            bc.x * b1 + bc.y * b2 + bc.z * b3,
+                            bc_x * r1 + bc_y * r2 + bc_z * r3,
+                            bc_x * g1 + bc_y * g2 + bc_z * g3,
+                            bc_x * b1 + bc_y * b2 + bc_z * b3,
                         )
                     }
                 };
@@ -658,11 +724,10 @@ fn rasterize_triangle(
                     color = apply_dither(color, x, y);
                 }
 
-                // Write pixel (use blend mode from texture)
+                // Write pixel
                 if color.blend == BlendMode::Opaque {
                     fb.set_pixel_with_depth(x, y, z, color);
                 } else {
-                    // For semi-transparent modes, blend with existing framebuffer
                     let idx = y * fb.width + x;
                     if z < fb.zbuffer[idx] {
                         fb.zbuffer[idx] = z;
@@ -670,11 +735,20 @@ fn rasterize_triangle(
                     }
                 }
             }
+
+            // Step to next pixel (x increment)
+            w0 += a0_step;
+            w1 += a1_step;
         }
+
+        // Step to next row (y increment)
+        w0_row += b0_step;
+        w1_row += b1_step;
     }
 }
 
 /// Render a mesh to the framebuffer
+/// Returns timing breakdown for profiling
 pub fn render_mesh(
     fb: &mut Framebuffer,
     vertices: &[Vertex],
@@ -682,7 +756,12 @@ pub fn render_mesh(
     textures: &[Texture],
     camera: &Camera,
     settings: &RasterSettings,
-) {
+) -> RasterTimings {
+    let mut timings = RasterTimings::default();
+
+    // === TRANSFORM PHASE ===
+    let transform_start = Instant::now();
+
     // Transform all vertices to camera space
     let mut cam_space_positions: Vec<Vec3> = Vec::with_capacity(vertices.len());
     let mut cam_space_normals: Vec<Vec3> = Vec::with_capacity(vertices.len());
@@ -706,6 +785,11 @@ pub fn render_mesh(
         let cam_normal = perspective_transform(v.normal, camera.basis_x, camera.basis_y, camera.basis_z);
         cam_space_normals.push(cam_normal.normalize());
     }
+
+    timings.transform_ms = transform_start.elapsed().as_secs_f32() * 1000.0;
+
+    // === CULL PHASE ===
+    let cull_start = Instant::now();
 
     // Build surfaces for front-faces and collect back-faces for wireframe
     let mut surfaces: Vec<Surface> = Vec::with_capacity(faces.len());
@@ -800,6 +884,11 @@ pub fn render_mesh(
         }
     }
 
+    timings.cull_ms = cull_start.elapsed().as_secs_f32() * 1000.0;
+
+    // === SORT PHASE ===
+    let sort_start = Instant::now();
+
     // Sort by depth if not using Z-buffer (painter's algorithm)
     if !settings.use_zbuffer {
         surfaces.sort_by(|a, b| {
@@ -809,15 +898,26 @@ pub fn render_mesh(
         });
     }
 
+    timings.sort_ms = sort_start.elapsed().as_secs_f32() * 1000.0;
+
+    // === DRAW PHASE ===
+    let draw_start = Instant::now();
+
     // Rasterize each solid surface (skip if wireframe-only mode)
     if !settings.wireframe_overlay {
         for surface in &surfaces {
             let texture = faces[surface.face_idx]
                 .texture_id
                 .and_then(|id| textures.get(id));
+
             rasterize_triangle(fb, surface, texture, settings);
         }
     }
+
+    timings.draw_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
+
+    // === WIREFRAME PHASE ===
+    let wireframe_start = Instant::now();
 
     // Draw wireframes for back-faces (visible but not solid)
     // Only draw if backface culling is enabled AND backface wireframe is enabled
@@ -888,6 +988,10 @@ pub fn render_mesh(
             fb.draw_line(x0, y0, x1, y1, front_wireframe_color);
         }
     }
+
+    timings.wireframe_ms = wireframe_start.elapsed().as_secs_f32() * 1000.0;
+
+    timings
 }
 
 /// Create a simple test cube mesh

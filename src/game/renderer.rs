@@ -4,16 +4,17 @@
 //! Combines static level geometry with dynamic entities.
 
 use macroquad::prelude::*;
+use std::time::Instant;
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh,
-    Light, RasterSettings, ShadingMode, Color as RasterColor,
+    Light, RasterSettings, RasterTimings, ShadingMode, Color as RasterColor,
     Vec3, project, perspective_transform,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
 };
 use crate::ui::Rect;
 use crate::world::Level;
 use crate::input::{InputState, Action};
-use super::runtime::{GameToolState, CameraMode};
+use super::runtime::{GameToolState, CameraMode, FrameTimings};
 
 /// Draw the test viewport (full area, no properties panel)
 /// Player settings are now edited in the World Editor properties panel when PlayerStart is selected.
@@ -25,6 +26,8 @@ pub fn draw_test_viewport(
     fb: &mut Framebuffer,
     input: &InputState,
 ) {
+    let frame_start = Instant::now();
+
     // Resize framebuffer to match game resolution (toggle via debug menu)
     let (fb_w, fb_h) = if game.raster_settings.low_resolution {
         (WIDTH, HEIGHT)       // 320x240 PS1 native
@@ -46,6 +49,9 @@ pub fn draw_test_viewport(
         game.toggle_playing();
     }
 
+    // === INPUT PHASE ===
+    let input_start = Instant::now();
+
     // Handle input (camera, player movement) - blocked when debug menu is open
     if !game.options_menu_open {
         match game.camera_mode {
@@ -62,8 +68,18 @@ pub fn draw_test_viewport(
         }
     }
 
+    let input_ms = FrameTimings::elapsed_ms(input_start);
+
+    // === CLEAR PHASE ===
+    let clear_start = Instant::now();
+
     // Clear framebuffer to dark gray
     fb.clear(RasterColor::new(20, 22, 28));
+
+    let clear_ms = FrameTimings::elapsed_ms(clear_start);
+
+    // === RENDER PHASE ===
+    let render_start = Instant::now();
 
     // Texture resolver closure
     let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<usize> {
@@ -74,7 +90,8 @@ pub fn draw_test_viewport(
         textures.iter().position(|t| t.name == tex_ref.name)
     };
 
-    // Collect all lights from room objects
+    // --- Sub-timing: Light collection ---
+    let lights_start = Instant::now();
     let lights: Vec<Light> = if game.raster_settings.shading != ShadingMode::None {
         level.rooms.iter()
             .flat_map(|room| {
@@ -95,6 +112,12 @@ pub fn draw_test_viewport(
     } else {
         Vec::new()
     };
+    let render_lights_ms = FrameTimings::elapsed_ms(lights_start);
+
+    // --- Sub-timing: Mesh generation and rasterization ---
+    let mut render_meshgen_ms = 0.0;
+    let mut render_raster_ms = 0.0;
+    let mut raster_timings = RasterTimings::default();
 
     // Render each room with its own ambient setting
     for room in &level.rooms {
@@ -103,14 +126,24 @@ pub fn draw_test_viewport(
             ambient: room.ambient,
             ..game.raster_settings.clone()
         };
+
+        // Time mesh data generation
+        let meshgen_start = Instant::now();
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings);
+        render_meshgen_ms += FrameTimings::elapsed_ms(meshgen_start);
+
+        // Time actual rasterization (returns detailed sub-timings)
+        let raster_start = Instant::now();
+        let room_timings = render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings);
+        render_raster_ms += FrameTimings::elapsed_ms(raster_start);
+        raster_timings.accumulate(&room_timings);
     }
 
     // Render player wireframe cylinder if playing
     if game.playing {
         if let Some(player_pos) = game.get_player_position() {
             let settings = &level.player_settings;
+            let raster_start = Instant::now();
             draw_wireframe_cylinder(
                 fb,
                 &game.camera,
@@ -120,8 +153,14 @@ pub fn draw_test_viewport(
                 12, // segments
                 RasterColor::new(80, 255, 80), // Bright green wireframe
             );
+            render_raster_ms += FrameTimings::elapsed_ms(raster_start);
         }
     }
+
+    let render_ms = FrameTimings::elapsed_ms(render_start);
+
+    // --- Sub-timing: Texture upload ---
+    let upload_start = Instant::now();
 
     // Convert framebuffer to texture and draw to viewport
     let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
@@ -155,6 +194,11 @@ pub fn draw_test_viewport(
         },
     );
 
+    let render_upload_ms = FrameTimings::elapsed_ms(upload_start);
+
+    // === UI PHASE ===
+    let ui_start = Instant::now();
+
     // Draw debug overlay HUD if enabled (top-right, always visible during gameplay)
     if game.show_debug_overlay {
         draw_debug_overlay(game, &rect, input, level);
@@ -164,6 +208,29 @@ pub fn draw_test_viewport(
     if game.options_menu_open {
         draw_debug_menu(game, &rect, input, level);
     }
+
+    let ui_ms = FrameTimings::elapsed_ms(ui_start);
+
+    // Store frame timings for display
+    game.frame_timings = FrameTimings {
+        input_ms,
+        logic_ms: 0.0, // Logic is run separately in tick()
+        clear_ms,
+        render_ms,
+        ui_ms,
+        total_ms: FrameTimings::elapsed_ms(frame_start),
+        // Render sub-timings
+        render_lights_ms,
+        render_meshgen_ms,
+        render_raster_ms,
+        render_upload_ms,
+        // Raster sub-timings (breakdown of render_raster_ms)
+        raster_transform_ms: raster_timings.transform_ms,
+        raster_cull_ms: raster_timings.cull_ms,
+        raster_sort_ms: raster_timings.sort_ms,
+        raster_draw_ms: raster_timings.draw_ms,
+        raster_wireframe_ms: raster_timings.wireframe_ms,
+    };
 }
 
 /// Handle player input during gameplay (Dark Souls style character controls)
@@ -577,8 +644,12 @@ fn toggle_pressed(input: &InputState) -> bool {
 
 /// Draw debug overlay HUD (top-right, shows player/collision stats)
 fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, level: &Level) {
-    let line_height = 12.0;
-    let overlay_w = 160.0;
+    // Scale factor for the entire overlay (2x = twice as big)
+    let scale = 2.0;
+
+    let line_height = 12.0 * scale;
+    let text_size = 10.0 * scale;
+    let overlay_w = 160.0 * scale;
     let overlay_x = rect.x + rect.w - overlay_w - 10.0;
     let overlay_y = rect.y + 10.0;
 
@@ -586,6 +657,25 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     let value_color = Color::from_rgba(200, 200, 210, 255);
     let good_color = Color::from_rgba(100, 255, 100, 255);
     let warn_color = Color::from_rgba(255, 180, 80, 255);
+
+    // Performance bar colors
+    let input_color = Color::from_rgba(100, 180, 255, 255);  // Blue - input
+    let clear_color = Color::from_rgba(180, 100, 255, 255);  // Purple - clear
+    let render_color = Color::from_rgba(255, 100, 100, 255); // Red - render (usually biggest)
+    let ui_color = Color::from_rgba(255, 200, 100, 255);     // Orange - UI
+
+    // Render sub-timing colors (shades of red)
+    let lights_color = Color::from_rgba(255, 150, 150, 255);  // Light red - lights
+    let meshgen_color = Color::from_rgba(255, 80, 80, 255);   // Medium red - mesh gen
+    let raster_color = Color::from_rgba(200, 50, 50, 255);    // Dark red - rasterization
+    let upload_color = Color::from_rgba(255, 120, 80, 255);   // Red-orange - upload
+
+    // Raster sub-timing colors (shades of maroon/brown)
+    let transform_color = Color::from_rgba(180, 100, 100, 255); // Transform
+    let cull_color = Color::from_rgba(160, 80, 80, 255);        // Cull
+    let sort_color = Color::from_rgba(140, 60, 60, 255);        // Sort
+    let draw_color = Color::from_rgba(120, 40, 40, 255);        // Draw (main)
+    let wireframe_color = Color::from_rgba(100, 70, 70, 255);   // Wireframe
 
     let mut lines: Vec<(String, Color)> = Vec::new();
 
@@ -669,7 +759,8 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     }
 
     // Calculate overlay height
-    let overlay_h = 8.0 + lines.len() as f32 * line_height + 4.0;
+    let padding = 8.0 * scale;
+    let overlay_h = padding + lines.len() as f32 * line_height + 4.0 * scale;
 
     // Draw background
     draw_rectangle(overlay_x, overlay_y, overlay_w, overlay_h, Color::from_rgba(20, 22, 28, 200));
@@ -677,8 +768,118 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
 
     // Draw lines
     for (i, (text, color)) in lines.iter().enumerate() {
-        let y = overlay_y + 12.0 + i as f32 * line_height;
-        draw_text(text, overlay_x + 6.0, y, 10.0, *color);
+        let y = overlay_y + 12.0 * scale + i as f32 * line_height;
+        draw_text(text, overlay_x + 6.0 * scale, y, text_size, *color);
+    }
+
+    // === PERFORMANCE BAR ===
+    // Draw a horizontal bar showing frame time breakdown
+    let bar_y = overlay_y + overlay_h + 6.0 * scale;
+    let bar_h = 12.0 * scale;
+    let bar_w = overlay_w - 12.0 * scale;
+    let bar_x = overlay_x + 6.0 * scale;
+
+    // Background (taller to fit stacked legend with render breakdown + raster breakdown)
+    let legend_height = 210.0 * scale; // 4 main items + 4 render items + 5 raster items + 2 headers + padding
+    draw_rectangle(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, Color::from_rgba(20, 22, 28, 200));
+    draw_rectangle_lines(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, 1.0, Color::from_rgba(60, 65, 75, 255));
+
+    // Calculate bar segments proportionally
+    // Target: 16.67ms = 60fps, show bar relative to that
+    let target_ms = 16.67;
+    let t = &game.frame_timings;
+    let total = t.total_ms.max(0.001); // Avoid division by zero
+
+    // Draw bar segments (stacked horizontally)
+    let mut x = bar_x;
+    let segments = [
+        (t.input_ms, input_color, "I"),
+        (t.clear_ms, clear_color, "C"),
+        (t.render_ms, render_color, "R"),
+        (t.ui_ms, ui_color, "U"),
+    ];
+
+    for (ms, color, _label) in segments.iter() {
+        let seg_w = (*ms / total) * bar_w;
+        if seg_w > 0.5 {
+            draw_rectangle(x, bar_y, seg_w, bar_h, *color);
+            x += seg_w;
+        }
+    }
+
+    // Draw target line (16.67ms = 60fps)
+    let target_x = bar_x + (target_ms / total.max(target_ms)) * bar_w;
+    if target_x < bar_x + bar_w {
+        draw_line(target_x, bar_y - 2.0 * scale, target_x, bar_y + bar_h + 2.0 * scale, 1.0, Color::from_rgba(255, 255, 255, 150));
+    }
+
+    // Draw timing text below bar
+    draw_text(
+        &format!("{:.1}ms", t.total_ms),
+        bar_x,
+        bar_y + bar_h + 10.0 * scale,
+        text_size,
+        value_color,
+    );
+
+    // Legend (stacked vertically with full names and times)
+    let legend_y = bar_y + bar_h + 20.0 * scale;
+    let legend_line_height = 12.0 * scale;
+    let legend_text_size = 9.0 * scale;
+    let legend_box_size = 6.0 * scale;
+
+    // Main phases
+    let legend_items: [(Color, &str, f32); 4] = [
+        (input_color, "Input", t.input_ms),
+        (clear_color, "Clear", t.clear_ms),
+        (render_color, "Render", t.render_ms),
+        (ui_color, "UI", t.ui_ms),
+    ];
+
+    for (i, (color, name, ms)) in legend_items.iter().enumerate() {
+        let y = legend_y + i as f32 * legend_line_height;
+        draw_rectangle(bar_x, y - legend_box_size * 0.5, legend_box_size, legend_box_size, *color);
+        draw_text(name, bar_x + 10.0 * scale, y + legend_box_size * 0.3, legend_text_size, label_color);
+        draw_text(&format!("{:.2}ms", ms), bar_x + 55.0 * scale, y + legend_box_size * 0.3, legend_text_size, value_color);
+    }
+
+    // Render breakdown (indented)
+    let render_y = legend_y + 4.0 * legend_line_height + 4.0 * scale;
+    draw_text("Render breakdown:", bar_x, render_y, legend_text_size * 0.9, label_color);
+
+    let render_items: [(Color, &str, f32); 4] = [
+        (lights_color, "Lights", t.render_lights_ms),
+        (meshgen_color, "MeshGen", t.render_meshgen_ms),
+        (raster_color, "Raster", t.render_raster_ms),
+        (upload_color, "Upload", t.render_upload_ms),
+    ];
+
+    let indent = 8.0 * scale;
+    for (i, (color, name, ms)) in render_items.iter().enumerate() {
+        let y = render_y + (i as f32 + 1.0) * legend_line_height;
+        draw_rectangle(bar_x + indent, y - legend_box_size * 0.5, legend_box_size, legend_box_size, *color);
+        draw_text(name, bar_x + indent + 10.0 * scale, y + legend_box_size * 0.3, legend_text_size, label_color);
+        draw_text(&format!("{:.2}ms", ms), bar_x + indent + 55.0 * scale, y + legend_box_size * 0.3, legend_text_size, value_color);
+    }
+
+    // Raster breakdown (further indented)
+    let raster_y = render_y + 5.0 * legend_line_height + 4.0 * scale;
+    draw_text("Raster breakdown:", bar_x + indent, raster_y, legend_text_size * 0.9, label_color);
+
+    let raster_items: [(Color, &str, f32); 5] = [
+        (transform_color, "Transform", t.raster_transform_ms),
+        (cull_color, "Cull", t.raster_cull_ms),
+        (sort_color, "Sort", t.raster_sort_ms),
+        (draw_color, "Draw", t.raster_draw_ms),
+        (wireframe_color, "Wireframe", t.raster_wireframe_ms),
+    ];
+
+    let indent2 = 16.0 * scale;
+    for (i, (color, name, ms)) in raster_items.iter().enumerate() {
+        let y = raster_y + (i as f32 + 1.0) * legend_line_height;
+        draw_rectangle(bar_x + indent2, y - legend_box_size * 0.5, legend_box_size, legend_box_size, *color);
+        draw_text(name, bar_x + indent2 + 10.0 * scale, y + legend_box_size * 0.3, legend_text_size, label_color);
+        draw_text(&format!("{:.2}ms", ms), bar_x + indent2 + 55.0 * scale, y + legend_box_size * 0.3, legend_text_size, value_color);
     }
 }
 

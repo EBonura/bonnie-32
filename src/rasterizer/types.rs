@@ -667,3 +667,29 @@ impl Default for RasterSettings {
         }
     }
 }
+
+/// Timing breakdown for rasterization stages (in milliseconds)
+#[derive(Debug, Clone, Default)]
+pub struct RasterTimings {
+    /// Vertex transformation to camera space and projection to screen (ms)
+    pub transform_ms: f32,
+    /// Surface building and backface culling (ms)
+    pub cull_ms: f32,
+    /// Depth sorting (painter's algorithm) (ms)
+    pub sort_ms: f32,
+    /// Triangle rasterization/filling (ms)
+    pub draw_ms: f32,
+    /// Wireframe rendering (back-face and front-face) (ms)
+    pub wireframe_ms: f32,
+}
+
+impl RasterTimings {
+    /// Accumulate timings from another instance
+    pub fn accumulate(&mut self, other: &RasterTimings) {
+        self.transform_ms += other.transform_ms;
+        self.cull_ms += other.cull_ms;
+        self.sort_ms += other.sort_ms;
+        self.draw_ms += other.draw_ms;
+        self.wireframe_ms += other.wireframe_ms;
+    }
+}
