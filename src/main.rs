@@ -170,6 +170,11 @@ async fn main() {
                     world_editor_first_open = false;
                     // Fresh scan to pick up any newly saved levels
                     app.world_editor.example_browser.open(discover_examples());
+                    // On WASM, trigger async load of example list
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        app.world_editor.example_browser.pending_load_list = true;
+                    }
                 }
                 app.set_active_tool(tool);
             }
@@ -579,6 +584,14 @@ async fn main() {
         #[cfg(target_arch = "wasm32")]
         if let Tool::WorldEditor = app.active_tool {
             let ws = &mut app.world_editor;
+            // Load example list from manifest if pending
+            if ws.example_browser.pending_load_list {
+                ws.example_browser.pending_load_list = false;
+                use editor::load_example_list;
+                let examples = load_example_list().await;
+                ws.example_browser.examples = examples;
+            }
+            // Load individual level preview if pending
             if let Some(path) = ws.example_browser.pending_load_path.take() {
                 use editor::load_example_level;
                 if let Some(level) = load_example_level(&path).await {
@@ -900,6 +913,11 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
         EditorAction::BrowseExamples => {
             // Open the level browser - fresh scan to pick up newly saved levels
             ws.example_browser.open(discover_examples());
+            // On WASM, trigger async load of example list
+            #[cfg(target_arch = "wasm32")]
+            {
+                ws.example_browser.pending_load_list = true;
+            }
             ws.editor_state.set_status("Browse levels", 2.0);
         }
         EditorAction::Exit | EditorAction::None => {}
