@@ -1,7 +1,7 @@
 //! Core rendering functions
 //! Triangle rasterization with PS1-style effects
 
-use std::time::Instant;
+use macroquad::prelude::get_time;
 use super::math::{perspective_transform, project, project_ortho, Vec3, NEAR_PLANE};
 use super::types::{BlendMode, Color, Face, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Vertex};
 
@@ -760,7 +760,7 @@ pub fn render_mesh(
     let mut timings = RasterTimings::default();
 
     // === TRANSFORM PHASE ===
-    let transform_start = Instant::now();
+    let transform_start = get_time();
 
     // Transform all vertices to camera space
     let mut cam_space_positions: Vec<Vec3> = Vec::with_capacity(vertices.len());
@@ -786,10 +786,10 @@ pub fn render_mesh(
         cam_space_normals.push(cam_normal.normalize());
     }
 
-    timings.transform_ms = transform_start.elapsed().as_secs_f32() * 1000.0;
+    timings.transform_ms = ((get_time() - transform_start) * 1000.0) as f32;
 
     // === CULL PHASE ===
-    let cull_start = Instant::now();
+    let cull_start = get_time();
 
     // Build surfaces for front-faces and collect back-faces for wireframe
     let mut surfaces: Vec<Surface> = Vec::with_capacity(faces.len());
@@ -884,10 +884,10 @@ pub fn render_mesh(
         }
     }
 
-    timings.cull_ms = cull_start.elapsed().as_secs_f32() * 1000.0;
+    timings.cull_ms = ((get_time() - cull_start) * 1000.0) as f32;
 
     // === SORT PHASE ===
-    let sort_start = Instant::now();
+    let sort_start = get_time();
 
     // Sort by depth if not using Z-buffer (painter's algorithm)
     if !settings.use_zbuffer {
@@ -898,10 +898,10 @@ pub fn render_mesh(
         });
     }
 
-    timings.sort_ms = sort_start.elapsed().as_secs_f32() * 1000.0;
+    timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
 
     // === DRAW PHASE ===
-    let draw_start = Instant::now();
+    let draw_start = get_time();
 
     // Rasterize each solid surface (skip if wireframe-only mode)
     if !settings.wireframe_overlay {
@@ -914,10 +914,10 @@ pub fn render_mesh(
         }
     }
 
-    timings.draw_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
+    timings.draw_ms = ((get_time() - draw_start) * 1000.0) as f32;
 
     // === WIREFRAME PHASE ===
-    let wireframe_start = Instant::now();
+    let wireframe_start = get_time();
 
     // Draw wireframes for back-faces (visible but not solid)
     // Only draw if backface culling is enabled AND backface wireframe is enabled
@@ -989,7 +989,7 @@ pub fn render_mesh(
         }
     }
 
-    timings.wireframe_ms = wireframe_start.elapsed().as_secs_f32() * 1000.0;
+    timings.wireframe_ms = ((get_time() - wireframe_start) * 1000.0) as f32;
 
     timings
 }

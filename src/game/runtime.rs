@@ -7,7 +7,6 @@
 use crate::rasterizer::{Camera, Vec3, RasterSettings};
 use crate::world::Level;
 use super::{World, Events, Entity};
-use std::time::Instant;
 
 /// Frame timing data for performance profiling
 #[derive(Debug, Clone, Default)]
@@ -49,14 +48,14 @@ pub struct FrameTimings {
 }
 
 impl FrameTimings {
-    /// Start timing a phase
-    pub fn start() -> Instant {
-        Instant::now()
+    /// Start timing a phase (returns time in seconds from macroquad)
+    pub fn start() -> f64 {
+        macroquad::prelude::get_time()
     }
 
     /// Get elapsed time in ms since start
-    pub fn elapsed_ms(start: Instant) -> f32 {
-        start.elapsed().as_secs_f32() * 1000.0
+    pub fn elapsed_ms(start: f64) -> f32 {
+        ((macroquad::prelude::get_time() - start) * 1000.0) as f32
     }
 }
 
