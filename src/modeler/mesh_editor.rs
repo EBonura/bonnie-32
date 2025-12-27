@@ -218,14 +218,12 @@ impl TextureAtlas {
     }
 
     /// Set a pixel with blend mode
+    /// Note: This stores the color WITH the blend mode intact - blending happens at render time
     pub fn set_pixel_blended(&mut self, x: usize, y: usize, color: RasterColor, mode: crate::rasterizer::BlendMode) {
         if x >= self.width || y >= self.height { return; }
-        let blended = if mode == crate::rasterizer::BlendMode::Opaque {
-            color
-        } else {
-            color.blend(self.get_pixel(x, y), mode)
-        };
-        self.set_pixel(x, y, blended);
+        // Store the color with the specified blend mode (don't blend now, blend at render time)
+        let color_with_mode = RasterColor::with_blend(color.r, color.g, color.b, mode);
+        self.set_pixel(x, y, color_with_mode);
     }
 
     /// Fill a rectangle with a color
@@ -270,6 +268,51 @@ impl TextureAtlas {
             for x in 0..self.width {
                 self.set_pixel(x, y, color);
             }
+        }
+    }
+
+    /// Flood fill starting from (x, y) with the given color
+    /// Uses a simple stack-based algorithm to avoid recursion depth issues
+    pub fn flood_fill(&mut self, x: usize, y: usize, fill_color: RasterColor) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+
+        let target_color = self.get_pixel(x, y);
+
+        // Don't fill if the target is already the fill color (same RGB and blend mode)
+        if target_color.r == fill_color.r
+            && target_color.g == fill_color.g
+            && target_color.b == fill_color.b
+            && target_color.blend == fill_color.blend {
+            return;
+        }
+
+        let mut stack = vec![(x, y)];
+
+        while let Some((cx, cy)) = stack.pop() {
+            if cx >= self.width || cy >= self.height {
+                continue;
+            }
+
+            let current = self.get_pixel(cx, cy);
+
+            // Check if this pixel matches the target color
+            if current.r != target_color.r
+                || current.g != target_color.g
+                || current.b != target_color.b
+                || current.blend != target_color.blend {
+                continue;
+            }
+
+            // Fill this pixel
+            self.set_pixel(cx, cy, fill_color);
+
+            // Add neighbors to stack
+            if cx > 0 { stack.push((cx - 1, cy)); }
+            if cx + 1 < self.width { stack.push((cx + 1, cy)); }
+            if cy > 0 { stack.push((cx, cy - 1)); }
+            if cy + 1 < self.height { stack.push((cx, cy + 1)); }
         }
     }
 

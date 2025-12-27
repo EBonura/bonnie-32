@@ -454,6 +454,13 @@ pub enum PaintMode {
     VertexColor,
 }
 
+/// Brush type for texture painting
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushType {
+    Square,
+    Fill,
+}
+
 /// Axis constraint for transforms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -604,6 +611,7 @@ pub struct ModelerState {
     pub paint_color: Color,
     pub paint_blend_mode: BlendMode,
     pub brush_size: f32,
+    pub brush_type: BrushType,
     pub paint_mode: PaintMode,
     pub color_picker_slider: Option<usize>, // Active slider in color picker (0=R, 1=G, 2=B)
 
@@ -768,6 +776,7 @@ impl ModelerState {
             paint_color: Color::WHITE,
             paint_blend_mode: BlendMode::Opaque,
             brush_size: 4.0,
+            brush_type: BrushType::Square,
             paint_mode: PaintMode::Texture,
             color_picker_slider: None,
 

@@ -467,8 +467,8 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let atlas_w = atlas_width as f32;
     let atlas_h = atlas_height as f32;
 
-    // Reserve space for PS1 color picker at bottom (swatch + 3 RGB sliders + blend mode + presets + label)
-    let palette_height = ps1_color_picker_with_blend_mode_height() + 20.0; // 72 + 20 for label
+    // Reserve space for PS1 color picker at bottom (swatch + 3 RGB sliders + blend mode + presets + label + brush tools)
+    let palette_height = ps1_color_picker_with_blend_mode_height() + 20.0 + 24.0; // 72 + 20 for label + 24 for brush tools
     let header_height = 20.0;
     let atlas_area_height = rect.h - palette_height - header_height;
 
@@ -505,6 +505,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     }
 
     // Draw the actual texture atlas pixels (skip transparent to show checkerboard)
+    // Map blend modes to alpha for preview visualization
     let pixels_per_block = (1.0 / scale).max(1.0) as usize;
     for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
         for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
@@ -518,7 +519,16 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
             let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
             if pw > 0.0 && ph > 0.0 {
-                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, 255));
+                // Map blend mode to approximate alpha for preview
+                let alpha = match pixel.blend {
+                    crate::rasterizer::BlendMode::Opaque => 255,
+                    crate::rasterizer::BlendMode::Average => 128,    // 50% blend
+                    crate::rasterizer::BlendMode::Add => 200,        // Additive (shown slightly transparent)
+                    crate::rasterizer::BlendMode::Subtract => 200,   // Subtractive (shown slightly transparent)
+                    crate::rasterizer::BlendMode::AddQuarter => 64,  // 25% additive
+                    crate::rasterizer::BlendMode::Erase => 0,        // Fully transparent (already skipped above)
+                };
+                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, alpha));
             }
         }
     }
@@ -686,26 +696,57 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         }
 
         // Painting on atlas with left-click (when not near UV vertex to avoid conflict with UV dragging)
-        if is_mouse_button_down(MouseButton::Left) && nearest_uv_vertex.is_none() && !state.uv_drag_active {
+        if nearest_uv_vertex.is_none() && !state.uv_drag_active {
             let px = ((mx - atlas_x) / scale) as usize;
             let py = ((my - atlas_y) / scale) as usize;
-            let color = state.paint_color;
-            let brush = state.brush_size as usize;
-            for dy in 0..brush {
-                for dx in 0..brush {
-                    state.project.atlas.set_pixel_blended(px + dx, py + dy, color, state.paint_blend_mode);
+
+            match state.brush_type {
+                super::state::BrushType::Square => {
+                    if is_mouse_button_down(MouseButton::Left) {
+                        let color = state.paint_color;
+                        let brush = state.brush_size as usize;
+                        for dy in 0..brush {
+                            for dx in 0..brush {
+                                state.project.atlas.set_pixel_blended(px + dx, py + dy, color, state.paint_blend_mode);
+                            }
+                        }
+                        state.dirty = true;
+                    }
+                }
+                super::state::BrushType::Fill => {
+                    // Fill tool: only trigger on click, not drag
+                    if is_mouse_button_pressed(MouseButton::Left) {
+                        let fill_color = crate::rasterizer::Color::with_blend(
+                            state.paint_color.r,
+                            state.paint_color.g,
+                            state.paint_color.b,
+                            state.paint_blend_mode,
+                        );
+                        state.project.atlas.flood_fill(px, py, fill_color);
+                        state.dirty = true;
+                    }
                 }
             }
-            state.dirty = true;
         }
 
         // Show brush cursor when not near a UV vertex
         if nearest_uv_vertex.is_none() {
-            let brush_size = state.brush_size;
             let cursor_x = atlas_x + ((mx - atlas_x) / scale).floor() * scale;
             let cursor_y = atlas_y + ((my - atlas_y) / scale).floor() * scale;
-            let cursor_w = brush_size * scale;
-            draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
+            match state.brush_type {
+                super::state::BrushType::Square => {
+                    let brush_size = state.brush_size;
+                    let cursor_w = brush_size * scale;
+                    draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
+                }
+                super::state::BrushType::Fill => {
+                    // Fill cursor: crosshair
+                    let cx = cursor_x + scale * 0.5;
+                    let cy = cursor_y + scale * 0.5;
+                    draw_line(cx - 6.0, cy, cx + 6.0, cy, 1.0, Color::from_rgba(255, 255, 255, 200));
+                    draw_line(cx, cy - 6.0, cx, cy + 6.0, 1.0, Color::from_rgba(255, 255, 255, 200));
+                }
+            }
         }
     }
 
@@ -737,6 +778,51 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         state.paint_blend_mode = new_blend;
     }
 
+    // Brush type buttons (below color picker)
+    let brush_tools_y = palette_y + 14.0 + ps1_color_picker_with_blend_mode_height() + 4.0;
+    draw_text("Tool:", rect.x + 4.0, brush_tools_y + 12.0, 11.0, TEXT_DIM);
+
+    let btn_width = 50.0;
+    let btn_height = 18.0;
+    let btn_x = rect.x + 36.0;
+
+    // Square brush button
+    let square_rect = Rect::new(btn_x, brush_tools_y, btn_width, btn_height);
+    let square_selected = state.brush_type == super::state::BrushType::Square;
+    let square_color = if square_selected { ACCENT_COLOR } else { Color::from_rgba(50, 50, 55, 255) };
+    draw_rectangle(square_rect.x, square_rect.y, square_rect.w, square_rect.h, square_color);
+    draw_rectangle_lines(square_rect.x, square_rect.y, square_rect.w, square_rect.h, 1.0, Color::from_rgba(80, 80, 85, 255));
+    let square_text_color = if square_selected { WHITE } else { TEXT_DIM };
+    draw_text("Brush", square_rect.x + 8.0, square_rect.y + 13.0, 11.0, square_text_color);
+
+    if ctx.mouse.clicked(&square_rect) {
+        state.brush_type = super::state::BrushType::Square;
+    }
+
+    // Fill button
+    let fill_rect = Rect::new(btn_x + btn_width + 4.0, brush_tools_y, btn_width, btn_height);
+    let fill_selected = state.brush_type == super::state::BrushType::Fill;
+    let fill_color = if fill_selected { ACCENT_COLOR } else { Color::from_rgba(50, 50, 55, 255) };
+    draw_rectangle(fill_rect.x, fill_rect.y, fill_rect.w, fill_rect.h, fill_color);
+    draw_rectangle_lines(fill_rect.x, fill_rect.y, fill_rect.w, fill_rect.h, 1.0, Color::from_rgba(80, 80, 85, 255));
+    let fill_text_color = if fill_selected { WHITE } else { TEXT_DIM };
+    draw_text("Fill", fill_rect.x + 14.0, fill_rect.y + 13.0, 11.0, fill_text_color);
+
+    if ctx.mouse.clicked(&fill_rect) {
+        state.brush_type = super::state::BrushType::Fill;
+    }
+
+    // Brush size (only show for square brush)
+    if state.brush_type == super::state::BrushType::Square {
+        draw_text(
+            &format!("Size: {}px", state.brush_size as i32),
+            fill_rect.x + btn_width + 12.0,
+            brush_tools_y + 12.0,
+            11.0,
+            TEXT_DIM,
+        );
+    }
+
     // Header info
     draw_text(
         &format!("{}x{}", atlas_width, atlas_height),
@@ -752,15 +838,12 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let text_width = mode_text.len() as f32 * 6.0;
     draw_text(mode_text, rect.x + rect.w - text_width - 8.0, rect.y + 14.0, 11.0, mode_color);
 
-    // Brush size indicator (in edit mode)
-    if state.view_mode == ViewMode::Texture {
-        draw_text(
-            &format!("Brush: {}px", state.brush_size as i32),
-            rect.x + 60.0,
-            rect.y + 14.0,
-            11.0,
-            TEXT_DIM,
-        );
+    // Toggle brush type with F key (in edit mode)
+    if state.view_mode == ViewMode::Texture && is_key_pressed(KeyCode::F) {
+        state.brush_type = match state.brush_type {
+            super::state::BrushType::Square => super::state::BrushType::Fill,
+            super::state::BrushType::Fill => super::state::BrushType::Square,
+        };
     }
 }
 
