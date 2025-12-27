@@ -329,6 +329,44 @@ impl TextureAtlas {
             name: String::from("atlas"),
         }
     }
+
+    /// Resize the atlas to new dimensions, preserving existing content where possible
+    /// Content at (x, y) is preserved if x < new_width and y < new_height
+    /// New areas are filled with grey (default color)
+    pub fn resize(&mut self, new_width: usize, new_height: usize) {
+        if new_width == self.width && new_height == self.height {
+            return;
+        }
+
+        let mut new_pixels = vec![0u8; new_width * new_height * 4];
+
+        // Initialize new pixels with grey default
+        for i in 0..(new_width * new_height) {
+            new_pixels[i * 4] = 128;     // R - grey
+            new_pixels[i * 4 + 1] = 128; // G - grey
+            new_pixels[i * 4 + 2] = 128; // B - grey
+            new_pixels[i * 4 + 3] = 0;   // BlendMode::Opaque
+        }
+
+        // Copy existing content that fits
+        let copy_w = self.width.min(new_width);
+        let copy_h = self.height.min(new_height);
+
+        for y in 0..copy_h {
+            for x in 0..copy_w {
+                let old_idx = (y * self.width + x) * 4;
+                let new_idx = (y * new_width + x) * 4;
+                new_pixels[new_idx] = self.pixels[old_idx];
+                new_pixels[new_idx + 1] = self.pixels[old_idx + 1];
+                new_pixels[new_idx + 2] = self.pixels[old_idx + 2];
+                new_pixels[new_idx + 3] = self.pixels[old_idx + 3];
+            }
+        }
+
+        self.width = new_width;
+        self.height = new_height;
+        self.pixels = new_pixels;
+    }
 }
 
 // Serialize TextureAtlas as base64-encoded PNG would be ideal, but for simplicity

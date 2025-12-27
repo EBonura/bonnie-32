@@ -614,6 +614,8 @@ pub struct ModelerState {
     pub brush_type: BrushType,
     pub paint_mode: PaintMode,
     pub color_picker_slider: Option<usize>, // Active slider in color picker (0=R, 1=G, 2=B)
+    pub brush_size_slider_active: bool, // True while dragging brush size slider
+    pub paint_stroke_active: bool, // True while painting (for undo grouping)
 
     // Vertex linking: when true, move coincident vertices together
     pub vertex_linking: bool,
@@ -714,6 +716,7 @@ impl ContextMenu {
 pub struct UndoState {
     pub mesh: EditableMesh,
     pub selection: ModelerSelection,
+    pub atlas: Option<TextureAtlas>, // Optional: only saved when atlas changes
     pub description: String,
 }
 
@@ -779,6 +782,8 @@ impl ModelerState {
             brush_type: BrushType::Square,
             paint_mode: PaintMode::Texture,
             color_picker_slider: None,
+            brush_size_slider_active: false,
+            paint_stroke_active: false,
 
             vertex_linking: true, // Default on: move coincident vertices together
 
@@ -1066,6 +1071,26 @@ impl ModelerState {
         let state = UndoState {
             mesh: self.mesh.clone(),
             selection: self.selection.clone(),
+            atlas: None, // Don't save atlas for mesh-only changes
+            description: description.to_string(),
+        };
+        self.undo_stack.push(state);
+
+        // Limit stack size
+        while self.undo_stack.len() > self.max_undo_levels {
+            self.undo_stack.remove(0);
+        }
+
+        // Clear redo stack when new action is performed
+        self.redo_stack.clear();
+    }
+
+    /// Save current state including texture atlas to undo stack (for paint operations)
+    pub fn push_undo_with_atlas(&mut self, description: &str) {
+        let state = UndoState {
+            mesh: self.mesh.clone(),
+            selection: self.selection.clone(),
+            atlas: Some(self.project.atlas.clone()),
             description: description.to_string(),
         };
         self.undo_stack.push(state);
@@ -1082,10 +1107,11 @@ impl ModelerState {
     /// Undo the last action (Ctrl+Z)
     pub fn undo(&mut self) -> bool {
         if let Some(undo_state) = self.undo_stack.pop() {
-            // Save current state to redo stack
+            // Save current state to redo stack (include atlas if the undo state had one)
             let redo_state = UndoState {
                 mesh: self.mesh.clone(),
                 selection: self.selection.clone(),
+                atlas: if undo_state.atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
                 description: undo_state.description.clone(),
             };
             self.redo_stack.push(redo_state);
@@ -1093,6 +1119,9 @@ impl ModelerState {
             // Restore the undo state
             self.mesh = undo_state.mesh;
             self.selection = undo_state.selection;
+            if let Some(atlas) = undo_state.atlas {
+                self.project.atlas = atlas;
+            }
             self.sync_mesh_to_project(); // Keep project in sync
             self.dirty = true;
             self.set_status(&format!("Undo: {}", undo_state.description), 1.0);
@@ -1106,10 +1135,11 @@ impl ModelerState {
     /// Redo the last undone action (Ctrl+Shift+Z or Ctrl+Y)
     pub fn redo(&mut self) -> bool {
         if let Some(redo_state) = self.redo_stack.pop() {
-            // Save current state to undo stack
+            // Save current state to undo stack (include atlas if the redo state had one)
             let undo_state = UndoState {
                 mesh: self.mesh.clone(),
                 selection: self.selection.clone(),
+                atlas: if redo_state.atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
                 description: redo_state.description.clone(),
             };
             self.undo_stack.push(undo_state);
@@ -1117,6 +1147,9 @@ impl ModelerState {
             // Restore the redo state
             self.mesh = redo_state.mesh;
             self.selection = redo_state.selection;
+            if let Some(atlas) = redo_state.atlas {
+                self.project.atlas = atlas;
+            }
             self.sync_mesh_to_project(); // Keep project in sync
             self.dirty = true;
             self.set_status(&format!("Redo: {}", redo_state.description), 1.0);
