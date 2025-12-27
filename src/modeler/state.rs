@@ -461,6 +461,32 @@ pub enum BrushType {
     Fill,
 }
 
+/// Atlas editing mode - UV vertex editing vs painting
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AtlasEditMode {
+    /// Move UV vertices
+    #[default]
+    Uv,
+    /// Paint on the texture atlas
+    Paint,
+}
+
+impl AtlasEditMode {
+    pub fn toggle(&self) -> Self {
+        match self {
+            AtlasEditMode::Uv => AtlasEditMode::Paint,
+            AtlasEditMode::Paint => AtlasEditMode::Uv,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            AtlasEditMode::Uv => "UV",
+            AtlasEditMode::Paint => "Paint",
+        }
+    }
+}
+
 /// Axis constraint for transforms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -613,6 +639,7 @@ pub struct ModelerState {
     pub brush_size: f32,
     pub brush_type: BrushType,
     pub paint_mode: PaintMode,
+    pub atlas_edit_mode: AtlasEditMode, // UV editing vs painting (V to toggle)
     pub color_picker_slider: Option<usize>, // Active slider in color picker (0=R, 1=G, 2=B)
     pub brush_size_slider_active: bool, // True while dragging brush size slider
     pub paint_stroke_active: bool, // True while painting (for undo grouping)
@@ -781,6 +808,7 @@ impl ModelerState {
             brush_size: 4.0,
             brush_type: BrushType::Square,
             paint_mode: PaintMode::Texture,
+            atlas_edit_mode: AtlasEditMode::default(),
             color_picker_slider: None,
             brush_size_slider_active: false,
             paint_stroke_active: false,

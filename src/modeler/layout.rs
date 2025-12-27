@@ -4,7 +4,7 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height};
 use crate::rasterizer::{Framebuffer, render_mesh, Camera, OrthoProjection};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
-use super::state::{ModelerState, SelectMode, TransformTool, ViewportId, ViewMode, ContextMenu, ModalTransform};
+use super::state::{ModelerState, SelectMode, TransformTool, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
 use super::viewport::draw_modeler_viewport;
 use super::mesh_editor::EditableMesh;
 use crate::rasterizer::Vec3;
@@ -559,13 +559,21 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
     // Draw UVs of selected faces only (cleaner view)
     if let Some(obj) = state.project.selected() {
-        let selected_color = Color::from_rgba(255, 200, 100, 255);
+        let face_edge_color = Color::from_rgba(255, 200, 100, 255);
         let vertex_color = Color::from_rgba(255, 255, 255, 255);
+        let selected_vertex_color = Color::from_rgba(100, 200, 255, 255); // Blue for selected UV verts
+
+        // Collect vertex indices from selected faces
+        let mut face_vertex_indices = std::collections::HashSet::new();
 
         // Only draw faces that are selected
         if let super::state::ModelerSelection::Faces(selected_faces) = &state.selection {
             for &fi in selected_faces {
                 if let Some(face) = obj.mesh.faces.get(fi) {
+                    face_vertex_indices.insert(face.v0);
+                    face_vertex_indices.insert(face.v1);
+                    face_vertex_indices.insert(face.v2);
+
                     // Get UV coordinates from vertices
                     let v0 = &obj.mesh.vertices[face.v0];
                     let v1 = &obj.mesh.vertices[face.v1];
@@ -584,15 +592,21 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                             screen_uvs[i].0, screen_uvs[i].1,
                             screen_uvs[j].0, screen_uvs[j].1,
                             2.0,
-                            selected_color,
+                            face_edge_color,
                         );
                     }
+                }
+            }
 
-                    // Draw UV vertices as draggable points (in edit mode)
-                    if state.view_mode == ViewMode::Texture {
-                        for (sx, sy) in &screen_uvs {
-                            draw_rectangle(sx - 3.0, sy - 3.0, 6.0, 6.0, vertex_color);
-                        }
+            // Draw UV vertices as points (only in UV mode) - after edges so they're on top
+            if state.atlas_edit_mode == AtlasEditMode::Uv {
+                for &vi in &face_vertex_indices {
+                    if let Some(v) = obj.mesh.vertices.get(vi) {
+                        let (sx, sy) = uv_to_screen(v.uv.x, v.uv.y);
+                        let is_uv_selected = state.uv_selection.contains(&vi);
+                        let color = if is_uv_selected { selected_vertex_color } else { vertex_color };
+                        let size = if is_uv_selected { 8.0 } else { 6.0 };
+                        draw_rectangle(sx - size * 0.5, sy - size * 0.5, size, size, color);
                     }
                 }
             }
@@ -600,66 +614,97 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     }
 
     // ========================================================================
-    // Interactive UV editing (only in Texture mode)
+    // Interactive UV editing (only in UV mode)
     // ========================================================================
-    if state.view_mode == ViewMode::Texture && inside_atlas {
-        // Check if we're near a UV vertex for dragging
+    if state.atlas_edit_mode == AtlasEditMode::Uv && inside_atlas {
+        // Collect vertices from selected faces (only these are editable)
+        let mut editable_verts = std::collections::HashSet::new();
+        if let Some(obj_idx) = state.project.selected_object {
+            if let Some(obj) = state.project.objects.get(obj_idx) {
+                if let super::state::ModelerSelection::Faces(face_indices) = &state.selection {
+                    for &fi in face_indices {
+                        if let Some(face) = obj.mesh.faces.get(fi) {
+                            editable_verts.insert(face.v0);
+                            editable_verts.insert(face.v1);
+                            editable_verts.insert(face.v2);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if we're near an editable UV vertex
         let mut nearest_uv_vertex: Option<(usize, usize, f32, f32)> = None; // (obj_idx, vert_idx, screen_x, screen_y)
         let mut nearest_dist = f32::MAX;
         let click_threshold = 8.0;
 
         if let Some(obj_idx) = state.project.selected_object {
             if let Some(obj) = state.project.objects.get(obj_idx) {
-                for (vi, vert) in obj.mesh.vertices.iter().enumerate() {
-                    let (sx, sy) = uv_to_screen(vert.uv.x, vert.uv.y);
-                    let dist = ((mx - sx).powi(2) + (my - sy).powi(2)).sqrt();
-                    if dist < click_threshold && dist < nearest_dist {
-                        nearest_uv_vertex = Some((obj_idx, vi, sx, sy));
-                        nearest_dist = dist;
+                for &vi in &editable_verts {
+                    if let Some(vert) = obj.mesh.vertices.get(vi) {
+                        let (sx, sy) = uv_to_screen(vert.uv.x, vert.uv.y);
+                        let dist = ((mx - sx).powi(2) + (my - sy).powi(2)).sqrt();
+                        if dist < click_threshold && dist < nearest_dist {
+                            nearest_uv_vertex = Some((obj_idx, vi, sx, sy));
+                            nearest_dist = dist;
+                        }
                     }
                 }
             }
         }
 
         // Show hover indicator for UV vertices
-        if let Some((_, _, sx, sy)) = nearest_uv_vertex {
-            draw_rectangle(sx - 5.0, sy - 5.0, 10.0, 10.0, Color::from_rgba(255, 255, 100, 150));
+        if let Some((_, vi, sx, sy)) = nearest_uv_vertex {
+            let is_selected = state.uv_selection.contains(&vi);
+            let hover_color = if is_selected {
+                Color::from_rgba(100, 200, 255, 150) // Blue hover for selected
+            } else {
+                Color::from_rgba(255, 255, 100, 150) // Yellow hover for unselected
+            };
+            draw_rectangle(sx - 5.0, sy - 5.0, 10.0, 10.0, hover_color);
         }
 
-        // Start UV drag on click near a vertex
+        // Handle click for selection and drag
         if is_mouse_button_pressed(MouseButton::Left) {
             if let Some((obj_idx, vert_idx, _, _)) = nearest_uv_vertex {
-                // Save undo state
-                state.push_undo("Move UV");
-                state.uv_drag_active = true;
-                state.uv_drag_start = (mx, my);
+                let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
-                // Collect all UVs of selected faces' vertices (or just the clicked vertex)
-                let mut start_uvs = Vec::new();
-                if let Some(obj) = state.project.objects.get(obj_idx) {
-                    // If we have face selection, move all UVs of selected faces
-                    if let super::state::ModelerSelection::Faces(face_indices) = &state.selection {
-                        let mut vert_set = std::collections::HashSet::new();
-                        for &fi in face_indices {
-                            if let Some(face) = obj.mesh.faces.get(fi) {
-                                vert_set.insert(face.v0);
-                                vert_set.insert(face.v1);
-                                vert_set.insert(face.v2);
-                            }
-                        }
-                        for vi in vert_set {
+                if shift_held {
+                    // Toggle selection of this vertex (no drag)
+                    if let Some(pos) = state.uv_selection.iter().position(|&v| v == vert_idx) {
+                        state.uv_selection.remove(pos);
+                    } else {
+                        state.uv_selection.push(vert_idx);
+                    }
+                } else {
+                    // Check if clicked vertex is already selected
+                    let already_selected = state.uv_selection.contains(&vert_idx);
+
+                    if !already_selected {
+                        // Select only this vertex first
+                        state.uv_selection.clear();
+                        state.uv_selection.push(vert_idx);
+                    }
+
+                    // Start dragging immediately (select + drag in one motion)
+                    state.push_undo("Move UV");
+                    state.uv_drag_active = true;
+                    state.uv_drag_start = (mx, my);
+
+                    // Collect start UVs for all selected vertices
+                    let mut start_uvs = Vec::new();
+                    if let Some(obj) = state.project.objects.get(obj_idx) {
+                        for &vi in &state.uv_selection {
                             if let Some(v) = obj.mesh.vertices.get(vi) {
                                 start_uvs.push((obj_idx, vi, v.uv));
                             }
                         }
-                    } else {
-                        // Just move the clicked vertex
-                        if let Some(v) = obj.mesh.vertices.get(vert_idx) {
-                            start_uvs.push((obj_idx, vert_idx, v.uv));
-                        }
                     }
+                    state.uv_drag_start_uvs = start_uvs;
                 }
-                state.uv_drag_start_uvs = start_uvs;
+            } else {
+                // Clicked on empty space - clear selection (unless painting)
+                // Don't clear if we're about to paint
             }
         }
 
@@ -694,71 +739,72 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             state.set_status("UV moved", 0.5);
         }
 
-        // Painting on atlas with left-click (when not near UV vertex to avoid conflict with UV dragging)
-        if nearest_uv_vertex.is_none() && !state.uv_drag_active {
-            let px = ((mx - atlas_x) / scale) as usize;
-            let py = ((my - atlas_y) / scale) as usize;
+    }
 
-            match state.brush_type {
-                super::state::BrushType::Square => {
-                    if is_mouse_button_down(MouseButton::Left) {
-                        // Save undo at stroke start
-                        if !state.paint_stroke_active {
-                            state.push_undo_with_atlas("Paint");
-                            state.paint_stroke_active = true;
-                        }
-                        let color = state.paint_color;
-                        let brush = state.brush_size as usize;
-                        for dy in 0..brush {
-                            for dx in 0..brush {
-                                state.project.atlas.set_pixel_blended(px + dx, py + dy, color, state.paint_blend_mode);
-                            }
-                        }
-                        state.dirty = true;
-                    } else {
-                        // End of stroke
-                        state.paint_stroke_active = false;
+    // ========================================================================
+    // Painting on atlas (only in Paint mode)
+    // ========================================================================
+    if state.atlas_edit_mode == AtlasEditMode::Paint && inside_atlas {
+        let px = ((mx - atlas_x) / scale) as usize;
+        let py = ((my - atlas_y) / scale) as usize;
+
+        match state.brush_type {
+            super::state::BrushType::Square => {
+                if is_mouse_button_down(MouseButton::Left) {
+                    // Save undo at stroke start
+                    if !state.paint_stroke_active {
+                        state.push_undo_with_atlas("Paint");
+                        state.paint_stroke_active = true;
                     }
-                }
-                super::state::BrushType::Fill => {
-                    // Fill tool: only trigger on click, not drag
-                    if is_mouse_button_pressed(MouseButton::Left) {
-                        state.push_undo_with_atlas("Fill");
-                        let fill_color = crate::rasterizer::Color::with_blend(
-                            state.paint_color.r,
-                            state.paint_color.g,
-                            state.paint_color.b,
-                            state.paint_blend_mode,
-                        );
-                        state.project.atlas.flood_fill(px, py, fill_color);
-                        state.dirty = true;
+                    let color = state.paint_color;
+                    let brush = state.brush_size as usize;
+                    for dy in 0..brush {
+                        for dx in 0..brush {
+                            state.project.atlas.set_pixel_blended(px + dx, py + dy, color, state.paint_blend_mode);
+                        }
                     }
+                    state.dirty = true;
+                } else {
+                    // End of stroke
+                    state.paint_stroke_active = false;
                 }
             }
-        } else {
-            // Reset stroke when not painting on atlas
-            state.paint_stroke_active = false;
-        }
-
-        // Show brush cursor when not near a UV vertex
-        if nearest_uv_vertex.is_none() {
-            let cursor_x = atlas_x + ((mx - atlas_x) / scale).floor() * scale;
-            let cursor_y = atlas_y + ((my - atlas_y) / scale).floor() * scale;
-            match state.brush_type {
-                super::state::BrushType::Square => {
-                    let brush_size = state.brush_size;
-                    let cursor_w = brush_size * scale;
-                    draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
-                }
-                super::state::BrushType::Fill => {
-                    // Fill cursor: crosshair
-                    let cx = cursor_x + scale * 0.5;
-                    let cy = cursor_y + scale * 0.5;
-                    draw_line(cx - 6.0, cy, cx + 6.0, cy, 1.0, Color::from_rgba(255, 255, 255, 200));
-                    draw_line(cx, cy - 6.0, cx, cy + 6.0, 1.0, Color::from_rgba(255, 255, 255, 200));
+            super::state::BrushType::Fill => {
+                // Fill tool: only trigger on click, not drag
+                if is_mouse_button_pressed(MouseButton::Left) {
+                    state.push_undo_with_atlas("Fill");
+                    let fill_color = crate::rasterizer::Color::with_blend(
+                        state.paint_color.r,
+                        state.paint_color.g,
+                        state.paint_color.b,
+                        state.paint_blend_mode,
+                    );
+                    state.project.atlas.flood_fill(px, py, fill_color);
+                    state.dirty = true;
                 }
             }
         }
+
+        // Show brush cursor
+        let cursor_x = atlas_x + ((mx - atlas_x) / scale).floor() * scale;
+        let cursor_y = atlas_y + ((my - atlas_y) / scale).floor() * scale;
+        match state.brush_type {
+            super::state::BrushType::Square => {
+                let brush_size = state.brush_size;
+                let cursor_w = brush_size * scale;
+                draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
+            }
+            super::state::BrushType::Fill => {
+                // Fill cursor: crosshair
+                let cx = cursor_x + scale * 0.5;
+                let cy = cursor_y + scale * 0.5;
+                draw_line(cx - 6.0, cy, cx + 6.0, cy, 1.0, Color::from_rgba(255, 255, 255, 200));
+                draw_line(cx, cy - 6.0, cx, cy + 6.0, 1.0, Color::from_rgba(255, 255, 255, 200));
+            }
+        }
+    } else {
+        // Reset stroke when not in paint mode
+        state.paint_stroke_active = false;
     }
 
     // ========================================================================
@@ -894,14 +940,26 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         btn_x += btn_w + 2.0;
     }
 
-    // Mode indicator
-    let mode_text = if state.view_mode == ViewMode::Texture { "EDIT (V to exit)" } else { "VIEW (V to edit)" };
-    let mode_color = if state.view_mode == ViewMode::Texture { ACCENT_COLOR } else { TEXT_DIM };
+    // Mode indicator (UV vs Paint)
+    let mode_text = match state.atlas_edit_mode {
+        AtlasEditMode::Uv => "UV (V)",
+        AtlasEditMode::Paint => "Paint (V)",
+    };
+    let mode_color = ACCENT_COLOR;
     let text_width = mode_text.len() as f32 * 6.0;
     draw_text(mode_text, rect.x + rect.w - text_width - 8.0, rect.y + 14.0, 11.0, mode_color);
 
-    // Brush type shortcuts (in edit mode)
-    if state.view_mode == ViewMode::Texture {
+    // V to toggle between UV and Paint mode
+    if is_key_pressed(KeyCode::V) {
+        state.atlas_edit_mode = state.atlas_edit_mode.toggle();
+        // Clear UV selection when switching modes
+        if state.atlas_edit_mode == AtlasEditMode::Paint {
+            state.uv_selection.clear();
+        }
+    }
+
+    // Brush type shortcuts (in paint mode)
+    if state.atlas_edit_mode == AtlasEditMode::Paint {
         if is_key_pressed(KeyCode::B) {
             state.brush_type = super::state::BrushType::Square;
         }
