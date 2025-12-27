@@ -7,6 +7,58 @@
 use crate::rasterizer::{Camera, Vec3, RasterSettings};
 use crate::world::Level;
 use super::{World, Events, Entity};
+use std::time::Instant;
+
+/// Frame timing data for performance profiling
+#[derive(Debug, Clone, Default)]
+pub struct FrameTimings {
+    /// Input handling time (ms)
+    pub input_ms: f32,
+    /// Physics/game logic time (ms)
+    pub logic_ms: f32,
+    /// Framebuffer clear time (ms)
+    pub clear_ms: f32,
+    /// Mesh rendering time (ms) - total
+    pub render_ms: f32,
+    /// UI/overlay drawing time (ms)
+    pub ui_ms: f32,
+    /// Total frame time (ms)
+    pub total_ms: f32,
+
+    // === Render sub-timings ===
+    /// Light collection time (ms)
+    pub render_lights_ms: f32,
+    /// Mesh data generation time (ms) - to_render_data_with_textures
+    pub render_meshgen_ms: f32,
+    /// Actual rasterization time (ms) - render_mesh calls
+    pub render_raster_ms: f32,
+    /// Framebuffer to texture upload time (ms)
+    pub render_upload_ms: f32,
+
+    // === Raster sub-timings (breakdown of render_raster_ms) ===
+    /// Vertex transform and projection time (ms)
+    pub raster_transform_ms: f32,
+    /// Surface building and backface culling time (ms)
+    pub raster_cull_ms: f32,
+    /// Depth sorting time (ms) - painter's algorithm
+    pub raster_sort_ms: f32,
+    /// Triangle fill/drawing time (ms)
+    pub raster_draw_ms: f32,
+    /// Wireframe rendering time (ms)
+    pub raster_wireframe_ms: f32,
+}
+
+impl FrameTimings {
+    /// Start timing a phase
+    pub fn start() -> Instant {
+        Instant::now()
+    }
+
+    /// Get elapsed time in ms since start
+    pub fn elapsed_ms(start: Instant) -> f32 {
+        start.elapsed().as_secs_f32() * 1000.0
+    }
+}
 
 /// Camera control mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -124,6 +176,9 @@ pub struct GameToolState {
 
     /// FPS limit setting (30/60/Unlocked)
     pub fps_limit: FpsLimit,
+
+    /// Frame timing data for performance profiling
+    pub frame_timings: FrameTimings,
 }
 
 impl GameToolState {
@@ -166,6 +221,7 @@ impl GameToolState {
             char_cam_yaw: 0.0,
             char_cam_pitch: 0.2, // Slight downward pitch by default
             fps_limit: FpsLimit::default(),
+            frame_timings: FrameTimings::default(),
         }
     }
 

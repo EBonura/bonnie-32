@@ -436,7 +436,8 @@ async fn main() {
                 // Handle modeler actions
                 handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.mesh_browser);
 
-                // Draw model browser overlay if open
+                // Draw model browser overlay if open (native only - uses filesystem)
+                #[cfg(not(target_arch = "wasm32"))]
                 if ms.model_browser.open {
                     ui_ctx.end_modal(real_mouse_modeler);
 
@@ -487,7 +488,8 @@ async fn main() {
                     }
                 }
 
-                // Draw mesh browser overlay if open
+                // Draw mesh browser overlay if open (native only - uses filesystem)
+                #[cfg(not(target_arch = "wasm32"))]
                 if ms.mesh_browser.open {
                     ui_ctx.end_modal(real_mouse_modeler);
 
@@ -924,6 +926,7 @@ fn handle_modeler_action(
             mesh_browser.open(meshes);
             state.set_status("Browse meshes", 2.0);
         }
+        #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::Save => {
             if let Some(path) = state.current_file.clone() {
                 if let Err(e) = state.save_project(&path) {
@@ -938,6 +941,10 @@ fn handle_modeler_action(
                     state.current_file = Some(default_path);
                 }
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        ModelerAction::Save => {
+            state.set_status("Save not available in browser - use Export", 3.0);
         }
         #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::SaveAs => {
@@ -979,12 +986,17 @@ fn handle_modeler_action(
         ModelerAction::PromptLoad => {
             state.set_status("Open not available in browser - use Upload", 3.0);
         }
+        #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::Load(path_str) => {
             let path = PathBuf::from(&path_str);
             if let Err(e) = state.load_project(&path) {
                 eprintln!("Load failed: {}", e);
                 state.set_status(&format!("Load failed: {}", e), 5.0);
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        ModelerAction::Load(_path_str) => {
+            state.set_status("Load not available in browser - use Upload", 3.0);
         }
         #[cfg(target_arch = "wasm32")]
         ModelerAction::Export => {
