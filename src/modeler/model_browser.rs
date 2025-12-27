@@ -42,8 +42,52 @@ pub fn discover_models() -> Vec<ModelInfo> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn discover_models() -> Vec<ModelInfo> {
-    // WASM: return empty for now (could load from manifest later)
+    // WASM: return empty, load async from manifest
     Vec::new()
+}
+
+/// Load model list from manifest asynchronously (for WASM)
+pub async fn load_model_list() -> Vec<ModelInfo> {
+    use macroquad::prelude::*;
+
+    // Load and parse manifest
+    let manifest = match load_string("assets/models/manifest.txt").await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to load models manifest: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let mut models = Vec::new();
+
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.ends_with(".ron") {
+            continue;
+        }
+
+        let name = line
+            .strip_suffix(".ron")
+            .unwrap_or(line)
+            .to_string();
+        let path = PathBuf::from(format!("assets/models/{}", line));
+
+        models.push(ModelInfo { name, path });
+    }
+
+    models
+}
+
+/// Load a specific model by path (for WASM async loading)
+pub async fn load_model(path: &PathBuf) -> Option<MeshProject> {
+    use macroquad::prelude::*;
+
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    match load_string(&path_str).await {
+        Ok(contents) => MeshProject::load_from_str(&contents).ok(),
+        Err(_) => None,
+    }
 }
 
 /// State for the model browser dialog
@@ -66,6 +110,10 @@ pub struct ModelBrowser {
     pub last_mouse: (f32, f32),
     /// Scroll offset for the list
     pub scroll_offset: f32,
+    /// Path pending async load (WASM)
+    pub pending_load_path: Option<PathBuf>,
+    /// Whether we need to async load the model list (WASM)
+    pub pending_load_list: bool,
 }
 
 impl Default for ModelBrowser {
@@ -82,6 +130,8 @@ impl Default for ModelBrowser {
             dragging: false,
             last_mouse: (0.0, 0.0),
             scroll_offset: 0.0,
+            pending_load_path: None,
+            pending_load_list: false,
         }
     }
 }
