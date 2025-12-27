@@ -1,11 +1,11 @@
 //! Model Browser
 //!
-//! Modal dialog for browsing and previewing saved spine models.
+//! Modal dialog for browsing and previewing saved mesh models.
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh};
-use super::spine::SpineModel;
+use super::mesh_editor::MeshProject;
 use std::path::PathBuf;
 
 /// Info about a model file
@@ -54,8 +54,8 @@ pub struct ModelBrowser {
     pub models: Vec<ModelInfo>,
     /// Currently selected index
     pub selected_index: Option<usize>,
-    /// Currently loaded preview model
-    pub preview_model: Option<SpineModel>,
+    /// Currently loaded preview project (includes mesh + texture atlas)
+    pub preview_project: Option<MeshProject>,
     /// Orbit camera state for preview
     pub orbit_yaw: f32,
     pub orbit_pitch: f32,
@@ -74,7 +74,7 @@ impl Default for ModelBrowser {
             open: false,
             models: Vec::new(),
             selected_index: None,
-            preview_model: None,
+            preview_project: None,
             orbit_yaw: 0.5,
             orbit_pitch: 0.3,
             orbit_distance: 300.0,
@@ -92,19 +92,19 @@ impl ModelBrowser {
         self.open = true;
         self.models = models;
         self.selected_index = None;
-        self.preview_model = None;
+        self.preview_project = None;
         self.scroll_offset = 0.0;
     }
 
     /// Close the browser
     pub fn close(&mut self) {
         self.open = false;
-        self.preview_model = None;
+        self.preview_project = None;
     }
 
-    /// Set the preview model
-    pub fn set_preview(&mut self, model: SpineModel) {
-        // Calculate bounding box to center camera
+    /// Set the preview project
+    pub fn set_preview(&mut self, project: MeshProject) {
+        // Calculate bounding box to center camera (across all objects)
         let mut min_y = f32::MAX;
         let mut max_y = f32::MIN;
         let mut min_x = f32::MAX;
@@ -112,14 +112,14 @@ impl ModelBrowser {
         let mut min_z = f32::MAX;
         let mut max_z = f32::MIN;
 
-        for segment in &model.segments {
-            for joint in &segment.joints {
-                min_x = min_x.min(joint.position.x - joint.radius);
-                max_x = max_x.max(joint.position.x + joint.radius);
-                min_y = min_y.min(joint.position.y - joint.radius);
-                max_y = max_y.max(joint.position.y + joint.radius);
-                min_z = min_z.min(joint.position.z - joint.radius);
-                max_z = max_z.max(joint.position.z + joint.radius);
+        for obj in &project.objects {
+            for vertex in &obj.mesh.vertices {
+                min_x = min_x.min(vertex.pos.x);
+                max_x = max_x.max(vertex.pos.x);
+                min_y = min_y.min(vertex.pos.y);
+                max_y = max_y.max(vertex.pos.y);
+                min_z = min_z.min(vertex.pos.z);
+                max_z = max_z.max(vertex.pos.z);
             }
         }
 
@@ -141,7 +141,7 @@ impl ModelBrowser {
             self.orbit_distance = 300.0;
         }
 
-        self.preview_model = Some(model);
+        self.preview_project = Some(project);
         self.orbit_yaw = 0.8;
         self.orbit_pitch = 0.3;
     }
@@ -238,21 +238,20 @@ pub fn draw_model_browser(
 
     draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h, Color::from_rgba(20, 20, 25, 255));
 
-    let has_preview = browser.preview_model.is_some();
+    let has_preview = browser.preview_project.is_some();
     let has_selection = browser.selected_index.is_some();
 
     if has_preview {
         draw_orbit_preview(ctx, browser, preview_rect, fb);
 
         // Draw stats at bottom of preview
-        if let Some(model) = &browser.preview_model {
+        if let Some(project) = &browser.preview_project {
             let stats_y = preview_rect.bottom() - 24.0;
             draw_rectangle(preview_rect.x, stats_y, preview_rect.w, 24.0, Color::from_rgba(30, 30, 35, 200));
 
-            let total_joints: usize = model.segments.iter().map(|s| s.joints.len()).sum();
             let stats_text = format!(
-                "Segments: {}  Joints: {}",
-                model.segments.len(), total_joints
+                "Vertices: {}  Faces: {}  Objects: {}",
+                project.total_vertices(), project.total_faces(), project.objects.len()
             );
             draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
         }
@@ -283,7 +282,7 @@ pub fn draw_model_browser(
 
     // Open button
     let open_rect = Rect::new(dialog_x + dialog_w - 90.0, footer_y + 8.0, 80.0, 28.0);
-    let open_enabled = browser.preview_model.is_some();
+    let open_enabled = browser.preview_project.is_some();
     if draw_text_button_enabled(ctx, open_rect, "Open", ACCENT_COLOR, open_enabled) {
         action = ModelBrowserAction::OpenModel;
     }
@@ -303,8 +302,8 @@ fn draw_orbit_preview(
     rect: Rect,
     fb: &mut Framebuffer,
 ) {
-    let model = match &browser.preview_model {
-        Some(m) => m,
+    let project = match &browser.preview_project {
+        Some(p) => p,
         None => return,
     };
 
@@ -364,12 +363,19 @@ fn draw_orbit_preview(
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(25, 25, 35));
 
-    // Render the model
-    let settings = RasterSettings::default();
-    let (vertices, faces) = model.generate_mesh();
+    // Convert atlas to rasterizer texture
+    let atlas_texture = project.atlas.to_raster_texture();
+    let textures = [atlas_texture];
 
-    if !vertices.is_empty() {
-        render_mesh(fb, &vertices, &faces, &[], &camera, &settings);
+    // Render all objects with texture
+    let settings = RasterSettings::default();
+    for obj in &project.objects {
+        if obj.visible {
+            let (vertices, faces) = obj.mesh.to_render_data_textured();
+            if !vertices.is_empty() {
+                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+            }
+        }
     }
 
     // Draw a simple floor plane indicator using the grid drawing

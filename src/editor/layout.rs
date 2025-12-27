@@ -25,6 +25,7 @@ pub enum EditorAction {
     Exit,           // Close/quit
 }
 
+
 /// Editor layout state (split panel ratios)
 pub struct EditorLayout {
     /// Main horizontal split (left panels | center+right)

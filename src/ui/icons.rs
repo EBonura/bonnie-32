@@ -52,6 +52,7 @@ pub mod icon {
     pub const SCALE_3D: char = '\u{e2eb}';     // Scale tool
     pub const MAXIMIZE_2: char = '\u{e113}';   // UV editor (expand/maximize)
     pub const BRUSH: char = '\u{e1d3}';        // Paint mode
+    pub const PAINT_BUCKET: char = '\u{e2e6}'; // Fill tool (paint-bucket)
     pub const GIT_BRANCH: char = '\u{e1f4}';   // Hierarchy
     pub const SCAN: char = '\u{e257}';         // Face selection
     pub const CIRCLE_DOT: char = '\u{e345}';   // Vertex selection

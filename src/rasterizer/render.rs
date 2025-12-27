@@ -1,7 +1,7 @@
 //! Core rendering functions
 //! Triangle rasterization with PS1-style effects
 
-use super::math::{barycentric, perspective_transform, project, Vec3, NEAR_PLANE};
+use super::math::{barycentric, perspective_transform, project, project_ortho, Vec3, NEAR_PLANE};
 use super::types::{BlendMode, Color, Face, Light, LightType, RasterSettings, ShadingMode, Texture, Vertex};
 
 /// Framebuffer for software rendering
@@ -42,6 +42,17 @@ impl Framebuffer {
         }
     }
 
+    /// Clear framebuffer with transparent black (for alpha compositing)
+    pub fn clear_transparent(&mut self) {
+        for i in 0..(self.width * self.height) {
+            self.pixels[i * 4] = 0;
+            self.pixels[i * 4 + 1] = 0;
+            self.pixels[i * 4 + 2] = 0;
+            self.pixels[i * 4 + 3] = 0;
+            self.zbuffer[i] = f32::MAX;
+        }
+    }
+
     pub fn set_pixel(&mut self, x: usize, y: usize, color: Color) {
         if x < self.width && y < self.height {
             let idx = (y * self.width + x) * 4;
@@ -58,12 +69,12 @@ impl Framebuffer {
         if x < self.width && y < self.height {
             let idx = (y * self.width + x) * 4;
 
-            // Read existing pixel (back)
-            let back = Color::with_alpha(
+            // Read existing pixel (back) - framebuffer stores RGBA with 255 = opaque
+            let back = Color::with_blend(
                 self.pixels[idx],
                 self.pixels[idx + 1],
                 self.pixels[idx + 2],
-                self.pixels[idx + 3],
+                BlendMode::Opaque, // Framebuffer pixels are always opaque
             );
 
             // Blend and write
@@ -329,6 +340,45 @@ impl Camera {
         cam
     }
 
+    /// Create a camera looking down the Y axis (top-down view, XZ plane)
+    pub fn ortho_top() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            // Looking down -Y, so: right=+X, up=+Z, forward=-Y
+            basis_x: Vec3::new(1.0, 0.0, 0.0),   // Right
+            basis_y: Vec3::new(0.0, 0.0, 1.0),   // Up (Z goes up on screen)
+            basis_z: Vec3::new(0.0, -1.0, 0.0),  // Forward (into the scene)
+        }
+    }
+
+    /// Create a camera looking down the Z axis (front view, XY plane)
+    pub fn ortho_front() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            // Looking down -Z, so: right=+X, up=+Y, forward=-Z
+            basis_x: Vec3::new(1.0, 0.0, 0.0),   // Right
+            basis_y: Vec3::new(0.0, -1.0, 0.0),  // Up (Y goes up, but screen Y is inverted)
+            basis_z: Vec3::new(0.0, 0.0, -1.0),  // Forward (into the scene)
+        }
+    }
+
+    /// Create a camera looking down the X axis (side view, ZY plane)
+    pub fn ortho_side() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            // Looking down -X, so: right=+Z, up=+Y, forward=-X
+            basis_x: Vec3::new(0.0, 0.0, -1.0),  // Right (Z goes left on screen)
+            basis_y: Vec3::new(0.0, -1.0, 0.0),  // Up
+            basis_z: Vec3::new(-1.0, 0.0, 0.0),  // Forward (into the scene)
+        }
+    }
+
     pub fn update_basis(&mut self) {
         let upward = Vec3::new(0.0, -1.0, 0.0);  // Use -Y as up to match screen coordinates
 
@@ -459,11 +509,11 @@ fn shade_multi_light_color(normal: Vec3, world_pos: Vec3, lights: &[Light], ambi
 
 /// Apply RGB shading to a color
 fn shade_color_rgb(color: Color, shade_r: f32, shade_g: f32, shade_b: f32) -> Color {
-    Color::with_alpha(
+    Color::with_blend(
         (color.r as f32 * shade_r).min(255.0) as u8,
         (color.g as f32 * shade_g).min(255.0) as u8,
         (color.b as f32 * shade_b).min(255.0) as u8,
-        color.a,
+        color.blend,
     )
 }
 
@@ -493,7 +543,7 @@ fn apply_dither(color: Color, x: usize, y: usize) -> Color {
     let g = ((color.g as i32 + offset).clamp(0, 255) as u8) & 0xF8;
     let b = ((color.b as i32 + offset).clamp(0, 255) as u8) & 0xF8;
 
-    Color::with_alpha(r, g, b, color.a)
+    Color::with_blend(r, g, b, color.blend)
 }
 
 /// Rasterize a single triangle
@@ -568,12 +618,17 @@ fn rasterize_triangle(
                     Color::WHITE
                 };
 
+                // Skip transparent pixels (Erase blend mode)
+                if color.is_transparent() {
+                    continue;
+                }
+
                 // Interpolate vertex colors (PS1-style Gouraud for color)
                 let vertex_color = Color {
                     r: (bc.x * surface.vc1.r as f32 + bc.y * surface.vc2.r as f32 + bc.z * surface.vc3.r as f32) as u8,
                     g: (bc.x * surface.vc1.g as f32 + bc.y * surface.vc2.g as f32 + bc.z * surface.vc3.g as f32) as u8,
                     b: (bc.x * surface.vc1.b as f32 + bc.y * surface.vc2.b as f32 + bc.z * surface.vc3.b as f32) as u8,
-                    a: 255,
+                    blend: BlendMode::Opaque,
                 };
 
                 // Apply PS1-style texture modulation: (texel * vertex_color) / 128
@@ -603,8 +658,17 @@ fn rasterize_triangle(
                     color = apply_dither(color, x, y);
                 }
 
-                // Write pixel
-                fb.set_pixel_with_depth(x, y, z, color);
+                // Write pixel (use blend mode from texture)
+                if color.blend == BlendMode::Opaque {
+                    fb.set_pixel_with_depth(x, y, z, color);
+                } else {
+                    // For semi-transparent modes, blend with existing framebuffer
+                    let idx = y * fb.width + x;
+                    if z < fb.zbuffer[idx] {
+                        fb.zbuffer[idx] = z;
+                        fb.set_pixel_blended(x, y, color, color.blend);
+                    }
+                }
             }
         }
     }
@@ -630,9 +694,12 @@ pub fn render_mesh(
         let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
         cam_space_positions.push(cam_pos);
 
-        // Project to screen (safe because we check near plane per-triangle)
-        // For vertices behind camera, this produces garbage - we skip those triangles
-        let screen_pos = project(cam_pos, settings.vertex_snap, fb.width, fb.height);
+        // Project to screen - use ortho or perspective based on settings
+        let screen_pos = if let Some(ref ortho) = settings.ortho_projection {
+            project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height)
+        } else {
+            project(cam_pos, settings.vertex_snap, fb.width, fb.height)
+        };
         projected.push(screen_pos);
 
         // Transform normal to camera space
@@ -742,12 +809,14 @@ pub fn render_mesh(
         });
     }
 
-    // Rasterize each solid surface
-    for surface in &surfaces {
-        let texture = faces[surface.face_idx]
-            .texture_id
-            .and_then(|id| textures.get(id));
-        rasterize_triangle(fb, surface, texture, settings);
+    // Rasterize each solid surface (skip if wireframe-only mode)
+    if !settings.wireframe_overlay {
+        for surface in &surfaces {
+            let texture = faces[surface.face_idx]
+                .texture_id
+                .and_then(|id| textures.get(id));
+            rasterize_triangle(fb, surface, texture, settings);
+        }
     }
 
     // Draw wireframes for back-faces (visible but not solid)

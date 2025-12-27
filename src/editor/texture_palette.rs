@@ -328,15 +328,16 @@ fn draw_folder_selector(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
 /// Convert a raster texture to a macroquad texture
 fn raster_to_mq_texture(texture: &RasterTexture) -> Texture2D {
-    // Convert RGBA pixels
+    // Convert RGBA pixels (use to_bytes which handles blend mode -> alpha conversion)
     let mut pixels = Vec::with_capacity(texture.width * texture.height * 4);
     for y in 0..texture.height {
         for x in 0..texture.width {
             let color = texture.get_pixel(x, y);
-            pixels.push(color.r);
-            pixels.push(color.g);
-            pixels.push(color.b);
-            pixels.push(color.a);
+            let bytes = color.to_bytes();
+            pixels.push(bytes[0]);
+            pixels.push(bytes[1]);
+            pixels.push(bytes[2]);
+            pixels.push(bytes[3]);
         }
     }
 

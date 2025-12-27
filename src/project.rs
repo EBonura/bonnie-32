@@ -6,7 +6,7 @@
 //! visible in all other views including the game preview.
 
 use crate::world::Level;
-use crate::modeler::{RiggedModel, SpineModel, EditableMesh};
+use crate::modeler::{RiggedModel, EditableMesh};
 use crate::tracker::Song;
 
 /// Central container for all project data.
@@ -24,9 +24,6 @@ pub struct ProjectData {
     /// Standalone editable meshes (not yet rigged)
     pub meshes: Vec<EditableMesh>,
 
-    /// Spine-based procedural meshes
-    pub spines: Vec<SpineModel>,
-
     /// Music tracks
     pub songs: Vec<Song>,
 }
@@ -38,7 +35,6 @@ impl ProjectData {
             level: Level::new(),
             models: Vec::new(),
             meshes: Vec::new(),
-            spines: Vec::new(),
             songs: Vec::new(),
         }
     }
@@ -49,7 +45,6 @@ impl ProjectData {
             level: crate::world::create_empty_level(),
             models: Vec::new(),
             meshes: Vec::new(),
-            spines: Vec::new(),
             songs: Vec::new(),
         }
     }
