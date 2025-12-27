@@ -4,7 +4,6 @@
 //! Combines static level geometry with dynamic entities.
 
 use macroquad::prelude::*;
-use std::time::Instant;
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh,
     Light, RasterSettings, RasterTimings, ShadingMode, Color as RasterColor,
@@ -26,7 +25,7 @@ pub fn draw_test_viewport(
     fb: &mut Framebuffer,
     input: &InputState,
 ) {
-    let frame_start = Instant::now();
+    let frame_start = FrameTimings::start();
 
     // Resize framebuffer to match game resolution (toggle via debug menu)
     let (fb_w, fb_h) = if game.raster_settings.low_resolution {
@@ -50,7 +49,7 @@ pub fn draw_test_viewport(
     }
 
     // === INPUT PHASE ===
-    let input_start = Instant::now();
+    let input_start = FrameTimings::start();
 
     // Handle input (camera, player movement) - blocked when debug menu is open
     if !game.options_menu_open {
@@ -71,7 +70,7 @@ pub fn draw_test_viewport(
     let input_ms = FrameTimings::elapsed_ms(input_start);
 
     // === CLEAR PHASE ===
-    let clear_start = Instant::now();
+    let clear_start = FrameTimings::start();
 
     // Clear framebuffer to dark gray
     fb.clear(RasterColor::new(20, 22, 28));
@@ -79,7 +78,7 @@ pub fn draw_test_viewport(
     let clear_ms = FrameTimings::elapsed_ms(clear_start);
 
     // === RENDER PHASE ===
-    let render_start = Instant::now();
+    let render_start = FrameTimings::start();
 
     // Texture resolver closure
     let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<usize> {
@@ -91,7 +90,7 @@ pub fn draw_test_viewport(
     };
 
     // --- Sub-timing: Light collection ---
-    let lights_start = Instant::now();
+    let lights_start = FrameTimings::start();
     let lights: Vec<Light> = if game.raster_settings.shading != ShadingMode::None {
         level.rooms.iter()
             .flat_map(|room| {
@@ -128,12 +127,12 @@ pub fn draw_test_viewport(
         };
 
         // Time mesh data generation
-        let meshgen_start = Instant::now();
+        let meshgen_start = FrameTimings::start();
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         render_meshgen_ms += FrameTimings::elapsed_ms(meshgen_start);
 
         // Time actual rasterization (returns detailed sub-timings)
-        let raster_start = Instant::now();
+        let raster_start = FrameTimings::start();
         let room_timings = render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings);
         render_raster_ms += FrameTimings::elapsed_ms(raster_start);
         raster_timings.accumulate(&room_timings);
@@ -143,7 +142,7 @@ pub fn draw_test_viewport(
     if game.playing {
         if let Some(player_pos) = game.get_player_position() {
             let settings = &level.player_settings;
-            let raster_start = Instant::now();
+            let raster_start = FrameTimings::start();
             draw_wireframe_cylinder(
                 fb,
                 &game.camera,
@@ -160,7 +159,7 @@ pub fn draw_test_viewport(
     let render_ms = FrameTimings::elapsed_ms(render_start);
 
     // --- Sub-timing: Texture upload ---
-    let upload_start = Instant::now();
+    let upload_start = FrameTimings::start();
 
     // Convert framebuffer to texture and draw to viewport
     let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
@@ -197,7 +196,7 @@ pub fn draw_test_viewport(
     let render_upload_ms = FrameTimings::elapsed_ms(upload_start);
 
     // === UI PHASE ===
-    let ui_start = Instant::now();
+    let ui_start = FrameTimings::start();
 
     // Draw debug overlay HUD if enabled (top-right, always visible during gameplay)
     if game.show_debug_overlay {
