@@ -1,7 +1,8 @@
 //! Build script to generate manifests for WASM builds
 //!
-//! Scans assets/textures/ and assets/levels/ and creates manifests
-//! listing all files, since WASM can't enumerate directories at runtime.
+//! Scans assets/textures/, assets/levels/, assets/models/, and assets/meshes/
+//! and creates manifests listing all files, since WASM can't enumerate
+//! directories at runtime.
 
 use std::fs;
 use std::io::Write;
@@ -10,9 +11,13 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=assets/textures");
     println!("cargo:rerun-if-changed=assets/levels");
+    println!("cargo:rerun-if-changed=assets/models");
+    println!("cargo:rerun-if-changed=assets/meshes");
 
     generate_texture_manifest();
     generate_levels_manifest();
+    generate_models_manifest();
+    generate_meshes_manifest();
 }
 
 /// Generate manifest for texture packs
@@ -94,6 +99,76 @@ fn generate_levels_manifest() {
         for level_entry in levels {
             let level_name = level_entry.file_name().to_string_lossy().to_string();
             manifest.push_str(&format!("{}\n", level_name));
+        }
+    }
+
+    // Write manifest file
+    let mut file = fs::File::create(manifest_path).unwrap();
+    file.write_all(manifest.as_bytes()).unwrap();
+}
+
+/// Generate manifest for models (for WASM builds)
+fn generate_models_manifest() {
+    let models_dir = Path::new("assets/models");
+    let manifest_path = Path::new("assets/models/manifest.txt");
+
+    let mut manifest = String::new();
+
+    if models_dir.exists() {
+        let mut models: Vec<_> = fs::read_dir(models_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let path = e.path();
+                // Only include .ron files, skip directories
+                path.is_file()
+                    && path
+                        .extension()
+                        .map(|ext| ext.to_ascii_lowercase() == "ron")
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        models.sort_by_key(|e| e.file_name());
+
+        for model_entry in models {
+            let model_name = model_entry.file_name().to_string_lossy().to_string();
+            manifest.push_str(&format!("{}\n", model_name));
+        }
+    }
+
+    // Write manifest file
+    let mut file = fs::File::create(manifest_path).unwrap();
+    file.write_all(manifest.as_bytes()).unwrap();
+}
+
+/// Generate manifest for meshes (for WASM builds)
+fn generate_meshes_manifest() {
+    let meshes_dir = Path::new("assets/meshes");
+    let manifest_path = Path::new("assets/meshes/manifest.txt");
+
+    let mut manifest = String::new();
+
+    if meshes_dir.exists() {
+        let mut meshes: Vec<_> = fs::read_dir(meshes_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let path = e.path();
+                // Only include .obj files, skip directories
+                path.is_file()
+                    && path
+                        .extension()
+                        .map(|ext| ext.to_ascii_lowercase() == "obj")
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        meshes.sort_by_key(|e| e.file_name());
+
+        for mesh_entry in meshes {
+            let mesh_name = mesh_entry.file_name().to_string_lossy().to_string();
+            manifest.push_str(&format!("{}\n", mesh_name));
         }
     }
 
