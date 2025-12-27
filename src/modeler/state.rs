@@ -957,10 +957,13 @@ impl ModelerState {
         self.set_status("New mesh", 1.0);
     }
 
-    /// Save mesh to file
+    /// Save project to file (includes mesh + texture atlas)
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn save_mesh(&mut self, path: &std::path::Path) -> Result<(), String> {
-        self.mesh.save_to_file(path)
+    pub fn save_project(&mut self, path: &std::path::Path) -> Result<(), String> {
+        // Sync current mesh to project before saving
+        self.sync_mesh_to_project();
+
+        self.project.save_to_file(path)
             .map_err(|e| format!("{}", e))?;
         self.current_file = Some(path.to_path_buf());
         self.dirty = false;
@@ -968,12 +971,13 @@ impl ModelerState {
         Ok(())
     }
 
-    /// Load mesh from file
+    /// Load project from file (includes mesh + texture atlas)
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_mesh(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let mesh = EditableMesh::load_from_file(path)
+    pub fn load_project(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let project = MeshProject::load_from_file(path)
             .map_err(|e| format!("{}", e))?;
-        self.mesh = mesh;
+        self.project = project;
+        self.sync_mesh_from_project();
         self.current_file = Some(path.to_path_buf());
         self.selection.clear();
         self.dirty = false;

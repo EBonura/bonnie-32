@@ -451,9 +451,9 @@ async fn main() {
                         ModelBrowserAction::SelectPreview(index) => {
                             if let Some(model_info) = ms.model_browser.models.get(index) {
                                 let path = model_info.path.clone();
-                                match modeler::EditableMesh::load_from_file(&path) {
-                                    Ok(mesh) => {
-                                        ms.model_browser.set_preview(mesh);
+                                match modeler::MeshProject::load_from_file(&path) {
+                                    Ok(project) => {
+                                        ms.model_browser.set_preview(project);
                                     }
                                     Err(e) => {
                                         eprintln!("Failed to load model: {}", e);
@@ -463,11 +463,12 @@ async fn main() {
                             }
                         }
                         ModelBrowserAction::OpenModel => {
-                            if let Some(mesh) = ms.model_browser.preview_model.take() {
+                            if let Some(project) = ms.model_browser.preview_project.take() {
                                 let path = ms.model_browser.selected_model()
                                     .map(|m| m.path.clone())
                                     .unwrap_or_else(|| PathBuf::from("assets/models/untitled.ron"));
-                                ms.modeler_state.mesh = mesh;
+                                ms.modeler_state.project = project;
+                                ms.modeler_state.sync_mesh_from_project();
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = false;
                                 ms.modeler_state.selection = modeler::ModelerSelection::None;
@@ -925,13 +926,13 @@ fn handle_modeler_action(
         }
         ModelerAction::Save => {
             if let Some(path) = state.current_file.clone() {
-                if let Err(e) = state.save_mesh(&path) {
+                if let Err(e) = state.save_project(&path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             } else {
                 // No current file - save with auto-generated name (model_001, model_002, etc.)
                 let default_path = next_available_model_name();
-                if let Err(e) = state.save_mesh(&default_path) {
+                if let Err(e) = state.save_project(&default_path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 } else {
                     state.current_file = Some(default_path);
@@ -949,7 +950,7 @@ fn handle_modeler_action(
                 .set_file_name("model.ron");
 
             if let Some(save_path) = dialog.save_file() {
-                if let Err(e) = state.save_mesh(&save_path) {
+                if let Err(e) = state.save_project(&save_path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             }
@@ -968,7 +969,7 @@ fn handle_modeler_action(
                 .set_directory(&default_dir);
 
             if let Some(path) = dialog.pick_file() {
-                if let Err(e) = state.load_mesh(&path) {
+                if let Err(e) = state.load_project(&path) {
                     eprintln!("Load failed: {}", e);
                     state.set_status(&format!("Load failed: {}", e), 5.0);
                 }
@@ -980,7 +981,7 @@ fn handle_modeler_action(
         }
         ModelerAction::Load(path_str) => {
             let path = PathBuf::from(&path_str);
-            if let Err(e) = state.load_mesh(&path) {
+            if let Err(e) = state.load_project(&path) {
                 eprintln!("Load failed: {}", e);
                 state.set_status(&format!("Load failed: {}", e), 5.0);
             }

@@ -102,6 +102,37 @@ impl MeshProject {
     pub fn total_faces(&self) -> usize {
         self.objects.iter().map(|o| o.mesh.face_count()).sum()
     }
+
+    /// Save project to file (.ron format)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_to_file(&self, path: &Path) -> Result<(), MeshEditorError> {
+        let config = ron::ser::PrettyConfig::new()
+            .depth_limit(4)
+            .indentor("  ".to_string());
+        let ron_data = ron::ser::to_string_pretty(self, config)
+            .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
+
+        std::fs::write(path, ron_data)
+            .map_err(|e| MeshEditorError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load project from file (.ron format)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_from_file(path: &Path) -> Result<Self, MeshEditorError> {
+        let ron_data = std::fs::read_to_string(path)
+            .map_err(|e| MeshEditorError::Io(e.to_string()))?;
+
+        let mut project: MeshProject = ron::from_str(&ron_data)
+            .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
+
+        // Select first object by default after loading
+        if !project.objects.is_empty() {
+            project.selected_object = Some(0);
+        }
+
+        Ok(project)
+    }
 }
 
 impl Default for MeshProject {
@@ -1110,16 +1141,16 @@ impl EditableMesh {
         Ok(mesh)
     }
 
-    /// Convert to render data (vertices and faces for the rasterizer)
+    /// Convert to render data (vertices and faces for the rasterizer) - no texture
     pub fn to_render_data(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
-        use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
+        use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
 
         let raster_vertices: Vec<RasterVertex> = self.vertices.iter().map(|v| {
             RasterVertex {
                 pos: v.pos,
                 uv: v.uv,
                 normal: v.normal,
-                color: RasterColor::new(180, 180, 180),
+                color: v.color,
                 bone_index: None,
             }
         }).collect();
@@ -1130,6 +1161,32 @@ impl EditableMesh {
                 v1: f.v1,
                 v2: f.v2,
                 texture_id: None,
+            }
+        }).collect();
+
+        (raster_vertices, raster_faces)
+    }
+
+    /// Convert to render data with texture atlas (texture_id = 0 for all faces)
+    pub fn to_render_data_textured(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
+        use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
+
+        let raster_vertices: Vec<RasterVertex> = self.vertices.iter().map(|v| {
+            RasterVertex {
+                pos: v.pos,
+                uv: v.uv,
+                normal: v.normal,
+                color: v.color,
+                bone_index: None,
+            }
+        }).collect();
+
+        let raster_faces: Vec<RasterFace> = self.faces.iter().map(|f| {
+            RasterFace {
+                v0: f.v0,
+                v1: f.v1,
+                v2: f.v2,
+                texture_id: Some(0), // Use texture atlas (index 0)
             }
         }).collect();
 
