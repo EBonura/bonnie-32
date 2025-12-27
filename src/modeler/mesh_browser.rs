@@ -55,8 +55,53 @@ pub fn discover_meshes() -> Vec<MeshInfo> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn discover_meshes() -> Vec<MeshInfo> {
-    // WASM: return empty for now (could load from manifest later)
+    // WASM: return empty, load async from manifest
     Vec::new()
+}
+
+/// Load mesh list from manifest asynchronously (for WASM)
+pub async fn load_mesh_list() -> Vec<MeshInfo> {
+    use macroquad::prelude::*;
+
+    // Load and parse manifest
+    let manifest = match load_string("assets/meshes/manifest.txt").await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to load meshes manifest: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let mut meshes = Vec::new();
+
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.ends_with(".obj") {
+            continue;
+        }
+
+        let name = line
+            .strip_suffix(".obj")
+            .unwrap_or(line)
+            .to_string();
+        let path = PathBuf::from(format!("assets/meshes/{}", line));
+
+        // We don't have vertex/face counts until we load the mesh
+        meshes.push(MeshInfo { name, path, vertex_count: 0, face_count: 0 });
+    }
+
+    meshes
+}
+
+/// Load a specific mesh by path (for WASM async loading)
+pub async fn load_mesh(path: &PathBuf) -> Option<EditableMesh> {
+    use macroquad::prelude::*;
+
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    match load_string(&path_str).await {
+        Ok(contents) => ObjImporter::parse(&contents).ok(),
+        Err(_) => None,
+    }
 }
 
 /// State for the mesh browser dialog
@@ -81,6 +126,10 @@ pub struct MeshBrowser {
     pub scroll_offset: f32,
     /// Scale multiplier for imported meshes (OBJ meshes are often small)
     pub import_scale: f32,
+    /// Path pending async load (WASM)
+    pub pending_load_path: Option<PathBuf>,
+    /// Whether we need to async load the mesh list (WASM)
+    pub pending_load_list: bool,
 }
 
 impl Default for MeshBrowser {
@@ -98,6 +147,8 @@ impl Default for MeshBrowser {
             last_mouse: (0.0, 0.0),
             scroll_offset: 0.0,
             import_scale: 100.0, // OBJ meshes are typically ~1 unit, scale up to match world
+            pending_load_path: None,
+            pending_load_list: false,
         }
     }
 }

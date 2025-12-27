@@ -123,7 +123,12 @@ impl MeshProject {
         let ron_data = std::fs::read_to_string(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
 
-        let mut project: MeshProject = ron::from_str(&ron_data)
+        Self::load_from_str(&ron_data)
+    }
+
+    /// Load project from string (.ron format) - works on all platforms including WASM
+    pub fn load_from_str(ron_data: &str) -> Result<Self, MeshEditorError> {
+        let mut project: MeshProject = ron::from_str(ron_data)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
         // Select first object by default after loading

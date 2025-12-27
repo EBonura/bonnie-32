@@ -441,8 +441,7 @@ async fn main() {
                 // Handle modeler actions
                 handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.mesh_browser);
 
-                // Draw model browser overlay if open (native only - uses filesystem)
-                #[cfg(not(target_arch = "wasm32"))]
+                // Draw model browser overlay if open
                 if ms.model_browser.open {
                     ui_ctx.end_modal(real_mouse_modeler);
 
@@ -457,14 +456,21 @@ async fn main() {
                         ModelBrowserAction::SelectPreview(index) => {
                             if let Some(model_info) = ms.model_browser.models.get(index) {
                                 let path = model_info.path.clone();
-                                match modeler::MeshProject::load_from_file(&path) {
-                                    Ok(project) => {
-                                        ms.model_browser.set_preview(project);
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    match modeler::MeshProject::load_from_file(&path) {
+                                        Ok(project) => {
+                                            ms.model_browser.set_preview(project);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to load model: {}", e);
+                                            ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
+                                        }
                                     }
-                                    Err(e) => {
-                                        eprintln!("Failed to load model: {}", e);
-                                        ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
-                                    }
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    ms.model_browser.pending_load_path = Some(path);
                                 }
                             }
                         }
@@ -493,8 +499,7 @@ async fn main() {
                     }
                 }
 
-                // Draw mesh browser overlay if open (native only - uses filesystem)
-                #[cfg(not(target_arch = "wasm32"))]
+                // Draw mesh browser overlay if open
                 if ms.mesh_browser.open {
                     ui_ctx.end_modal(real_mouse_modeler);
 
@@ -509,16 +514,23 @@ async fn main() {
                         MeshBrowserAction::SelectPreview(index) => {
                             if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
                                 let path = mesh_info.path.clone();
-                                match ObjImporter::load_from_file(&path) {
-                                    Ok(mut mesh) => {
-                                        // Compute normals for shading in preview
-                                        ObjImporter::compute_face_normals(&mut mesh);
-                                        ms.mesh_browser.set_preview(mesh);
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    match ObjImporter::load_from_file(&path) {
+                                        Ok(mut mesh) => {
+                                            // Compute normals for shading in preview
+                                            ObjImporter::compute_face_normals(&mut mesh);
+                                            ms.mesh_browser.set_preview(mesh);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to load mesh: {}", e);
+                                            ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
+                                        }
                                     }
-                                    Err(e) => {
-                                        eprintln!("Failed to load mesh: {}", e);
-                                        ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
-                                    }
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    ms.mesh_browser.pending_load_path = Some(path);
                                 }
                             }
                         }
@@ -598,6 +610,45 @@ async fn main() {
                     ws.example_browser.set_preview(level);
                 } else {
                     ws.editor_state.set_status("Failed to load level preview", 3.0);
+                }
+            }
+        }
+
+        // Handle pending async model/mesh load (WASM) - after all drawing is complete
+        #[cfg(target_arch = "wasm32")]
+        if let Tool::Modeler = app.active_tool {
+            let ms = &mut app.modeler;
+            // Load model list from manifest if pending
+            if ms.model_browser.pending_load_list {
+                ms.model_browser.pending_load_list = false;
+                use modeler::load_model_list;
+                let models = load_model_list().await;
+                ms.model_browser.models = models;
+            }
+            // Load individual model preview if pending
+            if let Some(path) = ms.model_browser.pending_load_path.take() {
+                use modeler::load_model;
+                if let Some(project) = load_model(&path).await {
+                    ms.model_browser.set_preview(project);
+                } else {
+                    ms.modeler_state.set_status("Failed to load model preview", 3.0);
+                }
+            }
+            // Load mesh list from manifest if pending
+            if ms.mesh_browser.pending_load_list {
+                ms.mesh_browser.pending_load_list = false;
+                use modeler::load_mesh_list;
+                let meshes = load_mesh_list().await;
+                ms.mesh_browser.meshes = meshes;
+            }
+            // Load individual mesh preview if pending
+            if let Some(path) = ms.mesh_browser.pending_load_path.take() {
+                use modeler::load_mesh;
+                if let Some(mut mesh) = load_mesh(&path).await {
+                    ObjImporter::compute_face_normals(&mut mesh);
+                    ms.mesh_browser.set_preview(mesh);
+                } else {
+                    ms.modeler_state.set_status("Failed to load mesh preview", 3.0);
                 }
             }
         }
@@ -937,11 +988,21 @@ fn handle_modeler_action(
         ModelerAction::BrowseModels => {
             let models = discover_models();
             model_browser.open(models);
+            // On WASM, trigger async load of model list
+            #[cfg(target_arch = "wasm32")]
+            {
+                model_browser.pending_load_list = true;
+            }
             state.set_status("Browse models", 2.0);
         }
         ModelerAction::BrowseMeshes => {
             let meshes = discover_meshes();
             mesh_browser.open(meshes);
+            // On WASM, trigger async load of mesh list
+            #[cfg(target_arch = "wasm32")]
+            {
+                mesh_browser.pending_load_list = true;
+            }
             state.set_status("Browse meshes", 2.0);
         }
         #[cfg(not(target_arch = "wasm32"))]
