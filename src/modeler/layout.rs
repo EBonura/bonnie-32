@@ -16,6 +16,22 @@ const TEXT_COLOR: Color = Color::new(0.8, 0.8, 0.85, 1.0);
 const TEXT_DIM: Color = Color::new(0.4, 0.4, 0.45, 1.0);
 const ACCENT_COLOR: Color = Color::new(0.0, 0.75, 0.9, 1.0);
 
+// PS1 polygon budget colors
+const POLY_GREEN: Color = Color::new(0.4, 0.9, 0.4, 1.0);   // < 300 faces - very safe
+const POLY_YELLOW: Color = Color::new(0.9, 0.9, 0.3, 1.0);  // 300-800 faces - moderate
+const POLY_RED: Color = Color::new(0.9, 0.4, 0.4, 1.0);     // > 800 faces - heavy
+
+/// Get color for face count based on PS1-realistic polygon budgets
+fn poly_count_color(face_count: usize) -> Color {
+    if face_count < 300 {
+        POLY_GREEN
+    } else if face_count < 800 {
+        POLY_YELLOW
+    } else {
+        POLY_RED
+    }
+}
+
 /// Actions that can be triggered by the modeler UI
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelerAction {
@@ -389,11 +405,12 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         };
         draw_text(&display_name, name_x, y + 16.0, 14.0, name_color);
 
-        // Face count
+        // Face count (color-coded for PS1 polygon budget)
         let face_count = obj.mesh.face_count();
         let count_text = format!("{}", face_count);
         let count_x = rect.x + rect.w - 30.0;
-        draw_text(&count_text, count_x, y + 16.0, 12.0, TEXT_DIM);
+        let count_color = poly_count_color(face_count);
+        draw_text(&count_text, count_x, y + 16.0, 12.0, count_color);
 
         // Handle clicks
         if is_mouse_button_pressed(MouseButton::Left) {
@@ -448,9 +465,10 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                     );
                 }
                 _ => {
+                    let fc = obj.mesh.face_count();
                     draw_text(
-                        &format!("\"{}\" - {} faces", obj.name, obj.mesh.face_count()),
-                        rect.x, info_y + 12.0, 12.0, TEXT_DIM,
+                        &format!("\"{}\" - {} faces", obj.name, fc),
+                        rect.x, info_y + 12.0, 12.0, poly_count_color(fc),
                     );
                 }
             }

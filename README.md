@@ -244,14 +244,15 @@ This project uses the following free texture packs:
 
 ### Assets (Modeler)
 
-#### Remaining
+#### Known Issues
+- [ ] Drag-to-select box only works in 3D view (not in 2D view)
+- [ ] Selection box overflows from 2D view into 3D viewport when dragging near boundary
+- [ ] Scale and Rotate transform modes not implemented - need to add Move mode first with proper gizmos for each mode
+- [ ] Overview panel is still a stub
 - [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
 
 #### Future
-- [ ] Pixel art painting tools: Built-in tools specific for texture painting
-- [ ] PS1 color depth constraints: Limit to PS1 palette (toggleable)
 - [ ] VRAM usage counter: Display usage with warning when exceeded
-- [ ] Polygon count indicator: Green/yellow/red based on PS1-realistic counts
 
 ---
 
