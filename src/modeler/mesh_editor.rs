@@ -125,11 +125,13 @@ pub struct TextureAtlas {
 
 impl TextureAtlas {
     pub fn new(width: usize, height: usize) -> Self {
-        // Initialize transparent (blend mode = Erase = 5)
+        // Initialize with grey (like Blender's default material)
         let mut pixels = vec![0u8; width * height * 4];
-        // Set blend mode byte to Erase (5) for all pixels
         for i in 0..(width * height) {
-            pixels[i * 4 + 3] = 5; // BlendMode::Erase
+            pixels[i * 4] = 128;     // R - grey
+            pixels[i * 4 + 1] = 128; // G - grey
+            pixels[i * 4 + 2] = 128; // B - grey
+            pixels[i * 4 + 3] = 0;   // BlendMode::Opaque
         }
         Self { width, height, pixels }
     }

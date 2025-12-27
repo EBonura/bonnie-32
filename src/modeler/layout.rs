@@ -504,11 +504,15 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         }
     }
 
-    // Draw the actual texture atlas pixels
+    // Draw the actual texture atlas pixels (skip transparent to show checkerboard)
     let pixels_per_block = (1.0 / scale).max(1.0) as usize;
     for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
         for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
             let pixel = state.project.atlas.get_pixel(bx, by);
+            // Skip transparent pixels so checkerboard shows through
+            if pixel.is_transparent() {
+                continue;
+            }
             let px = atlas_x + bx as f32 * scale;
             let py = atlas_y + by as f32 * scale;
             let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
@@ -522,18 +526,21 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     // Draw atlas border
     draw_rectangle_lines(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, 1.0, Color::from_rgba(100, 100, 105, 255));
 
-    // Helper to convert UV to screen coordinates
+    // Helper to convert UV to screen coordinates (snapped to pixel centers)
     let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
-        let sx = atlas_x + u * atlas_screen_w;
-        let sy = atlas_y + (1.0 - v) * atlas_screen_h; // Flip Y for screen coords
+        // Snap to pixel center for display
+        let px = (u * atlas_w).floor();
+        let py = ((1.0 - v) * atlas_h).floor();
+        let sx = atlas_x + (px + 0.5) * scale;
+        let sy = atlas_y + (py + 0.5) * scale;
         (sx, sy)
     };
 
-    // Helper to convert screen to UV coordinates (for future UV dragging)
-    let _screen_to_uv = |sx: f32, sy: f32| -> (f32, f32) {
-        let u = (sx - atlas_x) / atlas_screen_w;
-        let v = 1.0 - (sy - atlas_y) / atlas_screen_h;
-        (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+    // Helper to snap UV to pixel boundaries
+    let snap_uv_to_pixel = |u: f32, v: f32| -> (f32, f32) {
+        let px = (u * atlas_w).round() / atlas_w;
+        let py = (v * atlas_h).round() / atlas_h;
+        (px.clamp(0.0, 1.0), py.clamp(0.0, 1.0))
     };
 
     let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
@@ -647,7 +654,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             }
         }
 
-        // Continue UV drag
+        // Continue UV drag (snap to pixel boundaries)
         if state.uv_drag_active && is_mouse_button_down(MouseButton::Left) {
             let du = (mx - state.uv_drag_start.0) / atlas_screen_w;
             let dv = -(my - state.uv_drag_start.1) / atlas_screen_h; // Flip Y
@@ -655,8 +662,12 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             for (obj_idx, vert_idx, original_uv) in &state.uv_drag_start_uvs {
                 if let Some(obj) = state.project.objects.get_mut(*obj_idx) {
                     if let Some(vert) = obj.mesh.vertices.get_mut(*vert_idx) {
-                        vert.uv.x = (original_uv.x + du).clamp(0.0, 1.0);
-                        vert.uv.y = (original_uv.y + dv).clamp(0.0, 1.0);
+                        let new_u = original_uv.x + du;
+                        let new_v = original_uv.y + dv;
+                        // Snap to pixel boundaries
+                        let (snapped_u, snapped_v) = snap_uv_to_pixel(new_u, new_v);
+                        vert.uv.x = snapped_u;
+                        vert.uv.y = snapped_v;
                     }
                 }
             }
@@ -793,7 +804,7 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
         }
     }
 
-    // Draw the actual texture atlas pixels
+    // Draw the actual texture atlas pixels (skip transparent to show checkerboard)
     // For performance, we draw in blocks instead of pixel-by-pixel
     let block_size = (scale * 4.0).max(1.0); // Larger blocks for zoomed-out view
     let pixels_per_block = (block_size / scale).max(1.0) as usize;
@@ -802,6 +813,10 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
         for bx in (0..atlas.width).step_by(pixels_per_block) {
             // Sample the pixel (or average a block for downsampled view)
             let pixel = atlas.get_pixel(bx, by);
+            // Skip transparent pixels so checkerboard shows through
+            if pixel.is_transparent() {
+                continue;
+            }
             let px = atlas_x + bx as f32 * scale;
             let py = atlas_y + by as f32 * scale;
             let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px);
@@ -828,10 +843,12 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
             let v1 = &obj.mesh.vertices[face.v1];
             let v2 = &obj.mesh.vertices[face.v2];
 
-            // Convert UVs to screen coordinates
+            // Convert UVs to screen coordinates (snapped to pixel centers)
             let uv_to_screen = |uv: crate::rasterizer::Vec2| {
-                let sx = atlas_x + uv.x * atlas_screen_w;
-                let sy = atlas_y + (1.0 - uv.y) * atlas_screen_h; // Flip Y for screen coords
+                let px = (uv.x * atlas_w).floor();
+                let py = ((1.0 - uv.y) * atlas_h).floor();
+                let sx = atlas_x + (px + 0.5) * scale;
+                let sy = atlas_y + (py + 0.5) * scale;
                 (sx, sy)
             };
 
