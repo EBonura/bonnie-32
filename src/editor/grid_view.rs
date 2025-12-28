@@ -1267,8 +1267,6 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         state.set_status("Click on a sector to place object", 2.0);
                     }
                 }
-
-                _ => {}
             }
         }
     }

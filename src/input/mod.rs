@@ -6,6 +6,9 @@
 //! Native: Uses gilrs crate for cross-platform gamepad input
 //! WASM: Uses custom Web Gamepad API bindings (avoids RefCell conflicts)
 
+// Allow unused - input system scaffolding for future game runtime
+#![allow(dead_code)]
+
 mod actions;
 mod gamepad;
 mod state;

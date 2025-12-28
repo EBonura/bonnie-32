@@ -198,8 +198,9 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 
     toolbar.separator();
 
-    // Transform tools (Rotate/Scale only - Select/Move replaced by hover+gizmo)
+    // Transform tools with gizmos
     let tools = [
+        (icon::MOVE, "Move (G)", TransformTool::Move),
         (icon::ROTATE_3D, "Rotate (R)", TransformTool::Rotate),
         (icon::SCALE_3D, "Scale (S)", TransformTool::Scale),
     ];
@@ -335,7 +336,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 }
 
 /// Draw the Overview panel (PicoCAD-style object list)
-fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
+fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     let row_height = 22.0;
     let icon_width = 20.0;
     let mut y = rect.y;

@@ -5,6 +5,9 @@
 //! This enables live editing: changes in any editor are immediately
 //! visible in all other views including the game preview.
 
+// Allow unused - project structure for future use
+#![allow(dead_code)]
+
 use crate::world::Level;
 use crate::modeler::{RiggedModel, EditableMesh};
 use crate::tracker::Song;

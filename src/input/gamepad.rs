@@ -139,7 +139,7 @@ mod platform {
             self.gilrs.gamepads().next().is_some()
         }
 
-        fn get_active_gamepad(&self) -> Option<gilrs::Gamepad> {
+        fn get_active_gamepad(&self) -> Option<gilrs::Gamepad<'_>> {
             self.gilrs.gamepads().next().map(|(_, gp)| gp)
         }
 

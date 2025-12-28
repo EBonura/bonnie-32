@@ -15,6 +15,9 @@
 //! - Cache-friendly data layouts
 //! - No runtime type registration (compile-time known components)
 
+// Allow unused code - this module contains scaffolding for future game runtime
+#![allow(dead_code)]
+
 pub mod entity;
 pub mod component;
 pub mod world;
@@ -26,12 +29,9 @@ pub mod runtime;
 pub mod renderer;
 
 // Re-export main types
-pub use entity::{Entity, EntityAllocator};
-pub use component::ComponentStorage;
+pub use entity::Entity;
 pub use world::World;
-pub use event::{Events, EventQueue};
-pub use transform::{Transform, GlobalTransform, propagate_transforms};
-pub use components::*;
-pub use collision::{collide_cylinder, move_and_slide, CollisionResult};
-pub use runtime::{GameToolState, CameraMode, FpsLimit};
+pub use event::Events;
+pub use transform::GlobalTransform;
+pub use runtime::GameToolState;
 pub use renderer::draw_test_viewport;
