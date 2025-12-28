@@ -1,7 +1,7 @@
 //! Modeler UI layout and rendering
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry, draw_icon_centered};
 use crate::rasterizer::{Framebuffer, render_mesh, Camera, OrthoProjection};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
@@ -126,7 +126,7 @@ pub fn draw_modeler(
 
     // Draw panels - simplified for mesh-only workflow
     draw_panel(hierarchy_rect, Some("Overview"), Color::from_rgba(35, 35, 40, 255));
-    draw_overview_panel(ctx, panel_content_rect(hierarchy_rect, true), state);
+    draw_overview_panel(ctx, panel_content_rect(hierarchy_rect, true), state, icon_font);
 
     // Draw 4-panel viewport (PicoCAD-style)
     draw_4panel_viewport(ctx, center_rect, state, fb);
@@ -315,7 +315,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 }
 
 /// Draw the Overview panel (PicoCAD-style object list)
-fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
+fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     let row_height = 22.0;
     let icon_width = 20.0;
     let mut y = rect.y;
@@ -366,17 +366,17 @@ fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
         } else {
             TEXT_DIM
         };
-        let eye_icon = if obj.visible { "●" } else { "○" };
-        draw_text(eye_icon, eye_rect.x + 4.0, y + 16.0, 14.0, eye_color);
+        let eye_icon = if obj.visible { icon::EYE } else { icon::EYE_OFF };
+        draw_icon_centered(icon_font, eye_icon, &eye_rect, 14.0, eye_color);
 
         // Lock icon
-        let lock_x = rect.x + icon_width + 2.0;
-        let lock_color = if obj.locked { Color::from_rgba(255, 180, 100, 255) } else { TEXT_DIM };
-        let lock_icon = if obj.locked { "L" } else { "" };
-        draw_text(lock_icon, lock_x + 2.0, y + 16.0, 12.0, lock_color);
+        let lock_rect = Rect { x: rect.x + icon_width + 2.0, y, w: icon_width, h: row_height };
+        if obj.locked {
+            draw_icon_centered(icon_font, icon::LOCK, &lock_rect, 12.0, Color::from_rgba(255, 180, 100, 255));
+        }
 
         // Object name
-        let name_x = lock_x + 16.0;
+        let name_x = lock_rect.x + icon_width;
         let name_color = if obj.visible { TEXT_COLOR } else { TEXT_DIM };
         let display_name = if obj.name.len() > 20 {
             format!("{}...", &obj.name[..17])
@@ -1633,7 +1633,11 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     let vertex_color = Color::from_rgba(180, 180, 190, 255);
     let wireframe_mode = state.raster_settings.wireframe_overlay;
 
-    if !mesh.vertices.is_empty() && !wireframe_mode {
+    // Check if any visible object has vertices
+    let has_visible_geometry = state.project.objects.iter().any(|obj| obj.visible && !obj.mesh.vertices.is_empty())
+        || (!mesh.vertices.is_empty() && state.project.selected_object.map_or(true, |i| state.project.objects.get(i).map_or(true, |o| o.visible)));
+
+    if has_visible_geometry && !wireframe_mode {
         // Create ortho camera for this view direction
         let ortho_camera = match viewport_id {
             ViewportId::Top => Camera::ortho_top(),
@@ -1642,65 +1646,86 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             ViewportId::Perspective => unreachable!(),
         };
 
-        // Build rasterizer vertex/face data
-        let vertices: Vec<RasterVertex> = mesh.vertices.iter().map(|v| {
-            RasterVertex {
-                pos: v.pos,
-                normal: v.normal,
-                uv: v.uv,
-                color: RasterColor::new(180, 180, 180),
-                bone_index: None,
+        // Resize framebuffer to match viewport
+        let fb_w = (rect.w as usize).max(1);
+        let fb_h = (rect.h as usize).max(1);
+        fb.resize(fb_w, fb_h);
+
+        // Clear with transparent so grid shows through
+        fb.clear_transparent();
+
+        // Set up ortho projection - center is the pan offset
+        let mut ortho_settings = state.raster_settings.clone();
+        ortho_settings.ortho_projection = Some(OrthoProjection {
+            zoom,
+            center_x: center.x,
+            center_y: center.y,
+        });
+        ortho_settings.backface_cull = false; // Show all faces in ortho views
+        ortho_settings.backface_wireframe = false;
+
+        // Convert atlas to texture (shared by all objects)
+        let atlas_texture = state.project.atlas.to_raster_texture();
+        let textures = [atlas_texture];
+
+        // Render all visible objects
+        for (obj_idx, obj) in state.project.objects.iter().enumerate() {
+            // Skip hidden objects
+            if !obj.visible {
+                continue;
             }
-        }).collect();
 
-        let faces: Vec<RasterFace> = mesh.faces.iter().map(|f| {
-            RasterFace {
-                v0: f.v0,
-                v1: f.v1,
-                v2: f.v2,
-                texture_id: Some(0),
+            // Use state.mesh for selected object (has edits), project mesh for others
+            let obj_mesh = if state.project.selected_object == Some(obj_idx) {
+                &state.mesh
+            } else {
+                &obj.mesh
+            };
+
+            // Dim non-selected objects slightly
+            let base_color = if state.project.selected_object == Some(obj_idx) {
+                180u8
+            } else {
+                140u8
+            };
+
+            let vertices: Vec<RasterVertex> = obj_mesh.vertices.iter().map(|v| {
+                RasterVertex {
+                    pos: v.pos,
+                    normal: v.normal,
+                    uv: v.uv,
+                    color: RasterColor::new(base_color, base_color, base_color),
+                    bone_index: None,
+                }
+            }).collect();
+
+            let faces: Vec<RasterFace> = obj_mesh.faces.iter().map(|f| {
+                RasterFace {
+                    v0: f.v0,
+                    v1: f.v1,
+                    v2: f.v2,
+                    texture_id: Some(0),
+                }
+            }).collect();
+
+            if !vertices.is_empty() && !faces.is_empty() {
+                render_mesh(fb, &vertices, &faces, &textures, &ortho_camera, &ortho_settings);
             }
-        }).collect();
-
-        if !vertices.is_empty() && !faces.is_empty() {
-            // Resize framebuffer to match viewport
-            let fb_w = (rect.w as usize).max(1);
-            let fb_h = (rect.h as usize).max(1);
-            fb.resize(fb_w, fb_h);
-
-            // Clear with transparent so grid shows through
-            fb.clear_transparent();
-
-            // Set up ortho projection - center is the pan offset
-            let mut ortho_settings = state.raster_settings.clone();
-            ortho_settings.ortho_projection = Some(OrthoProjection {
-                zoom,
-                center_x: center.x,
-                center_y: center.y,
-            });
-            ortho_settings.backface_cull = false; // Show all faces in ortho views
-            ortho_settings.backface_wireframe = false;
-
-            // Convert atlas to texture
-            let atlas_texture = state.project.atlas.to_raster_texture();
-            let textures = [atlas_texture];
-
-            render_mesh(fb, &vertices, &faces, &textures, &ortho_camera, &ortho_settings);
-
-            // Blit framebuffer to screen with alpha blending
-            let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
-            texture.set_filter(FilterMode::Nearest);
-            draw_texture_ex(
-                &texture,
-                rect.x,
-                rect.y,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(vec2(rect.w, rect.h)),
-                    ..Default::default()
-                },
-            );
         }
+
+        // Blit framebuffer to screen with alpha blending
+        let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
+        texture.set_filter(FilterMode::Nearest);
+        draw_texture_ex(
+            &texture,
+            rect.x,
+            rect.y,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(rect.w, rect.h)),
+                ..Default::default()
+            },
+        );
     }
 
     if !mesh.vertices.is_empty() {

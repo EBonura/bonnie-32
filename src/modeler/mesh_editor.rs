@@ -1003,7 +1003,7 @@ impl EditableMesh {
         ))
     }
 
-    /// Compute face normal (un-normalized cross product)
+    /// Compute face normal for CW-wound faces (pointing outward)
     pub fn face_normal(&self, face_idx: usize) -> Option<Vec3> {
         let face = self.faces.get(face_idx)?;
         let v0 = self.vertices.get(face.v0)?.pos;
@@ -1011,18 +1011,17 @@ impl EditableMesh {
         let v2 = self.vertices.get(face.v2)?.pos;
 
         // Edge vectors
-        let e1 = Vec3::new(v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
-        let e2 = Vec3::new(v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
 
-        // Cross product
-        let nx = e1.y * e2.z - e1.z * e2.y;
-        let ny = e1.z * e2.x - e1.x * e2.z;
-        let nz = e1.x * e2.y - e1.y * e2.x;
+        // Cross product: e2 × e1 for CW winding (reversed from CCW convention)
+        // This gives outward-facing normal for CW-wound triangles
+        let normal = e2.cross(e1);
 
         // Normalize
-        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        let len = normal.len();
         if len > 0.0001 {
-            Some(Vec3::new(nx / len, ny / len, nz / len))
+            Some(Vec3::new(normal.x / len, normal.y / len, normal.z / len))
         } else {
             Some(Vec3::new(0.0, 1.0, 0.0)) // Default up if degenerate
         }
@@ -1059,7 +1058,7 @@ impl EditableMesh {
     /// Returns the indices of the new top faces (for selection update)
     pub fn extrude_faces(&mut self, face_indices: &[usize], amount: f32) -> Vec<usize> {
         use crate::rasterizer::Vec2;
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         if face_indices.is_empty() || amount.abs() < 0.001 {
             return face_indices.to_vec();
@@ -1110,77 +1109,76 @@ impl EditableMesh {
             }
         }
 
-        // Collect edges from selected faces for creating side faces
-        let mut edges: Vec<(usize, usize)> = Vec::new();
+        // Collect directed edges from selected faces, preserving winding order
+        // Each edge stored as (v_from, v_to) in face winding order
+        let mut directed_edges: Vec<(usize, usize)> = Vec::new();
         for &fi in face_indices {
             if let Some([v0, v1, v2]) = self.face_vertices(fi) {
-                // Add edges (ordered so we can find shared edges)
-                edges.push((v0.min(v1), v0.max(v1)));
-                edges.push((v1.min(v2), v1.max(v2)));
-                edges.push((v2.min(v0), v2.max(v0)));
+                // Edges in winding order: v0->v1, v1->v2, v2->v0
+                directed_edges.push((v0, v1));
+                directed_edges.push((v1, v2));
+                directed_edges.push((v2, v0));
             }
         }
 
-        // Find boundary edges (edges that appear only once = outer edge)
-        edges.sort();
-        let mut boundary_edges: Vec<(usize, usize)> = Vec::new();
-        let mut i = 0;
-        while i < edges.len() {
-            let edge = edges[i];
-            let mut count = 1;
-            while i + count < edges.len() && edges[i + count] == edge {
-                count += 1;
-            }
-            if count == 1 {
-                boundary_edges.push(edge);
-            }
-            i += count;
-        }
+        // Find boundary edges: edges where the reverse direction doesn't exist
+        // (internal edges have both directions from adjacent faces)
+        let edge_set: HashSet<(usize, usize)> = directed_edges.iter().cloned().collect();
+        let boundary_edges: Vec<(usize, usize)> = directed_edges.iter()
+            .filter(|(a, b)| !edge_set.contains(&(*b, *a)))
+            .cloned()
+            .collect();
 
         // Create side faces for each boundary edge
+        // The edge (v0, v1) is in the winding order of the original face
         for (v0_old, v1_old) in boundary_edges {
             if let (Some(&v0_new), Some(&v1_new)) = (old_to_new.get(&v0_old), old_to_new.get(&v1_old)) {
-                // Create quad as 2 triangles
-                // Need to determine correct winding order
-                // Old edge goes v0->v1, new edge goes v0_new->v1_new
-                // Side face should connect: v0_old, v1_old, v1_new, v0_new
+                // Get positions
+                let p0_old = self.vertices[v0_old].pos;
+                let p1_old = self.vertices[v1_old].pos;
+                let p0_new = self.vertices[v0_new].pos;
+                let p1_new = self.vertices[v1_new].pos;
 
-                // Get UVs from original vertices (simple mapping)
-                let uv00 = Vec2::new(0.0, 1.0);
-                let uv10 = Vec2::new(1.0, 1.0);
-                let uv11 = Vec2::new(1.0, 0.0);
-                let uv01 = Vec2::new(0.0, 0.0);
+                // Build quad: v1_old -> v1_new -> v0_new -> v0_old (CW when viewed from outside)
+                // This creates a quad where:
+                // - Bottom edge: v1_old to v0_old (reverse of boundary edge direction)
+                // - Top edge: v1_new to v0_new
+                // - Left edge: v0_old to v0_new (extrusion direction)
+                // - Right edge: v1_old to v1_new (extrusion direction)
 
-                // Compute side normal (perpendicular to edge and extrusion direction)
-                if let (Some(p0), Some(p1)) = (self.vertices.get(v0_old), self.vertices.get(v1_old)) {
-                    let edge_dir = Vec3::new(
-                        p1.pos.x - p0.pos.x,
-                        p1.pos.y - p0.pos.y,
-                        p1.pos.z - p0.pos.z,
-                    );
-                    // Cross product of edge and extrusion direction
-                    let side_normal = Vec3::new(
-                        edge_dir.y * avg_normal.z - edge_dir.z * avg_normal.y,
-                        edge_dir.z * avg_normal.x - edge_dir.x * avg_normal.z,
-                        edge_dir.x * avg_normal.y - edge_dir.y * avg_normal.x,
-                    ).normalize();
+                // Compute the face normal from the actual quad geometry
+                // First triangle is: sv0(p1_old), sv1(p1_new), sv2(p0_new)
+                // For CW winding, normal = e2.cross(e1) where:
+                // e1 = sv1 - sv0 = p1_new - p1_old
+                // e2 = sv2 - sv0 = p0_new - p1_old
+                let e1 = p1_new - p1_old;
+                let e2 = p0_new - p1_old;
+                let side_normal = e2.cross(e1).normalize();
 
-                    // Create 4 new vertices for the quad with proper UVs and normals
-                    let sv0 = Vertex::new(self.vertices[v0_old].pos, uv00, side_normal);
-                    let sv1 = Vertex::new(self.vertices[v1_old].pos, uv10, side_normal);
-                    let sv2 = Vertex::new(self.vertices[v1_new].pos, uv11, side_normal);
-                    let sv3 = Vertex::new(self.vertices[v0_new].pos, uv01, side_normal);
+                // Get UVs for side face
+                let uv00 = Vec2::new(0.0, 0.0);
+                let uv01 = Vec2::new(0.0, 1.0);
+                let uv11 = Vec2::new(1.0, 1.0);
+                let uv10 = Vec2::new(1.0, 0.0);
 
-                    let si0 = self.vertices.len();
-                    self.vertices.push(sv0);
-                    self.vertices.push(sv1);
-                    self.vertices.push(sv2);
-                    self.vertices.push(sv3);
+                // Create 4 vertices for the quad with the computed normal
+                let sv0 = Vertex::new(p1_old, uv00, side_normal);
+                let sv1 = Vertex::new(p1_new, uv01, side_normal);
+                let sv2 = Vertex::new(p0_new, uv11, side_normal);
+                let sv3 = Vertex::new(p0_old, uv10, side_normal);
 
-                    // Two triangles for the quad (CW winding)
-                    self.faces.push(Face::new(si0, si0 + 2, si0 + 1));
-                    self.faces.push(Face::new(si0, si0 + 3, si0 + 2));
-                }
+                let si0 = self.vertices.len();
+                self.vertices.push(sv0);
+                self.vertices.push(sv1);
+                self.vertices.push(sv2);
+                self.vertices.push(sv3);
+
+                // Two triangles for the quad (CW winding for our rasterizer)
+                // Quad is: sv0(v1_old), sv1(v1_new), sv2(v0_new), sv3(v0_old)
+                // Triangle 1: sv0, sv1, sv2
+                // Triangle 2: sv0, sv2, sv3
+                self.faces.push(Face::new(si0, si0 + 1, si0 + 2));
+                self.faces.push(Face::new(si0, si0 + 2, si0 + 3));
             }
         }
 
