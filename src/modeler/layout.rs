@@ -2227,6 +2227,22 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
         if state.context_menu.is_some() {
             state.context_menu = None;
         } else if state.drag_manager.is_dragging() {
+            // Sync tool state before cancelling
+            match state.modal_transform {
+                ModalTransform::Grab => state.tool_box.tools.move_tool.end_drag(),
+                ModalTransform::Scale => state.tool_box.tools.scale.end_drag(),
+                ModalTransform::Rotate => state.tool_box.tools.rotate.end_drag(),
+                ModalTransform::None => {
+                    // Also handle gizmo drags (not modal)
+                    if state.drag_manager.active.is_move() {
+                        state.tool_box.tools.move_tool.end_drag();
+                    } else if state.drag_manager.active.is_scale() {
+                        state.tool_box.tools.scale.end_drag();
+                    } else if state.drag_manager.active.is_rotate() {
+                        state.tool_box.tools.rotate.end_drag();
+                    }
+                }
+            }
             // Cancel active drag and restore original positions
             if let Some(original_positions) = state.drag_manager.cancel() {
                 for (idx, pos) in original_positions {

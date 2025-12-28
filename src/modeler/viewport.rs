@@ -225,6 +225,13 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
 
     // Confirm on left click
     if is_mouse_button_pressed(MouseButton::Left) {
+        // Sync tool state before ending
+        match state.modal_transform {
+            ModalTransform::Grab => state.tool_box.tools.move_tool.end_drag(),
+            ModalTransform::Scale => state.tool_box.tools.scale.end_drag(),
+            ModalTransform::Rotate => state.tool_box.tools.rotate.end_drag(),
+            ModalTransform::None => {}
+        }
         if let Some(_result) = state.drag_manager.end() {
             state.sync_mesh_to_project();
         }
@@ -235,6 +242,13 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
 
     // Cancel on right click (Escape is handled through ActionRegistry in handle_actions())
     if is_mouse_button_pressed(MouseButton::Right) {
+        // Sync tool state before cancelling
+        match state.modal_transform {
+            ModalTransform::Grab => state.tool_box.tools.move_tool.end_drag(),
+            ModalTransform::Scale => state.tool_box.tools.scale.end_drag(),
+            ModalTransform::Rotate => state.tool_box.tools.rotate.end_drag(),
+            ModalTransform::None => {}
+        }
         if let Some(original_positions) = state.drag_manager.cancel() {
             for (vert_idx, original_pos) in original_positions {
                 if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
@@ -474,9 +488,10 @@ pub fn draw_modeler_viewport(
             // Save undo state before starting transform
             state.push_undo(mode.label());
 
-            // Start the appropriate DragManager drag
+            // Start the appropriate DragManager drag and sync tool state
             match mode {
                 ModalTransform::Grab => {
+                    state.tool_box.tools.move_tool.start_drag(None);
                     state.drag_manager.start_move(
                         center,
                         mouse_pos,
@@ -488,6 +503,7 @@ pub fn draw_modeler_viewport(
                     );
                 }
                 ModalTransform::Scale => {
+                    state.tool_box.tools.scale.start_drag(None);
                     state.drag_manager.start_scale(
                         center,
                         mouse_pos,
@@ -497,6 +513,7 @@ pub fn draw_modeler_viewport(
                     );
                 }
                 ModalTransform::Rotate => {
+                    state.tool_box.tools.rotate.start_drag(Some(UiAxis::Y), 0.0);
                     // For rotation, initial angle is 0
                     state.drag_manager.start_rotate(
                         center,
