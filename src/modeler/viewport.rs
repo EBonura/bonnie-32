@@ -9,7 +9,7 @@ use crate::rasterizer::{
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
     world_to_screen,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform};
+use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, TransformTool};
 
 /// Get all selected element positions for modal transforms
 fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
@@ -515,16 +515,16 @@ pub fn draw_modeler_viewport(
         },
     );
 
-    // Draw and handle move gizmo (on top of the framebuffer)
-    handle_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+    // Draw and handle transform gizmo (on top of the framebuffer)
+    handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
 
-    // Update hover state every frame (like world editor) - but not when dragging gizmo
-    if !state.gizmo_dragging {
+    // Update hover state every frame (like world editor) - but not when gizmo is active
+    if !state.gizmo_dragging && state.gizmo_hovered_axis.is_none() {
         update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
     }
 
-    // Handle box selection (left-drag without hitting an element)
-    if !state.gizmo_dragging {
+    // Handle box selection (left-drag without hitting an element or gizmo)
+    if !state.gizmo_dragging && state.gizmo_hovered_axis.is_none() {
         handle_box_selection(ctx, state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
     }
 
@@ -1344,14 +1344,14 @@ fn handle_hover_click(state: &mut ModelerState) {
 }
 
 // ============================================================================
-// GIZMO - Move selected elements by dragging axis handles
+// GIZMO - Transform selected elements by dragging axis handles
 // ============================================================================
 
-const GIZMO_SIZE: f32 = 60.0;  // Length of gizmo arms in screen pixels
 const GIZMO_HIT_RADIUS: f32 = 8.0;  // Hit radius for axis lines
+const ROTATE_GIZMO_RADIUS: f32 = 50.0;  // Radius of rotate circles in screen pixels
 
-/// Handle the move gizmo: draw it, detect hover/click on axes, process dragging
-fn handle_gizmo(
+/// Dispatcher: handle the appropriate gizmo based on current tool
+fn handle_transform_gizmo(
     ctx: &UiContext,
     state: &mut ModelerState,
     mouse_pos: (f32, f32),
@@ -1363,36 +1363,50 @@ fn handle_gizmo(
     fb_width: usize,
     fb_height: usize,
 ) {
-    // Only show gizmo if something is selected
-    let center = match state.selection.compute_center(&state.mesh) {
-        Some(c) => c,
-        None => {
+    match state.tool {
+        TransformTool::Move => handle_move_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
+        TransformTool::Scale => handle_scale_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
+        TransformTool::Rotate => handle_rotate_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
+        _ => {
+            // Select/Extrude modes don't have gizmos
             state.gizmo_hovered_axis = None;
-            return;
         }
-    };
+    }
+}
 
+/// Shared gizmo setup: compute center, screen position, and axis endpoints
+struct GizmoSetup {
+    center: Vec3,
+    center_screen: (f32, f32),
+    world_length: f32,
+    axis_screen_ends: [(Axis, (f32, f32), Color); 3],
+}
+
+fn setup_gizmo(
+    state: &ModelerState,
+    draw_x: f32,
+    draw_y: f32,
+    draw_w: f32,
+    draw_h: f32,
+    fb_width: usize,
+    fb_height: usize,
+) -> Option<GizmoSetup> {
+    let center = state.selection.compute_center(&state.mesh)?;
     let camera = &state.camera;
 
-    // Project gizmo center to screen
     let center_screen = match world_to_screen(center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height) {
-        Some((sx, sy)) => {
-            // Convert framebuffer coords to screen coords
-            (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h)
-        }
-        None => return,
+        Some((sx, sy)) => (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h),
+        None => return None,
     };
 
-    // Project axis endpoints
     let axis_dirs = [
         (Axis::X, Vec3::new(1.0, 0.0, 0.0), RED),
         (Axis::Y, Vec3::new(0.0, 1.0, 0.0), GREEN),
         (Axis::Z, Vec3::new(0.0, 0.0, 1.0), BLUE),
     ];
 
-    // Calculate axis length in world space based on distance from camera
     let dist_to_camera = (center - camera.position).len();
-    let world_length = dist_to_camera * 0.1;  // Scale gizmo with distance
+    let world_length = dist_to_camera * 0.1;
 
     let mut axis_screen_ends: [(Axis, (f32, f32), Color); 3] = [
         (Axis::X, (0.0, 0.0), RED),
@@ -1408,27 +1422,100 @@ fn handle_gizmo(
         }
     }
 
+    Some(GizmoSetup { center, center_screen, world_length, axis_screen_ends })
+}
+
+/// Get axis color with hover/drag state
+fn get_axis_color(base_color: Color, is_hovered: bool, is_dragging: bool) -> Color {
+    if is_dragging {
+        YELLOW
+    } else if is_hovered {
+        Color::from_rgba(
+            (base_color.r * 255.0) as u8,
+            (base_color.g * 255.0) as u8,
+            (base_color.b * 255.0) as u8,
+            255,
+        )
+    } else {
+        Color::from_rgba(
+            (base_color.r * 200.0) as u8,
+            (base_color.g * 200.0) as u8,
+            (base_color.b * 200.0) as u8,
+            200,
+        )
+    }
+}
+
+/// Start a gizmo drag operation
+fn start_gizmo_drag(state: &mut ModelerState, axis: Axis, mouse_pos: (f32, f32), center: Vec3) {
+    state.gizmo_dragging = true;
+    state.gizmo_drag_axis = Some(axis);
+    state.gizmo_drag_start_mouse = mouse_pos;
+    state.gizmo_drag_center = center;
+
+    let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+    if state.vertex_linking {
+        indices = state.mesh.expand_to_coincident(&indices, 0.001);
+    }
+
+    state.gizmo_drag_start_positions = indices.iter()
+        .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+        .collect();
+}
+
+/// End a gizmo drag operation
+fn end_gizmo_drag(state: &mut ModelerState, action_name: &str) {
+    if !state.gizmo_drag_start_positions.is_empty() {
+        state.push_undo(action_name);
+        state.sync_mesh_to_project();
+    }
+    state.gizmo_dragging = false;
+    state.gizmo_drag_axis = None;
+    state.gizmo_drag_start_positions.clear();
+}
+
+// ============================================================================
+// MOVE GIZMO - Arrows pointing along each axis
+// ============================================================================
+
+fn handle_move_gizmo(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    mouse_pos: (f32, f32),
+    inside_viewport: bool,
+    draw_x: f32,
+    draw_y: f32,
+    draw_w: f32,
+    draw_h: f32,
+    fb_width: usize,
+    fb_height: usize,
+) {
+    let setup = match setup_gizmo(state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height) {
+        Some(s) => s,
+        None => {
+            state.gizmo_hovered_axis = None;
+            return;
+        }
+    };
+
+    let camera = &state.camera;
+
     // Handle ongoing drag
     if state.gizmo_dragging {
         if ctx.mouse.left_down {
-            // Continue dragging - move vertices along the axis
             if let Some(axis) = state.gizmo_drag_axis {
                 let mouse_delta = (mouse_pos.0 - state.gizmo_drag_start_mouse.0, mouse_pos.1 - state.gizmo_drag_start_mouse.1);
-
-                // Get axis direction in world space
                 let axis_dir = match axis {
                     Axis::X => Vec3::new(1.0, 0.0, 0.0),
                     Axis::Y => Vec3::new(0.0, 1.0, 0.0),
                     Axis::Z => Vec3::new(0.0, 0.0, 1.0),
                 };
 
-                // Project axis to screen to determine movement direction
-                let axis_end_world = state.gizmo_drag_center + axis_dir * world_length;
+                let axis_end_world = state.gizmo_drag_center + axis_dir * setup.world_length;
                 if let (Some((cx, cy)), Some((ex, ey))) = (
                     world_to_screen(state.gizmo_drag_center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
                     world_to_screen(axis_end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
                 ) {
-                    // Convert to screen coords
                     let cx_screen = cx / fb_width as f32 * draw_w;
                     let cy_screen = cy / fb_height as f32 * draw_h;
                     let ex_screen = ex / fb_width as f32 * draw_w;
@@ -1438,21 +1525,14 @@ fn handle_gizmo(
                     let axis_screen_len = (axis_screen_dir.0.powi(2) + axis_screen_dir.1.powi(2)).sqrt();
 
                     if axis_screen_len > 0.1 {
-                        // Project mouse delta onto axis direction
                         let axis_norm = (axis_screen_dir.0 / axis_screen_len, axis_screen_dir.1 / axis_screen_len);
                         let projected_delta = mouse_delta.0 * axis_norm.0 + mouse_delta.1 * axis_norm.1;
-
-                        // Convert screen delta to world delta
-                        // Scale based on how much screen space the world_length occupies
-                        let world_per_pixel = world_length / axis_screen_len;
+                        let world_per_pixel = setup.world_length / axis_screen_len;
                         let world_delta = projected_delta * world_per_pixel;
 
-                        // Apply movement to all affected vertices
                         for (vert_idx, original_pos) in &state.gizmo_drag_start_positions {
                             if let Some(vert) = state.mesh.vertices.get_mut(*vert_idx) {
                                 vert.pos = *original_pos + axis_dir * world_delta;
-
-                                // Apply grid snapping if enabled
                                 if !is_key_down(KeyCode::Z) && state.snap_settings.enabled {
                                     let snap = state.snap_settings.grid_size;
                                     vert.pos.x = (vert.pos.x / snap).round() * snap;
@@ -1466,28 +1546,18 @@ fn handle_gizmo(
                 }
             }
         } else {
-            // Mouse released - end drag
-            if !state.gizmo_drag_start_positions.is_empty() {
-                state.push_undo("Gizmo Move");
-                state.sync_mesh_to_project(); // Keep project in sync
-            }
-            state.gizmo_dragging = false;
-            state.gizmo_drag_axis = None;
-            state.gizmo_drag_start_positions.clear();
+            end_gizmo_drag(state, "Gizmo Move");
         }
     }
 
     // Detect axis hover
     state.gizmo_hovered_axis = None;
     if !state.gizmo_dragging && inside_viewport {
-        for (axis, end_screen, _) in &axis_screen_ends {
+        for (axis, end_screen, _) in &setup.axis_screen_ends {
             let dist = point_to_line_distance(
-                mouse_pos.0,
-                mouse_pos.1,
-                center_screen.0,
-                center_screen.1,
-                end_screen.0,
-                end_screen.1,
+                mouse_pos.0, mouse_pos.1,
+                setup.center_screen.0, setup.center_screen.1,
+                end_screen.0, end_screen.1,
             );
             if dist < GIZMO_HIT_RADIUS {
                 state.gizmo_hovered_axis = Some(*axis);
@@ -1498,61 +1568,26 @@ fn handle_gizmo(
 
     // Start drag on click
     if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging {
-        let axis = state.gizmo_hovered_axis.unwrap();
-        state.gizmo_dragging = true;
-        state.gizmo_drag_axis = Some(axis);
-        state.gizmo_drag_start_mouse = mouse_pos;
-        state.gizmo_drag_center = center;
-
-        // Store original positions of all affected vertices
-        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
-
-        // If vertex linking is enabled, expand to include coincident vertices
-        if state.vertex_linking {
-            indices = state.mesh.expand_to_coincident(&indices, 0.001);
-        }
-
-        state.gizmo_drag_start_positions = indices.iter()
-            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
-            .collect();
+        start_gizmo_drag(state, state.gizmo_hovered_axis.unwrap(), mouse_pos, setup.center);
     }
 
-    // Draw the gizmo axes
-    for (axis, end_screen, base_color) in &axis_screen_ends {
+    // Draw move gizmo (arrows)
+    for (axis, end_screen, base_color) in &setup.axis_screen_ends {
         let is_hovered = state.gizmo_hovered_axis == Some(*axis);
         let is_dragging = state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis);
-
-        let color = if is_dragging {
-            YELLOW
-        } else if is_hovered {
-            Color::from_rgba(
-                (base_color.r * 255.0) as u8,
-                (base_color.g * 255.0) as u8,
-                (base_color.b * 255.0) as u8,
-                255,
-            )
-        } else {
-            Color::from_rgba(
-                (base_color.r * 200.0) as u8,
-                (base_color.g * 200.0) as u8,
-                (base_color.b * 200.0) as u8,
-                200,
-            )
-        };
-
+        let color = get_axis_color(*base_color, is_hovered, is_dragging);
         let thickness = if is_hovered || is_dragging { 3.0 } else { 2.0 };
 
         // Draw axis line
-        draw_line(center_screen.0, center_screen.1, end_screen.0, end_screen.1, thickness, color);
+        draw_line(setup.center_screen.0, setup.center_screen.1, end_screen.0, end_screen.1, thickness, color);
 
         // Draw arrowhead
-        let dx = end_screen.0 - center_screen.0;
-        let dy = end_screen.1 - center_screen.1;
+        let dx = end_screen.0 - setup.center_screen.0;
+        let dy = end_screen.1 - setup.center_screen.1;
         let len = (dx * dx + dy * dy).sqrt();
         if len > 5.0 {
             let nx = dx / len;
             let ny = dy / len;
-            // Perpendicular
             let px = -ny;
             let py = nx;
             let arrow_size = 6.0;
@@ -1569,5 +1604,329 @@ fn handle_gizmo(
 
     // Draw center circle
     let center_color = if state.gizmo_dragging { YELLOW } else { WHITE };
-    draw_circle(center_screen.0, center_screen.1, 4.0, center_color);
+    draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
+}
+
+// ============================================================================
+// SCALE GIZMO - Cubes at the end of each axis
+// ============================================================================
+
+fn handle_scale_gizmo(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    mouse_pos: (f32, f32),
+    inside_viewport: bool,
+    draw_x: f32,
+    draw_y: f32,
+    draw_w: f32,
+    draw_h: f32,
+    fb_width: usize,
+    fb_height: usize,
+) {
+    let setup = match setup_gizmo(state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height) {
+        Some(s) => s,
+        None => {
+            state.gizmo_hovered_axis = None;
+            return;
+        }
+    };
+
+    let camera = &state.camera;
+
+    // Handle ongoing drag - scale along axis
+    if state.gizmo_dragging {
+        if ctx.mouse.left_down {
+            if let Some(axis) = state.gizmo_drag_axis {
+                let mouse_delta = (mouse_pos.0 - state.gizmo_drag_start_mouse.0, mouse_pos.1 - state.gizmo_drag_start_mouse.1);
+                let axis_dir = match axis {
+                    Axis::X => Vec3::new(1.0, 0.0, 0.0),
+                    Axis::Y => Vec3::new(0.0, 1.0, 0.0),
+                    Axis::Z => Vec3::new(0.0, 0.0, 1.0),
+                };
+
+                // Project axis to screen to determine scale direction
+                let axis_end_world = state.gizmo_drag_center + axis_dir * setup.world_length;
+                if let (Some((cx, cy)), Some((ex, ey))) = (
+                    world_to_screen(state.gizmo_drag_center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
+                    world_to_screen(axis_end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
+                ) {
+                    let cx_screen = cx / fb_width as f32 * draw_w;
+                    let cy_screen = cy / fb_height as f32 * draw_h;
+                    let ex_screen = ex / fb_width as f32 * draw_w;
+                    let ey_screen = ey / fb_height as f32 * draw_h;
+
+                    let axis_screen_dir = (ex_screen - cx_screen, ey_screen - cy_screen);
+                    let axis_screen_len = (axis_screen_dir.0.powi(2) + axis_screen_dir.1.powi(2)).sqrt();
+
+                    if axis_screen_len > 0.1 {
+                        let axis_norm = (axis_screen_dir.0 / axis_screen_len, axis_screen_dir.1 / axis_screen_len);
+                        let projected_delta = mouse_delta.0 * axis_norm.0 + mouse_delta.1 * axis_norm.1;
+
+                        // Scale factor: 1.0 + delta * sensitivity
+                        let scale_factor = 1.0 + projected_delta * 0.005;
+
+                        // Apply scale relative to center
+                        for (vert_idx, original_pos) in &state.gizmo_drag_start_positions {
+                            if let Some(vert) = state.mesh.vertices.get_mut(*vert_idx) {
+                                let offset = *original_pos - state.gizmo_drag_center;
+                                let scaled_offset = match axis {
+                                    Axis::X => Vec3::new(offset.x * scale_factor, offset.y, offset.z),
+                                    Axis::Y => Vec3::new(offset.x, offset.y * scale_factor, offset.z),
+                                    Axis::Z => Vec3::new(offset.x, offset.y, offset.z * scale_factor),
+                                };
+                                vert.pos = state.gizmo_drag_center + scaled_offset;
+
+                                if !is_key_down(KeyCode::Z) && state.snap_settings.enabled {
+                                    let snap = state.snap_settings.grid_size;
+                                    vert.pos.x = (vert.pos.x / snap).round() * snap;
+                                    vert.pos.y = (vert.pos.y / snap).round() * snap;
+                                    vert.pos.z = (vert.pos.z / snap).round() * snap;
+                                }
+                            }
+                        }
+                        state.dirty = true;
+                    }
+                }
+            }
+        } else {
+            end_gizmo_drag(state, "Gizmo Scale");
+        }
+    }
+
+    // Detect hover on cube handles
+    state.gizmo_hovered_axis = None;
+    if !state.gizmo_dragging && inside_viewport {
+        let cube_size = 6.0;
+        for (axis, end_screen, _) in &setup.axis_screen_ends {
+            let dx = mouse_pos.0 - end_screen.0;
+            let dy = mouse_pos.1 - end_screen.1;
+            if dx.abs() < cube_size && dy.abs() < cube_size {
+                state.gizmo_hovered_axis = Some(*axis);
+                break;
+            }
+        }
+    }
+
+    // Start drag on click
+    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging {
+        start_gizmo_drag(state, state.gizmo_hovered_axis.unwrap(), mouse_pos, setup.center);
+    }
+
+    // Draw scale gizmo (lines with cubes)
+    for (axis, end_screen, base_color) in &setup.axis_screen_ends {
+        let is_hovered = state.gizmo_hovered_axis == Some(*axis);
+        let is_dragging = state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis);
+        let color = get_axis_color(*base_color, is_hovered, is_dragging);
+        let thickness = if is_hovered || is_dragging { 3.0 } else { 2.0 };
+
+        // Draw axis line
+        draw_line(setup.center_screen.0, setup.center_screen.1, end_screen.0, end_screen.1, thickness, color);
+
+        // Draw cube at end
+        let cube_size = if is_hovered || is_dragging { 5.0 } else { 4.0 };
+        draw_rectangle(
+            end_screen.0 - cube_size,
+            end_screen.1 - cube_size,
+            cube_size * 2.0,
+            cube_size * 2.0,
+            color,
+        );
+    }
+
+    // Draw center circle
+    let center_color = if state.gizmo_dragging { YELLOW } else { WHITE };
+    draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
+}
+
+// ============================================================================
+// ROTATE GIZMO - Circles around each axis
+// ============================================================================
+
+fn handle_rotate_gizmo(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    mouse_pos: (f32, f32),
+    inside_viewport: bool,
+    draw_x: f32,
+    draw_y: f32,
+    draw_w: f32,
+    draw_h: f32,
+    fb_width: usize,
+    fb_height: usize,
+) {
+    let setup = match setup_gizmo(state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height) {
+        Some(s) => s,
+        None => {
+            state.gizmo_hovered_axis = None;
+            return;
+        }
+    };
+
+    // Copy camera data to avoid borrow conflicts
+    let camera_position = state.camera.position;
+    let camera_basis_x = state.camera.basis_x;
+    let camera_basis_y = state.camera.basis_y;
+    let camera_basis_z = state.camera.basis_z;
+
+    // Handle ongoing drag - rotate around axis
+    if state.gizmo_dragging {
+        if ctx.mouse.left_down {
+            if let Some(axis) = state.gizmo_drag_axis {
+                // Calculate angle from mouse movement around center
+                let start_vec = (
+                    state.gizmo_drag_start_mouse.0 - setup.center_screen.0,
+                    state.gizmo_drag_start_mouse.1 - setup.center_screen.1,
+                );
+                let current_vec = (
+                    mouse_pos.0 - setup.center_screen.0,
+                    mouse_pos.1 - setup.center_screen.1,
+                );
+
+                // Calculate angle between vectors
+                let start_angle = start_vec.1.atan2(start_vec.0);
+                let current_angle = current_vec.1.atan2(current_vec.0);
+                let angle = current_angle - start_angle;
+
+                // Apply rotation around the selected axis
+                let cos_a = angle.cos();
+                let sin_a = angle.sin();
+
+                for (vert_idx, original_pos) in &state.gizmo_drag_start_positions {
+                    if let Some(vert) = state.mesh.vertices.get_mut(*vert_idx) {
+                        let offset = *original_pos - state.gizmo_drag_center;
+                        let rotated_offset = match axis {
+                            Axis::X => Vec3::new(
+                                offset.x,
+                                offset.y * cos_a - offset.z * sin_a,
+                                offset.y * sin_a + offset.z * cos_a,
+                            ),
+                            Axis::Y => Vec3::new(
+                                offset.x * cos_a + offset.z * sin_a,
+                                offset.y,
+                                -offset.x * sin_a + offset.z * cos_a,
+                            ),
+                            Axis::Z => Vec3::new(
+                                offset.x * cos_a - offset.y * sin_a,
+                                offset.x * sin_a + offset.y * cos_a,
+                                offset.z,
+                            ),
+                        };
+                        vert.pos = state.gizmo_drag_center + rotated_offset;
+
+                        if !is_key_down(KeyCode::Z) && state.snap_settings.enabled {
+                            let snap = state.snap_settings.grid_size;
+                            vert.pos.x = (vert.pos.x / snap).round() * snap;
+                            vert.pos.y = (vert.pos.y / snap).round() * snap;
+                            vert.pos.z = (vert.pos.z / snap).round() * snap;
+                        }
+                    }
+                }
+                state.dirty = true;
+            }
+        } else {
+            end_gizmo_drag(state, "Gizmo Rotate");
+        }
+    }
+
+    // Detect hover on rotation circles - check each circle individually
+    state.gizmo_hovered_axis = None;
+    if !state.gizmo_dragging && inside_viewport {
+        let axes_to_check = [
+            (Axis::X, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            (Axis::Y, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            (Axis::Z, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+        ];
+
+        let mut best_dist = f32::MAX;
+        let mut best_axis: Option<Axis> = None;
+
+        for (axis, perp1, perp2) in &axes_to_check {
+            // Check visibility - skip if circle is edge-on
+            let axis_dir = match axis {
+                Axis::X => Vec3::new(1.0, 0.0, 0.0),
+                Axis::Y => Vec3::new(0.0, 1.0, 0.0),
+                Axis::Z => Vec3::new(0.0, 0.0, 1.0),
+            };
+            let dot = (axis_dir.x * camera_basis_z.x + axis_dir.y * camera_basis_z.y + axis_dir.z * camera_basis_z.z).abs();
+            if dot > 0.95 { continue; } // Skip nearly edge-on circles
+
+            // Sample points on the circle and find minimum distance to mouse
+            let segments = 24;
+            for i in 0..segments {
+                let t = i as f32 / segments as f32 * std::f32::consts::TAU;
+                let world_point = setup.center + *perp1 * (t.cos() * setup.world_length) + *perp2 * (t.sin() * setup.world_length);
+
+                if let Some((sx, sy)) = world_to_screen(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height) {
+                    let screen_pos = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
+                    let dist = ((mouse_pos.0 - screen_pos.0).powi(2) + (mouse_pos.1 - screen_pos.1).powi(2)).sqrt();
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_axis = Some(*axis);
+                    }
+                }
+            }
+        }
+
+        if best_dist < GIZMO_HIT_RADIUS * 1.5 {
+            state.gizmo_hovered_axis = best_axis;
+        }
+    }
+
+    // Start drag on click
+    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging {
+        start_gizmo_drag(state, state.gizmo_hovered_axis.unwrap(), mouse_pos, setup.center);
+    }
+
+    // Draw rotation circles
+    let axes = [(Axis::X, RED), (Axis::Y, GREEN), (Axis::Z, BLUE)];
+
+    for (axis, base_color) in &axes {
+        let is_hovered = state.gizmo_hovered_axis == Some(*axis);
+        let is_dragging = state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis);
+        let color = get_axis_color(*base_color, is_hovered, is_dragging);
+        let thickness = if is_hovered || is_dragging { 2.5 } else { 1.5 };
+
+        // Draw arc representing rotation around this axis
+        let segments = 32;
+        let view_dir = camera_basis_z;
+
+        // Determine visibility factor based on how perpendicular the axis is to view
+        let axis_dir = match axis {
+            Axis::X => Vec3::new(1.0, 0.0, 0.0),
+            Axis::Y => Vec3::new(0.0, 1.0, 0.0),
+            Axis::Z => Vec3::new(0.0, 0.0, 1.0),
+        };
+        let dot = (axis_dir.x * view_dir.x + axis_dir.y * view_dir.y + axis_dir.z * view_dir.z).abs();
+
+        // Only draw if axis is reasonably perpendicular to view (circle would be visible)
+        if dot < 0.9 {
+            // Get perpendicular vectors for this axis
+            let (perp1, perp2) = match axis {
+                Axis::X => (Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+                Axis::Y => (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+                Axis::Z => (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            };
+
+            let mut prev_screen: Option<(f32, f32)> = None;
+            for i in 0..=segments {
+                let t = i as f32 / segments as f32 * std::f32::consts::TAU;
+                let world_point = setup.center + perp1 * (t.cos() * setup.world_length) + perp2 * (t.sin() * setup.world_length);
+
+                if let Some((sx, sy)) = world_to_screen(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height) {
+                    let screen_pos = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
+
+                    if let Some(prev) = prev_screen {
+                        draw_line(prev.0, prev.1, screen_pos.0, screen_pos.1, thickness, color);
+                    }
+                    prev_screen = Some(screen_pos);
+                } else {
+                    prev_screen = None;
+                }
+            }
+        }
+    }
+
+    // Draw center circle
+    let center_color = if state.gizmo_dragging { YELLOW } else { WHITE };
+    draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
 }
