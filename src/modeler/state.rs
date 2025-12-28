@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode};
 use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, TextureAtlas};
 use super::model::Animation;
+use super::drag::DragManager;
 
 // ============================================================================
 // PicoCAD-Style Viewport System
@@ -718,6 +719,9 @@ pub struct ModelerState {
 
     // Context menu state
     pub context_menu: Option<ContextMenu>,
+
+    // Unified drag manager (new system - replaces scattered gizmo_drag_* fields)
+    pub drag_manager: DragManager,
 }
 
 /// Context menu for right-click actions
@@ -864,6 +868,8 @@ impl ModelerState {
             modal_transform_center: Vec3::ZERO,
 
             context_menu: None,
+
+            drag_manager: DragManager::new(),
         }
     }
 

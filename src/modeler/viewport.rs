@@ -3,13 +3,32 @@
 //! Simplified PicoCAD-style viewport with mesh editing only.
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext};
+use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
     world_to_screen,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, TransformTool};
+use super::drag::{DragManager, DragUpdateResult, ActiveDrag};
+
+/// Convert state::Axis to ui::Axis
+fn to_ui_axis(axis: Axis) -> UiAxis {
+    match axis {
+        Axis::X => UiAxis::X,
+        Axis::Y => UiAxis::Y,
+        Axis::Z => UiAxis::Z,
+    }
+}
+
+/// Convert ui::Axis to state::Axis
+fn from_ui_axis(axis: UiAxis) -> Axis {
+    match axis {
+        UiAxis::X => Axis::X,
+        UiAxis::Y => Axis::Y,
+        UiAxis::Z => Axis::Z,
+    }
+}
 
 /// Get all selected element positions for modal transforms
 fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
@@ -1475,7 +1494,7 @@ fn end_gizmo_drag(state: &mut ModelerState, action_name: &str) {
 }
 
 // ============================================================================
-// MOVE GIZMO - Arrows pointing along each axis
+// MOVE GIZMO - Arrows pointing along each axis (now using DragManager)
 // ============================================================================
 
 fn handle_move_gizmo(
@@ -1498,10 +1517,53 @@ fn handle_move_gizmo(
         }
     };
 
-    let camera = &state.camera;
+    // Check if using new drag manager
+    let using_new_drag = state.drag_manager.is_dragging() && state.drag_manager.active.is_move();
 
-    // Handle ongoing drag
-    if state.gizmo_dragging {
+    // Handle ongoing drag with new DragManager
+    if using_new_drag {
+        if ctx.mouse.left_down {
+            // Convert screen coords to framebuffer coords for ray casting
+            let fb_mouse = (
+                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+            );
+
+            let result = state.drag_manager.update(
+                fb_mouse,
+                &state.camera,
+                fb_width,
+                fb_height,
+            );
+
+            if let DragUpdateResult::Move { positions, .. } = result {
+                // Apply snapping if enabled and not holding Z
+                let snap_disabled = is_key_down(KeyCode::Z);
+                for (vert_idx, new_pos) in positions {
+                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = if state.snap_settings.enabled && !snap_disabled {
+                            state.snap_settings.snap_vec3(new_pos)
+                        } else {
+                            new_pos
+                        };
+                    }
+                }
+                state.dirty = true;
+            }
+        } else {
+            // End drag
+            if let Some(_result) = state.drag_manager.end() {
+                state.push_undo("Gizmo Move");
+                state.sync_mesh_to_project();
+            }
+            // Also clear old state for compatibility
+            state.gizmo_dragging = false;
+            state.gizmo_drag_axis = None;
+        }
+    }
+    // Fallback to old drag system for compatibility during transition
+    else if state.gizmo_dragging {
+        let camera = &state.camera;
         if ctx.mouse.left_down {
             if let Some(axis) = state.gizmo_drag_axis {
                 let mouse_delta = (mouse_pos.0 - state.gizmo_drag_start_mouse.0, mouse_pos.1 - state.gizmo_drag_start_mouse.1);
@@ -1552,7 +1614,7 @@ fn handle_move_gizmo(
 
     // Detect axis hover
     state.gizmo_hovered_axis = None;
-    if !state.gizmo_dragging && inside_viewport {
+    if !state.gizmo_dragging && !using_new_drag && inside_viewport {
         for (axis, end_screen, _) in &setup.axis_screen_ends {
             let dist = point_to_line_distance(
                 mouse_pos.0, mouse_pos.1,
@@ -1566,15 +1628,50 @@ fn handle_move_gizmo(
         }
     }
 
-    // Start drag on click
-    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging {
-        start_gizmo_drag(state, state.gizmo_hovered_axis.unwrap(), mouse_pos, setup.center);
+    // Start drag on click - use new DragManager
+    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging && !using_new_drag {
+        let axis = state.gizmo_hovered_axis.unwrap();
+
+        // Get vertex indices and initial positions
+        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        if state.vertex_linking {
+            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+        }
+
+        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .collect();
+
+        // Convert screen coords to framebuffer coords
+        let fb_mouse = (
+            (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+            (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+        );
+
+        // Start the new drag manager
+        state.drag_manager.start_move(
+            setup.center,
+            fb_mouse,
+            Some(to_ui_axis(axis)),
+            indices,
+            initial_positions.clone(),
+            state.snap_settings.enabled,
+            state.snap_settings.grid_size,
+        );
+
+        // Also set old state for compatibility with drawing code
+        state.gizmo_dragging = true;
+        state.gizmo_drag_axis = Some(axis);
+        state.gizmo_drag_start_mouse = mouse_pos;
+        state.gizmo_drag_center = setup.center;
+        state.gizmo_drag_start_positions = initial_positions;
     }
 
     // Draw move gizmo (arrows)
     for (axis, end_screen, base_color) in &setup.axis_screen_ends {
         let is_hovered = state.gizmo_hovered_axis == Some(*axis);
-        let is_dragging = state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis);
+        let is_dragging = (state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis))
+            || (using_new_drag && state.drag_manager.current_axis() == Some(to_ui_axis(*axis)));
         let color = get_axis_color(*base_color, is_hovered, is_dragging);
         let thickness = if is_hovered || is_dragging { 3.0 } else { 2.0 };
 
@@ -1603,7 +1700,7 @@ fn handle_move_gizmo(
     }
 
     // Draw center circle
-    let center_color = if state.gizmo_dragging { YELLOW } else { WHITE };
+    let center_color = if state.gizmo_dragging || using_new_drag { YELLOW } else { WHITE };
     draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
 }
 

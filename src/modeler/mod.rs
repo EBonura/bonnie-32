@@ -16,6 +16,7 @@ mod mesh_editor;
 mod obj_import;
 mod mesh_browser;
 pub mod actions;
+pub mod drag;
 
 // Re-export public API
 #[allow(unused_imports)]

@@ -14,10 +14,12 @@
 mod math;
 mod types;
 mod render;
+pub mod ray;
 
 pub use math::*;
 pub use types::*;
 pub use render::*;
+pub use ray::{Ray, screen_to_ray, ray_line_closest_point, ray_plane_intersection, ray_circle_angle};
 
 /// Screen dimensions (authentic PS1 resolution)
 pub const WIDTH: usize = 320;

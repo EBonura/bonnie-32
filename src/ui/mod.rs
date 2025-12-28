@@ -22,6 +22,7 @@ mod tabbar;
 mod icons;
 mod theme;
 mod actions;
+pub mod drag_tracker;
 
 pub use rect::*;
 pub use panel::*;
@@ -31,3 +32,9 @@ pub use tabbar::*;
 pub use icons::*;
 pub use theme::*;
 pub use actions::*;
+pub use drag_tracker::{
+    DragState, DragStatus, DragConfig, DragTracker, DragUpdate,
+    SnapMode, Axis, PickerType, Modifiers,
+    pick_line, pick_plane, pick_circle_angle, pick_position, pick_angle,
+    snap_position, snap_angle, apply_drag_update,
+};
