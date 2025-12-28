@@ -25,4 +25,4 @@ pub use layout::*;
 pub use texture_pack::TexturePack;
 pub use example_levels::*;
 pub use example_browser::*;
-pub use actions::{create_editor_actions, build_context as build_editor_context};
+// Actions used internally by layout.rs

@@ -51,6 +51,11 @@ impl ActiveDrag {
         matches!(self, ActiveDrag::Move(_))
     }
 
+    /// Check if this is a free move (no axis constraint - screen-space movement)
+    pub fn is_free_move(&self) -> bool {
+        matches!(self, ActiveDrag::Move(t) if t.axis.is_none())
+    }
+
     pub fn is_rotate(&self) -> bool {
         matches!(self, ActiveDrag::Rotate(_))
     }

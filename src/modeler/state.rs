@@ -645,12 +645,6 @@ pub struct ModelerState {
     pub redo_stack: Vec<UndoState>,
     pub max_undo_levels: usize,
 
-    // Transform state (for mouse drag - legacy, used by handle_drag_move)
-    pub transform_active: bool,
-    pub transform_start_mouse: (f32, f32),
-    pub transform_start_positions: Vec<Vec3>,
-    pub transform_start_rotations: Vec<Vec3>,
-
     // Snap/quantization settings
     pub snap_settings: SnapSettings,
 
@@ -662,9 +656,15 @@ pub struct ModelerState {
     /// Last mouse position for ortho panning (separate from perspective view)
     pub ortho_last_mouse: (f32, f32),
 
-    // Box selection state
-    pub box_select_active: bool,
-    pub box_select_start: (f32, f32),
+    // Pending drag start positions (for detecting drag vs click)
+    // Actual drag state is in DragManager
+    pub box_select_pending_start: Option<(f32, f32)>,
+    pub free_drag_pending_start: Option<(f32, f32)>,
+    pub ortho_drag_pending_start: Option<(f32, f32)>,
+    /// Which ortho viewport initiated the current drag (if any)
+    pub ortho_drag_viewport: Option<ViewportId>,
+    /// Zoom level of the ortho viewport when drag started
+    pub ortho_drag_zoom: f32,
 
     // Hover state (like world editor - auto-detect element under cursor)
     /// Hovered vertex index (highest priority)
@@ -801,11 +801,6 @@ impl ModelerState {
             redo_stack: Vec::new(),
             max_undo_levels: 50,
 
-            transform_active: false,
-            transform_start_mouse: (0.0, 0.0),
-            transform_start_positions: Vec::new(),
-            transform_start_rotations: Vec::new(),
-
             snap_settings: SnapSettings::default(),
 
             viewport_last_mouse: (0.0, 0.0),
@@ -813,8 +808,11 @@ impl ModelerState {
             ortho_pan_viewport: None,
             ortho_last_mouse: (0.0, 0.0),
 
-            box_select_active: false,
-            box_select_start: (0.0, 0.0),
+            box_select_pending_start: None,
+            free_drag_pending_start: None,
+            ortho_drag_pending_start: None,
+            ortho_drag_viewport: None,
+            ortho_drag_zoom: 1.0,
 
             hovered_vertex: None,
             hovered_edge: None,

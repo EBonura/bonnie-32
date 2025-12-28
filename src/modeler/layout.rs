@@ -1273,7 +1273,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     let mut ortho_hovered_edge: Option<(usize, usize)> = None;
     let mut ortho_hovered_face: Option<usize> = None;
 
-    if inside_viewport && state.active_viewport == viewport_id && !state.transform_active && state.modal_transform == ModalTransform::None && !state.box_select_active {
+    if inside_viewport && state.active_viewport == viewport_id && !state.drag_manager.is_dragging() && state.modal_transform == ModalTransform::None {
         const VERTEX_THRESHOLD: f32 = 10.0;
         const EDGE_THRESHOLD: f32 = 6.0;
         const FACE_THRESHOLD: f32 = 20.0;
@@ -1497,7 +1497,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // =========================================================================
     // Handle click to select in ortho views
     // =========================================================================
-    if inside_viewport && state.active_viewport == viewport_id && is_mouse_button_pressed(MouseButton::Left) && state.modal_transform == ModalTransform::None && !state.box_select_active {
+    if inside_viewport && state.active_viewport == viewport_id && is_mouse_button_pressed(MouseButton::Left) && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() {
         let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_key_down(KeyCode::X);
 
         if let Some(vert_idx) = state.hovered_vertex {
@@ -1575,62 +1575,95 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         };
 
         // Start drag on left-down (when we have selection and not clicking to select)
-        if ctx.mouse.left_down && !state.transform_active {
-            let dx = (ctx.mouse.x - state.viewport_last_mouse.0).abs();
-            let dy = (ctx.mouse.y - state.viewport_last_mouse.1).abs();
-            // Only start drag if we've moved a bit (distinguish from click-to-select)
-            if dx > 3.0 || dy > 3.0 {
-                // Start transform
-                state.transform_active = true;
-                state.transform_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        // Use ortho_drag_pending_start to detect drag vs click, similar to box select
+        if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && !state.drag_manager.is_dragging() {
+            state.ortho_drag_pending_start = Some((ctx.mouse.x, ctx.mouse.y));
+        }
 
-                // Collect starting positions
-                let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
-                if state.vertex_linking {
-                    indices = state.mesh.expand_to_coincident(&indices, 0.001);
+        // Check if we should convert pending start to actual ortho move
+        if let Some(start_pos) = state.ortho_drag_pending_start {
+            if ctx.mouse.left_down && !state.drag_manager.is_dragging() {
+                let dx = (ctx.mouse.x - start_pos.0).abs();
+                let dy = (ctx.mouse.y - start_pos.1).abs();
+                // Only become ortho move if moved at least 3 pixels
+                if dx > 3.0 || dy > 3.0 {
+                    // Collect starting positions
+                    let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+                    if state.vertex_linking {
+                        indices = state.mesh.expand_to_coincident(&indices, 0.001);
+                    }
+                    let initial_positions: Vec<(usize, crate::rasterizer::Vec3)> = indices.iter()
+                        .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+                        .collect();
+
+                    if !initial_positions.is_empty() {
+                        // Calculate center
+                        let sum: crate::rasterizer::Vec3 = initial_positions.iter()
+                            .map(|(_, p)| *p)
+                            .fold(crate::rasterizer::Vec3::ZERO, |acc, p| acc + p);
+                        let center = sum * (1.0 / initial_positions.len() as f32);
+
+                        // Save undo state before starting
+                        state.push_undo("Ortho Move");
+
+                        // Store ortho-specific data for the drag
+                        state.ortho_drag_viewport = Some(viewport_id);
+                        state.ortho_drag_zoom = ortho_zoom;
+
+                        // Start free move drag
+                        state.drag_manager.start_move(
+                            center,
+                            start_pos,
+                            None, // Free movement
+                            indices,
+                            initial_positions,
+                            state.snap_settings.enabled,
+                            state.snap_settings.grid_size,
+                        );
+                    }
+
+                    state.ortho_drag_pending_start = None;
                 }
-                state.transform_start_positions = indices.iter()
-                    .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| v.pos))
-                    .collect();
+            } else if !ctx.mouse.left_down {
+                // Mouse released without dragging - clear pending
+                state.ortho_drag_pending_start = None;
             }
         }
 
-        // Continue drag
-        if state.transform_active && ctx.mouse.left_down {
-            let delta = screen_to_world_delta(
-                ctx.mouse.x - state.transform_start_mouse.0,
-                ctx.mouse.y - state.transform_start_mouse.1,
-            );
+        // Continue ortho drag (if we're the active ortho drag viewport)
+        if state.drag_manager.active.is_free_move() && state.ortho_drag_viewport == Some(viewport_id) {
+            if ctx.mouse.left_down {
+                // Get mouse delta from drag start
+                if let Some(drag_state) = &state.drag_manager.state {
+                    let dx = ctx.mouse.x - drag_state.initial_mouse.0;
+                    let dy = ctx.mouse.y - drag_state.initial_mouse.1;
 
-            let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
-            if state.vertex_linking {
-                indices = state.mesh.expand_to_coincident(&indices, 0.001);
-            }
+                    let delta = screen_to_world_delta(dx, dy);
 
-            for (i, &idx) in indices.iter().enumerate() {
-                if let (Some(vert), Some(&start)) = (state.mesh.vertices.get_mut(idx), state.transform_start_positions.get(i)) {
-                    vert.pos = start + delta;
+                    // Apply delta to initial positions
+                    if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
+                        for (idx, start_pos) in &tracker.initial_positions {
+                            if let Some(vert) = state.mesh.vertices.get_mut(*idx) {
+                                vert.pos = *start_pos + delta;
 
-                    // Apply grid snapping if enabled
-                    if state.snap_settings.enabled && !is_key_down(KeyCode::Z) {
-                        let snap = state.snap_settings.grid_size;
-                        vert.pos.x = (vert.pos.x / snap).round() * snap;
-                        vert.pos.y = (vert.pos.y / snap).round() * snap;
-                        vert.pos.z = (vert.pos.z / snap).round() * snap;
+                                // Apply grid snapping if enabled
+                                if state.snap_settings.enabled && !is_key_down(KeyCode::Z) {
+                                    let snap = state.snap_settings.grid_size;
+                                    vert.pos.x = (vert.pos.x / snap).round() * snap;
+                                    vert.pos.y = (vert.pos.y / snap).round() * snap;
+                                    vert.pos.z = (vert.pos.z / snap).round() * snap;
+                                }
+                            }
+                        }
+                        state.dirty = true;
                     }
                 }
-            }
-            state.dirty = true;
-        }
-
-        // End drag
-        if !ctx.mouse.left_down && state.transform_active {
-            if !state.transform_start_positions.is_empty() {
-                state.push_undo("Ortho Move");
+            } else {
+                // End drag
+                state.drag_manager.end();
+                state.ortho_drag_viewport = None;
                 state.sync_mesh_to_project();
             }
-            state.transform_active = false;
-            state.transform_start_positions.clear();
         }
     }
 
@@ -2204,14 +2237,21 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
                 state.sync_mesh_to_project();
             }
             state.modal_transform = ModalTransform::None;
-        } else if state.transform_active {
-            // Cancel click-drag transform
-            apply_selected_positions_layout(state, &state.transform_start_positions.clone());
-            state.transform_active = false;
+        } else if state.drag_manager.active.is_free_move() {
+            // Cancel free move (perspective or ortho drag)
+            if let Some(original_positions) = state.drag_manager.cancel() {
+                for (vert_idx, original_pos) in original_positions {
+                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = original_pos;
+                    }
+                }
+            }
+            state.ortho_drag_viewport = None;
             state.set_status("Move cancelled", 0.5);
-        } else if state.box_select_active {
-            state.box_select_active = false;
-            // box_select_start will be reset next time box selection starts
+        } else if state.drag_manager.active.is_box_select() {
+            // Cancel box selection via DragManager
+            state.drag_manager.cancel();
+            state.box_select_pending_start = None;
         }
     }
 
@@ -2234,68 +2274,6 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     }
 
     action
-}
-
-/// Apply positions back to selected elements (for cancelling transform_active drags)
-fn apply_selected_positions_layout(state: &mut ModelerState, positions: &[Vec3]) {
-    let mut pos_idx = 0;
-    let selection = state.selection.clone();
-
-    match &selection {
-        super::state::ModelerSelection::Vertices(verts) => {
-            for &vert_idx in verts {
-                if let Some(&new_pos) = positions.get(pos_idx) {
-                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = new_pos;
-                    }
-                }
-                pos_idx += 1;
-            }
-        }
-        super::state::ModelerSelection::Edges(edges) => {
-            for (v0, v1) in edges {
-                if let Some(&new_pos) = positions.get(pos_idx) {
-                    if let Some(vert) = state.mesh.vertices.get_mut(*v0) {
-                        vert.pos = new_pos;
-                    }
-                }
-                pos_idx += 1;
-                if let Some(&new_pos) = positions.get(pos_idx) {
-                    if let Some(vert) = state.mesh.vertices.get_mut(*v1) {
-                        vert.pos = new_pos;
-                    }
-                }
-                pos_idx += 1;
-            }
-        }
-        super::state::ModelerSelection::Faces(faces) => {
-            for &face_idx in faces {
-                if let Some(face) = state.mesh.faces.get(face_idx).cloned() {
-                    if let Some(&new_pos) = positions.get(pos_idx) {
-                        if let Some(vert) = state.mesh.vertices.get_mut(face.v0) {
-                            vert.pos = new_pos;
-                        }
-                    }
-                    pos_idx += 1;
-                    if let Some(&new_pos) = positions.get(pos_idx) {
-                        if let Some(vert) = state.mesh.vertices.get_mut(face.v1) {
-                            vert.pos = new_pos;
-                        }
-                    }
-                    pos_idx += 1;
-                    if let Some(&new_pos) = positions.get(pos_idx) {
-                        if let Some(vert) = state.mesh.vertices.get_mut(face.v2) {
-                            vert.pos = new_pos;
-                        }
-                    }
-                    pos_idx += 1;
-                }
-            }
-        }
-        _ => {}
-    }
-
-    state.sync_mesh_to_project();
 }
 
 /// Handle arrow key movement for selected vertices/faces
