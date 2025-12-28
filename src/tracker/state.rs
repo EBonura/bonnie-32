@@ -2,6 +2,8 @@
 
 use super::audio::AudioEngine;
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
+use super::actions::create_tracker_actions;
+use crate::ui::ActionRegistry;
 use std::path::PathBuf;
 
 /// Tracker view mode
@@ -91,6 +93,8 @@ pub struct TrackerState {
     pub editing_knob: Option<usize>,
     /// Text being edited for knob value
     pub knob_edit_text: String,
+    /// Action registry for keyboard shortcuts
+    pub actions: ActionRegistry,
 }
 
 /// Soundfont filename
@@ -195,6 +199,7 @@ impl TrackerState {
             instrument_scroll: 0,
             editing_knob: None,
             knob_edit_text: String::new(),
+            actions: create_tracker_actions(),
         }
     }
 

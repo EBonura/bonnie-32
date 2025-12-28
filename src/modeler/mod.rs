@@ -15,6 +15,9 @@ mod model_browser;
 mod mesh_editor;
 mod obj_import;
 mod mesh_browser;
+pub mod actions;
+pub mod drag;
+pub mod tools;
 
 // Re-export public API
 #[allow(unused_imports)]
@@ -28,3 +31,4 @@ pub use model_browser::*;
 pub use mesh_editor::*;
 pub use obj_import::*;
 pub use mesh_browser::*;
+// Actions used internally by layout.rs

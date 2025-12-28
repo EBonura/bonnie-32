@@ -361,8 +361,9 @@ impl Camera {
             rotation_x: 0.0,
             rotation_y: 0.0,
             // Looking down -Z, so: right=+X, up=+Y, forward=-Z
-            basis_x: Vec3::new(1.0, 0.0, 0.0),   // Right
-            basis_y: Vec3::new(0.0, -1.0, 0.0),  // Up (Y goes up, but screen Y is inverted)
+            // Don't negate Y here - project_ortho handles the screen Y flip
+            basis_x: Vec3::new(1.0, 0.0, 0.0),   // Right: world +X -> camera +X
+            basis_y: Vec3::new(0.0, 1.0, 0.0),   // Up: world +Y -> camera +Y
             basis_z: Vec3::new(0.0, 0.0, -1.0),  // Forward (into the scene)
         }
     }
@@ -374,8 +375,10 @@ impl Camera {
             rotation_x: 0.0,
             rotation_y: 0.0,
             // Looking down -X, so: right=+Z, up=+Y, forward=-X
-            basis_x: Vec3::new(0.0, 0.0, -1.0),  // Right (Z goes left on screen)
-            basis_y: Vec3::new(0.0, -1.0, 0.0),  // Up
+            // Wireframe uses (v.pos.z, v.pos.y), so:
+            // cam_pos.x should be v.pos.z, cam_pos.y should be v.pos.y
+            basis_x: Vec3::new(0.0, 0.0, 1.0),   // Right: world +Z -> camera +X
+            basis_y: Vec3::new(0.0, 1.0, 0.0),   // Up: world +Y -> camera +Y
             basis_z: Vec3::new(-1.0, 0.0, 0.0),  // Forward (into the scene)
         }
     }

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode};
 use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, TextureAtlas};
 use super::model::Animation;
+use super::drag::DragManager;
+use super::tools::ModelerToolBox;
 
 // ============================================================================
 // PicoCAD-Style Viewport System
@@ -405,28 +407,6 @@ impl ModelerSelection {
     }
 }
 
-/// Active transform tool
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransformTool {
-    Select,
-    Move,
-    Rotate,
-    Scale,
-    Extrude,
-}
-
-impl TransformTool {
-    pub fn label(&self) -> &'static str {
-        match self {
-            TransformTool::Select => "Select",
-            TransformTool::Move => "Move (G)",
-            TransformTool::Rotate => "Rotate (R)",
-            TransformTool::Scale => "Scale (S)",
-            TransformTool::Extrude => "Extrude (E)",
-        }
-    }
-}
-
 /// Modal transform mode (Blender-style G/S/R)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalTransform {
@@ -443,6 +423,27 @@ impl ModalTransform {
             ModalTransform::Grab => "Grab",
             ModalTransform::Scale => "Scale",
             ModalTransform::Rotate => "Rotate",
+        }
+    }
+}
+
+/// UV modal transform mode (G/S/R for UV editing)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UvModalTransform {
+    #[default]
+    None,
+    Grab,   // G key - move UV selection
+    Scale,  // S key - scale UV selection
+    Rotate, // R key - rotate UV selection
+}
+
+impl UvModalTransform {
+    pub fn label(&self) -> &'static str {
+        match self {
+            UvModalTransform::None => "",
+            UvModalTransform::Grab => "UV Grab",
+            UvModalTransform::Scale => "UV Scale",
+            UvModalTransform::Rotate => "UV Rotate",
         }
     }
 }
@@ -602,7 +603,6 @@ pub struct ModelerState {
 
     // View/edit state
     pub select_mode: SelectMode,
-    pub tool: TransformTool,
     pub selection: ModelerSelection,
 
     // Camera (orbit mode for perspective view)
@@ -632,6 +632,11 @@ pub struct ModelerState {
     pub uv_drag_active: bool,
     pub uv_drag_start: (f32, f32),
     pub uv_drag_start_uvs: Vec<(usize, usize, Vec2)>, // (object_idx, vertex_idx, original_uv)
+    pub uv_box_select_start: Option<(f32, f32)>, // Start of box selection in screen coords
+    pub uv_modal_transform: UvModalTransform, // G/S/R modal transforms for UV
+    pub uv_modal_start_mouse: (f32, f32), // Mouse position when modal started
+    pub uv_modal_start_uvs: Vec<(usize, crate::rasterizer::Vec2)>, // (vertex_idx, original_uv)
+    pub uv_modal_center: crate::rasterizer::Vec2, // Center of UV selection for rotation/scale
 
     // Paint state
     pub paint_color: Color,
@@ -666,13 +671,6 @@ pub struct ModelerState {
     pub redo_stack: Vec<UndoState>,
     pub max_undo_levels: usize,
 
-    // Transform state (for mouse drag)
-    pub transform_active: bool,
-    pub transform_start_mouse: (f32, f32),
-    pub transform_start_positions: Vec<Vec3>,
-    pub transform_start_rotations: Vec<Vec3>,
-    pub axis_lock: Option<Axis>,
-
     // Snap/quantization settings
     pub snap_settings: SnapSettings,
 
@@ -684,9 +682,15 @@ pub struct ModelerState {
     /// Last mouse position for ortho panning (separate from perspective view)
     pub ortho_last_mouse: (f32, f32),
 
-    // Box selection state
-    pub box_select_active: bool,
-    pub box_select_start: (f32, f32),
+    // Pending drag start positions (for detecting drag vs click)
+    // Actual drag state is in DragManager
+    pub box_select_pending_start: Option<(f32, f32)>,
+    pub free_drag_pending_start: Option<(f32, f32)>,
+    pub ortho_drag_pending_start: Option<(f32, f32)>,
+    /// Which ortho viewport initiated the current drag (if any)
+    pub ortho_drag_viewport: Option<ViewportId>,
+    /// Zoom level of the ortho viewport when drag started
+    pub ortho_drag_zoom: f32,
 
     // Hover state (like world editor - auto-detect element under cursor)
     /// Hovered vertex index (highest priority)
@@ -696,28 +700,21 @@ pub struct ModelerState {
     /// Hovered face index (lowest priority)
     pub hovered_face: Option<usize>,
 
-    // Gizmo drag state (for move gizmo)
+    // Gizmo hover state
     /// Which gizmo axis is being hovered (for highlighting)
     pub gizmo_hovered_axis: Option<Axis>,
-    /// True if currently dragging the gizmo
-    pub gizmo_dragging: bool,
-    /// Which axis is being dragged
-    pub gizmo_drag_axis: Option<Axis>,
-    /// Start mouse position when gizmo drag began
-    pub gizmo_drag_start_mouse: (f32, f32),
-    /// Initial positions of vertices being dragged
-    pub gizmo_drag_start_positions: Vec<(usize, Vec3)>,
-    /// Selection center when drag started
-    pub gizmo_drag_center: Vec3,
 
-    // Modal transform state (G/S/R keys)
+    // Modal transform state (G/S/R keys) - now uses DragManager for actual transform
     pub modal_transform: ModalTransform,
-    pub modal_transform_start_mouse: (f32, f32),
-    pub modal_transform_start_positions: Vec<Vec3>,
-    pub modal_transform_center: Vec3,
 
     // Context menu state
     pub context_menu: Option<ContextMenu>,
+
+    // Unified drag manager (new system - replaces scattered gizmo_drag_* fields)
+    pub drag_manager: DragManager,
+
+    // Tool system (TrenchBroom-inspired)
+    pub tool_box: ModelerToolBox,
 }
 
 /// Context menu for right-click actions
@@ -774,7 +771,6 @@ impl ModelerState {
             current_file: None,
 
             select_mode: SelectMode::Face, // PicoCAD: face-centric
-            tool: TransformTool::Select,
             selection: ModelerSelection::None,
 
             camera,
@@ -802,6 +798,11 @@ impl ModelerState {
             uv_drag_active: false,
             uv_drag_start: (0.0, 0.0),
             uv_drag_start_uvs: Vec::new(),
+            uv_box_select_start: None,
+            uv_modal_transform: UvModalTransform::None,
+            uv_modal_start_mouse: (0.0, 0.0),
+            uv_modal_start_uvs: Vec::new(),
+            uv_modal_center: Vec2::default(),
 
             paint_color: Color::WHITE,
             paint_blend_mode: BlendMode::Opaque,
@@ -831,12 +832,6 @@ impl ModelerState {
             redo_stack: Vec::new(),
             max_undo_levels: 50,
 
-            transform_active: false,
-            transform_start_mouse: (0.0, 0.0),
-            transform_start_positions: Vec::new(),
-            transform_start_rotations: Vec::new(),
-            axis_lock: None,
-
             snap_settings: SnapSettings::default(),
 
             viewport_last_mouse: (0.0, 0.0),
@@ -844,26 +839,25 @@ impl ModelerState {
             ortho_pan_viewport: None,
             ortho_last_mouse: (0.0, 0.0),
 
-            box_select_active: false,
-            box_select_start: (0.0, 0.0),
+            box_select_pending_start: None,
+            free_drag_pending_start: None,
+            ortho_drag_pending_start: None,
+            ortho_drag_viewport: None,
+            ortho_drag_zoom: 1.0,
 
             hovered_vertex: None,
             hovered_edge: None,
             hovered_face: None,
 
             gizmo_hovered_axis: None,
-            gizmo_dragging: false,
-            gizmo_drag_axis: None,
-            gizmo_drag_start_mouse: (0.0, 0.0),
-            gizmo_drag_start_positions: Vec::new(),
-            gizmo_drag_center: Vec3::ZERO,
 
             modal_transform: ModalTransform::None,
-            modal_transform_start_mouse: (0.0, 0.0),
-            modal_transform_start_positions: Vec::new(),
-            modal_transform_center: Vec3::ZERO,
 
             context_menu: None,
+
+            drag_manager: DragManager::new(),
+
+            tool_box: ModelerToolBox::new(),
         }
     }
 

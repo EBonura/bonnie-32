@@ -12,6 +12,7 @@ use crate::ui::{
 use super::state::{TrackerState, TrackerView};
 use super::psx_reverb::ReverbType;
 use super::audio::OutputSampleRate;
+use super::actions::build_context;
 
 // Layout constants
 const ROW_HEIGHT: f32 = 18.0;
@@ -934,64 +935,78 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
 /// Handle keyboard and mouse input
 fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
-    // Navigation
-    if is_key_pressed(KeyCode::Up) {
+    // Build action context
+    let column_type = match state.current_column {
+        0 => "note",
+        1 => "instrument",
+        3 => "effect",
+        4 => "effect",
+        _ => "other",
+    };
+    let actx = build_context(
+        state.playing,
+        state.current_pattern().is_some(),
+        column_type,
+        state.editing_knob.is_some(),
+    );
+
+    // Navigation using actions
+    if state.actions.triggered("nav.up", &actx) {
         state.cursor_up();
     }
-    if is_key_pressed(KeyCode::Down) {
+    if state.actions.triggered("nav.down", &actx) {
         state.cursor_down();
     }
-    if is_key_pressed(KeyCode::Left) {
+    if state.actions.triggered("nav.left", &actx) {
         state.cursor_left();
     }
-    if is_key_pressed(KeyCode::Right) {
+    if state.actions.triggered("nav.right", &actx) {
         state.cursor_right();
     }
-    if is_key_pressed(KeyCode::Tab) {
-        if is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) {
-            state.prev_channel();
-        } else {
-            state.next_channel();
-        }
+    if state.actions.triggered("nav.next_channel", &actx) {
+        state.next_channel();
+    }
+    if state.actions.triggered("nav.prev_channel", &actx) {
+        state.prev_channel();
     }
 
     // Page up/down
-    if is_key_pressed(KeyCode::PageUp) {
+    if state.actions.triggered("nav.page_up", &actx) {
         for _ in 0..16 {
             state.cursor_up();
         }
     }
-    if is_key_pressed(KeyCode::PageDown) {
+    if state.actions.triggered("nav.page_down", &actx) {
         for _ in 0..16 {
             state.cursor_down();
         }
     }
 
     // Home/End
-    if is_key_pressed(KeyCode::Home) {
+    if state.actions.triggered("nav.home", &actx) {
         state.current_row = 0;
         state.scroll_row = 0;
     }
-    if is_key_pressed(KeyCode::End) {
+    if state.actions.triggered("nav.end", &actx) {
         if let Some(pattern) = state.current_pattern() {
             state.current_row = pattern.length - 1;
         }
     }
 
     // Playback
-    if is_key_pressed(KeyCode::Space) {
+    if state.actions.triggered("playback.toggle", &actx) {
         state.toggle_playback();
     }
-    if is_key_pressed(KeyCode::Escape) {
+    if state.actions.triggered("playback.stop", &actx) {
         state.stop_playback();
     }
 
     // Octave (numpad only - regular +/- are piano keys now)
-    if is_key_pressed(KeyCode::KpAdd) {
+    if state.actions.triggered("octave.up", &actx) {
         state.octave = (state.octave + 1).min(9);
         state.set_status(&format!("Octave: {}", state.octave), 1.0);
     }
-    if is_key_pressed(KeyCode::KpSubtract) {
+    if state.actions.triggered("octave.down", &actx) {
         state.octave = state.octave.saturating_sub(1);
         state.set_status(&format!("Octave: {}", state.octave), 1.0);
     }
@@ -1000,16 +1015,16 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     // Use the instrument list in Instruments view or channel strip +/- buttons instead
 
     // Edit step
-    if is_key_pressed(KeyCode::F9) {
+    if state.actions.triggered("edit_step.decrease", &actx) {
         state.edit_step = state.edit_step.saturating_sub(1);
         state.set_status(&format!("Edit step: {}", state.edit_step), 1.0);
     }
-    if is_key_pressed(KeyCode::F10) {
+    if state.actions.triggered("edit_step.increase", &actx) {
         state.edit_step = (state.edit_step + 1).min(16);
         state.set_status(&format!("Edit step: {}", state.edit_step), 1.0);
     }
 
-    // Delete
+    // Delete - still using direct key check since it conflicts with note entry context
     if is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace) {
         state.delete_note();
     }
