@@ -427,6 +427,27 @@ impl ModalTransform {
     }
 }
 
+/// UV modal transform mode (G/S/R for UV editing)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UvModalTransform {
+    #[default]
+    None,
+    Grab,   // G key - move UV selection
+    Scale,  // S key - scale UV selection
+    Rotate, // R key - rotate UV selection
+}
+
+impl UvModalTransform {
+    pub fn label(&self) -> &'static str {
+        match self {
+            UvModalTransform::None => "",
+            UvModalTransform::Grab => "UV Grab",
+            UvModalTransform::Scale => "UV Scale",
+            UvModalTransform::Rotate => "UV Rotate",
+        }
+    }
+}
+
 /// Paint mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaintMode {
@@ -611,6 +632,11 @@ pub struct ModelerState {
     pub uv_drag_active: bool,
     pub uv_drag_start: (f32, f32),
     pub uv_drag_start_uvs: Vec<(usize, usize, Vec2)>, // (object_idx, vertex_idx, original_uv)
+    pub uv_box_select_start: Option<(f32, f32)>, // Start of box selection in screen coords
+    pub uv_modal_transform: UvModalTransform, // G/S/R modal transforms for UV
+    pub uv_modal_start_mouse: (f32, f32), // Mouse position when modal started
+    pub uv_modal_start_uvs: Vec<(usize, crate::rasterizer::Vec2)>, // (vertex_idx, original_uv)
+    pub uv_modal_center: crate::rasterizer::Vec2, // Center of UV selection for rotation/scale
 
     // Paint state
     pub paint_color: Color,
@@ -772,6 +798,11 @@ impl ModelerState {
             uv_drag_active: false,
             uv_drag_start: (0.0, 0.0),
             uv_drag_start_uvs: Vec::new(),
+            uv_box_select_start: None,
+            uv_modal_transform: UvModalTransform::None,
+            uv_modal_start_mouse: (0.0, 0.0),
+            uv_modal_start_uvs: Vec::new(),
+            uv_modal_center: Vec2::default(),
 
             paint_color: Color::WHITE,
             paint_blend_mode: BlendMode::Opaque,

@@ -701,8 +701,62 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                     state.uv_drag_start_uvs = start_uvs;
                 }
             } else {
-                // Clicked on empty space - clear selection (unless painting)
-                // Don't clear if we're about to paint
+                // Clicked on empty space - start box selection
+                state.uv_box_select_start = Some((mx, my));
+            }
+        }
+
+        // Handle UV box selection
+        if let Some(start) = state.uv_box_select_start {
+            if is_mouse_button_down(MouseButton::Left) {
+                // Draw box selection rectangle
+                let x0 = start.0.min(mx);
+                let y0 = start.1.min(my);
+                let x1 = start.0.max(mx);
+                let y1 = start.1.max(my);
+                let box_color = Color::from_rgba(100, 150, 255, 80);
+                let border_color = Color::from_rgba(100, 150, 255, 200);
+                draw_rectangle(x0, y0, x1 - x0, y1 - y0, box_color);
+                draw_rectangle_lines(x0, y0, x1 - x0, y1 - y0, 1.0, border_color);
+            } else {
+                // Box select released - select UV vertices inside the box
+                let x0 = start.0.min(mx);
+                let y0 = start.1.min(my);
+                let x1 = start.0.max(mx);
+                let y1 = start.1.max(my);
+
+                // Only apply if box has some size (not just a click)
+                let box_size = (x1 - x0).abs().max((y1 - y0).abs());
+                if box_size > 3.0 {
+                    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                    if !shift_held {
+                        state.uv_selection.clear();
+                    }
+
+                    // Select all editable UV vertices within the box
+                    if let Some(obj_idx) = state.project.selected_object {
+                        if let Some(obj) = state.project.objects.get(obj_idx) {
+                            for &vi in &editable_verts {
+                                if let Some(vert) = obj.mesh.vertices.get(vi) {
+                                    let (sx, sy) = uv_to_screen(vert.uv.x, vert.uv.y);
+                                    if sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 {
+                                        if !state.uv_selection.contains(&vi) {
+                                            state.uv_selection.push(vi);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if box_size <= 3.0 {
+                    // Small box = click on empty space - clear selection
+                    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                    if !shift_held {
+                        state.uv_selection.clear();
+                    }
+                }
+
+                state.uv_box_select_start = None;
             }
         }
 
@@ -737,6 +791,163 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             state.set_status("UV moved", 0.5);
         }
 
+        // ========================================================================
+        // UV Modal Transforms (G/S/R keys)
+        // ========================================================================
+
+        // Start UV modal transforms (only if we have a selection)
+        if !state.uv_selection.is_empty() && state.uv_modal_transform == super::state::UvModalTransform::None {
+            let start_modal = |transform: super::state::UvModalTransform, state: &mut ModelerState, mx: f32, my: f32, obj_idx: usize| {
+                state.push_undo(transform.label());
+                state.uv_modal_transform = transform;
+                state.uv_modal_start_mouse = (mx, my);
+
+                // Save original UVs and compute center
+                let mut start_uvs = Vec::new();
+                let mut center = crate::rasterizer::Vec2::default();
+                let mut count = 0.0;
+
+                if let Some(obj) = state.project.objects.get(obj_idx) {
+                    for &vi in &state.uv_selection {
+                        if let Some(v) = obj.mesh.vertices.get(vi) {
+                            start_uvs.push((vi, v.uv));
+                            center.x += v.uv.x;
+                            center.y += v.uv.y;
+                            count += 1.0;
+                        }
+                    }
+                }
+
+                if count > 0.0 {
+                    center.x /= count;
+                    center.y /= count;
+                }
+
+                state.uv_modal_start_uvs = start_uvs;
+                state.uv_modal_center = center;
+            };
+
+            if let Some(obj_idx) = state.project.selected_object {
+                if is_key_pressed(KeyCode::G) {
+                    start_modal(super::state::UvModalTransform::Grab, state, mx, my, obj_idx);
+                } else if is_key_pressed(KeyCode::S) {
+                    start_modal(super::state::UvModalTransform::Scale, state, mx, my, obj_idx);
+                } else if is_key_pressed(KeyCode::R) {
+                    start_modal(super::state::UvModalTransform::Rotate, state, mx, my, obj_idx);
+                }
+            }
+        }
+
+        // Apply UV modal transform
+        if state.uv_modal_transform != super::state::UvModalTransform::None {
+            if let Some(obj_idx) = state.project.selected_object {
+                let atlas_size = state.project.atlas.width as f32;
+
+                match state.uv_modal_transform {
+                    super::state::UvModalTransform::Grab => {
+                        // Calculate UV delta from mouse movement
+                        let du = (mx - state.uv_modal_start_mouse.0) / atlas_screen_w;
+                        let dv = -(my - state.uv_modal_start_mouse.1) / atlas_screen_h;
+
+                        if let Some(obj) = state.project.objects.get_mut(obj_idx) {
+                            for &(vi, original_uv) in &state.uv_modal_start_uvs {
+                                if let Some(vert) = obj.mesh.vertices.get_mut(vi) {
+                                    let new_u = original_uv.x + du;
+                                    let new_v = original_uv.y + dv;
+                                    let (su, sv) = snap_uv(new_u, new_v, atlas_size);
+                                    vert.uv.x = su;
+                                    vert.uv.y = sv;
+                                }
+                            }
+                        }
+                    }
+                    super::state::UvModalTransform::Scale => {
+                        // Scale from center based on mouse distance
+                        let center = state.uv_modal_center;
+                        let (cx_screen, cy_screen) = uv_to_screen(center.x, center.y);
+
+                        let initial_dist = ((state.uv_modal_start_mouse.0 - cx_screen).powi(2) +
+                                          (state.uv_modal_start_mouse.1 - cy_screen).powi(2)).sqrt();
+                        let current_dist = ((mx - cx_screen).powi(2) + (my - cy_screen).powi(2)).sqrt();
+
+                        let scale = if initial_dist > 1.0 { current_dist / initial_dist } else { 1.0 };
+
+                        if let Some(obj) = state.project.objects.get_mut(obj_idx) {
+                            for &(vi, original_uv) in &state.uv_modal_start_uvs {
+                                if let Some(vert) = obj.mesh.vertices.get_mut(vi) {
+                                    let du = original_uv.x - center.x;
+                                    let dv = original_uv.y - center.y;
+                                    let new_u = center.x + du * scale;
+                                    let new_v = center.y + dv * scale;
+                                    let (su, sv) = snap_uv(new_u, new_v, atlas_size);
+                                    vert.uv.x = su;
+                                    vert.uv.y = sv;
+                                }
+                            }
+                        }
+                    }
+                    super::state::UvModalTransform::Rotate => {
+                        // Rotate around center based on mouse angle
+                        let center = state.uv_modal_center;
+                        let (cx_screen, cy_screen) = uv_to_screen(center.x, center.y);
+
+                        let initial_angle = (state.uv_modal_start_mouse.1 - cy_screen)
+                            .atan2(state.uv_modal_start_mouse.0 - cx_screen);
+                        let current_angle = (my - cy_screen).atan2(mx - cx_screen);
+                        let angle_delta = current_angle - initial_angle;
+
+                        let cos_a = angle_delta.cos();
+                        let sin_a = angle_delta.sin();
+
+                        if let Some(obj) = state.project.objects.get_mut(obj_idx) {
+                            for &(vi, original_uv) in &state.uv_modal_start_uvs {
+                                if let Some(vert) = obj.mesh.vertices.get_mut(vi) {
+                                    let du = original_uv.x - center.x;
+                                    let dv = original_uv.y - center.y;
+                                    // Note: Y is flipped in UV space relative to screen
+                                    let rotated_u = du * cos_a + dv * sin_a;
+                                    let rotated_v = -du * sin_a + dv * cos_a;
+                                    let new_u = center.x + rotated_u;
+                                    let new_v = center.y + rotated_v;
+                                    let (su, sv) = snap_uv(new_u, new_v, atlas_size);
+                                    vert.uv.x = su;
+                                    vert.uv.y = sv;
+                                }
+                            }
+                        }
+                    }
+                    super::state::UvModalTransform::None => {}
+                }
+
+                state.sync_mesh_from_project();
+                state.dirty = true;
+
+                // Confirm with click or Enter
+                if is_mouse_button_pressed(MouseButton::Left) || is_key_pressed(KeyCode::Enter) {
+                    state.uv_modal_transform = super::state::UvModalTransform::None;
+                    state.uv_modal_start_uvs.clear();
+                    state.set_status("UV transform applied", 0.5);
+                }
+
+                // Cancel with Escape or right-click
+                if is_key_pressed(KeyCode::Escape) || is_mouse_button_pressed(MouseButton::Right) {
+                    // Restore original UVs
+                    if let Some(obj) = state.project.objects.get_mut(obj_idx) {
+                        for &(vi, original_uv) in &state.uv_modal_start_uvs {
+                            if let Some(vert) = obj.mesh.vertices.get_mut(vi) {
+                                vert.uv = original_uv;
+                            }
+                        }
+                    }
+                    state.uv_modal_transform = super::state::UvModalTransform::None;
+                    state.uv_modal_start_uvs.clear();
+                    state.sync_mesh_from_project();
+                    // Remove the undo state we pushed (discard the operation)
+                    state.undo_stack.pop();
+                    state.set_status("UV transform cancelled", 0.5);
+                }
+            }
+        }
     }
 
     // ========================================================================
@@ -938,6 +1149,67 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         btn_x += btn_w + 2.0;
     }
 
+    // UV Transform buttons (only in UV mode)
+    if state.atlas_edit_mode == AtlasEditMode::Uv {
+        btn_x += 8.0; // Add some spacing
+
+        use crate::ui::{icon, draw_icon_centered};
+
+        // Lucide icon buttons for UV transforms: (icon, tooltip, action_id)
+        let uv_buttons: &[(char, &str, &str)] = &[
+            (icon::FLIP_HORIZONTAL, "Flip H", "uv_flip_h"),
+            (icon::FLIP_VERTICAL, "Flip V", "uv_flip_v"),
+            (icon::ROTATE_CW, "Rotate CW", "uv_rot_cw"),
+            (icon::REFRESH_CW, "Reset UVs", "uv_reset"),
+        ];
+
+        let has_selection = !state.uv_selection.is_empty();
+
+        for (icon_char, tooltip, action) in uv_buttons {
+            let btn_w = 20.0;
+            let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let enabled = has_selection;
+
+            // Button background
+            let bg_color = if !enabled {
+                Color::from_rgba(40, 40, 45, 255)
+            } else if hovered {
+                Color::from_rgba(80, 80, 90, 255)
+            } else {
+                Color::from_rgba(55, 55, 60, 255)
+            };
+            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg_color);
+
+            // Draw icon
+            let icon_color = if enabled { TEXT_COLOR } else { Color::from_rgba(80, 80, 85, 255) };
+            draw_icon_centered(icon_font, *icon_char, &btn_rect, 12.0, icon_color);
+
+            // Handle click
+            if enabled && hovered && is_mouse_button_pressed(MouseButton::Left) {
+                match *action {
+                    "uv_flip_h" => flip_selected_uvs(state, true, false),
+                    "uv_flip_v" => flip_selected_uvs(state, false, true),
+                    "uv_rot_cw" => rotate_selected_uvs(state, true),
+                    "uv_reset" => reset_selected_uvs(state),
+                    _ => {}
+                }
+            }
+
+            // Show tooltip on hover
+            if hovered {
+                let tooltip_text = if enabled { *tooltip } else { &format!("{} (select UVs)", tooltip) };
+                let tw = tooltip_text.len() as f32 * 6.0 + 8.0;
+                let tx = btn_rect.x + btn_rect.w * 0.5 - tw * 0.5;
+                let ty = btn_rect.y + btn_rect.h + 2.0;
+                draw_rectangle(tx, ty, tw, 14.0, Color::from_rgba(30, 30, 35, 240));
+                draw_text(tooltip_text, tx + 4.0, ty + 10.0, 10.0, TEXT_COLOR);
+            }
+
+            btn_x += btn_w + 2.0;
+        }
+    }
+
     // Mode indicator (UV vs Paint)
     // Note: V/B/F shortcuts are handled through ActionRegistry in handle_actions()
     let mode_text = match state.atlas_edit_mode {
@@ -947,6 +1219,18 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let mode_color = ACCENT_COLOR;
     let text_width = mode_text.len() as f32 * 6.0;
     draw_text(mode_text, rect.x + rect.w - text_width - 8.0, rect.y + 14.0, 11.0, mode_color);
+
+    // Show UV modal transform indicator (when G/S/R is active)
+    if state.uv_modal_transform != super::state::UvModalTransform::None {
+        let transform_text = match state.uv_modal_transform {
+            super::state::UvModalTransform::Grab => "Grab (ESC to cancel)",
+            super::state::UvModalTransform::Scale => "Scale (ESC to cancel)",
+            super::state::UvModalTransform::Rotate => "Rotate (ESC to cancel)",
+            super::state::UvModalTransform::None => "",
+        };
+        let indicator_color = Color::from_rgba(255, 200, 100, 255);
+        draw_text(transform_text, rect.x + 8.0, rect.y + rect.h - 8.0, 11.0, indicator_color);
+    }
 }
 
 /// DEPRECATED: Draw the UV Editor panel with the texture atlas and face UVs
@@ -2024,6 +2308,221 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
     draw_text(hints, rect.right() - (hints.len() as f32 * 6.0) - 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
 }
 
+// ============================================================================
+// UV Transform Functions
+// ============================================================================
+
+/// Get UV vertices from selected faces
+fn get_uv_vertices_from_selection(state: &ModelerState) -> Vec<usize> {
+    let mut verts = std::collections::HashSet::new();
+    if let Some(obj) = state.project.selected() {
+        if let super::state::ModelerSelection::Faces(faces) = &state.selection {
+            for &fi in faces {
+                if let Some(face) = obj.mesh.faces.get(fi) {
+                    verts.insert(face.v0);
+                    verts.insert(face.v1);
+                    verts.insert(face.v2);
+                }
+            }
+        }
+    }
+    verts.into_iter().collect()
+}
+
+/// Compute center of UV coordinates for given vertices
+fn compute_uv_center(state: &ModelerState, verts: &[usize]) -> Option<crate::rasterizer::Vec2> {
+    if verts.is_empty() {
+        return None;
+    }
+    let obj = state.project.selected()?;
+    let mut sum_u = 0.0f32;
+    let mut sum_v = 0.0f32;
+    let mut count = 0;
+    for &vi in verts {
+        if let Some(v) = obj.mesh.vertices.get(vi) {
+            sum_u += v.uv.x;
+            sum_v += v.uv.y;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(crate::rasterizer::Vec2::new(sum_u / count as f32, sum_v / count as f32))
+}
+
+/// Snap UV to pixel boundary
+fn snap_uv(u: f32, v: f32, atlas_size: f32) -> (f32, f32) {
+    let px = (u * atlas_size).round() / atlas_size;
+    let py = (v * atlas_size).round() / atlas_size;
+    (px.clamp(0.0, 1.0), py.clamp(0.0, 1.0))
+}
+
+/// Flip selected UVs horizontally and/or vertically around their center
+fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
+    let verts = get_uv_vertices_from_selection(state);
+    if verts.is_empty() {
+        state.set_status("No faces selected", 1.0);
+        return;
+    }
+
+    let center = match compute_uv_center(state, &verts) {
+        Some(c) => c,
+        None => return,
+    };
+
+    let atlas_size = state.project.atlas.width as f32;
+
+    state.push_undo(if flip_h { "Flip UV Horizontal" } else { "Flip UV Vertical" });
+
+    if let Some(obj) = state.project.selected_mut() {
+        for &vi in &verts {
+            if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                if flip_h {
+                    v.uv.x = center.x - (v.uv.x - center.x);
+                }
+                if flip_v {
+                    v.uv.y = center.y - (v.uv.y - center.y);
+                }
+                // Snap to pixel boundary
+                let (su, sv) = snap_uv(v.uv.x, v.uv.y, atlas_size);
+                v.uv.x = su;
+                v.uv.y = sv;
+            }
+        }
+    }
+
+    state.sync_mesh_from_project();
+    state.dirty = true;
+    state.set_status(if flip_h { "Flipped UV horizontal" } else { "Flipped UV vertical" }, 1.0);
+}
+
+/// Rotate selected UVs 90 degrees around their center
+fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
+    let verts = get_uv_vertices_from_selection(state);
+    if verts.is_empty() {
+        state.set_status("No faces selected", 1.0);
+        return;
+    }
+
+    let center = match compute_uv_center(state, &verts) {
+        Some(c) => c,
+        None => return,
+    };
+
+    let atlas_size = state.project.atlas.width as f32;
+
+    state.push_undo("Rotate UV 90°");
+
+    if let Some(obj) = state.project.selected_mut() {
+        for &vi in &verts {
+            if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                // Translate to origin
+                let du = v.uv.x - center.x;
+                let dv = v.uv.y - center.y;
+                // Rotate 90 degrees
+                let (new_du, new_dv) = if clockwise {
+                    (dv, -du)  // CW: (x,y) -> (y,-x)
+                } else {
+                    (-dv, du)  // CCW: (x,y) -> (-y,x)
+                };
+                // Translate back
+                v.uv.x = center.x + new_du;
+                v.uv.y = center.y + new_dv;
+                // Snap to pixel boundary
+                let (su, sv) = snap_uv(v.uv.x, v.uv.y, atlas_size);
+                v.uv.x = su;
+                v.uv.y = sv;
+            }
+        }
+    }
+
+    state.sync_mesh_from_project();
+    state.dirty = true;
+    state.set_status(if clockwise { "Rotated UV 90° CW" } else { "Rotated UV 90° CCW" }, 1.0);
+}
+
+/// Reset UVs to planar projection from face normals
+fn reset_selected_uvs(state: &mut ModelerState) {
+    if let super::state::ModelerSelection::Faces(faces) = &state.selection.clone() {
+        if faces.is_empty() {
+            state.set_status("No faces selected", 1.0);
+            return;
+        }
+
+        let atlas_size = state.project.atlas.width as f32;
+
+        state.push_undo("Reset UVs");
+
+        if let Some(obj) = state.project.selected_mut() {
+            for &fi in faces {
+                if let Some(face) = obj.mesh.faces.get(fi) {
+                    let v0_idx = face.v0;
+                    let v1_idx = face.v1;
+                    let v2_idx = face.v2;
+
+                    // Get vertex positions
+                    let p0 = obj.mesh.vertices[v0_idx].pos;
+                    let p1 = obj.mesh.vertices[v1_idx].pos;
+                    let p2 = obj.mesh.vertices[v2_idx].pos;
+
+                    // Compute face normal
+                    let edge1 = p1 - p0;
+                    let edge2 = p2 - p0;
+                    let normal = edge1.cross(edge2).normalize();
+
+                    // Choose projection axes based on dominant normal component
+                    // This gives axis-aligned projections similar to TrenchBroom's paraxial
+                    let abs_normal = crate::rasterizer::Vec3::new(normal.x.abs(), normal.y.abs(), normal.z.abs());
+
+                    let (u_axis, v_axis) = if abs_normal.y >= abs_normal.x && abs_normal.y >= abs_normal.z {
+                        // Top/bottom face - project onto XZ
+                        (crate::rasterizer::Vec3::new(1.0, 0.0, 0.0), crate::rasterizer::Vec3::new(0.0, 0.0, 1.0))
+                    } else if abs_normal.x >= abs_normal.z {
+                        // Side face (X dominant) - project onto YZ
+                        (crate::rasterizer::Vec3::new(0.0, 0.0, 1.0), crate::rasterizer::Vec3::new(0.0, 1.0, 0.0))
+                    } else {
+                        // Front/back face (Z dominant) - project onto XY
+                        (crate::rasterizer::Vec3::new(1.0, 0.0, 0.0), crate::rasterizer::Vec3::new(0.0, 1.0, 0.0))
+                    };
+
+                    // Project vertices onto UV plane
+                    // Scale factor: 1 world unit = 1/64 of texture (adjustable)
+                    let uv_scale = 1.0 / 64.0;
+
+                    let u0 = p0.dot(u_axis) * uv_scale;
+                    let v0 = p0.dot(v_axis) * uv_scale;
+                    let u1 = p1.dot(u_axis) * uv_scale;
+                    let v1 = p1.dot(v_axis) * uv_scale;
+                    let u2 = p2.dot(u_axis) * uv_scale;
+                    let v2 = p2.dot(v_axis) * uv_scale;
+
+                    // Normalize to 0-1 range by taking fractional part
+                    let norm_uv = |u: f32, v: f32| {
+                        let u = u.rem_euclid(1.0);
+                        let v = v.rem_euclid(1.0);
+                        snap_uv(u, v, atlas_size)
+                    };
+
+                    let (su0, sv0) = norm_uv(u0, v0);
+                    let (su1, sv1) = norm_uv(u1, v1);
+                    let (su2, sv2) = norm_uv(u2, v2);
+
+                    obj.mesh.vertices[v0_idx].uv = crate::rasterizer::Vec2::new(su0, sv0);
+                    obj.mesh.vertices[v1_idx].uv = crate::rasterizer::Vec2::new(su1, sv1);
+                    obj.mesh.vertices[v2_idx].uv = crate::rasterizer::Vec2::new(su2, sv2);
+                }
+            }
+        }
+
+        state.sync_mesh_from_project();
+        state.dirty = true;
+        state.set_status("Reset UVs to planar projection", 1.0);
+    } else {
+        state.set_status("Select faces to reset UVs", 1.0);
+    }
+}
+
 /// Handle all keyboard actions using the action registry
 /// Returns a ModelerAction if a file action was triggered
 fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> ModelerAction {
@@ -2210,6 +2709,22 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     if actions.triggered("brush.fill", &ctx) {
         state.brush_type = super::state::BrushType::Fill;
         state.set_status("Fill brush", 0.5);
+    }
+
+    // ========================================================================
+    // UV Transform Actions
+    // ========================================================================
+    if actions.triggered("uv.flip_horizontal", &ctx) {
+        flip_selected_uvs(state, true, false);
+    }
+    if actions.triggered("uv.flip_vertical", &ctx) {
+        flip_selected_uvs(state, false, true);
+    }
+    if actions.triggered("uv.rotate_cw", &ctx) {
+        rotate_selected_uvs(state, true);
+    }
+    if actions.triggered("uv.reset", &ctx) {
+        reset_selected_uvs(state);
     }
 
     // ========================================================================
