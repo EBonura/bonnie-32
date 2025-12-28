@@ -548,41 +548,61 @@ pub fn draw_modeler_viewport(
     // Draw grid
     draw_grid(fb, &state.camera, 0.0, 50.0, 10);
 
-    // Render mesh with texture atlas
-    let mesh = &state.mesh;
-    let vertices: Vec<RasterVertex> = mesh.vertices.iter().map(|v| {
-        RasterVertex {
-            pos: v.pos,
-            normal: v.normal,
-            uv: v.uv,
-            color: RasterColor::new(180, 180, 180),
-            bone_index: None,
+    // Render all visible objects
+    // Convert atlas to rasterizer texture (shared by all objects)
+    let atlas_texture = state.project.atlas.to_raster_texture();
+    let textures = [atlas_texture];
+
+    for (obj_idx, obj) in state.project.objects.iter().enumerate() {
+        // Skip hidden objects
+        if !obj.visible {
+            continue;
         }
-    }).collect();
 
-    // All faces use texture 0 (the atlas)
-    let faces: Vec<RasterFace> = mesh.faces.iter().map(|f| {
-        RasterFace {
-            v0: f.v0,
-            v1: f.v1,
-            v2: f.v2,
-            texture_id: Some(0),
+        // Use state.mesh for selected object (has edits), project mesh for others
+        let mesh = if state.project.selected_object == Some(obj_idx) {
+            &state.mesh
+        } else {
+            &obj.mesh
+        };
+
+        // Dim non-selected objects slightly
+        let base_color = if state.project.selected_object == Some(obj_idx) {
+            180u8
+        } else {
+            140u8
+        };
+
+        let vertices: Vec<RasterVertex> = mesh.vertices.iter().map(|v| {
+            RasterVertex {
+                pos: v.pos,
+                normal: v.normal,
+                uv: v.uv,
+                color: RasterColor::new(base_color, base_color, base_color),
+                bone_index: None,
+            }
+        }).collect();
+
+        // All faces use texture 0 (the atlas)
+        let faces: Vec<RasterFace> = mesh.faces.iter().map(|f| {
+            RasterFace {
+                v0: f.v0,
+                v1: f.v1,
+                v2: f.v2,
+                texture_id: Some(0),
+            }
+        }).collect();
+
+        if !vertices.is_empty() && !faces.is_empty() {
+            render_mesh(
+                fb,
+                &vertices,
+                &faces,
+                &textures,
+                &state.camera,
+                &state.raster_settings,
+            );
         }
-    }).collect();
-
-    if !vertices.is_empty() && !faces.is_empty() {
-        // Convert atlas to rasterizer texture
-        let atlas_texture = state.project.atlas.to_raster_texture();
-        let textures = [atlas_texture];
-
-        render_mesh(
-            fb,
-            &vertices,
-            &faces,
-            &textures,
-            &state.camera,
-            &state.raster_settings,
-        );
     }
 
     // Draw selection overlays

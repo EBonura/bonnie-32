@@ -100,6 +100,10 @@ pub mod icon {
     pub const EYE_OFF: char = '\u{e0bb}';         // Hidden (eye-off)
     pub const ORBIT: char = '\u{e12e}';           // Orbit camera (orbit icon)
 
+    // Lock icons
+    pub const LOCK: char = '\u{e109}';            // Locked
+    pub const LOCK_OPEN: char = '\u{e10a}';       // Unlocked
+
     // Input / Controller
     pub const GAMEPAD_2: char = '\u{e0df}';       // Gamepad controller
 }
