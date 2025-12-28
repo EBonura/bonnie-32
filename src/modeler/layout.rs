@@ -4,7 +4,8 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, render_mesh, Camera, OrthoProjection};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
-use super::state::{ModelerState, SelectMode, TransformTool, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
+use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
+use super::tools::ModelerToolId;
 use super::viewport::draw_modeler_viewport;
 use super::mesh_editor::EditableMesh;
 use super::actions::{create_modeler_actions, build_context};
@@ -203,17 +204,17 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 
     toolbar.separator();
 
-    // Transform tools with gizmos
+    // Transform tools with gizmos (using new tool system)
     let tools = [
-        (icon::MOVE, "Move (G)", TransformTool::Move),
-        (icon::ROTATE_3D, "Rotate (R)", TransformTool::Rotate),
-        (icon::SCALE_3D, "Scale (S)", TransformTool::Scale),
+        (icon::MOVE, "Move (G)", ModelerToolId::Move),
+        (icon::ROTATE_3D, "Rotate (R)", ModelerToolId::Rotate),
+        (icon::SCALE_3D, "Scale (S)", ModelerToolId::Scale),
     ];
 
-    for (icon_char, tooltip, tool) in tools {
-        let is_active = state.tool == tool;
+    for (icon_char, tooltip, tool_id) in tools {
+        let is_active = state.tool_box.is_active(tool_id);
         if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_active) {
-            state.tool = tool;
+            state.tool_box.toggle(tool_id);
         }
     }
 
@@ -308,34 +309,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     };
     toolbar.label(&file_label);
 
-    // Keyboard shortcuts for file operations
-    let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
-             || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
-    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-
-    if ctrl && is_key_pressed(KeyCode::N) && action == ModelerAction::None {
-        action = ModelerAction::New;
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if ctrl && is_key_pressed(KeyCode::O) && action == ModelerAction::None {
-            action = ModelerAction::PromptLoad;
-        }
-        if ctrl && shift && is_key_pressed(KeyCode::S) && action == ModelerAction::None {
-            action = ModelerAction::SaveAs;
-        } else if ctrl && is_key_pressed(KeyCode::S) && action == ModelerAction::None {
-            action = ModelerAction::Save;
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        if ctrl && is_key_pressed(KeyCode::O) && action == ModelerAction::None {
-            action = ModelerAction::Import;
-        }
-        if ctrl && is_key_pressed(KeyCode::S) && action == ModelerAction::None {
-            action = ModelerAction::Export;
-        }
-    }
+    // Note: Keyboard shortcuts are now handled through the ActionRegistry in handle_actions()
 
     action
 }
@@ -965,6 +939,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     }
 
     // Mode indicator (UV vs Paint)
+    // Note: V/B/F shortcuts are handled through ActionRegistry in handle_actions()
     let mode_text = match state.atlas_edit_mode {
         AtlasEditMode::Uv => "UV (V)",
         AtlasEditMode::Paint => "Paint (V)",
@@ -972,25 +947,6 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let mode_color = ACCENT_COLOR;
     let text_width = mode_text.len() as f32 * 6.0;
     draw_text(mode_text, rect.x + rect.w - text_width - 8.0, rect.y + 14.0, 11.0, mode_color);
-
-    // V to toggle between UV and Paint mode
-    if is_key_pressed(KeyCode::V) {
-        state.atlas_edit_mode = state.atlas_edit_mode.toggle();
-        // Clear UV selection when switching modes
-        if state.atlas_edit_mode == AtlasEditMode::Paint {
-            state.uv_selection.clear();
-        }
-    }
-
-    // Brush type shortcuts (in paint mode)
-    if state.atlas_edit_mode == AtlasEditMode::Paint {
-        if is_key_pressed(KeyCode::B) {
-            state.brush_type = super::state::BrushType::Square;
-        }
-        if is_key_pressed(KeyCode::F) {
-            state.brush_type = super::state::BrushType::Fill;
-        }
-    }
 }
 
 /// DEPRECATED: Draw the UV Editor panel with the texture atlas and face UVs
@@ -1896,10 +1852,16 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
     y += line_height * 2.0;
 
-    // Tool info
+    // Tool info (using new tool system)
     draw_text("Tool:", rect.x, y + 14.0, 12.0, TEXT_DIM);
     y += line_height;
-    draw_text(state.tool.label(), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+    let tool_label = match state.tool_box.active_transform_tool() {
+        Some(ModelerToolId::Move) => "Move (G)",
+        Some(ModelerToolId::Rotate) => "Rotate (R)",
+        Some(ModelerToolId::Scale) => "Scale (S)",
+        _ => "Select",
+    };
+    draw_text(tool_label, rect.x, y + 14.0, 12.0, TEXT_COLOR);
 
     y += line_height * 2.0;
 
@@ -2033,6 +1995,7 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
 /// Returns a ModelerAction if a file action was triggered
 fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> ModelerAction {
     use crate::rasterizer::ShadingMode;
+    use crate::ui::Axis as UiAxis;
 
     // Build context for action enable/disable checks
     let has_selection = !state.selection.is_empty();
@@ -2044,6 +2007,8 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
         SelectMode::Face => "face",
     };
     let is_texture_mode = state.view_mode == ViewMode::Texture;
+    let is_dragging = state.drag_manager.is_dragging() || state.modal_transform != ModalTransform::None;
+    let is_paint_mode = is_texture_mode && state.atlas_edit_mode == AtlasEditMode::Paint;
 
     let ctx = build_context(
         state.can_undo(),
@@ -2055,6 +2020,8 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
         select_mode_str,
         false, // text_editing - would need to track this
         state.dirty,
+        is_dragging,
+        is_paint_mode,
     );
 
     let mut action = ModelerAction::None;
@@ -2110,19 +2077,18 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     }
 
     // ========================================================================
-    // Transform Actions
+    // Transform Actions (Modal - Blender-style G/S/R)
+    // These set the modal_transform mode; viewport.rs will start the actual drag
     // ========================================================================
-    if actions.triggered("transform.grab", &ctx) {
-        state.tool = TransformTool::Move;
-        state.set_status("Move", 1.0);
+    if actions.triggered("transform.grab", &ctx) && !is_dragging {
+        state.modal_transform = ModalTransform::Grab;
+        // Viewport will start the drag on next frame when it sees this flag
     }
-    if actions.triggered("transform.rotate", &ctx) {
-        state.tool = TransformTool::Rotate;
-        state.set_status("Rotate", 1.0);
+    if actions.triggered("transform.rotate", &ctx) && !is_dragging {
+        state.modal_transform = ModalTransform::Rotate;
     }
-    if actions.triggered("transform.scale", &ctx) {
-        state.tool = TransformTool::Scale;
-        state.set_status("Scale", 1.0);
+    if actions.triggered("transform.scale", &ctx) && !is_dragging {
+        state.modal_transform = ModalTransform::Scale;
     }
     if actions.triggered("transform.extrude", &ctx) {
         // Perform extrude immediately on selected faces
@@ -2173,6 +2139,83 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     }
 
     // ========================================================================
+    // Axis Constraints (during transforms)
+    // ========================================================================
+    if actions.triggered("axis.constrain_x", &ctx) {
+        state.drag_manager.set_axis(Some(UiAxis::X));
+        state.set_status("X axis", 0.5);
+    }
+    if actions.triggered("axis.constrain_y", &ctx) {
+        state.drag_manager.set_axis(Some(UiAxis::Y));
+        state.set_status("Y axis", 0.5);
+    }
+    // Note: Z axis constraint only works when dragging (otherwise Z is snap toggle)
+    if is_dragging && actions.triggered("axis.constrain_z", &ctx) {
+        state.drag_manager.set_axis(Some(UiAxis::Z));
+        state.set_status("Z axis", 0.5);
+    }
+
+    // ========================================================================
+    // Atlas/Paint Mode Actions
+    // ========================================================================
+    if actions.triggered("atlas.toggle_mode", &ctx) {
+        state.atlas_edit_mode = state.atlas_edit_mode.toggle();
+        // Clear UV selection when switching modes
+        if state.atlas_edit_mode == AtlasEditMode::Paint {
+            state.uv_selection.clear();
+        }
+        let mode = match state.atlas_edit_mode {
+            AtlasEditMode::Uv => "UV",
+            AtlasEditMode::Paint => "Paint",
+        };
+        state.set_status(&format!("Atlas mode: {}", mode), 1.0);
+    }
+    if actions.triggered("brush.square", &ctx) {
+        state.brush_type = super::state::BrushType::Square;
+        state.set_status("Square brush", 0.5);
+    }
+    if actions.triggered("brush.fill", &ctx) {
+        state.brush_type = super::state::BrushType::Fill;
+        state.set_status("Fill brush", 0.5);
+    }
+
+    // ========================================================================
+    // Context Menu Actions
+    // ========================================================================
+    if actions.triggered("context.open_menu", &ctx) {
+        // Tab key opens context menu at mouse position
+        let (mx, my) = mouse_position();
+        let world_pos = screen_to_world_position(state, mx, my);
+        let snapped = state.snap_settings.snap_vec3(world_pos);
+        state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));
+    }
+    if actions.triggered("context.close", &ctx) {
+        // Escape closes menus or cancels operations (priority order)
+        if state.context_menu.is_some() {
+            state.context_menu = None;
+        } else if state.drag_manager.is_dragging() {
+            // Cancel active drag and restore original positions
+            if let Some(original_positions) = state.drag_manager.cancel() {
+                for (idx, pos) in original_positions {
+                    if let Some(vert) = state.mesh.vertices.get_mut(idx) {
+                        vert.pos = pos;
+                    }
+                }
+                state.sync_mesh_to_project();
+            }
+            state.modal_transform = ModalTransform::None;
+        } else if state.transform_active {
+            // Cancel click-drag transform
+            apply_selected_positions_layout(state, &state.transform_start_positions.clone());
+            state.transform_active = false;
+            state.set_status("Move cancelled", 0.5);
+        } else if state.box_select_active {
+            state.box_select_active = false;
+            // box_select_start will be reset next time box selection starts
+        }
+    }
+
+    // ========================================================================
     // Arrow Key Movement (PicoCAD-style)
     // ========================================================================
     // Z key = temporarily disable snap (held key, not triggered through actions)
@@ -2191,6 +2234,68 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     }
 
     action
+}
+
+/// Apply positions back to selected elements (for cancelling transform_active drags)
+fn apply_selected_positions_layout(state: &mut ModelerState, positions: &[Vec3]) {
+    let mut pos_idx = 0;
+    let selection = state.selection.clone();
+
+    match &selection {
+        super::state::ModelerSelection::Vertices(verts) => {
+            for &vert_idx in verts {
+                if let Some(&new_pos) = positions.get(pos_idx) {
+                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = new_pos;
+                    }
+                }
+                pos_idx += 1;
+            }
+        }
+        super::state::ModelerSelection::Edges(edges) => {
+            for (v0, v1) in edges {
+                if let Some(&new_pos) = positions.get(pos_idx) {
+                    if let Some(vert) = state.mesh.vertices.get_mut(*v0) {
+                        vert.pos = new_pos;
+                    }
+                }
+                pos_idx += 1;
+                if let Some(&new_pos) = positions.get(pos_idx) {
+                    if let Some(vert) = state.mesh.vertices.get_mut(*v1) {
+                        vert.pos = new_pos;
+                    }
+                }
+                pos_idx += 1;
+            }
+        }
+        super::state::ModelerSelection::Faces(faces) => {
+            for &face_idx in faces {
+                if let Some(face) = state.mesh.faces.get(face_idx).cloned() {
+                    if let Some(&new_pos) = positions.get(pos_idx) {
+                        if let Some(vert) = state.mesh.vertices.get_mut(face.v0) {
+                            vert.pos = new_pos;
+                        }
+                    }
+                    pos_idx += 1;
+                    if let Some(&new_pos) = positions.get(pos_idx) {
+                        if let Some(vert) = state.mesh.vertices.get_mut(face.v1) {
+                            vert.pos = new_pos;
+                        }
+                    }
+                    pos_idx += 1;
+                    if let Some(&new_pos) = positions.get(pos_idx) {
+                        if let Some(vert) = state.mesh.vertices.get_mut(face.v2) {
+                            vert.pos = new_pos;
+                        }
+                    }
+                    pos_idx += 1;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    state.sync_mesh_to_project();
 }
 
 /// Handle arrow key movement for selected vertices/faces
@@ -2460,25 +2565,7 @@ impl PrimitiveType {
 
 /// Draw and handle context menu
 fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
-    // Check for Tab key to open menu (avoids conflict with right-click camera rotation)
-    // On Mac, right-click is used for camera rotation, so use Tab instead
-    if is_key_pressed(KeyCode::Tab) {
-        let (mx, my) = (ctx.mouse.x, ctx.mouse.y);
-
-        // Compute world position based on active viewport
-        let world_pos = screen_to_world_position(state, mx, my);
-
-        // Snap to grid
-        let snapped = state.snap_settings.snap_vec3(world_pos);
-
-        state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));
-    }
-
-    // Close menu on left click outside or Escape
-    if is_key_pressed(KeyCode::Escape) {
-        state.context_menu = None;
-        return;
-    }
+    // Note: Tab/Escape shortcuts are now handled through ActionRegistry in handle_actions()
 
     let menu = match &state.context_menu {
         Some(m) => m.clone(),

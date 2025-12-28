@@ -41,6 +41,8 @@ pub struct DragState {
     pub initial_angle: f32,
     /// Current angle (for rotation drags)
     pub current_angle: f32,
+    /// Center in screen coords (for rotation - calculate angle from this point)
+    pub center_screen: (f32, f32),
 }
 
 impl DragState {
@@ -58,6 +60,7 @@ impl DragState {
             current_mouse: initial_mouse,
             initial_angle: 0.0,
             current_angle: 0.0,
+            center_screen: (0.0, 0.0),
         }
     }
 
@@ -66,6 +69,7 @@ impl DragState {
         center: Vec3,
         initial_angle: f32,
         initial_mouse: (f32, f32),
+        center_screen: (f32, f32),
     ) -> Self {
         Self {
             initial_position: center,
@@ -75,6 +79,7 @@ impl DragState {
             current_mouse: initial_mouse,
             initial_angle,
             current_angle: initial_angle,
+            center_screen,
         }
     }
 

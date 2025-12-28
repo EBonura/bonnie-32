@@ -20,6 +20,10 @@ pub mod flags {
     pub const BUILD_MODE: u32 = 1 << 4;
     /// Has a mesh loaded
     pub const HAS_MESH: u32 = 1 << 5;
+    /// Currently dragging/transforming
+    pub const DRAGGING: u32 = 1 << 6;
+    /// In paint mode (within texture mode)
+    pub const PAINT_MODE: u32 = 1 << 7;
 }
 
 /// Create the complete action registry for the modeler
@@ -304,6 +308,37 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     // ========================================================================
+    // Axis Constraints (during transforms)
+    // ========================================================================
+    registry.register(
+        Action::new("axis.constrain_x")
+            .label("Constrain to X")
+            .shortcut(Shortcut::key(KeyCode::X))
+            .status_tip("Constrain transform to X axis")
+            .category("Transform")
+            .enabled_when(|ctx| ctx.has_flag(flags::DRAGGING)),
+    );
+
+    registry.register(
+        Action::new("axis.constrain_y")
+            .label("Constrain to Y")
+            .shortcut(Shortcut::key(KeyCode::Y))
+            .status_tip("Constrain transform to Y axis")
+            .category("Transform")
+            .enabled_when(|ctx| ctx.has_flag(flags::DRAGGING)),
+    );
+
+    // Note: Z key is also used for snap toggle, context determines which applies
+    registry.register(
+        Action::new("axis.constrain_z")
+            .label("Constrain to Z")
+            .shortcut(Shortcut::key(KeyCode::Z))
+            .status_tip("Constrain transform to Z axis")
+            .category("Transform")
+            .enabled_when(|ctx| ctx.has_flag(flags::DRAGGING)),
+    );
+
+    // ========================================================================
     // Snap Settings
     // ========================================================================
     registry.register(
@@ -313,6 +348,36 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .icon(icon::MAGNET)
             .status_tip("Hold Z to temporarily disable grid snapping")
             .category("Snap"),
+    );
+
+    // ========================================================================
+    // Atlas/Paint Mode Actions
+    // ========================================================================
+    registry.register(
+        Action::new("atlas.toggle_mode")
+            .label("Toggle UV/Paint")
+            .shortcut(Shortcut::key(KeyCode::V))
+            .status_tip("Toggle between UV editing and Paint mode")
+            .category("Atlas")
+            .enabled_when(|ctx| ctx.has_flag(flags::TEXTURE_MODE)),
+    );
+
+    registry.register(
+        Action::new("brush.square")
+            .label("Square Brush")
+            .shortcut(Shortcut::key(KeyCode::B))
+            .status_tip("Switch to square brush")
+            .category("Paint")
+            .enabled_when(|ctx| ctx.has_flag(flags::PAINT_MODE)),
+    );
+
+    registry.register(
+        Action::new("brush.fill")
+            .label("Fill Brush")
+            .shortcut(Shortcut::key(KeyCode::F))
+            .status_tip("Switch to fill brush")
+            .category("Paint")
+            .enabled_when(|ctx| ctx.has_flag(flags::PAINT_MODE)),
     );
 
     // ========================================================================
@@ -418,6 +483,8 @@ pub fn build_context(
     select_mode: &str, // "vertex", "edge", or "face"
     text_editing: bool,
     is_dirty: bool,
+    is_dragging: bool,
+    is_paint_mode: bool,
 ) -> ActionContext {
     let mut ctx = ActionContext {
         can_undo,
@@ -444,6 +511,14 @@ pub fn build_context(
         "edge" => ctx.flags |= flags::EDGE_MODE,
         "face" => ctx.flags |= flags::FACE_MODE,
         _ => {}
+    }
+
+    if is_dragging {
+        ctx.flags |= flags::DRAGGING;
+    }
+
+    if is_paint_mode {
+        ctx.flags |= flags::PAINT_MODE;
     }
 
     ctx
@@ -504,15 +579,50 @@ mod tests {
 
         // Face mode should show as checked when in face mode
         let ctx = build_context(
-            false, false, false, false, false, false, "face", false, false
+            false, false, false, false, false, false, "face", false, false, false, false
         );
         assert!(registry.is_checked("select.face_mode", &ctx));
         assert!(!registry.is_checked("select.vertex_mode", &ctx));
 
         // Texture mode toggle
         let ctx2 = build_context(
-            false, false, false, false, false, true, "face", false, false
+            false, false, false, false, false, true, "face", false, false, false, false
         );
         assert!(registry.is_checked("view.toggle_mode", &ctx2));
+    }
+
+    #[test]
+    fn test_axis_constraint_conditions() {
+        let registry = create_modeler_actions();
+
+        // Axis constraints should only be enabled when dragging
+        let ctx_not_dragging = build_context(
+            false, false, true, false, false, false, "vertex", false, false, false, false
+        );
+        assert!(!registry.is_enabled("axis.constrain_x", &ctx_not_dragging));
+
+        let ctx_dragging = build_context(
+            false, false, true, false, false, false, "vertex", false, false, true, false
+        );
+        assert!(registry.is_enabled("axis.constrain_x", &ctx_dragging));
+        assert!(registry.is_enabled("axis.constrain_y", &ctx_dragging));
+        assert!(registry.is_enabled("axis.constrain_z", &ctx_dragging));
+    }
+
+    #[test]
+    fn test_paint_mode_conditions() {
+        let registry = create_modeler_actions();
+
+        // Brush actions should only be enabled in paint mode
+        let ctx_not_paint = build_context(
+            false, false, false, false, false, true, "face", false, false, false, false
+        );
+        assert!(!registry.is_enabled("brush.square", &ctx_not_paint));
+
+        let ctx_paint = build_context(
+            false, false, false, false, false, true, "face", false, false, false, true
+        );
+        assert!(registry.is_enabled("brush.square", &ctx_paint));
+        assert!(registry.is_enabled("brush.fill", &ctx_paint));
     }
 }

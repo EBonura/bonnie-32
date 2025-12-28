@@ -9,8 +9,9 @@ use crate::rasterizer::{
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
     world_to_screen,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, TransformTool};
-use super::drag::{DragManager, DragUpdateResult, ActiveDrag};
+use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform};
+use super::drag::DragUpdateResult;
+use super::tools::ModelerToolId;
 
 /// Convert state::Axis to ui::Axis
 fn to_ui_axis(axis: Axis) -> UiAxis {
@@ -170,95 +171,77 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
     state.sync_mesh_to_project();
 }
 
-/// Handle modal transforms (G=Grab, S=Scale, R=Rotate)
+/// Handle modal transforms (G=Grab, S=Scale, R=Rotate) using DragManager
 fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
     if state.modal_transform == ModalTransform::None {
         return;
     }
 
-    // Handle axis constraints (X/Y/Z keys)
-    if is_key_pressed(KeyCode::X) {
-        state.axis_lock = Some(Axis::X);
-        state.set_status("X axis", 0.5);
-    } else if is_key_pressed(KeyCode::Y) {
-        state.axis_lock = Some(Axis::Y);
-        state.set_status("Y axis", 0.5);
-    } else if is_key_pressed(KeyCode::Z) {
-        state.axis_lock = Some(Axis::Z);
-        state.set_status("Z axis", 0.5);
+    // Must have an active drag
+    if !state.drag_manager.is_dragging() {
+        state.modal_transform = ModalTransform::None;
+        return;
     }
 
-    // Calculate mouse delta
-    let dx = mouse_pos.0 - state.modal_transform_start_mouse.0;
-    let dy = mouse_pos.1 - state.modal_transform_start_mouse.1;
+    // Note: Axis constraints (X/Y/Z keys) are now handled through ActionRegistry in handle_actions()
 
-    // Calculate new positions based on transform type
-    let new_positions: Vec<Vec3> = match state.modal_transform {
-        ModalTransform::Grab => {
-            let scale = 0.5; // Sensitivity
-            let offset = match state.axis_lock {
-                Some(Axis::X) => Vec3::new(dx * scale, 0.0, 0.0),
-                Some(Axis::Y) => Vec3::new(0.0, -dy * scale, 0.0),
-                Some(Axis::Z) => Vec3::new(0.0, 0.0, dx * scale),
-                None => Vec3::new(dx * scale, -dy * scale, 0.0),
-            };
-            state.modal_transform_start_positions.iter().map(|&p| p + offset).collect()
-        }
-        ModalTransform::Scale => {
-            let scale = 1.0 + (dx + dy) * 0.005;
-            state.modal_transform_start_positions.iter().map(|&start_pos| {
-                let offset = start_pos - state.modal_transform_center;
-                let scaled_offset = match state.axis_lock {
-                    Some(Axis::X) => Vec3::new(offset.x * scale, offset.y, offset.z),
-                    Some(Axis::Y) => Vec3::new(offset.x, offset.y * scale, offset.z),
-                    Some(Axis::Z) => Vec3::new(offset.x, offset.y, offset.z * scale),
-                    None => offset * scale,
-                };
-                state.modal_transform_center + scaled_offset
-            }).collect()
-        }
-        ModalTransform::Rotate => {
-            let angle = (dx + dy) * 0.01;
-            state.modal_transform_start_positions.iter().map(|&start_pos| {
-                let offset = start_pos - state.modal_transform_center;
-                let cos_a = angle.cos();
-                let sin_a = angle.sin();
-                let rotated_offset = match state.axis_lock {
-                    Some(Axis::X) => Vec3::new(
-                        offset.x,
-                        offset.y * cos_a - offset.z * sin_a,
-                        offset.y * sin_a + offset.z * cos_a,
-                    ),
-                    Some(Axis::Y) | None => Vec3::new(
-                        offset.x * cos_a + offset.z * sin_a,
-                        offset.y,
-                        -offset.x * sin_a + offset.z * cos_a,
-                    ),
-                    Some(Axis::Z) => Vec3::new(
-                        offset.x * cos_a - offset.y * sin_a,
-                        offset.x * sin_a + offset.y * cos_a,
-                        offset.z,
-                    ),
-                };
-                state.modal_transform_center + rotated_offset
-            }).collect()
-        }
-        ModalTransform::None => return,
-    };
+    // Update the drag with current mouse position
+    // Modal transforms use screen-space coordinates
+    let result = state.drag_manager.update(
+        mouse_pos,
+        &state.camera,
+        1, // Not used for screen-space transforms
+        1,
+    );
 
-    // Apply positions (real-time preview)
-    apply_selected_positions(state, &new_positions);
+    // Apply the updated positions
+    match result {
+        DragUpdateResult::Move { positions, .. } => {
+            for (vert_idx, new_pos) in positions {
+                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                    vert.pos = new_pos;
+                }
+            }
+            state.dirty = true;
+        }
+        DragUpdateResult::Scale { positions, .. } => {
+            for (vert_idx, new_pos) in positions {
+                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                    vert.pos = new_pos;
+                }
+            }
+            state.dirty = true;
+        }
+        DragUpdateResult::Rotate { positions, .. } => {
+            for (vert_idx, new_pos) in positions {
+                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                    vert.pos = new_pos;
+                }
+            }
+            state.dirty = true;
+        }
+        _ => {}
+    }
 
     // Confirm on left click
     if is_mouse_button_pressed(MouseButton::Left) {
+        if let Some(_result) = state.drag_manager.end() {
+            state.sync_mesh_to_project();
+        }
         state.modal_transform = ModalTransform::None;
         state.dirty = true;
         state.set_status("Transform applied", 1.0);
     }
 
-    // Cancel on ESC or right click
-    if is_key_pressed(KeyCode::Escape) || is_mouse_button_pressed(MouseButton::Right) {
-        apply_selected_positions(state, &state.modal_transform_start_positions.clone());
+    // Cancel on right click (Escape is handled through ActionRegistry in handle_actions())
+    if is_mouse_button_pressed(MouseButton::Right) {
+        if let Some(original_positions) = state.drag_manager.cancel() {
+            for (vert_idx, original_pos) in original_positions {
+                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                    vert.pos = original_pos;
+                }
+            }
+        }
         state.modal_transform = ModalTransform::None;
         state.set_status("Transform cancelled", 1.0);
     }
@@ -349,8 +332,8 @@ fn handle_drag_move(
         state.set_status("Moved", 0.5);
     }
 
-    // Cancel drag on ESC or right-click
-    if state.transform_active && (is_key_pressed(KeyCode::Escape) || is_mouse_button_pressed(MouseButton::Right)) {
+    // Cancel drag on right-click (Escape is handled through ActionRegistry in handle_actions())
+    if state.transform_active && is_mouse_button_pressed(MouseButton::Right) {
         apply_selected_positions(state, &state.transform_start_positions.clone());
         state.transform_active = false;
         state.set_status("Move cancelled", 0.5);
@@ -435,33 +418,78 @@ pub fn draw_modeler_viewport(
 
     state.viewport_last_mouse = mouse_pos;
 
-    // Modal transforms: G = Grab, S = Scale, R = Rotate
+    // Modal transforms: G = Grab, S = Scale, R = Rotate (now using DragManager)
+    // Note: G/S/R keys are now handled through ActionRegistry in handle_actions()
+    // which sets state.modal_transform. Here we just start the drag when needed.
     let has_selection = !state.selection.is_empty();
-    let no_transform_active = !state.transform_active && state.modal_transform == ModalTransform::None;
+    let modal_requested = state.modal_transform != ModalTransform::None;
+    let drag_not_started = !state.drag_manager.is_dragging();
 
-    if inside_viewport && has_selection && no_transform_active {
-        let start_modal = |mode: ModalTransform, state: &mut ModelerState, mouse: (f32, f32)| {
-            let positions = get_selected_positions(state);
-            if positions.is_empty() {
-                return;
-            }
+    // If modal_transform was set by ActionRegistry but drag not started, start it now
+    if has_selection && modal_requested && drag_not_started {
+        let mode = state.modal_transform;
+
+        // Get vertex indices and initial positions (same as gizmo drags)
+        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        if state.vertex_linking {
+            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+        }
+
+        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .collect();
+
+        if !initial_positions.is_empty() {
+            // Calculate center
+            let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
+            let center = sum * (1.0 / initial_positions.len() as f32);
+
             // Save undo state before starting transform
             state.push_undo(mode.label());
-            let center = positions.iter().fold(Vec3::ZERO, |acc, p| acc + *p) * (1.0 / positions.len() as f32);
-            state.modal_transform = mode;
-            state.modal_transform_start_mouse = mouse;
-            state.modal_transform_start_positions = positions;
-            state.modal_transform_center = center;
-            state.axis_lock = None;
-            state.set_status(&format!("{} - X/Y/Z to constrain, click to confirm", mode.label()), 5.0);
-        };
 
-        if is_key_pressed(KeyCode::G) {
-            start_modal(ModalTransform::Grab, state, mouse_pos);
-        } else if is_key_pressed(KeyCode::S) {
-            start_modal(ModalTransform::Scale, state, mouse_pos);
-        } else if is_key_pressed(KeyCode::R) {
-            start_modal(ModalTransform::Rotate, state, mouse_pos);
+            // Start the appropriate DragManager drag
+            match mode {
+                ModalTransform::Grab => {
+                    state.drag_manager.start_move(
+                        center,
+                        mouse_pos,
+                        None, // No axis constraint initially
+                        indices,
+                        initial_positions,
+                        state.snap_settings.enabled,
+                        state.snap_settings.grid_size,
+                    );
+                }
+                ModalTransform::Scale => {
+                    state.drag_manager.start_scale(
+                        center,
+                        mouse_pos,
+                        None, // No axis constraint initially
+                        indices,
+                        initial_positions,
+                    );
+                }
+                ModalTransform::Rotate => {
+                    // For rotation, initial angle is 0
+                    state.drag_manager.start_rotate(
+                        center,
+                        0.0, // initial angle
+                        mouse_pos,
+                        mouse_pos, // Use mouse_pos as center for screen-space rotation
+                        UiAxis::Y, // Default to Y axis rotation
+                        indices,
+                        initial_positions,
+                        state.snap_settings.enabled,
+                        15.0, // 15-degree snap increments
+                    );
+                }
+                ModalTransform::None => {}
+            }
+
+            state.set_status(&format!("{} - X/Y/Z to constrain, click to confirm", mode.label()), 5.0);
+        } else {
+            // No valid vertices, cancel the modal transform
+            state.modal_transform = ModalTransform::None;
         }
     }
 
@@ -538,12 +566,12 @@ pub fn draw_modeler_viewport(
     handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
 
     // Update hover state every frame (like world editor) - but not when gizmo is active
-    if !state.gizmo_dragging && state.gizmo_hovered_axis.is_none() {
+    if !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
         update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
     }
 
     // Handle box selection (left-drag without hitting an element or gizmo)
-    if !state.gizmo_dragging && state.gizmo_hovered_axis.is_none() {
+    if !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
         handle_box_selection(ctx, state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
     }
 
@@ -568,7 +596,7 @@ pub fn draw_modeler_viewport(
         && state.modal_transform == ModalTransform::None
         && !state.box_select_active
         && state.gizmo_hovered_axis.is_none()
-        && !state.gizmo_dragging
+        && !state.drag_manager.is_dragging()
     {
         handle_hover_click(state);
     }
@@ -708,10 +736,7 @@ fn handle_box_selection(
         state.box_select_active = false;
     }
 
-    // Cancel box selection on ESC
-    if state.box_select_active && is_key_pressed(KeyCode::Escape) {
-        state.box_select_active = false;
-    }
+    // Note: Cancel box selection on ESC is handled through ActionRegistry in handle_actions()
 }
 
 /// Draw grid on the floor plane
@@ -1382,12 +1407,13 @@ fn handle_transform_gizmo(
     fb_width: usize,
     fb_height: usize,
 ) {
-    match state.tool {
-        TransformTool::Move => handle_move_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
-        TransformTool::Scale => handle_scale_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
-        TransformTool::Rotate => handle_rotate_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
+    // Use new tool system - check which transform tool is active
+    match state.tool_box.active_transform_tool() {
+        Some(ModelerToolId::Move) => handle_move_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
+        Some(ModelerToolId::Scale) => handle_scale_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
+        Some(ModelerToolId::Rotate) => handle_rotate_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
         _ => {
-            // Select/Extrude modes don't have gizmos
+            // Select/Extrude modes or no tool active - no gizmos
             state.gizmo_hovered_axis = None;
         }
     }
@@ -1465,34 +1491,6 @@ fn get_axis_color(base_color: Color, is_hovered: bool, is_dragging: bool) -> Col
     }
 }
 
-/// Start a gizmo drag operation
-fn start_gizmo_drag(state: &mut ModelerState, axis: Axis, mouse_pos: (f32, f32), center: Vec3) {
-    state.gizmo_dragging = true;
-    state.gizmo_drag_axis = Some(axis);
-    state.gizmo_drag_start_mouse = mouse_pos;
-    state.gizmo_drag_center = center;
-
-    let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
-    if state.vertex_linking {
-        indices = state.mesh.expand_to_coincident(&indices, 0.001);
-    }
-
-    state.gizmo_drag_start_positions = indices.iter()
-        .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
-        .collect();
-}
-
-/// End a gizmo drag operation
-fn end_gizmo_drag(state: &mut ModelerState, action_name: &str) {
-    if !state.gizmo_drag_start_positions.is_empty() {
-        state.push_undo(action_name);
-        state.sync_mesh_to_project();
-    }
-    state.gizmo_dragging = false;
-    state.gizmo_drag_axis = None;
-    state.gizmo_drag_start_positions.clear();
-}
-
 // ============================================================================
 // MOVE GIZMO - Arrows pointing along each axis (now using DragManager)
 // ============================================================================
@@ -1517,11 +1515,11 @@ fn handle_move_gizmo(
         }
     };
 
-    // Check if using new drag manager
-    let using_new_drag = state.drag_manager.is_dragging() && state.drag_manager.active.is_move();
+    // Check if DragManager has an active move drag
+    let is_dragging = state.drag_manager.is_dragging() && state.drag_manager.active.is_move();
 
-    // Handle ongoing drag with new DragManager
-    if using_new_drag {
+    // Handle ongoing drag with DragManager
+    if is_dragging {
         if ctx.mouse.left_down {
             // Convert screen coords to framebuffer coords for ray casting
             let fb_mouse = (
@@ -1537,7 +1535,6 @@ fn handle_move_gizmo(
             );
 
             if let DragUpdateResult::Move { positions, .. } = result {
-                // Apply snapping if enabled and not holding Z
                 let snap_disabled = is_key_down(KeyCode::Z);
                 for (vert_idx, new_pos) in positions {
                     if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
@@ -1556,65 +1553,12 @@ fn handle_move_gizmo(
                 state.push_undo("Gizmo Move");
                 state.sync_mesh_to_project();
             }
-            // Also clear old state for compatibility
-            state.gizmo_dragging = false;
-            state.gizmo_drag_axis = None;
-        }
-    }
-    // Fallback to old drag system for compatibility during transition
-    else if state.gizmo_dragging {
-        let camera = &state.camera;
-        if ctx.mouse.left_down {
-            if let Some(axis) = state.gizmo_drag_axis {
-                let mouse_delta = (mouse_pos.0 - state.gizmo_drag_start_mouse.0, mouse_pos.1 - state.gizmo_drag_start_mouse.1);
-                let axis_dir = match axis {
-                    Axis::X => Vec3::new(1.0, 0.0, 0.0),
-                    Axis::Y => Vec3::new(0.0, 1.0, 0.0),
-                    Axis::Z => Vec3::new(0.0, 0.0, 1.0),
-                };
-
-                let axis_end_world = state.gizmo_drag_center + axis_dir * setup.world_length;
-                if let (Some((cx, cy)), Some((ex, ey))) = (
-                    world_to_screen(state.gizmo_drag_center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                    world_to_screen(axis_end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                ) {
-                    let cx_screen = cx / fb_width as f32 * draw_w;
-                    let cy_screen = cy / fb_height as f32 * draw_h;
-                    let ex_screen = ex / fb_width as f32 * draw_w;
-                    let ey_screen = ey / fb_height as f32 * draw_h;
-
-                    let axis_screen_dir = (ex_screen - cx_screen, ey_screen - cy_screen);
-                    let axis_screen_len = (axis_screen_dir.0.powi(2) + axis_screen_dir.1.powi(2)).sqrt();
-
-                    if axis_screen_len > 0.1 {
-                        let axis_norm = (axis_screen_dir.0 / axis_screen_len, axis_screen_dir.1 / axis_screen_len);
-                        let projected_delta = mouse_delta.0 * axis_norm.0 + mouse_delta.1 * axis_norm.1;
-                        let world_per_pixel = setup.world_length / axis_screen_len;
-                        let world_delta = projected_delta * world_per_pixel;
-
-                        for (vert_idx, original_pos) in &state.gizmo_drag_start_positions {
-                            if let Some(vert) = state.mesh.vertices.get_mut(*vert_idx) {
-                                vert.pos = *original_pos + axis_dir * world_delta;
-                                if !is_key_down(KeyCode::Z) && state.snap_settings.enabled {
-                                    let snap = state.snap_settings.grid_size;
-                                    vert.pos.x = (vert.pos.x / snap).round() * snap;
-                                    vert.pos.y = (vert.pos.y / snap).round() * snap;
-                                    vert.pos.z = (vert.pos.z / snap).round() * snap;
-                                }
-                            }
-                        }
-                        state.dirty = true;
-                    }
-                }
-            }
-        } else {
-            end_gizmo_drag(state, "Gizmo Move");
         }
     }
 
-    // Detect axis hover
+    // Detect axis hover (only when not dragging)
     state.gizmo_hovered_axis = None;
-    if !state.gizmo_dragging && !using_new_drag && inside_viewport {
+    if !is_dragging && inside_viewport {
         for (axis, end_screen, _) in &setup.axis_screen_ends {
             let dist = point_to_line_distance(
                 mouse_pos.0, mouse_pos.1,
@@ -1628,8 +1572,8 @@ fn handle_move_gizmo(
         }
     }
 
-    // Start drag on click - use new DragManager
-    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging && !using_new_drag {
+    // Start drag on click
+    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
         let axis = state.gizmo_hovered_axis.unwrap();
 
         // Get vertex indices and initial positions
@@ -1648,32 +1592,24 @@ fn handle_move_gizmo(
             (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
         );
 
-        // Start the new drag manager
+        // Start drag with DragManager
         state.drag_manager.start_move(
             setup.center,
             fb_mouse,
             Some(to_ui_axis(axis)),
             indices,
-            initial_positions.clone(),
+            initial_positions,
             state.snap_settings.enabled,
             state.snap_settings.grid_size,
         );
-
-        // Also set old state for compatibility with drawing code
-        state.gizmo_dragging = true;
-        state.gizmo_drag_axis = Some(axis);
-        state.gizmo_drag_start_mouse = mouse_pos;
-        state.gizmo_drag_center = setup.center;
-        state.gizmo_drag_start_positions = initial_positions;
     }
 
     // Draw move gizmo (arrows)
     for (axis, end_screen, base_color) in &setup.axis_screen_ends {
         let is_hovered = state.gizmo_hovered_axis == Some(*axis);
-        let is_dragging = (state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis))
-            || (using_new_drag && state.drag_manager.current_axis() == Some(to_ui_axis(*axis)));
-        let color = get_axis_color(*base_color, is_hovered, is_dragging);
-        let thickness = if is_hovered || is_dragging { 3.0 } else { 2.0 };
+        let axis_dragging = is_dragging && state.drag_manager.current_axis() == Some(to_ui_axis(*axis));
+        let color = get_axis_color(*base_color, is_hovered, axis_dragging);
+        let thickness = if is_hovered || axis_dragging { 3.0 } else { 2.0 };
 
         // Draw axis line
         draw_line(setup.center_screen.0, setup.center_screen.1, end_screen.0, end_screen.1, thickness, color);
@@ -1700,7 +1636,7 @@ fn handle_move_gizmo(
     }
 
     // Draw center circle
-    let center_color = if state.gizmo_dragging || using_new_drag { YELLOW } else { WHITE };
+    let center_color = if is_dragging { YELLOW } else { WHITE };
     draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
 }
 
@@ -1728,71 +1664,49 @@ fn handle_scale_gizmo(
         }
     };
 
-    let camera = &state.camera;
+    // Check if DragManager has an active scale drag
+    let is_dragging = state.drag_manager.is_dragging() && state.drag_manager.active.is_scale();
 
-    // Handle ongoing drag - scale along axis
-    if state.gizmo_dragging {
+    // Handle ongoing drag with DragManager
+    if is_dragging {
         if ctx.mouse.left_down {
-            if let Some(axis) = state.gizmo_drag_axis {
-                let mouse_delta = (mouse_pos.0 - state.gizmo_drag_start_mouse.0, mouse_pos.1 - state.gizmo_drag_start_mouse.1);
-                let axis_dir = match axis {
-                    Axis::X => Vec3::new(1.0, 0.0, 0.0),
-                    Axis::Y => Vec3::new(0.0, 1.0, 0.0),
-                    Axis::Z => Vec3::new(0.0, 0.0, 1.0),
-                };
+            let fb_mouse = (
+                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+            );
 
-                // Project axis to screen to determine scale direction
-                let axis_end_world = state.gizmo_drag_center + axis_dir * setup.world_length;
-                if let (Some((cx, cy)), Some((ex, ey))) = (
-                    world_to_screen(state.gizmo_drag_center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                    world_to_screen(axis_end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                ) {
-                    let cx_screen = cx / fb_width as f32 * draw_w;
-                    let cy_screen = cy / fb_height as f32 * draw_h;
-                    let ex_screen = ex / fb_width as f32 * draw_w;
-                    let ey_screen = ey / fb_height as f32 * draw_h;
+            let result = state.drag_manager.update(
+                fb_mouse,
+                &state.camera,
+                fb_width,
+                fb_height,
+            );
 
-                    let axis_screen_dir = (ex_screen - cx_screen, ey_screen - cy_screen);
-                    let axis_screen_len = (axis_screen_dir.0.powi(2) + axis_screen_dir.1.powi(2)).sqrt();
-
-                    if axis_screen_len > 0.1 {
-                        let axis_norm = (axis_screen_dir.0 / axis_screen_len, axis_screen_dir.1 / axis_screen_len);
-                        let projected_delta = mouse_delta.0 * axis_norm.0 + mouse_delta.1 * axis_norm.1;
-
-                        // Scale factor: 1.0 + delta * sensitivity
-                        let scale_factor = 1.0 + projected_delta * 0.005;
-
-                        // Apply scale relative to center
-                        for (vert_idx, original_pos) in &state.gizmo_drag_start_positions {
-                            if let Some(vert) = state.mesh.vertices.get_mut(*vert_idx) {
-                                let offset = *original_pos - state.gizmo_drag_center;
-                                let scaled_offset = match axis {
-                                    Axis::X => Vec3::new(offset.x * scale_factor, offset.y, offset.z),
-                                    Axis::Y => Vec3::new(offset.x, offset.y * scale_factor, offset.z),
-                                    Axis::Z => Vec3::new(offset.x, offset.y, offset.z * scale_factor),
-                                };
-                                vert.pos = state.gizmo_drag_center + scaled_offset;
-
-                                if !is_key_down(KeyCode::Z) && state.snap_settings.enabled {
-                                    let snap = state.snap_settings.grid_size;
-                                    vert.pos.x = (vert.pos.x / snap).round() * snap;
-                                    vert.pos.y = (vert.pos.y / snap).round() * snap;
-                                    vert.pos.z = (vert.pos.z / snap).round() * snap;
-                                }
-                            }
-                        }
-                        state.dirty = true;
+            if let DragUpdateResult::Scale { positions, .. } = result {
+                let snap_disabled = is_key_down(KeyCode::Z);
+                for (vert_idx, new_pos) in positions {
+                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = if state.snap_settings.enabled && !snap_disabled {
+                            state.snap_settings.snap_vec3(new_pos)
+                        } else {
+                            new_pos
+                        };
                     }
                 }
+                state.dirty = true;
             }
         } else {
-            end_gizmo_drag(state, "Gizmo Scale");
+            // End drag
+            if let Some(_result) = state.drag_manager.end() {
+                state.push_undo("Gizmo Scale");
+                state.sync_mesh_to_project();
+            }
         }
     }
 
-    // Detect hover on cube handles
+    // Detect hover on cube handles (only when not dragging)
     state.gizmo_hovered_axis = None;
-    if !state.gizmo_dragging && inside_viewport {
+    if !is_dragging && inside_viewport {
         let cube_size = 6.0;
         for (axis, end_screen, _) in &setup.axis_screen_ends {
             let dx = mouse_pos.0 - end_screen.0;
@@ -1805,22 +1719,46 @@ fn handle_scale_gizmo(
     }
 
     // Start drag on click
-    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging {
-        start_gizmo_drag(state, state.gizmo_hovered_axis.unwrap(), mouse_pos, setup.center);
+    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
+        let axis = state.gizmo_hovered_axis.unwrap();
+
+        // Get vertex indices and initial positions
+        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        if state.vertex_linking {
+            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+        }
+
+        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .collect();
+
+        let fb_mouse = (
+            (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+            (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+        );
+
+        // Start drag with DragManager
+        state.drag_manager.start_scale(
+            setup.center,
+            fb_mouse,
+            Some(to_ui_axis(axis)),
+            indices,
+            initial_positions,
+        );
     }
 
     // Draw scale gizmo (lines with cubes)
     for (axis, end_screen, base_color) in &setup.axis_screen_ends {
         let is_hovered = state.gizmo_hovered_axis == Some(*axis);
-        let is_dragging = state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis);
-        let color = get_axis_color(*base_color, is_hovered, is_dragging);
-        let thickness = if is_hovered || is_dragging { 3.0 } else { 2.0 };
+        let axis_dragging = is_dragging && state.drag_manager.current_axis() == Some(to_ui_axis(*axis));
+        let color = get_axis_color(*base_color, is_hovered, axis_dragging);
+        let thickness = if is_hovered || axis_dragging { 3.0 } else { 2.0 };
 
         // Draw axis line
         draw_line(setup.center_screen.0, setup.center_screen.1, end_screen.0, end_screen.1, thickness, color);
 
         // Draw cube at end
-        let cube_size = if is_hovered || is_dragging { 5.0 } else { 4.0 };
+        let cube_size = if is_hovered || axis_dragging { 5.0 } else { 4.0 };
         draw_rectangle(
             end_screen.0 - cube_size,
             end_screen.1 - cube_size,
@@ -1831,7 +1769,7 @@ fn handle_scale_gizmo(
     }
 
     // Draw center circle
-    let center_color = if state.gizmo_dragging { YELLOW } else { WHITE };
+    let center_color = if is_dragging { YELLOW } else { WHITE };
     draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
 }
 
@@ -1865,69 +1803,45 @@ fn handle_rotate_gizmo(
     let camera_basis_y = state.camera.basis_y;
     let camera_basis_z = state.camera.basis_z;
 
-    // Handle ongoing drag - rotate around axis
-    if state.gizmo_dragging {
+    // Check if DragManager has an active rotate drag
+    let is_dragging = state.drag_manager.is_dragging() && state.drag_manager.active.is_rotate();
+
+    // Handle ongoing drag with DragManager
+    if is_dragging {
         if ctx.mouse.left_down {
-            if let Some(axis) = state.gizmo_drag_axis {
-                // Calculate angle from mouse movement around center
-                let start_vec = (
-                    state.gizmo_drag_start_mouse.0 - setup.center_screen.0,
-                    state.gizmo_drag_start_mouse.1 - setup.center_screen.1,
-                );
-                let current_vec = (
-                    mouse_pos.0 - setup.center_screen.0,
-                    mouse_pos.1 - setup.center_screen.1,
-                );
+            // Rotation uses screen-space coordinates for angle calculation
+            let result = state.drag_manager.update(
+                mouse_pos,  // screen-space mouse position
+                &state.camera,
+                fb_width,
+                fb_height,
+            );
 
-                // Calculate angle between vectors
-                let start_angle = start_vec.1.atan2(start_vec.0);
-                let current_angle = current_vec.1.atan2(current_vec.0);
-                let angle = current_angle - start_angle;
-
-                // Apply rotation around the selected axis
-                let cos_a = angle.cos();
-                let sin_a = angle.sin();
-
-                for (vert_idx, original_pos) in &state.gizmo_drag_start_positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(*vert_idx) {
-                        let offset = *original_pos - state.gizmo_drag_center;
-                        let rotated_offset = match axis {
-                            Axis::X => Vec3::new(
-                                offset.x,
-                                offset.y * cos_a - offset.z * sin_a,
-                                offset.y * sin_a + offset.z * cos_a,
-                            ),
-                            Axis::Y => Vec3::new(
-                                offset.x * cos_a + offset.z * sin_a,
-                                offset.y,
-                                -offset.x * sin_a + offset.z * cos_a,
-                            ),
-                            Axis::Z => Vec3::new(
-                                offset.x * cos_a - offset.y * sin_a,
-                                offset.x * sin_a + offset.y * cos_a,
-                                offset.z,
-                            ),
+            if let DragUpdateResult::Rotate { positions, .. } = result {
+                let snap_disabled = is_key_down(KeyCode::Z);
+                for (vert_idx, new_pos) in positions {
+                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = if state.snap_settings.enabled && !snap_disabled {
+                            state.snap_settings.snap_vec3(new_pos)
+                        } else {
+                            new_pos
                         };
-                        vert.pos = state.gizmo_drag_center + rotated_offset;
-
-                        if !is_key_down(KeyCode::Z) && state.snap_settings.enabled {
-                            let snap = state.snap_settings.grid_size;
-                            vert.pos.x = (vert.pos.x / snap).round() * snap;
-                            vert.pos.y = (vert.pos.y / snap).round() * snap;
-                            vert.pos.z = (vert.pos.z / snap).round() * snap;
-                        }
                     }
                 }
                 state.dirty = true;
             }
         } else {
-            end_gizmo_drag(state, "Gizmo Rotate");
+            // End drag
+            if let Some(_result) = state.drag_manager.end() {
+                state.push_undo("Gizmo Rotate");
+                state.sync_mesh_to_project();
+            }
         }
     }
 
-    // Detect hover on rotation circles - check each circle individually
+    // Detect hover on rotation circles (only when not dragging)
     state.gizmo_hovered_axis = None;
-    if !state.gizmo_dragging && inside_viewport {
+    if !is_dragging && inside_viewport {
         let axes_to_check = [
             (Axis::X, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
             (Axis::Y, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
@@ -1970,8 +1884,38 @@ fn handle_rotate_gizmo(
     }
 
     // Start drag on click
-    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !state.gizmo_dragging {
-        start_gizmo_drag(state, state.gizmo_hovered_axis.unwrap(), mouse_pos, setup.center);
+    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
+        let axis = state.gizmo_hovered_axis.unwrap();
+
+        // Get vertex indices and initial positions
+        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        if state.vertex_linking {
+            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+        }
+
+        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .collect();
+
+        // Calculate initial angle (for screen-space rotation)
+        let start_vec = (
+            mouse_pos.0 - setup.center_screen.0,
+            mouse_pos.1 - setup.center_screen.1,
+        );
+        let initial_angle = start_vec.1.atan2(start_vec.0);
+
+        // Start drag with DragManager (rotation uses screen-space angle calculation)
+        state.drag_manager.start_rotate(
+            setup.center,
+            initial_angle,
+            mouse_pos,           // screen-space mouse
+            setup.center_screen, // screen-space center for angle calculation
+            to_ui_axis(axis),
+            indices,
+            initial_positions,
+            state.snap_settings.enabled,
+            15.0, // Snap to 15-degree increments
+        );
     }
 
     // Draw rotation circles
@@ -1979,9 +1923,9 @@ fn handle_rotate_gizmo(
 
     for (axis, base_color) in &axes {
         let is_hovered = state.gizmo_hovered_axis == Some(*axis);
-        let is_dragging = state.gizmo_dragging && state.gizmo_drag_axis == Some(*axis);
-        let color = get_axis_color(*base_color, is_hovered, is_dragging);
-        let thickness = if is_hovered || is_dragging { 2.5 } else { 1.5 };
+        let axis_dragging = is_dragging && state.drag_manager.current_axis() == Some(to_ui_axis(*axis));
+        let color = get_axis_color(*base_color, is_hovered, axis_dragging);
+        let thickness = if is_hovered || axis_dragging { 2.5 } else { 1.5 };
 
         // Draw arc representing rotation around this axis
         let segments = 32;
@@ -2024,6 +1968,6 @@ fn handle_rotate_gizmo(
     }
 
     // Draw center circle
-    let center_color = if state.gizmo_dragging { YELLOW } else { WHITE };
+    let center_color = if is_dragging { YELLOW } else { WHITE };
     draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
 }

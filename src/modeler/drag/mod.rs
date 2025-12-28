@@ -110,6 +110,7 @@ impl DragManager {
         center: Vec3,
         initial_angle: f32,
         initial_mouse: (f32, f32),
+        center_screen: (f32, f32),
         axis: Axis,
         vertex_indices: Vec<usize>,
         initial_positions: Vec<(usize, Vec3)>,
@@ -120,7 +121,7 @@ impl DragManager {
         let config = tracker.create_config(snap_enabled, snap_degrees);
 
         self.active = ActiveDrag::Rotate(tracker);
-        self.state = Some(DragState::new_rotation(center, initial_angle, initial_mouse));
+        self.state = Some(DragState::new_rotation(center, initial_angle, initial_mouse, center_screen));
         self.config = Some(config);
     }
 
@@ -194,28 +195,29 @@ impl DragManager {
             }
 
             ActiveDrag::Rotate(tracker) => {
-                if let Some(config) = &self.config {
-                    let update = apply_drag_update(
-                        config,
-                        state,
-                        mouse_pos,
-                        camera,
-                        viewport_width,
-                        viewport_height,
-                    );
+                // Use screen-space angle calculation (more intuitive for gizmos)
+                // Calculate angle from vectors relative to center_screen
+                let start_vec = (
+                    state.initial_mouse.0 - state.center_screen.0,
+                    state.initial_mouse.1 - state.center_screen.1,
+                );
+                let current_vec = (
+                    mouse_pos.0 - state.center_screen.0,
+                    mouse_pos.1 - state.center_screen.1,
+                );
 
-                    if let Some(new_angle) = update.new_angle {
-                        state.current_angle = new_angle;
-                        let angle_delta = state.angle_delta();
-                        let new_positions = tracker.compute_new_positions(angle_delta);
-                        return DragUpdateResult::Rotate {
-                            status: update.status,
-                            angle: new_angle,
-                            positions: new_positions,
-                        };
-                    }
+                let start_angle = start_vec.1.atan2(start_vec.0);
+                let current_angle = current_vec.1.atan2(current_vec.0);
+                let angle_delta = current_angle - start_angle;
+
+                state.current_angle = state.initial_angle + angle_delta;
+                let new_positions = tracker.compute_new_positions(angle_delta);
+
+                DragUpdateResult::Rotate {
+                    status: DragStatus::Continue,
+                    angle: state.current_angle,
+                    positions: new_positions,
                 }
-                DragUpdateResult::Denied
             }
 
             ActiveDrag::Scale(tracker) => {
