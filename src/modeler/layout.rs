@@ -1,12 +1,13 @@
 //! Modeler UI layout and rendering
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, render_mesh, Camera, OrthoProjection};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use super::state::{ModelerState, SelectMode, TransformTool, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
 use super::viewport::draw_modeler_viewport;
 use super::mesh_editor::EditableMesh;
+use super::actions::{create_modeler_actions, build_context};
 use crate::rasterizer::Vec3;
 
 // Colors (matching tracker/editor style)
@@ -59,6 +60,8 @@ pub struct ModelerLayout {
     pub right_panel_split: SplitPanel,
     /// Timeline height
     pub timeline_height: f32,
+    /// Action registry for keyboard shortcuts
+    pub actions: ActionRegistry,
 }
 
 impl ModelerLayout {
@@ -69,6 +72,7 @@ impl ModelerLayout {
             left_split: SplitPanel::vertical(102).with_ratio(0.5).with_min_size(100.0),
             right_panel_split: SplitPanel::vertical(103).with_ratio(0.4).with_min_size(80.0),
             timeline_height: 80.0,
+            actions: create_modeler_actions(),
         }
     }
 }
@@ -143,8 +147,9 @@ pub fn draw_modeler(
     // Draw status bar
     draw_status_bar(status_rect, state);
 
-    // Handle keyboard shortcuts
-    handle_keyboard(state);
+    // Handle keyboard shortcuts using action registry
+    let keyboard_action = handle_actions(&layout.actions, state);
+    let action = if keyboard_action != ModelerAction::None { keyboard_action } else { action };
 
     // Draw context menu (on top of everything)
     draw_context_menu(ctx, state);
@@ -2024,66 +2029,136 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
     draw_text(hints, rect.right() - (hints.len() as f32 * 6.0) - 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
 }
 
-fn handle_keyboard(state: &mut ModelerState) {
-    let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
-             || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
-    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+/// Handle all keyboard actions using the action registry
+/// Returns a ModelerAction if a file action was triggered
+fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> ModelerAction {
+    use crate::rasterizer::ShadingMode;
+
+    // Build context for action enable/disable checks
+    let has_selection = !state.selection.is_empty();
+    let has_face_selection = matches!(&state.selection, super::state::ModelerSelection::Faces(f) if !f.is_empty());
+    let has_vertex_selection = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if !v.is_empty());
+    let select_mode_str = match state.select_mode {
+        SelectMode::Vertex => "vertex",
+        SelectMode::Edge => "edge",
+        SelectMode::Face => "face",
+    };
+    let is_texture_mode = state.view_mode == ViewMode::Texture;
+
+    let ctx = build_context(
+        state.can_undo(),
+        state.can_redo(),
+        has_selection,
+        has_face_selection,
+        has_vertex_selection,
+        is_texture_mode,
+        select_mode_str,
+        false, // text_editing - would need to track this
+        state.dirty,
+    );
+
+    let mut action = ModelerAction::None;
 
     // ========================================================================
-    // Undo/Redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y)
+    // File Actions (return ModelerAction)
     // ========================================================================
-    if ctrl && is_key_pressed(KeyCode::Z) {
-        if shift {
-            state.redo();
-        } else {
-            state.undo();
-        }
-        return; // Don't process other shortcuts
+    if actions.triggered("file.new", &ctx) {
+        action = ModelerAction::New;
     }
-    if ctrl && is_key_pressed(KeyCode::Y) {
+    if actions.triggered("file.open", &ctx) {
+        action = ModelerAction::PromptLoad;
+    }
+    if actions.triggered("file.save", &ctx) {
+        action = ModelerAction::Save;
+    }
+    if actions.triggered("file.save_as", &ctx) {
+        action = ModelerAction::SaveAs;
+    }
+
+    // ========================================================================
+    // Edit Actions
+    // ========================================================================
+    if actions.triggered("edit.undo", &ctx) {
+        state.undo();
+        return action; // Don't process other shortcuts after undo
+    }
+    if actions.triggered("edit.redo", &ctx) || actions.triggered("edit.redo_alt", &ctx) {
         state.redo();
-        return;
+        return action;
+    }
+    if actions.triggered("edit.delete", &ctx) || actions.triggered("edit.delete_alt", &ctx) {
+        delete_selection(state);
     }
 
-    // File shortcuts (Ctrl+N, Ctrl+S, etc.) are now handled in draw_toolbar
-    // to properly return ModelerAction
+    // ========================================================================
+    // Selection Mode Actions
+    // ========================================================================
+    if actions.triggered("select.vertex_mode", &ctx) {
+        state.select_mode = SelectMode::Vertex;
+        state.selection = super::state::ModelerSelection::None;
+        state.set_status("Vertex mode", 1.0);
+    }
+    if actions.triggered("select.edge_mode", &ctx) {
+        state.select_mode = SelectMode::Edge;
+        state.selection = super::state::ModelerSelection::None;
+        state.set_status("Edge mode", 1.0);
+    }
+    if actions.triggered("select.face_mode", &ctx) {
+        state.select_mode = SelectMode::Face;
+        state.selection = super::state::ModelerSelection::None;
+        state.set_status("Face mode", 1.0);
+    }
 
     // ========================================================================
-    // Z key = Temporarily disable grid snap (hold to disable)
+    // Transform Actions
     // ========================================================================
-    // Note: We store snap state when Z is pressed, restore when released
-    // For simplicity, we just check if Z is held and temporarily override
-    let snap_override = is_key_down(KeyCode::Z);
+    if actions.triggered("transform.grab", &ctx) {
+        state.tool = TransformTool::Move;
+        state.set_status("Move", 1.0);
+    }
+    if actions.triggered("transform.rotate", &ctx) {
+        state.tool = TransformTool::Rotate;
+        state.set_status("Rotate", 1.0);
+    }
+    if actions.triggered("transform.scale", &ctx) {
+        state.tool = TransformTool::Scale;
+        state.set_status("Scale", 1.0);
+    }
+    if actions.triggered("transform.extrude", &ctx) {
+        // Perform extrude immediately on selected faces
+        if let super::state::ModelerSelection::Faces(face_indices) = &state.selection {
+            if !face_indices.is_empty() {
+                let indices = face_indices.clone();
+                state.push_undo("Extrude");
+                let extrude_amount = state.snap_settings.grid_size;
+                let new_faces = state.mesh.extrude_faces(&indices, extrude_amount);
+                state.selection = super::state::ModelerSelection::Faces(new_faces);
+                state.sync_mesh_to_project();
+                state.dirty = true;
+                state.set_status(&format!("Extruded {} face(s)", indices.len()), 1.0);
+            } else {
+                state.set_status("Select faces to extrude", 1.0);
+            }
+        } else {
+            state.set_status("Switch to Face mode (3) to extrude", 1.0);
+        }
+    }
 
     // ========================================================================
-    // Arrow key movement (PicoCAD-style: move selection by grid units)
+    // View Actions
     // ========================================================================
-    handle_arrow_key_movement(state, shift, snap_override);
-
-    // ========================================================================
-    // PicoCAD-style shortcuts
-    // ========================================================================
-
-    // V = Toggle Build/Texture view mode
-    if is_key_pressed(KeyCode::V) && !ctrl {
+    if actions.triggered("view.toggle_mode", &ctx) {
         state.toggle_view_mode();
     }
-
-    // Space = Toggle fullscreen viewport
-    if is_key_pressed(KeyCode::Space) {
+    if actions.triggered("view.toggle_fullscreen", &ctx) {
         state.toggle_fullscreen_viewport();
     }
-
-    // M = Toggle wireframe/solid render mode - like PicoCAD
-    if is_key_pressed(KeyCode::M) && !ctrl {
+    if actions.triggered("view.toggle_wireframe", &ctx) {
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "Wireframe" } else { "Solid" };
         state.set_status(&format!("Render: {}", mode), 1.0);
     }
-
-    // L = Toggle shading (like PicoCAD)
-    if is_key_pressed(KeyCode::L) && !ctrl {
-        use crate::rasterizer::ShadingMode;
+    if actions.triggered("view.cycle_shading", &ctx) {
         state.raster_settings.shading = match state.raster_settings.shading {
             ShadingMode::None => ShadingMode::Flat,
             ShadingMode::Flat => ShadingMode::Gouraud,
@@ -2098,65 +2173,24 @@ fn handle_keyboard(state: &mut ModelerState) {
     }
 
     // ========================================================================
-    // Selection mode shortcuts
+    // Arrow Key Movement (PicoCAD-style)
     // ========================================================================
+    // Z key = temporarily disable snap (held key, not triggered through actions)
+    let snap_override = is_key_down(KeyCode::Z);
+    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
-    // 1/2/3 = Vertex/Edge/Face selection modes
-    if is_key_pressed(KeyCode::Key1) && !ctrl {
-        state.select_mode = SelectMode::Vertex;
-        state.selection = super::state::ModelerSelection::None;
-        state.set_status("Vertex mode", 1.0);
-    }
+    // Handle movement with small/regular variants
+    let move_triggered =
+        actions.triggered("move.left", &ctx) || actions.triggered("move.right", &ctx) ||
+        actions.triggered("move.up", &ctx) || actions.triggered("move.down", &ctx) ||
+        actions.triggered("move.left_small", &ctx) || actions.triggered("move.right_small", &ctx) ||
+        actions.triggered("move.up_small", &ctx) || actions.triggered("move.down_small", &ctx);
 
-    if is_key_pressed(KeyCode::Key2) && !ctrl {
-        state.select_mode = SelectMode::Edge;
-        state.selection = super::state::ModelerSelection::None;
-        state.set_status("Edge mode", 1.0);
-    }
-
-    if is_key_pressed(KeyCode::Key3) && !ctrl {
-        state.select_mode = SelectMode::Face;
-        state.selection = super::state::ModelerSelection::None;
-        state.set_status("Face mode", 1.0);
+    if move_triggered {
+        handle_arrow_key_movement(state, shift, snap_override);
     }
 
-    // Transform tools (not in Object mode for Mesh context)
-    if is_key_pressed(KeyCode::G) {
-        state.tool = TransformTool::Move;
-        state.set_status("Move", 1.0);
-    }
-    if is_key_pressed(KeyCode::R) {
-        state.tool = TransformTool::Rotate;
-        state.set_status("Rotate", 1.0);
-    }
-    if is_key_pressed(KeyCode::S) && !ctrl {
-        state.tool = TransformTool::Scale;
-        state.set_status("Scale", 1.0);
-    }
-    if is_key_pressed(KeyCode::E) {
-        // Perform extrude immediately on selected faces
-        if let super::state::ModelerSelection::Faces(face_indices) = &state.selection {
-            if !face_indices.is_empty() {
-                let indices = face_indices.clone();
-                state.push_undo("Extrude"); // Save state before extrude
-                let extrude_amount = state.snap_settings.grid_size; // Extrude by one grid unit
-                let new_faces = state.mesh.extrude_faces(&indices, extrude_amount);
-                state.selection = super::state::ModelerSelection::Faces(new_faces);
-                state.sync_mesh_to_project(); // Keep project in sync
-                state.dirty = true;
-                state.set_status(&format!("Extruded {} face(s)", indices.len()), 1.0);
-            } else {
-                state.set_status("Select faces to extrude", 1.0);
-            }
-        } else {
-            state.set_status("Switch to Face mode (3) to extrude", 1.0);
-        }
-    }
-
-    // Delete selection (Delete or Backspace - NOT X since X is for multi-select)
-    if is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace) {
-        delete_selection(state);
-    }
+    action
 }
 
 /// Handle arrow key movement for selected vertices/faces

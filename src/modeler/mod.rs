@@ -15,6 +15,7 @@ mod model_browser;
 mod mesh_editor;
 mod obj_import;
 mod mesh_browser;
+pub mod actions;
 
 // Re-export public API
 #[allow(unused_imports)]
@@ -28,3 +29,4 @@ pub use model_browser::*;
 pub use mesh_editor::*;
 pub use obj_import::*;
 pub use mesh_browser::*;
+pub use actions::{create_modeler_actions, build_context};

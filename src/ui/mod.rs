@@ -21,6 +21,7 @@ mod input;
 mod tabbar;
 mod icons;
 mod theme;
+mod actions;
 
 pub use rect::*;
 pub use panel::*;
@@ -29,3 +30,4 @@ pub use input::*;
 pub use tabbar::*;
 pub use icons::*;
 pub use theme::*;
+pub use actions::*;

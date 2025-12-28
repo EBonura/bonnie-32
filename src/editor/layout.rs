@@ -1,13 +1,14 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
 use super::{EditorState, EditorTool, Selection, GridViewMode, SECTOR_SIZE};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
+use super::actions::{create_editor_actions, build_context, flags};
 
 /// Actions that can be triggered by the editor UI
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +37,8 @@ pub struct EditorLayout {
     pub left_split: SplitPanel,
     /// Right vertical split (texture palette | properties)
     pub right_panel_split: SplitPanel,
+    /// Action registry for keyboard shortcuts
+    pub actions: ActionRegistry,
 }
 
 impl EditorLayout {
@@ -47,6 +50,7 @@ impl EditorLayout {
             right_split: SplitPanel::horizontal(1001).with_ratio(0.75).with_min_size(150.0),
             left_split: SplitPanel::vertical(1002).with_ratio(0.6).with_min_size(100.0),
             right_panel_split: SplitPanel::vertical(1003).with_ratio(0.6).with_min_size(100.0),
+            actions: create_editor_actions(),
         }
     }
 
@@ -228,8 +232,8 @@ pub fn draw_editor(
     let status_rect = main_rect.slice_bottom(status_height);
     let panels_rect = main_rect.remaining_after_bottom(status_height);
 
-    // Draw unified toolbar
-    let action = draw_unified_toolbar(ctx, toolbar_rect, state, icon_font);
+    // Draw unified toolbar and handle keyboard shortcuts
+    let action = draw_unified_toolbar(ctx, toolbar_rect, state, icon_font, &layout.actions);
 
     // Main split: left panels | rest
     let (left_rect, rest_rect) = layout.main_split.update(ctx, panels_rect);
@@ -286,7 +290,7 @@ pub fn draw_editor(
     action
 }
 
-fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) -> EditorAction {
+fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>, actions: &ActionRegistry) -> EditorAction {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
     let mut action = EditorAction::None;
@@ -553,44 +557,66 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     };
     toolbar.label(&file_label);
 
-    // Keyboard shortcuts
-    let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
-             || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
-    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    // Build action context for keyboard shortcuts
+    let has_object_selection = matches!(&state.selection, Selection::Object { .. });
+    let has_sector_selection = matches!(&state.selection, Selection::Sector { .. } | Selection::SectorFace { .. });
+    let has_selection = has_object_selection || has_sector_selection;
 
-    if ctrl && is_key_pressed(KeyCode::N) {
+    let mut selection_flags = 0u32;
+    if has_object_selection {
+        selection_flags |= flags::OBJECT_SELECTED;
+    }
+    if has_sector_selection {
+        selection_flags |= flags::SECTOR_SELECTED;
+    }
+
+    let actx = build_context(
+        !state.undo_stack.is_empty(),
+        !state.redo_stack.is_empty(),
+        has_selection,
+        state.clipboard.is_some(),
+        selection_flags,
+        false, // text_editing
+        state.dirty,
+    );
+
+    // File actions
+    if actions.triggered("file.new", &actx) {
         action = EditorAction::New;
     }
+
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if ctrl && is_key_pressed(KeyCode::O) {
+        if actions.triggered("file.open", &actx) {
             action = EditorAction::PromptLoad;
         }
-        if ctrl && shift && is_key_pressed(KeyCode::S) {
+        if actions.triggered("file.save_as", &actx) {
             action = EditorAction::SaveAs;
-        } else if ctrl && is_key_pressed(KeyCode::S) {
+        } else if actions.triggered("file.save", &actx) {
             action = EditorAction::Save;
         }
     }
+
     #[cfg(target_arch = "wasm32")]
     {
-        if ctrl && is_key_pressed(KeyCode::O) {
+        if actions.triggered("file.open", &actx) {
             action = EditorAction::Import;
         }
-        if ctrl && is_key_pressed(KeyCode::S) {
+        if actions.triggered("file.save", &actx) {
             action = EditorAction::Export;
         }
     }
-    if ctrl && is_key_pressed(KeyCode::Z) {
-        if shift {
-            state.redo();
-        } else {
-            state.undo();
-        }
+
+    // Edit actions
+    if actions.triggered("edit.undo", &actx) {
+        state.undo();
+    }
+    if actions.triggered("edit.redo", &actx) {
+        state.redo();
     }
 
-    // Copy selected object (Ctrl+C)
-    if ctrl && is_key_pressed(KeyCode::C) {
+    // Copy selected object
+    if actions.triggered("edit.copy", &actx) {
         if let Selection::Object { room, index } = &state.selection {
             if let Some(r) = state.level.rooms.get(*room) {
                 if let Some(obj) = r.objects.get(*index) {
@@ -601,8 +627,8 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
 
-    // Paste object (Ctrl+V) - place at selected sector
-    if ctrl && is_key_pressed(KeyCode::V) {
+    // Paste object - place at selected sector
+    if actions.triggered("edit.paste", &actx) {
         if let Some(copied) = state.clipboard.clone() {
             // Get target sector from selection
             let target = match &state.selection {
