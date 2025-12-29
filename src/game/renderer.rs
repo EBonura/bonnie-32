@@ -27,11 +27,21 @@ pub fn draw_test_viewport(
 ) {
     let frame_start = FrameTimings::start();
 
-    // Resize framebuffer to match game resolution (toggle via debug menu)
-    let (fb_w, fb_h) = if game.raster_settings.low_resolution {
-        (WIDTH, HEIGHT)       // 320x240 PS1 native
+    // Resize framebuffer based on resolution and aspect ratio settings
+    let (fb_w, fb_h) = if game.raster_settings.stretch_to_fill {
+        // Stretch mode: keep vertical resolution fixed, scale horizontal to match viewport aspect ratio
+        // This maintains consistent pixel size while utilizing full screen width
+        let base_h = if game.raster_settings.low_resolution { HEIGHT } else { HEIGHT_HI };
+        let viewport_aspect = rect.w / rect.h;
+        let scaled_w = (base_h as f32 * viewport_aspect) as usize;
+        (scaled_w.max(1), base_h)
     } else {
-        (WIDTH_HI, HEIGHT_HI) // 640x480 high res
+        // 4:3 mode: fixed PS1 resolution
+        if game.raster_settings.low_resolution {
+            (WIDTH, HEIGHT)       // 320x240 PS1 native
+        } else {
+            (WIDTH_HI, HEIGHT_HI) // 640x480 high res
+        }
     };
     fb.resize(fb_w, fb_h);
 
@@ -178,20 +188,26 @@ pub fn draw_test_viewport(
     let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
     texture.set_filter(FilterMode::Nearest);
 
-    // Calculate draw area maintaining aspect ratio (4:3 for PS1)
-    let fb_aspect = fb.width as f32 / fb.height as f32;
-    let rect_aspect = rect.w / rect.h;
-    let (draw_w, draw_h, draw_x, draw_y) = if fb_aspect > rect_aspect {
-        let w = rect.w;
-        let h = rect.w / fb_aspect;
-        (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+    // Calculate draw area - framebuffer matches viewport in stretch mode, needs letterboxing in 4:3
+    let (draw_w, draw_h, draw_x, draw_y) = if game.raster_settings.stretch_to_fill {
+        // Framebuffer already sized to viewport aspect, draw at full size
+        (rect.w, rect.h, rect.x, rect.y)
     } else {
-        let h = rect.h;
-        let w = rect.h * fb_aspect;
-        (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        // Maintain aspect ratio (4:3 for PS1) with letterboxing
+        let fb_aspect = fb.width as f32 / fb.height as f32;
+        let rect_aspect = rect.w / rect.h;
+        if fb_aspect > rect_aspect {
+            let w = rect.w;
+            let h = rect.w / fb_aspect;
+            (w, h, rect.x, rect.y + (rect.h - h) * 0.5)
+        } else {
+            let h = rect.h;
+            let w = rect.h * fb_aspect;
+            (w, h, rect.x + (rect.w - w) * 0.5, rect.y)
+        }
     };
 
-    // Draw letterbox bars
+    // Draw letterbox bars (background for non-rendered area)
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(10, 10, 12, 255));
 
     // Draw the rendered frame
@@ -446,12 +462,13 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
         "Affine UV",     // 3 - PS1 texture warping
         "Fixed-Point",   // 4 - PS1 fixed-point math (jitter)
         "Low Res",       // 5 - 320x240
-        "RGB555",        // 6 - PS1 15-bit color
-        "Dithering",     // 7 - 4x4 Bayer
-        "Shading",       // 8 - None/Flat/Gouraud
-        "FPS",           // 9 - 30/60/Unlocked
-        "---",           // 10 - Separator
-        "Reset",         // 11
+        "4:3 Aspect",    // 6 - 4:3 aspect ratio (vs stretch to fill)
+        "RGB555",        // 7 - PS1 15-bit color
+        "Dithering",     // 8 - PS1 dithering
+        "Shading",       // 9 - None/Flat/Gouraud
+        "FPS",           // 10 - 30/60/Unlocked
+        "---",           // 11 - Separator
+        "Reset",         // 12
     ];
     let menu_h = 20.0 + items.len() as f32 * row_height + 14.0;
     let selected = game.debug_menu_selection;
@@ -563,20 +580,28 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                 }
             }
             6 => {
+                // 4:3 aspect ratio (vs stretch to fill)
+                // Note: toggle shows ON when NOT stretching (i.e., maintaining 4:3)
+                draw_toggle(menu_x, y, !game.raster_settings.stretch_to_fill);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.stretch_to_fill = !game.raster_settings.stretch_to_fill;
+                }
+            }
+            7 => {
                 // RGB555 (PS1 15-bit color)
                 draw_toggle(menu_x, y, game.raster_settings.use_rgb555);
                 if is_selected && toggle_pressed(input) {
                     game.raster_settings.use_rgb555 = !game.raster_settings.use_rgb555;
                 }
             }
-            7 => {
-                // Dithering (4x4 Bayer)
+            8 => {
+                // Dithering (PS1 ordered dithering)
                 draw_toggle(menu_x, y, game.raster_settings.dithering);
                 if is_selected && toggle_pressed(input) {
                     game.raster_settings.dithering = !game.raster_settings.dithering;
                 }
             }
-            8 => {
+            9 => {
                 // Shading mode (cycle: None -> Flat -> Gouraud)
                 let mode_name = match game.raster_settings.shading {
                     ShadingMode::None => "None",
@@ -604,7 +629,7 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     }
                 }
             }
-            9 => {
+            10 => {
                 // FPS limit (cycle: 30 -> 60 -> Unlocked)
                 draw_text(game.fps_limit.label(), menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
 
@@ -619,7 +644,7 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     }
                 }
             }
-            11 => {
+            12 => {
                 // Reset game
                 draw_text("[Press A]", menu_x + 100.0, y, 12.0, Color::from_rgba(80, 80, 90, 255));
 
