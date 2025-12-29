@@ -1114,7 +1114,7 @@ impl Default for RasterSettings {
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240
             dithering: true,        // PS1 default: dithering enabled for smooth gradients
-            stretch_to_fill: true,  // Default: use full viewport space
+            stretch_to_fill: false, // Default: 4:3 aspect ratio with letterboxing
             wireframe_overlay: false, // Default: wireframe off
             ortho_projection: None,  // Default: perspective projection
             use_rgb555: true,        // PS1 default: 15-bit color mode
