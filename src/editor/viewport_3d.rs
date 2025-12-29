@@ -13,7 +13,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext};
 use crate::rasterizer::{
-    Framebuffer, Texture as RasterTexture, render_mesh, Color as RasterColor, Vec3,
+    Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
     world_to_screen, world_to_screen_with_depth,
     point_to_segment_distance, point_in_triangle_2d,
@@ -1366,6 +1366,14 @@ pub fn draw_viewport_3d(
         Vec::new()
     };
 
+    // Convert textures to RGB555 if enabled
+    let use_rgb555 = state.raster_settings.use_rgb555;
+    let textures_15: Vec<_> = if use_rgb555 {
+        textures.iter().map(|t| t.to_15()).collect()
+    } else {
+        Vec::new()
+    };
+
     // Render each room with its own ambient setting (skip hidden ones)
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         // Skip hidden rooms
@@ -1378,7 +1386,12 @@ pub fn draw_viewport_3d(
             ..state.raster_settings.clone()
         };
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
+
+        if use_rgb555 {
+            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &state.camera_3d, &render_settings);
+        } else {
+            render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
+        }
     }
 
     // Draw wall preview when in DrawWall mode (after geometry so depth testing works)

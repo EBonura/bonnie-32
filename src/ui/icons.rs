@@ -65,6 +65,8 @@ pub mod icon {
     pub const SUN: char = '\u{e178}';         // Lighting/shading
     pub const BLEND: char = '\u{e59c}';       // Dithering (color blending)
     pub const PROPORTIONS: char = '\u{e5cf}'; // Aspect ratio toggle (4:3 vs stretch)
+    pub const ARROW_DOWN_UP: char = '\u{e1c7}'; // Z-buffer / depth sorting (arrow-down-up)
+    pub const PALETTE: char = '\u{e12f}';     // RGB555 color mode (15-bit PS1 color)
 
     // Music editor
     pub const MUSIC: char = '\u{e122}';       // Music/notes

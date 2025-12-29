@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry, draw_icon_centered};
-use crate::rasterizer::{Framebuffer, render_mesh, Camera, OrthoProjection};
+use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
 use super::tools::ModelerToolId;
@@ -261,6 +261,18 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "Wireframe" } else { "Solid" };
         state.set_status(&format!("Render: {}", mode), 1.5);
+    }
+    // Z-buffer toggle (ON = z-buffer, OFF = painter's algorithm)
+    if toolbar.icon_button_active(ctx, icon::ARROW_DOWN_UP, icon_font, "Z-Buffer (OFF = painter's algorithm)", state.raster_settings.use_zbuffer) {
+        state.raster_settings.use_zbuffer = !state.raster_settings.use_zbuffer;
+        let mode = if state.raster_settings.use_zbuffer { "Z-Buffer" } else { "Painter's Algorithm" };
+        state.set_status(&format!("Depth: {}", mode), 1.5);
+    }
+    // RGB555 toggle (PS1-authentic 15-bit color mode)
+    if toolbar.icon_button_active(ctx, icon::PALETTE, icon_font, "RGB555 (PS1 15-bit color mode)", state.raster_settings.use_rgb555) {
+        state.raster_settings.use_rgb555 = !state.raster_settings.use_rgb555;
+        let mode = if state.raster_settings.use_rgb555 { "RGB555 (15-bit)" } else { "RGB888 (24-bit)" };
+        state.set_status(&format!("Color: {}", mode), 1.5);
     }
 
     toolbar.separator();
@@ -1665,8 +1677,13 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         ortho_settings.backface_wireframe = false;
 
         // Convert atlas to texture (shared by all objects)
+        let use_rgb555 = state.raster_settings.use_rgb555;
         let atlas_texture = state.project.atlas.to_raster_texture();
-        let textures = [atlas_texture];
+        let atlas_texture_15 = if use_rgb555 {
+            Some(state.project.atlas.to_raster_texture_15())
+        } else {
+            None
+        };
 
         // Render all visible objects
         for (obj_idx, obj) in state.project.objects.iter().enumerate() {
@@ -1709,7 +1726,23 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             }).collect();
 
             if !vertices.is_empty() && !faces.is_empty() {
-                render_mesh(fb, &vertices, &faces, &textures, &ortho_camera, &ortho_settings);
+                if use_rgb555 {
+                    // RGB555 rendering path
+                    let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
+                    render_mesh_15(
+                        fb,
+                        &vertices,
+                        &faces,
+                        &textures_15,
+                        None,
+                        &ortho_camera,
+                        &ortho_settings,
+                    );
+                } else {
+                    // RGB888 rendering path (original)
+                    let textures = [atlas_texture.clone()];
+                    render_mesh(fb, &vertices, &faces, &textures, &ortho_camera, &ortho_settings);
+                }
             }
         }
 

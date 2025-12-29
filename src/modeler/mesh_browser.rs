@@ -4,7 +4,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR, TEXT_COLOR};
-use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, world_to_screen};
+use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, world_to_screen};
 use super::mesh_editor::EditableMesh;
 use super::obj_import::ObjImporter;
 use std::path::PathBuf;
@@ -441,7 +441,11 @@ fn draw_orbit_preview(
     let settings = RasterSettings::default();
 
     if !mesh.vertices.is_empty() {
-        render_mesh(fb, &mesh.vertices, &mesh.faces, &[], &camera, &settings);
+        if settings.use_rgb555 {
+            render_mesh_15(fb, &mesh.vertices, &mesh.faces, &[], None, &camera, &settings);
+        } else {
+            render_mesh(fb, &mesh.vertices, &mesh.faces, &[], &camera, &settings);
+        }
     }
 
     // Draw a simple floor plane indicator

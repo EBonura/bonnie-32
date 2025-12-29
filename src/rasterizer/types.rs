@@ -3,6 +3,417 @@
 use super::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
+// =============================================================================
+// PS1 RGB555 Color Type
+// =============================================================================
+
+/// PS1-authentic 15-bit color with semi-transparency bit
+///
+/// Format: `sRRRRRGG GGGBBBBB` (big-endian for clarity)
+/// - Bit 15 (s): Semi-transparency flag (1 = use face's blend mode, 0 = write directly)
+/// - Bits 14-10: Red (0-31)
+/// - Bits 9-5: Green (0-31)
+/// - Bits 4-0: Blue (0-31)
+///
+/// Special value: 0x0000 = fully transparent (not drawn, like CLUT transparency)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Color15(pub u16);
+
+impl Color15 {
+    /// Fully transparent pixel - will not be drawn (acts as color key)
+    pub const TRANSPARENT: Color15 = Color15(0x0000);
+
+    /// Opaque black (bit 15 = 0, so no blending)
+    /// Note: To get drawable black, use BLACK_DRAWABLE which sets bit 15
+    pub const BLACK: Color15 = Color15(0x0000);
+
+    /// Drawable black (bit 15 set so it's not treated as transparent)
+    pub const BLACK_DRAWABLE: Color15 = Color15(0x8000);
+
+    /// Opaque white
+    pub const WHITE: Color15 = Color15(0x7FFF);
+
+    /// Semi-transparent white (bit 15 set)
+    pub const WHITE_SEMI: Color15 = Color15(0xFFFF);
+
+    /// Create from 5-bit RGB values (0-31 each), opaque (no semi-transparency)
+    #[inline]
+    pub fn new(r: u8, g: u8, b: u8) -> Self {
+        let r = (r.min(31) as u16) << 10;
+        let g = (g.min(31) as u16) << 5;
+        let b = b.min(31) as u16;
+        Color15(r | g | b)
+    }
+
+    /// Create from 5-bit RGB with semi-transparency bit
+    #[inline]
+    pub fn new_semi(r: u8, g: u8, b: u8, semi_transparent: bool) -> Self {
+        let mut c = Self::new(r, g, b);
+        if semi_transparent {
+            c.0 |= 0x8000;
+        }
+        c
+    }
+
+    /// Create from 8-bit RGB values (quantized to 5-bit)
+    #[inline]
+    pub fn from_rgb888(r: u8, g: u8, b: u8) -> Self {
+        Self::new(r >> 3, g >> 3, b >> 3)
+    }
+
+    /// Create from 8-bit RGB with semi-transparency
+    #[inline]
+    pub fn from_rgb888_semi(r: u8, g: u8, b: u8, semi_transparent: bool) -> Self {
+        Self::new_semi(r >> 3, g >> 3, b >> 3, semi_transparent)
+    }
+
+    /// Create from Color (8-bit) - quantizes to 5-bit
+    /// Maps BlendMode::Erase to transparent (0x0000)
+    /// Maps non-Opaque blend modes to semi-transparent (bit 15 set)
+    #[inline]
+    pub fn from_color(c: Color) -> Self {
+        if c.blend == BlendMode::Erase {
+            return Color15::TRANSPARENT;
+        }
+        let semi = c.blend != BlendMode::Opaque;
+        Self::from_rgb888_semi(c.r, c.g, c.b, semi)
+    }
+
+    /// Convert to Color (8-bit) for display
+    /// Maps transparent (0x0000) to BlendMode::Erase
+    /// Maps semi-transparent (bit 15) to BlendMode::Average (caller should override)
+    #[inline]
+    pub fn to_color(self) -> Color {
+        if self.is_transparent() {
+            return Color::TRANSPARENT;
+        }
+        let blend = if self.is_semi_transparent() {
+            BlendMode::Average // Default blend mode, face should override
+        } else {
+            BlendMode::Opaque
+        };
+        Color::with_blend(self.r8(), self.g8(), self.b8(), blend)
+    }
+
+    /// Check if this pixel is fully transparent (0x0000 = not drawn)
+    #[inline]
+    pub fn is_transparent(self) -> bool {
+        self.0 == 0x0000
+    }
+
+    /// Check if semi-transparency bit is set (bit 15)
+    #[inline]
+    pub fn is_semi_transparent(self) -> bool {
+        self.0 & 0x8000 != 0
+    }
+
+    /// Set semi-transparency bit
+    #[inline]
+    pub fn set_semi_transparent(&mut self, semi: bool) {
+        if semi {
+            self.0 |= 0x8000;
+        } else {
+            self.0 &= 0x7FFF;
+        }
+    }
+
+    /// Get red channel as 5-bit value (0-31)
+    #[inline]
+    pub fn r5(self) -> u8 {
+        ((self.0 >> 10) & 0x1F) as u8
+    }
+
+    /// Get green channel as 5-bit value (0-31)
+    #[inline]
+    pub fn g5(self) -> u8 {
+        ((self.0 >> 5) & 0x1F) as u8
+    }
+
+    /// Get blue channel as 5-bit value (0-31)
+    #[inline]
+    pub fn b5(self) -> u8 {
+        (self.0 & 0x1F) as u8
+    }
+
+    /// Get red channel as 8-bit value (0-255, expanded from 5-bit)
+    #[inline]
+    pub fn r8(self) -> u8 {
+        self.r5() << 3
+    }
+
+    /// Get green channel as 8-bit value (0-255, expanded from 5-bit)
+    #[inline]
+    pub fn g8(self) -> u8 {
+        self.g5() << 3
+    }
+
+    /// Get blue channel as 8-bit value (0-255, expanded from 5-bit)
+    #[inline]
+    pub fn b8(self) -> u8 {
+        self.b5() << 3
+    }
+
+    /// PS1-style texture modulation: (self * vertex_color) / 128
+    /// Works in 5-bit space for authentic PS1 behavior
+    /// Note: If result is all-zero RGB, sets bit 15 to make it drawable black (not transparent)
+    #[inline]
+    pub fn modulate(self, vertex_r: u8, vertex_g: u8, vertex_b: u8) -> Self {
+        // Convert vertex colors from 8-bit to 5-bit scale factor (0-31 maps to 0.0-~2.0)
+        // PS1 used 128 as neutral, so vertex 128 = no change
+        // In 5-bit: 16 = neutral (128 >> 3)
+        let r = ((self.r5() as u16 * vertex_r as u16) / 128).min(31) as u8;
+        let g = ((self.g5() as u16 * vertex_g as u16) / 128).min(31) as u8;
+        let b = ((self.b5() as u16 * vertex_b as u16) / 128).min(31) as u8;
+        // If result is all black (0x0000), set bit 15 to avoid being treated as transparent
+        let semi = self.is_semi_transparent() || (r == 0 && g == 0 && b == 0);
+        Self::new_semi(r, g, b, semi)
+    }
+
+    /// Apply shading (multiply by intensity 0.0-1.0)
+    /// Note: If result is all-zero RGB, sets bit 15 to make it drawable black (not transparent)
+    #[inline]
+    pub fn shade(self, intensity: f32) -> Self {
+        let i = intensity.clamp(0.0, 1.0);
+        let r = (self.r5() as f32 * i) as u8;
+        let g = (self.g5() as f32 * i) as u8;
+        let b = (self.b5() as f32 * i) as u8;
+        // If result is all black (0x0000), set bit 15 to avoid being treated as transparent
+        let semi = self.is_semi_transparent() || (r == 0 && g == 0 && b == 0);
+        Self::new_semi(r, g, b, semi)
+    }
+
+    /// Apply RGB shading (different intensity per channel)
+    /// Note: If result is all-zero RGB, sets bit 15 to make it drawable black (not transparent)
+    #[inline]
+    pub fn shade_rgb(self, r_shade: f32, g_shade: f32, b_shade: f32) -> Self {
+        let r = (self.r5() as f32 * r_shade.clamp(0.0, 2.0)).min(31.0) as u8;
+        let g = (self.g5() as f32 * g_shade.clamp(0.0, 2.0)).min(31.0) as u8;
+        let b = (self.b5() as f32 * b_shade.clamp(0.0, 2.0)).min(31.0) as u8;
+        // If result is all black (0x0000), set bit 15 to avoid being treated as transparent
+        let semi = self.is_semi_transparent() || (r == 0 && g == 0 && b == 0);
+        Self::new_semi(r, g, b, semi)
+    }
+
+    /// Interpolate between two colors (for Gouraud shading)
+    /// Note: If result is all-zero RGB, sets bit 15 to make it drawable black (not transparent)
+    #[inline]
+    pub fn lerp(self, other: Color15, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let inv_t = 1.0 - t;
+        let r = (self.r5() as f32 * inv_t + other.r5() as f32 * t) as u8;
+        let g = (self.g5() as f32 * inv_t + other.g5() as f32 * t) as u8;
+        let b = (self.b5() as f32 * inv_t + other.b5() as f32 * t) as u8;
+        // Semi-transparency: if either is semi-transparent, result is semi-transparent
+        // Also set bit 15 if result is all black to avoid transparency
+        let semi = self.is_semi_transparent() || other.is_semi_transparent() || (r == 0 && g == 0 && b == 0);
+        Self::new_semi(r, g, b, semi)
+    }
+
+    /// Convert to [u8; 4] RGBA for framebuffer display
+    #[inline]
+    pub fn to_rgba(self) -> [u8; 4] {
+        if self.is_transparent() {
+            [0, 0, 0, 0]
+        } else {
+            [self.r8(), self.g8(), self.b8(), 255]
+        }
+    }
+}
+
+// Serialization for Color15 - store as u16
+impl Serialize for Color15 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Color15 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        u16::deserialize(deserializer).map(Color15)
+    }
+}
+
+// =============================================================================
+// PS1 RGB555 Texture Type
+// =============================================================================
+
+/// PS1-authentic texture using 15-bit color (RGB555 + semi-transparency bit)
+///
+/// Uses `Vec<Color15>` for storage - each pixel is a u16 with:
+/// - 0x0000 = fully transparent (CLUT-style color key)
+/// - Bit 15 = semi-transparency flag (use face's blend mode if set)
+/// - Bits 14-10 = Red (5 bits, 0-31)
+/// - Bits 9-5 = Green (5 bits, 0-31)
+/// - Bits 4-0 = Blue (5 bits, 0-31)
+#[derive(Debug, Clone)]
+pub struct Texture15 {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<Color15>,
+    pub name: String,
+}
+
+impl Texture15 {
+    /// Create a new texture filled with white
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![Color15::WHITE; width * height],
+            name: String::new(),
+        }
+    }
+
+    /// Create a new texture filled with a specific color
+    pub fn new_filled(width: usize, height: usize, color: Color15) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![color; width * height],
+            name: String::new(),
+        }
+    }
+
+    /// Load texture from a PNG file
+    /// Alpha channel: 0 = transparent (0x0000), otherwise opaque
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
+        use image::GenericImageView;
+
+        let path = path.as_ref();
+        let img = image::open(path)
+            .map_err(|e| format!("Failed to load {}: {}", path.display(), e))?;
+
+        let (width, height) = img.dimensions();
+        let rgba = img.to_rgba8();
+
+        let pixels: Vec<Color15> = rgba
+            .pixels()
+            .map(|p| {
+                // Alpha 0 = transparent (0x0000), otherwise quantize to RGB555
+                if p[3] == 0 {
+                    Color15::TRANSPARENT
+                } else {
+                    Color15::from_rgb888(p[0], p[1], p[2])
+                }
+            })
+            .collect();
+
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        Ok(Self {
+            width: width as usize,
+            height: height as usize,
+            pixels,
+            name,
+        })
+    }
+
+    /// Load texture from raw PNG bytes
+    pub fn from_bytes(bytes: &[u8], name: String) -> Result<Self, String> {
+        use image::GenericImageView;
+
+        let img = image::load_from_memory(bytes)
+            .map_err(|e| format!("Failed to decode image: {}", e))?;
+
+        let (width, height) = img.dimensions();
+        let rgba = img.to_rgba8();
+
+        let pixels: Vec<Color15> = rgba
+            .pixels()
+            .map(|p| {
+                if p[3] == 0 {
+                    Color15::TRANSPARENT
+                } else {
+                    Color15::from_rgb888(p[0], p[1], p[2])
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            width: width as usize,
+            height: height as usize,
+            pixels,
+            name,
+        })
+    }
+
+    /// Convert from an 8-bit Texture
+    pub fn from_texture(tex: &Texture) -> Self {
+        let pixels: Vec<Color15> = tex.pixels.iter().map(|c| Color15::from_color(*c)).collect();
+        Self {
+            width: tex.width,
+            height: tex.height,
+            pixels,
+            name: tex.name.clone(),
+        }
+    }
+
+    /// Convert to an 8-bit Texture (for backwards compatibility)
+    pub fn to_texture(&self) -> Texture {
+        let pixels: Vec<Color> = self.pixels.iter().map(|c| c.to_color()).collect();
+        Texture {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Sample texture at UV coordinates (no filtering - PS1 style)
+    /// Handles negative UVs correctly using euclidean modulo for proper tiling
+    #[inline]
+    pub fn sample(&self, u: f32, v: f32) -> Color15 {
+        let u_wrapped = u.rem_euclid(1.0);
+        let v_wrapped = v.rem_euclid(1.0);
+        let tx = ((u_wrapped * self.width as f32) as usize).min(self.width - 1);
+        let ty = ((v_wrapped * self.height as f32) as usize).min(self.height - 1);
+        self.pixels[ty * self.width + tx]
+    }
+
+    /// Get pixel at x,y coordinates
+    #[inline]
+    pub fn get_pixel(&self, x: usize, y: usize) -> Color15 {
+        if x < self.width && y < self.height {
+            self.pixels[y * self.width + x]
+        } else {
+            Color15::TRANSPARENT
+        }
+    }
+
+    /// Set pixel at x,y coordinates
+    #[inline]
+    pub fn set_pixel(&mut self, x: usize, y: usize, color: Color15) {
+        if x < self.width && y < self.height {
+            self.pixels[y * self.width + x] = color;
+        }
+    }
+
+    /// Create a checkerboard test texture
+    pub fn checkerboard(width: usize, height: usize, color1: Color15, color2: Color15) -> Self {
+        let mut pixels = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let checker = ((x / 4) + (y / 4)) % 2 == 0;
+                pixels.push(if checker { color1 } else { color2 });
+            }
+        }
+        Self { width, height, pixels, name: "checkerboard".to_string() }
+    }
+}
+
+// =============================================================================
+// Original Color Type (8-bit, for backwards compatibility)
+// =============================================================================
+
 /// RGB color with PS1-style blend mode (no 8-bit alpha, just 6 blend states)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ColorDeserialize")]
@@ -494,6 +905,27 @@ impl Texture {
             Color::BLACK
         }
     }
+
+    /// Convert to Texture15 (RGB555) for PS1-authentic rendering
+    /// Handles blend modes: Erase becomes TRANSPARENT (0x0000),
+    /// other modes set semi-transparency bit if not Opaque
+    pub fn to_15(&self) -> Texture15 {
+        let pixels: Vec<Color15> = self.pixels.iter().map(|c| {
+            if c.blend == BlendMode::Erase {
+                Color15::TRANSPARENT
+            } else {
+                let semi = c.blend != BlendMode::Opaque;
+                Color15::from_rgb888_semi(c.r, c.g, c.b, semi)
+            }
+        }).collect();
+
+        Texture15 {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: self.name.clone(),
+        }
+    }
 }
 
 /// Shading mode
@@ -613,6 +1045,10 @@ pub struct RasterSettings {
     pub wireframe_overlay: bool,
     /// Orthographic projection settings (None = perspective)
     pub ortho_projection: Option<OrthoProjection>,
+    /// Use PS1-authentic RGB555 color mode (true = 15-bit color, false = 24-bit)
+    /// When enabled, textures and framebuffer use native 15-bit color with
+    /// PS1-authentic semi-transparency (bit 15) and CLUT-style transparency (0x0000)
+    pub use_rgb555: bool,
 }
 
 /// Orthographic projection settings for ortho views
@@ -660,10 +1096,11 @@ impl Default for RasterSettings {
             lights: vec![Light::directional(Vec3::new(-1.0, -1.0, -1.0), 0.7)],
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240
-            dithering: true,        // PS1 default: ordered dithering enabled
+            dithering: false,       // Disabled: conflicts with RGB555 mode (TODO: fix dithering for 15-bit)
             stretch_to_fill: true,  // Default: use full viewport space
             wireframe_overlay: false, // Default: wireframe off
             ortho_projection: None,  // Default: perspective projection
+            use_rgb555: true,        // PS1 default: 15-bit color mode
         }
     }
 }

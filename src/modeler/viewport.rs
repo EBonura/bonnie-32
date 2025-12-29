@@ -5,7 +5,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
-    Framebuffer, render_mesh, Color as RasterColor, Vec3,
+    Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
     world_to_screen,
 };
@@ -550,8 +550,16 @@ pub fn draw_modeler_viewport(
 
     // Render all visible objects
     // Convert atlas to rasterizer texture (shared by all objects)
+    // Use RGB555 or RGB888 based on settings
+    let use_rgb555 = state.raster_settings.use_rgb555;
+
+    // Pre-convert atlas to appropriate format
     let atlas_texture = state.project.atlas.to_raster_texture();
-    let textures = [atlas_texture];
+    let atlas_texture_15 = if use_rgb555 {
+        Some(state.project.atlas.to_raster_texture_15())
+    } else {
+        None
+    };
 
     for (obj_idx, obj) in state.project.objects.iter().enumerate() {
         // Skip hidden objects
@@ -594,14 +602,32 @@ pub fn draw_modeler_viewport(
         }).collect();
 
         if !vertices.is_empty() && !faces.is_empty() {
-            render_mesh(
-                fb,
-                &vertices,
-                &faces,
-                &textures,
-                &state.camera,
-                &state.raster_settings,
-            );
+            if use_rgb555 {
+                // RGB555 rendering path
+                // Blend modes come from texture pixels (semi-transparency bit)
+                // Default to Opaque per-face since blend is encoded in texture
+                let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
+                render_mesh_15(
+                    fb,
+                    &vertices,
+                    &faces,
+                    &textures_15,
+                    None, // Blend modes from texture pixels, not per-face
+                    &state.camera,
+                    &state.raster_settings,
+                );
+            } else {
+                // RGB888 rendering path (original)
+                let textures = [atlas_texture.clone()];
+                render_mesh(
+                    fb,
+                    &vertices,
+                    &faces,
+                    &textures,
+                    &state.camera,
+                    &state.raster_settings,
+                );
+            }
         }
     }
 

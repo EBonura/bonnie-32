@@ -532,6 +532,18 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
         state.set_status(&format!("Aspect Ratio: {}", mode), 2.0);
     }
+    // Z-buffer toggle (ON = z-buffer, OFF = painter's algorithm)
+    if toolbar.icon_button_active(ctx, icon::ARROW_DOWN_UP, icon_font, "Z-Buffer (OFF = painter's algorithm)", state.raster_settings.use_zbuffer) {
+        state.raster_settings.use_zbuffer = !state.raster_settings.use_zbuffer;
+        let mode = if state.raster_settings.use_zbuffer { "Z-Buffer" } else { "Painter's Algorithm" };
+        state.set_status(&format!("Depth: {}", mode), 2.0);
+    }
+    // RGB555 toggle (PS1-authentic 15-bit color mode)
+    if toolbar.icon_button_active(ctx, icon::PALETTE, icon_font, "RGB555 (PS1 15-bit color mode)", state.raster_settings.use_rgb555) {
+        state.raster_settings.use_rgb555 = !state.raster_settings.use_rgb555;
+        let mode = if state.raster_settings.use_rgb555 { "RGB555 (15-bit)" } else { "RGB888 (24-bit)" };
+        state.set_status(&format!("Color: {}", mode), 2.0);
+    }
 
     toolbar.separator();
 

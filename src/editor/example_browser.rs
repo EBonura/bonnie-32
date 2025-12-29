@@ -5,7 +5,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
 use crate::world::Level;
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use super::example_levels::{ExampleLevelInfo, LevelStats, get_level_stats};
 use super::TexturePack;
 
@@ -451,11 +451,23 @@ fn draw_orbit_preview(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
+    // Convert textures to RGB555 if enabled
+    let use_rgb555 = settings.use_rgb555;
+    let textures_15: Vec<_> = if use_rgb555 {
+        textures.iter().map(|t| t.to_15()).collect()
+    } else {
+        Vec::new()
+    };
+
     // Render each room using the same method as the main viewport
     for room in &level.rooms {
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         if !vertices.is_empty() {
-            render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+            if use_rgb555 {
+                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings);
+            } else {
+                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+            }
         }
     }
 
