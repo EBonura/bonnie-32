@@ -473,8 +473,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     for (obj_idx, obj) in room.objects.iter().enumerate() {
         // Calculate world position (center of sector)
         let world_x = room.position.x + (obj.sector_x as f32 + 0.5) * SECTOR_SIZE;
+        let world_y = room.position.y + obj.height;
         let world_z = room.position.z + (obj.sector_z as f32 + 0.5) * SECTOR_SIZE;
-        let (sx, sy) = world_to_screen(world_x, world_z);
+        // Convert to 2D plane based on view mode
+        let (plane_a, plane_b) = world_pos_to_plane(world_x, world_y, world_z);
+        let (sx, sy) = world_to_screen(plane_a, plane_b);
 
         // Check if this object is selected
         let is_selected = matches!(&state.selection, super::Selection::Object { room: r, index } if *r == current_room_idx && *index == obj_idx);
@@ -664,19 +667,24 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     // Draw ghost preview when dragging an object
     if let Some((drag_room_idx, obj_idx)) = state.grid_dragging_object {
         if state.grid_sector_drag_start.is_some() {
-            let (offset_x, offset_z) = state.grid_sector_drag_offset;
-            // Snap to sector grid
-            let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
-            let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
+            let (offset_a, offset_b) = state.grid_sector_drag_offset;
+            // Snap to sector grid (in plane coordinates)
+            let snapped_a = (offset_a / SECTOR_SIZE).round() * SECTOR_SIZE;
+            let snapped_b = (offset_b / SECTOR_SIZE).round() * SECTOR_SIZE;
+            // Convert plane offset to world offset
+            let (world_dx, _world_dy, world_dz) = plane_to_world_offset(snapped_a, snapped_b);
 
             if let Some(drag_room) = state.level.rooms.get(drag_room_idx) {
                 if let Some(obj) = drag_room.objects.get(obj_idx) {
                     // Get current world position
                     let current_pos = obj.world_position(drag_room);
-                    // Calculate ghost position
-                    let new_world_x = current_pos.x + snapped_x;
-                    let new_world_z = current_pos.z + snapped_z;
-                    let (gx, gy) = world_to_screen(new_world_x, new_world_z);
+                    // Calculate ghost position in world space
+                    let new_world_x = current_pos.x + world_dx;
+                    let new_world_y = current_pos.y;
+                    let new_world_z = current_pos.z + world_dz;
+                    // Convert to screen via plane coordinates
+                    let (plane_a, plane_b) = world_pos_to_plane(new_world_x, new_world_y, new_world_z);
+                    let (gx, gy) = world_to_screen(plane_a, plane_b);
 
                     // Draw ghost object (semi-transparent)
                     use crate::world::ObjectType;
@@ -753,17 +761,19 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
         // Handle drag release
         if ctx.mouse.left_released && state.grid_sector_drag_start.is_some() {
-            let (offset_x, offset_z) = state.grid_sector_drag_offset;
+            let (offset_a, offset_b) = state.grid_sector_drag_offset;
 
             // Check if we're dragging an object
             if let Some((drag_room_idx, obj_idx)) = state.grid_dragging_object {
-                // Object dragging - snap to sector grid
-                let snapped_x = (offset_x / SECTOR_SIZE).round() * SECTOR_SIZE;
-                let snapped_z = (offset_z / SECTOR_SIZE).round() * SECTOR_SIZE;
+                // Object dragging - snap to sector grid (in plane coordinates)
+                let snapped_a = (offset_a / SECTOR_SIZE).round() * SECTOR_SIZE;
+                let snapped_b = (offset_b / SECTOR_SIZE).round() * SECTOR_SIZE;
+                // Convert plane offset to world offset
+                let (world_dx, _world_dy, world_dz) = plane_to_world_offset(snapped_a, snapped_b);
 
                 // Convert to sector delta
-                let sector_dx = (snapped_x / SECTOR_SIZE).round() as i32;
-                let sector_dz = (snapped_z / SECTOR_SIZE).round() as i32;
+                let sector_dx = (world_dx / SECTOR_SIZE).round() as i32;
+                let sector_dz = (world_dz / SECTOR_SIZE).round() as i32;
 
                 if sector_dx != 0 || sector_dz != 0 {
                     state.save_undo();
@@ -790,9 +800,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             }
             // Handle sector/room dragging
             else {
-                // offset_x/offset_z are actually screen-plane offsets (a, b)
+                // offset_a/offset_b are screen-plane offsets
                 // Convert to world offsets using view mode
-                let (world_dx, world_dy, world_dz) = plane_to_world_offset(offset_x, offset_z);
+                let (world_dx, world_dy, world_dz) = plane_to_world_offset(offset_a, offset_b);
 
                 // Snap offsets to appropriate grid
                 let snapped_dx = (world_dx / SECTOR_SIZE).round() * SECTOR_SIZE;
