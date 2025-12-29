@@ -1,0 +1,27 @@
+(
+  rooms: [
+    (
+      id: 0,
+      position: (
+        x: -2048.0,
+        y: 0.0,
+        z: -2048.0,
+      ),
+      width: 3,
+      depth: 4,
+      sectors: [
+        [Some((floor: Some((heights: (512.0, 0.0, 0.0, 512.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (512.0, 512.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)])), Some((floor: Some((heights: (512.0, 0.0, -0.0, 512.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (512.0, 512.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)])), Some((floor: Some((heights: (512.0, -0.0, -0.0, -0.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (-0.0, 512.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)])), Some((floor: Some((heights: (-0.0, -0.0, 0.0, 0.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: [(heights: (0.0, 0.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)]))],
+        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, -0.0), texture: (pack: "64x-opengameart", name: "Coal"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (-0.0, 0.0, 0.0, -0.0), texture: (pack: "64x-opengameart", name: "Coal"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [], walls_south: [], walls_west: [])), Some((floor: Some((heights: (-0.0, 0.0, 0.0, 0.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [], walls_south: [], walls_west: []))],
+        [Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [(heights: (0.0, 0.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [(heights: (0.0, 0.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "retro-texture-pack", name: "FLOOR_1A"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: Some((heights: (2048.0, 2048.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), walls_north: [], walls_east: [(heights: (-0.0, -0.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)], walls_south: [], walls_west: [])), Some((floor: Some((heights: (0.0, 0.0, 0.0, 0.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, walkable: true, blend_mode: Opaque)), ceiling: None, walls_north: [], walls_east: [(heights: (0.0, 0.0, 2048.0, 2048.0), texture: (pack: "64x-opengameart", name: "Bark"), uv: None, solid: true, blend_mode: Opaque)], walls_south: [], walls_west: []))],
+      ],
+      portals: [],
+      ambient: 0.5,
+    ),
+  ],
+  editor_layout: (
+    main_split: 0.25,
+    right_split: 0.75,
+    left_split: 0.15873016,
+    right_panel_split: 0.15873016,
+  ),
+)
