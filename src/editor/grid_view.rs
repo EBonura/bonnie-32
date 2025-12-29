@@ -668,20 +668,21 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     if let Some((drag_room_idx, obj_idx)) = state.grid_dragging_object {
         if state.grid_sector_drag_start.is_some() {
             let (offset_a, offset_b) = state.grid_sector_drag_offset;
-            // Snap to sector grid (in plane coordinates)
-            let snapped_a = (offset_a / SECTOR_SIZE).round() * SECTOR_SIZE;
-            let snapped_b = (offset_b / SECTOR_SIZE).round() * SECTOR_SIZE;
             // Convert plane offset to world offset
-            let (world_dx, _world_dy, world_dz) = plane_to_world_offset(snapped_a, snapped_b);
+            let (world_dx, world_dy, world_dz) = plane_to_world_offset(offset_a, offset_b);
+            // Snap to sector grid for horizontal, click height for vertical
+            let snapped_dx = (world_dx / SECTOR_SIZE).round() * SECTOR_SIZE;
+            let snapped_dz = (world_dz / SECTOR_SIZE).round() * SECTOR_SIZE;
+            let snapped_dy = (world_dy / CLICK_HEIGHT).round() * CLICK_HEIGHT;
 
             if let Some(drag_room) = state.level.rooms.get(drag_room_idx) {
                 if let Some(obj) = drag_room.objects.get(obj_idx) {
                     // Get current world position
                     let current_pos = obj.world_position(drag_room);
                     // Calculate ghost position in world space
-                    let new_world_x = current_pos.x + world_dx;
-                    let new_world_y = current_pos.y;
-                    let new_world_z = current_pos.z + world_dz;
+                    let new_world_x = current_pos.x + snapped_dx;
+                    let new_world_y = current_pos.y + snapped_dy;
+                    let new_world_z = current_pos.z + snapped_dz;
                     // Convert to screen via plane coordinates
                     let (plane_a, plane_b) = world_pos_to_plane(new_world_x, new_world_y, new_world_z);
                     let (gx, gy) = world_to_screen(plane_a, plane_b);
@@ -765,29 +766,63 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
             // Check if we're dragging an object
             if let Some((drag_room_idx, obj_idx)) = state.grid_dragging_object {
-                // Object dragging - snap to sector grid (in plane coordinates)
-                let snapped_a = (offset_a / SECTOR_SIZE).round() * SECTOR_SIZE;
-                let snapped_b = (offset_b / SECTOR_SIZE).round() * SECTOR_SIZE;
                 // Convert plane offset to world offset
-                let (world_dx, _world_dy, world_dz) = plane_to_world_offset(snapped_a, snapped_b);
+                let (world_dx, world_dy, world_dz) = plane_to_world_offset(offset_a, offset_b);
+
+                // Snap to sector grid for horizontal movement
+                let snapped_dx = (world_dx / SECTOR_SIZE).round() * SECTOR_SIZE;
+                let snapped_dz = (world_dz / SECTOR_SIZE).round() * SECTOR_SIZE;
+                // Snap to click height for vertical movement
+                let snapped_dy = (world_dy / CLICK_HEIGHT).round() * CLICK_HEIGHT;
 
                 // Convert to sector delta
-                let sector_dx = (world_dx / SECTOR_SIZE).round() as i32;
-                let sector_dz = (world_dz / SECTOR_SIZE).round() as i32;
+                let sector_dx = (snapped_dx / SECTOR_SIZE).round() as i32;
+                let sector_dz = (snapped_dz / SECTOR_SIZE).round() as i32;
 
-                if sector_dx != 0 || sector_dz != 0 {
+                let has_horizontal_movement = sector_dx != 0 || sector_dz != 0;
+                let has_vertical_movement = snapped_dy.abs() >= CLICK_HEIGHT * 0.5;
+
+                if has_horizontal_movement || has_vertical_movement {
                     state.save_undo();
 
+                    let mut final_sector_x = 0;
+                    let mut final_sector_z = 0;
+                    let mut final_height = 0.0;
+
                     if let Some(obj) = state.level.get_object_mut(drag_room_idx, obj_idx) {
-                        // Update sector coordinates
-                        let new_sector_x = (obj.sector_x as i32 + sector_dx).max(0) as usize;
-                        let new_sector_z = (obj.sector_z as i32 + sector_dz).max(0) as usize;
+                        // Update sector coordinates (horizontal movement)
+                        if has_horizontal_movement {
+                            let new_sector_x = (obj.sector_x as i32 + sector_dx).max(0) as usize;
+                            let new_sector_z = (obj.sector_z as i32 + sector_dz).max(0) as usize;
+                            obj.sector_x = new_sector_x;
+                            obj.sector_z = new_sector_z;
+                        }
 
-                        obj.sector_x = new_sector_x;
-                        obj.sector_z = new_sector_z;
+                        // Update height (vertical movement in Front/Side views)
+                        if has_vertical_movement {
+                            obj.height += snapped_dy;
+                        }
 
+                        // Store final values for status message
+                        final_sector_x = obj.sector_x;
+                        final_sector_z = obj.sector_z;
+                        final_height = obj.height;
+                    }
+
+                    // Status message (after mutable borrow ends)
+                    if has_horizontal_movement && has_vertical_movement {
                         state.set_status(
-                            &format!("Moved object to sector ({}, {})", new_sector_x, new_sector_z),
+                            &format!("Moved object to sector ({}, {}) at height {:.0}", final_sector_x, final_sector_z, final_height),
+                            2.0
+                        );
+                    } else if has_horizontal_movement {
+                        state.set_status(
+                            &format!("Moved object to sector ({}, {})", final_sector_x, final_sector_z),
+                            2.0
+                        );
+                    } else {
+                        state.set_status(
+                            &format!("Changed object height to {:.0}", final_height),
                             2.0
                         );
                     }

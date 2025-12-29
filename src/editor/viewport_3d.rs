@@ -128,6 +128,7 @@ pub fn draw_viewport_3d(
             for room_idx in affected_rooms {
                 if let Some(room) = state.level.rooms.get_mut(room_idx) {
                     room.cleanup_empty_sectors();
+                    room.trim_empty_edges();
                     room.recalculate_bounds();
                 }
             }
