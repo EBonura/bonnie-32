@@ -1037,8 +1037,6 @@ pub enum BlendMode {
 pub struct RasterSettings {
     /// Use affine texture mapping (true = PS1 warping, false = perspective correct)
     pub affine_textures: bool,
-    /// Snap vertices to integer coordinates (PS1 jitter)
-    pub vertex_snap: bool,
     /// Use Z-buffer (false = painter's algorithm)
     pub use_zbuffer: bool,
     /// Shading mode
@@ -1065,6 +1063,10 @@ pub struct RasterSettings {
     /// When enabled, textures and framebuffer use native 15-bit color with
     /// PS1-authentic semi-transparency (bit 15) and CLUT-style transparency (0x0000)
     pub use_rgb555: bool,
+    /// Use fixed-point math for projection and interpolation (true = PS1 precision loss)
+    /// When enabled, uses 16.16 fixed-point arithmetic which causes the characteristic
+    /// PS1 vertex jitter and texture wobble due to limited precision.
+    pub use_fixed_point: bool,
 }
 
 /// Orthographic projection settings for ortho views
@@ -1104,7 +1106,6 @@ impl Default for RasterSettings {
     fn default() -> Self {
         Self {
             affine_textures: true,  // PS1 default: affine (warpy)
-            vertex_snap: true,      // PS1 default: jittery vertices
             use_zbuffer: true,
             shading: ShadingMode::Gouraud,
             backface_cull: true,
@@ -1117,6 +1118,7 @@ impl Default for RasterSettings {
             wireframe_overlay: false, // Default: wireframe off
             ortho_projection: None,  // Default: perspective projection
             use_rgb555: true,        // PS1 default: 15-bit color mode
+            use_fixed_point: true,   // PS1 default: fixed-point math (jittery)
         }
     }
 }

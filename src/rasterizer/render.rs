@@ -1149,17 +1149,37 @@ pub fn render_mesh(
     let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
 
     for v in vertices {
-        // Transform position to camera space
-        let rel_pos = v.pos - camera.position;
-        let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-        cam_space_positions.push(cam_pos);
-
-        // Project to screen - use ortho or perspective based on settings
-        let screen_pos = if let Some(ref ortho) = settings.ortho_projection {
-            project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height)
+        // Project to screen - use ortho, fixed-point, or float projection
+        let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
+            // Ortho: use float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
+            (screen, cam_pos)
+        } else if settings.use_fixed_point {
+            // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
+            let (sx, sy, depth) = super::fixed::project_fixed(
+                v.pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+            );
+            // Still need cam_pos for culling/shading (use float for this)
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
         } else {
-            project(cam_pos, settings.vertex_snap, fb.width, fb.height)
+            // Standard float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project(cam_pos, fb.width, fb.height);
+            (screen, cam_pos)
         };
+
+        cam_space_positions.push(cam_pos);
         projected.push(screen_pos);
 
         // Transform normal to camera space
@@ -1399,17 +1419,37 @@ pub fn render_mesh_15(
     let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
 
     for v in vertices {
-        // Transform position to camera space
-        let rel_pos = v.pos - camera.position;
-        let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-        cam_space_positions.push(cam_pos);
-
-        // Project to screen - use ortho or perspective based on settings
-        let screen_pos = if let Some(ref ortho) = settings.ortho_projection {
-            project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height)
+        // Project to screen - use ortho, fixed-point, or float projection
+        let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
+            // Ortho: use float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
+            (screen, cam_pos)
+        } else if settings.use_fixed_point {
+            // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
+            let (sx, sy, depth) = super::fixed::project_fixed(
+                v.pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+            );
+            // Still need cam_pos for culling/shading (use float for this)
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
         } else {
-            project(cam_pos, settings.vertex_snap, fb.width, fb.height)
+            // Standard float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project(cam_pos, fb.width, fb.height);
+            (screen, cam_pos)
         };
+
+        cam_space_positions.push(cam_pos);
         projected.push(screen_pos);
 
         // Transform normal to camera space

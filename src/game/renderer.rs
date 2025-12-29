@@ -442,7 +442,7 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
         "Overlay",       // 1
         "---",           // 2 - Separator
         "Affine UV",     // 3 - PS1 texture warping
-        "Vertex Snap",   // 4 - PS1 vertex jitter
+        "Fixed-Point",   // 4 - PS1 fixed-point math (jitter)
         "Low Res",       // 5 - 320x240
         "RGB555",        // 6 - PS1 15-bit color
         "Dithering",     // 7 - 4x4 Bayer
@@ -547,10 +547,10 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                 }
             }
             4 => {
-                // Vertex snap (PS1 jitter)
-                draw_toggle(menu_x, y, game.raster_settings.vertex_snap);
+                // Fixed-point math (PS1 jitter)
+                draw_toggle(menu_x, y, game.raster_settings.use_fixed_point);
                 if is_selected && toggle_pressed(input) {
-                    game.raster_settings.vertex_snap = !game.raster_settings.vertex_snap;
+                    game.raster_settings.use_fixed_point = !game.raster_settings.use_fixed_point;
                 }
             }
             5 => {
@@ -937,7 +937,7 @@ fn draw_wireframe_cylinder(
             return None;
         }
 
-        let proj = project(cam, false, fb.width, fb.height);
+        let proj = project(cam, fb.width, fb.height);
         Some((proj.x as i32, proj.y as i32, cam.z))
     };
 

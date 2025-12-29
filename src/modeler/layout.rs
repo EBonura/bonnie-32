@@ -226,10 +226,10 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.raster_settings.affine_textures { "ON" } else { "OFF" };
         state.set_status(&format!("Affine textures: {}", mode), 1.5);
     }
-    if toolbar.icon_button_active(ctx, icon::MAGNET, icon_font, "Vertex Snap (jittery)", state.raster_settings.vertex_snap) {
-        state.raster_settings.vertex_snap = !state.raster_settings.vertex_snap;
-        let mode = if state.raster_settings.vertex_snap { "ON" } else { "OFF" };
-        state.set_status(&format!("Vertex snap: {}", mode), 1.5);
+    if toolbar.icon_button_active(ctx, icon::HASH, icon_font, "Fixed-Point Math (jittery)", state.raster_settings.use_fixed_point) {
+        state.raster_settings.use_fixed_point = !state.raster_settings.use_fixed_point;
+        let mode = if state.raster_settings.use_fixed_point { "ON" } else { "OFF" };
+        state.set_status(&format!("Fixed-point: {}", mode), 1.5);
     }
     if toolbar.icon_button_active(ctx, icon::MONITOR, icon_font, "Low Resolution (320x240)", state.raster_settings.low_resolution) {
         state.raster_settings.low_resolution = !state.raster_settings.low_resolution;
@@ -274,7 +274,6 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.raster_settings.use_rgb555 { "RGB555 (15-bit)" } else { "RGB888 (24-bit)" };
         state.set_status(&format!("Color: {}", mode), 1.5);
     }
-
     toolbar.separator();
 
     // Snap toggle

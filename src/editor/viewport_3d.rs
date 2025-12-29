@@ -2544,7 +2544,7 @@ fn draw_filled_octahedron(
         let rel = p - camera.position;
         let cam = crate::rasterizer::perspective_transform(rel, camera.basis_x, camera.basis_y, camera.basis_z);
         if cam.z < 0.1 { return None; }
-        let proj = crate::rasterizer::project(cam, false, fb.width, fb.height);
+        let proj = crate::rasterizer::project(cam, fb.width, fb.height);
         Some((proj.x as i32, proj.y as i32, cam.z))
     };
 

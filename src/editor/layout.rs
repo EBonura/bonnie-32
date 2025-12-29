@@ -437,11 +437,11 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.set_status(&format!("Room boundaries: {}", mode), 2.0);
     }
 
-    // Wireframe overlay toggle
-    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe Overlay", state.raster_settings.wireframe_overlay) {
+    // Wireframe toggle
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe", state.raster_settings.wireframe_overlay) {
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "ON" } else { "OFF" };
-        state.set_status(&format!("Wireframe overlay: {}", mode), 2.0);
+        state.set_status(&format!("Wireframe: {}", mode), 2.0);
     }
 
     toolbar.separator();
@@ -502,10 +502,10 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let mode = if state.raster_settings.affine_textures { "ON" } else { "OFF" };
         state.set_status(&format!("Affine textures: {}", mode), 2.0);
     }
-    if toolbar.icon_button_active(ctx, icon::MAGNET, icon_font, "Vertex Snap (PS1 jitter)", state.raster_settings.vertex_snap) {
-        state.raster_settings.vertex_snap = !state.raster_settings.vertex_snap;
-        let mode = if state.raster_settings.vertex_snap { "ON" } else { "OFF" };
-        state.set_status(&format!("Vertex snap: {}", mode), 2.0);
+    if toolbar.icon_button_active(ctx, icon::HASH, icon_font, "Fixed-Point Math (PS1 jitter)", state.raster_settings.use_fixed_point) {
+        state.raster_settings.use_fixed_point = !state.raster_settings.use_fixed_point;
+        let mode = if state.raster_settings.use_fixed_point { "ON" } else { "OFF" };
+        state.set_status(&format!("Fixed-point: {}", mode), 2.0);
     }
     if toolbar.icon_button_active(ctx, icon::SUN, icon_font, "Gouraud Shading", state.raster_settings.shading != crate::rasterizer::ShadingMode::None) {
         use crate::rasterizer::ShadingMode;
@@ -544,7 +544,6 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let mode = if state.raster_settings.use_rgb555 { "RGB555 (15-bit)" } else { "RGB888 (24-bit)" };
         state.set_status(&format!("Color: {}", mode), 2.0);
     }
-
     toolbar.separator();
 
     // Current file label
