@@ -673,52 +673,56 @@ fn blend_rgb555(front_r: u8, front_g: u8, front_b: u8, back_r: u8, back_g: u8, b
     }
 }
 
-/// Apply PS1-style ordered dithering to a Color15
-/// Works directly in 5-bit space for authentic PS1 behavior
-#[inline]
-fn apply_dither_15(color: Color15, x: usize, y: usize) -> Color15 {
-    // Get dither value from matrix based on pixel position (0-15)
-    let dither = BAYER_4X4[y & 3][x & 3];
-
-    // PS1 offset formula scaled for 5-bit: (dither - 8) / 4 gives range -2 to +1
-    // This is smaller because we're in 5-bit space (0-31) not 8-bit (0-255)
-    let offset = (dither - 8) / 4;
-
-    // Apply offset to each 5-bit channel
-    let r = (color.r5() as i32 + offset).clamp(0, 31) as u8;
-    let g = (color.g5() as i32 + offset).clamp(0, 31) as u8;
-    let b = (color.b5() as i32 + offset).clamp(0, 31) as u8;
-
-    Color15::new_semi(r, g, b, color.is_semi_transparent())
-}
-
-/// PS1 4x4 ordered dithering matrix (Bayer pattern)
-/// Raw values 0-15, same pattern used by PlayStation hardware
-const BAYER_4X4: [[i32; 4]; 4] = [
-    [ 0,  8,  2, 10],
-    [12,  4, 14,  6],
-    [ 3, 11,  1,  9],
-    [15,  7, 13,  5],
+/// PS1 GPU dither matrix (authentic signed values -4 to +3)
+/// Verified against psx-spx specifications and Duckstation emulator
+/// Applied to 8-bit color values before quantization to 5-bit
+const PS1_DITHER_MATRIX: [[i8; 4]; 4] = [
+    [-4,  0, -3,  1],
+    [ 2, -2,  3, -1],
+    [-3,  1, -4,  0],
+    [ 3, -1,  2, -2],
 ];
 
-/// Apply PS1-style ordered dithering to a color
-/// The PS1 used 15-bit color (5 bits per channel = 32 levels)
-/// Dithering adds spatial noise to hide color banding in gradients
+/// Expand 5-bit color to 8-bit with proper range (0-31 → 0-255)
+/// Uses the standard formula: (v5 << 3) | (v5 >> 2)
+/// This gives: 0→0, 1→8, 2→16, ..., 31→255
+#[inline]
+fn expand_5_to_8(v5: u8) -> u8 {
+    (v5 << 3) | (v5 >> 2)
+}
+
+/// Apply PS1-authentic dithering during 8-bit to 5-bit quantization
+/// Takes 8-bit RGB values, applies dither offset, returns 5-bit values
+///
+/// Hardware behavior (verified against Duckstation):
+/// 1. Add dither offset to 8-bit value (can go negative or >255)
+/// 2. Right-shift by 3 (divide by 8)
+/// 3. Clamp result to 0-31
+#[inline]
+fn dither_and_quantize(r8: u8, g8: u8, b8: u8, x: usize, y: usize) -> (u8, u8, u8) {
+    let offset = PS1_DITHER_MATRIX[y & 3][x & 3] as i32;
+
+    // Add offset, shift, then clamp to 5-bit range (matches hardware)
+    let r5 = ((r8 as i32 + offset) >> 3).clamp(0, 31) as u8;
+    let g5 = ((g8 as i32 + offset) >> 3).clamp(0, 31) as u8;
+    let b5 = ((b8 as i32 + offset) >> 3).clamp(0, 31) as u8;
+
+    (r5, g5, b5)
+}
+
+/// Apply PS1-authentic ordered dithering to an 8-bit color
+/// Uses the authentic PS1 dither matrix and algorithm
 fn apply_dither(color: Color, x: usize, y: usize) -> Color {
-    // Get dither value from matrix based on pixel position (0-15)
-    let dither = BAYER_4X4[y & 3][x & 3];
+    let offset = PS1_DITHER_MATRIX[y & 3][x & 3] as i32;
 
-    // PS1 offset formula: (dither / 2.0 - 4.0) gives range -4 to +3.5
-    // We use integer math: (dither - 8) / 2 gives range -4 to +3
-    let offset = (dither - 8) / 2;
+    // Add offset, shift by 3, clamp to 5-bit, then expand back to 8-bit
+    // This matches PS1 hardware behavior
+    let r5 = ((color.r as i32 + offset) >> 3).clamp(0, 31) as u8;
+    let g5 = ((color.g as i32 + offset) >> 3).clamp(0, 31) as u8;
+    let b5 = ((color.b as i32 + offset) >> 3).clamp(0, 31) as u8;
 
-    // Apply offset to each channel and quantize to 5-bit (32 levels)
-    // PS1 used 0xF8 mask to truncate to 5 bits (keeps top 5 bits)
-    let r = ((color.r as i32 + offset).clamp(0, 255) as u8) & 0xF8;
-    let g = ((color.g as i32 + offset).clamp(0, 255) as u8) & 0xF8;
-    let b = ((color.b as i32 + offset).clamp(0, 255) as u8) & 0xF8;
-
-    Color::with_blend(r, g, b, color.blend)
+    // Convert back to 8-bit (keeping the quantized look)
+    Color::with_blend(r5 << 3, g5 << 3, b5 << 3, color.blend)
 }
 
 /// Rasterize a single triangle using incremental barycentric stepping.
@@ -1075,15 +1079,26 @@ fn rasterize_triangle_15(
                     continue;
                 }
 
-                // Interpolate vertex colors (8-bit for modulation)
+                // === PS1-AUTHENTIC COLOR PIPELINE ===
+                // All calculations happen in 8-bit space, dithering applied during final quantization
+
+                // Expand texture from 5-bit to 8-bit for internal calculations
+                let tex_r8 = expand_5_to_8(color.r5());
+                let tex_g8 = expand_5_to_8(color.g5());
+                let tex_b8 = expand_5_to_8(color.b5());
+
+                // Interpolate vertex colors (already 8-bit)
                 let vertex_r = (bc_x * surface.vc1.r as f32 + bc_y * surface.vc2.r as f32 + bc_z * surface.vc3.r as f32) as u8;
                 let vertex_g = (bc_x * surface.vc1.g as f32 + bc_y * surface.vc2.g as f32 + bc_z * surface.vc3.g as f32) as u8;
                 let vertex_b = (bc_x * surface.vc1.b as f32 + bc_y * surface.vc2.b as f32 + bc_z * surface.vc3.b as f32) as u8;
 
-                // Apply PS1-style texture modulation (in 5-bit space)
-                color = color.modulate(vertex_r, vertex_g, vertex_b);
+                // Apply PS1-style texture modulation in 8-bit space
+                // Formula: (texture * vertex_color) / 128, clamped to 255
+                let mod_r8 = ((tex_r8 as u32 * vertex_r as u32) / 128).min(255) as u8;
+                let mod_g8 = ((tex_g8 as u32 * vertex_g as u32) / 128).min(255) as u8;
+                let mod_b8 = ((tex_b8 as u32 * vertex_b as u32) / 128).min(255) as u8;
 
-                // Apply shading (lighting)
+                // Apply shading (lighting) in 8-bit space
                 let (shade_r, shade_g, shade_b) = match settings.shading {
                     ShadingMode::None => (1.0, 1.0, 1.0),
                     ShadingMode::Flat => flat_shade,
@@ -1097,12 +1112,25 @@ fn rasterize_triangle_15(
                     }
                 };
 
-                color = color.shade_rgb(shade_r, shade_g, shade_b);
+                // Apply shading to get final 8-bit values (clamp shading to 2.0 for overbright)
+                let shaded_r8 = (mod_r8 as f32 * shade_r.clamp(0.0, 2.0)).min(255.0) as u8;
+                let shaded_g8 = (mod_g8 as f32 * shade_g.clamp(0.0, 2.0)).min(255.0) as u8;
+                let shaded_b8 = (mod_b8 as f32 * shade_b.clamp(0.0, 2.0)).min(255.0) as u8;
 
-                // Apply PS1-style ordered dithering (in 5-bit space)
-                if settings.dithering {
-                    color = apply_dither_15(color, x, y);
-                }
+                // Final quantization: dither (if enabled) and convert 8-bit to 5-bit
+                let (r5, g5, b5) = if settings.dithering {
+                    dither_and_quantize(shaded_r8, shaded_g8, shaded_b8, x, y)
+                } else {
+                    // Simple truncation without dithering
+                    (shaded_r8 >> 3, shaded_g8 >> 3, shaded_b8 >> 3)
+                };
+
+                // Create final color, preserving semi-transparency from original texture
+                // IMPORTANT: If final color is all-black (r5=g5=b5=0), we must set bit 15
+                // to make it "drawable black" (0x8000) instead of "transparent black" (0x0000)
+                let is_all_black = r5 == 0 && g5 == 0 && b5 == 0;
+                let semi = color.is_semi_transparent() || is_all_black;
+                let color = Color15::new_semi(r5, g5, b5, semi);
 
                 // Write pixel with PS1-authentic semi-transparency handling
                 // If pixel's semi-transparency bit is set, use face_blend_mode

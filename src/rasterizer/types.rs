@@ -1113,7 +1113,7 @@ impl Default for RasterSettings {
             lights: vec![Light::directional(Vec3::new(-1.0, -1.0, -1.0), 0.7)],
             ambient: 0.3,
             low_resolution: true,   // PS1 default: 320x240
-            dithering: false,       // Disabled: conflicts with RGB555 mode (TODO: fix dithering for 15-bit)
+            dithering: true,        // PS1 default: dithering enabled for smooth gradients
             stretch_to_fill: true,  // Default: use full viewport space
             wireframe_overlay: false, // Default: wireframe off
             ortho_projection: None,  // Default: perspective projection
