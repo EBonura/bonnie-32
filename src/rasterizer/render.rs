@@ -629,48 +629,62 @@ fn shade_color_rgb(color: Color, shade_r: f32, shade_g: f32, shade_b: f32) -> Co
 
 /// PS1-authentic blend operation for RGB555 colors
 /// front = new pixel, back = existing framebuffer pixel
-/// Returns blended (r, g, b) tuple
+/// Returns blended (r, g, b) tuple, quantized to 5-bit and expanded back to 8-bit
+///
+/// PS1 GPU performed blending in 5-bit space, so results must be quantized
 #[inline]
 fn blend_rgb555(front_r: u8, front_g: u8, front_b: u8, back_r: u8, back_g: u8, back_b: u8, mode: BlendMode) -> (u8, u8, u8) {
-    match mode {
-        BlendMode::Opaque => (front_r, front_g, front_b),
+    // Convert inputs to 5-bit (they should already be quantized, but ensure consistency)
+    let f_r5 = front_r >> 3;
+    let f_g5 = front_g >> 3;
+    let f_b5 = front_b >> 3;
+    let b_r5 = back_r >> 3;
+    let b_g5 = back_g >> 3;
+    let b_b5 = back_b >> 3;
+
+    // Perform blending in 5-bit space (PS1 authentic)
+    let (r5, g5, b5) = match mode {
+        BlendMode::Opaque => (f_r5, f_g5, f_b5),
         BlendMode::Average => {
-            // Mode 0: 0.5*B + 0.5*F
+            // Mode 0: 0.5*B + 0.5*F (in 5-bit space)
             (
-                ((back_r as u16 + front_r as u16) / 2) as u8,
-                ((back_g as u16 + front_g as u16) / 2) as u8,
-                ((back_b as u16 + front_b as u16) / 2) as u8,
+                ((b_r5 as u16 + f_r5 as u16) / 2).min(31) as u8,
+                ((b_g5 as u16 + f_g5 as u16) / 2).min(31) as u8,
+                ((b_b5 as u16 + f_b5 as u16) / 2).min(31) as u8,
             )
         }
         BlendMode::Add => {
-            // Mode 1: B + F (clamped to 255)
+            // Mode 1: B + F (clamped to 31)
             (
-                (back_r as u16 + front_r as u16).min(255) as u8,
-                (back_g as u16 + front_g as u16).min(255) as u8,
-                (back_b as u16 + front_b as u16).min(255) as u8,
+                (b_r5 as u16 + f_r5 as u16).min(31) as u8,
+                (b_g5 as u16 + f_g5 as u16).min(31) as u8,
+                (b_b5 as u16 + f_b5 as u16).min(31) as u8,
             )
         }
         BlendMode::Subtract => {
             // Mode 2: B - F (clamped to 0)
             (
-                (back_r as i16 - front_r as i16).max(0) as u8,
-                (back_g as i16 - front_g as i16).max(0) as u8,
-                (back_b as i16 - front_b as i16).max(0) as u8,
+                (b_r5 as i16 - f_r5 as i16).max(0) as u8,
+                (b_g5 as i16 - f_g5 as i16).max(0) as u8,
+                (b_b5 as i16 - f_b5 as i16).max(0) as u8,
             )
         }
         BlendMode::AddQuarter => {
-            // Mode 3: B + 0.25*F (clamped to 255)
+            // Mode 3: B + 0.25*F (clamped to 31)
             (
-                (back_r as u16 + front_r as u16 / 4).min(255) as u8,
-                (back_g as u16 + front_g as u16 / 4).min(255) as u8,
-                (back_b as u16 + front_b as u16 / 4).min(255) as u8,
+                (b_r5 as u16 + f_r5 as u16 / 4).min(31) as u8,
+                (b_g5 as u16 + f_g5 as u16 / 4).min(31) as u8,
+                (b_b5 as u16 + f_b5 as u16 / 4).min(31) as u8,
             )
         }
         BlendMode::Erase => {
-            // Erase: transparent (return back unchanged, though this shouldn't be called)
-            (back_r, back_g, back_b)
+            // Erase: transparent (return back unchanged)
+            (b_r5, b_g5, b_b5)
         }
-    }
+    };
+
+    // Expand back to 8-bit (quantized output)
+    (r5 << 3, g5 << 3, b5 << 3)
 }
 
 /// PS1 GPU dither matrix (authentic signed values -4 to +3)

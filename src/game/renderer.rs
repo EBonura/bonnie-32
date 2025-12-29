@@ -118,13 +118,14 @@ pub fn draw_test_viewport(
     let mut render_raster_ms = 0.0;
     let mut raster_timings = RasterTimings::default();
 
-    // Convert textures to RGB555 if enabled
+    // --- Sub-timing: Texture conversion (RGB888 to RGB555) ---
+    // Lazy cache: only convert if texture count changed (textures added/removed)
+    let texconv_start = FrameTimings::start();
     let use_rgb555 = game.raster_settings.use_rgb555;
-    let textures_15: Vec<_> = if use_rgb555 {
-        textures.iter().map(|t| t.to_15()).collect()
-    } else {
-        Vec::new()
-    };
+    if use_rgb555 && game.textures_15_cache.len() != textures.len() {
+        game.textures_15_cache = textures.iter().map(|t| t.to_15()).collect();
+    }
+    let render_texconv_ms = FrameTimings::elapsed_ms(texconv_start);
 
     // Render each room with its own ambient setting
     for room in &level.rooms {
@@ -142,7 +143,7 @@ pub fn draw_test_viewport(
         // Time actual rasterization (returns detailed sub-timings)
         let raster_start = FrameTimings::start();
         let room_timings = if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &game.camera, &render_settings)
+            render_mesh_15(fb, &vertices, &faces, &game.textures_15_cache, None, &game.camera, &render_settings)
         } else {
             render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings)
         };
@@ -232,6 +233,7 @@ pub fn draw_test_viewport(
         total_ms: FrameTimings::elapsed_ms(frame_start),
         // Render sub-timings
         render_lights_ms,
+        render_texconv_ms,
         render_meshgen_ms,
         render_raster_ms,
         render_upload_ms,
@@ -685,6 +687,7 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
 
     // Render sub-timing colors (shades of red)
     let lights_color = Color::from_rgba(255, 150, 150, 255);  // Light red - lights
+    let texconv_color = Color::from_rgba(255, 100, 180, 255); // Pink - texture conversion
     let meshgen_color = Color::from_rgba(255, 80, 80, 255);   // Medium red - mesh gen
     let raster_color = Color::from_rgba(200, 50, 50, 255);    // Dark red - rasterization
     let upload_color = Color::from_rgba(255, 120, 80, 255);   // Red-orange - upload
@@ -799,7 +802,7 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     let bar_x = overlay_x + 6.0 * scale;
 
     // Background (taller to fit stacked legend with render breakdown + raster breakdown)
-    let legend_height = 210.0 * scale; // 4 main items + 4 render items + 5 raster items + 2 headers + padding
+    let legend_height = 222.0 * scale; // 4 main items + 5 render items + 5 raster items + 2 headers + padding
     draw_rectangle(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, Color::from_rgba(20, 22, 28, 200));
     draw_rectangle_lines(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, 1.0, Color::from_rgba(60, 65, 75, 255));
 
@@ -866,8 +869,9 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     let render_y = legend_y + 4.0 * legend_line_height + 4.0 * scale;
     draw_text("Render breakdown:", bar_x, render_y, legend_text_size * 0.9, label_color);
 
-    let render_items: [(Color, &str, f32); 4] = [
+    let render_items: [(Color, &str, f32); 5] = [
         (lights_color, "Lights", t.render_lights_ms),
+        (texconv_color, "TexConv", t.render_texconv_ms),
         (meshgen_color, "MeshGen", t.render_meshgen_ms),
         (raster_color, "Raster", t.render_raster_ms),
         (upload_color, "Upload", t.render_upload_ms),
@@ -882,7 +886,7 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     }
 
     // Raster breakdown (further indented)
-    let raster_y = render_y + 5.0 * legend_line_height + 4.0 * scale;
+    let raster_y = render_y + 6.0 * legend_line_height + 4.0 * scale;
     draw_text("Raster breakdown:", bar_x + indent, raster_y, legend_text_size * 0.9, label_color);
 
     let raster_items: [(Color, &str, f32); 5] = [
