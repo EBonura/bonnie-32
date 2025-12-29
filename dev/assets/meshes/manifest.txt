@@ -1,0 +1,4 @@
+clockwork.obj
+crawler.obj
+ghost.obj
+warrior.obj
