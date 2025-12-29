@@ -18,6 +18,9 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://ebonura.github.io/bonnie-engine/
     steps:
       - uses: actions/checkout@v4
 

@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - 'dev/**'
+      - 'feature/**'
   workflow_dispatch:
 
 permissions:
@@ -15,6 +16,9 @@ permissions:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: https://ebonura.github.io/bonnie-engine/dev/
     steps:
       - uses: actions/checkout@v4
 

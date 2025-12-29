@@ -4,7 +4,7 @@
 //! Reads level data from ProjectData for rendering, uses ECS World for entities.
 //! Player settings are stored in Level.player_settings and edited in the World Editor.
 
-use crate::rasterizer::{Camera, Vec3, RasterSettings};
+use crate::rasterizer::{Camera, Vec3, RasterSettings, Texture15};
 use crate::world::Level;
 use super::{World, Events, Entity};
 
@@ -27,6 +27,8 @@ pub struct FrameTimings {
     // === Render sub-timings ===
     /// Light collection time (ms)
     pub render_lights_ms: f32,
+    /// Texture conversion time (ms) - RGB888 to RGB555
+    pub render_texconv_ms: f32,
     /// Mesh data generation time (ms) - to_render_data_with_textures
     pub render_meshgen_ms: f32,
     /// Actual rasterization time (ms) - render_mesh calls
@@ -178,6 +180,9 @@ pub struct GameToolState {
 
     /// Frame timing data for performance profiling
     pub frame_timings: FrameTimings,
+
+    /// Cached RGB555 textures (lazy-populated, invalidated when texture count changes)
+    pub textures_15_cache: Vec<Texture15>,
 }
 
 impl GameToolState {
@@ -221,6 +226,7 @@ impl GameToolState {
             char_cam_pitch: 0.2, // Slight downward pitch by default
             fps_limit: FpsLimit::default(),
             frame_timings: FrameTimings::default(),
+            textures_15_cache: Vec::new(),
         }
     }
 
