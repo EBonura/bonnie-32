@@ -1,0 +1,54 @@
+name: Deploy Dev Build
+
+# Deploys feature branches to /dev/ subdirectory
+# Access at: https://ebonura.github.io/bonnie-engine/dev/
+
+on:
+  push:
+    branches:
+      - 'dev/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build WASM
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Download macroquad JS bundle
+        run: curl -L -o mq_js_bundle.js https://raw.githubusercontent.com/not-fl3/macroquad/v0.4.14/js/mq_js_bundle.js
+
+      - name: Prepare dev folder
+        run: |
+          mkdir -p dev-build
+          cp target/wasm32-unknown-unknown/release/bonnie-engine.wasm dev-build/
+          cp docs/index.html dev-build/
+          cp docs/audio-processor.js dev-build/
+          cp docs/favicon-16.png dev-build/
+          cp docs/favicon-32.png dev-build/
+          cp docs/apple-touch-icon.png dev-build/
+          cp mq_js_bundle.js dev-build/
+          cp -r assets dev-build/
+
+          # Add a banner to indicate this is a dev build
+          sed -i 's|Loading Bonnie Engine|Loading Bonnie Engine (DEV)|g' dev-build/index.html
+          sed -i 's|<title>Bonnie Engine|<title>[DEV] Bonnie Engine|g' dev-build/index.html
+
+      - name: Deploy to gh-pages /dev/ folder
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dev-build
+          destination_dir: dev
+          keep_files: true  # Don't delete other files (preserves main build at root)
