@@ -1722,6 +1722,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                     v1: f.v1,
                     v2: f.v2,
                     texture_id: Some(0),
+                    black_transparent: f.black_transparent,
                 }
             }).collect();
 

@@ -84,6 +84,9 @@ pub struct HorizontalFace {
     /// Normal rendering mode (front, both, or back)
     #[serde(default)]
     pub normal_mode: FaceNormalMode,
+    /// If true, pure black pixels (RGB 0,0,0) are treated as transparent (PS1 CLUT-style)
+    #[serde(default = "default_true")]
+    pub black_transparent: bool,
 }
 
 impl HorizontalFace {
@@ -97,6 +100,7 @@ impl HorizontalFace {
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
+            black_transparent: true,
         }
     }
 
@@ -110,6 +114,7 @@ impl HorizontalFace {
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
+            black_transparent: true,
         }
     }
 
@@ -228,6 +233,9 @@ pub struct VerticalFace {
     /// Normal rendering mode (front, both, or back)
     #[serde(default)]
     pub normal_mode: FaceNormalMode,
+    /// If true, pure black pixels (RGB 0,0,0) are treated as transparent (PS1 CLUT-style)
+    #[serde(default = "default_true")]
+    pub black_transparent: bool,
 }
 
 impl VerticalFace {
@@ -241,6 +249,7 @@ impl VerticalFace {
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
+            black_transparent: true,
         }
     }
 
@@ -255,6 +264,7 @@ impl VerticalFace {
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
+            black_transparent: true,
         }
     }
 
@@ -1383,11 +1393,11 @@ impl Room {
             }
             // Winding order: floor = CCW from above, ceiling = CW from above (so it faces down)
             if is_floor {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(face.black_transparent));
             } else {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(face.black_transparent));
             }
         }
 
@@ -1400,11 +1410,11 @@ impl Room {
             }
             // Reverse winding order for back face
             if is_floor {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(face.black_transparent));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
             } else {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(face.black_transparent));
             }
         }
     }
@@ -1492,8 +1502,8 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
             }
             // Two triangles for the quad (CCW winding when viewed from inside room)
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
         }
 
         // Add back-facing face (flipped normal and winding)
@@ -1504,8 +1514,8 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, wall.colors[i]));
             }
             // Reverse winding order for back face
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
         }
     }
 }

@@ -1277,6 +1277,7 @@ impl EditableMesh {
                 v1: f.v1,
                 v2: f.v2,
                 texture_id: None,
+                black_transparent: f.black_transparent,
             }
         }).collect();
 
@@ -1303,6 +1304,7 @@ impl EditableMesh {
                 v1: f.v1,
                 v2: f.v2,
                 texture_id: Some(0), // Use texture atlas (index 0)
+                black_transparent: f.black_transparent,
             }
         }).collect();
 

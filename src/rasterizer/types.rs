@@ -685,6 +685,14 @@ pub struct Face {
     pub v1: usize,
     pub v2: usize,
     pub texture_id: Option<usize>,
+    /// If true, pure black pixels (RGB 0,0,0) are treated as transparent (PS1 CLUT-style)
+    /// If false, black pixels are rendered as black
+    #[serde(default = "default_black_transparent")]
+    pub black_transparent: bool,
+}
+
+fn default_black_transparent() -> bool {
+    true
 }
 
 impl Face {
@@ -694,6 +702,7 @@ impl Face {
             v1,
             v2,
             texture_id: None,
+            black_transparent: true, // Default: black is transparent (PS1 style)
         }
     }
 
@@ -703,7 +712,14 @@ impl Face {
             v1,
             v2,
             texture_id: Some(texture_id),
+            black_transparent: true, // Default: black is transparent (PS1 style)
         }
+    }
+
+    /// Set the black_transparent flag (builder pattern)
+    pub fn with_black_transparent(mut self, black_transparent: bool) -> Self {
+        self.black_transparent = black_transparent;
+        self
     }
 }
 

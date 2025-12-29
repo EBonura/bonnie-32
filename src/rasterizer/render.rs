@@ -539,6 +539,7 @@ struct Surface {
     pub vc3: Color, // Vertex color 3
     pub normal: Vec3, // Face normal (camera space)
     pub face_idx: usize,
+    pub black_transparent: bool, // If true, black pixels are transparent (PS1 CLUT-style)
 }
 
 /// Calculate shading intensity from a single directional light
@@ -923,11 +924,13 @@ fn rasterize_triangle(
 /// Rasterize a single triangle using RGB555 (PS1-authentic mode)
 /// Uses Color15 for texture sampling and Color15 for pixel output
 /// Face blend mode is used when texture pixel has semi-transparency bit set
+/// black_transparent: if true, pure black pixels (before shading) are skipped as transparent
 fn rasterize_triangle_15(
     fb: &mut Framebuffer,
     surface: &Surface,
     texture: Option<&Texture15>,
     face_blend_mode: BlendMode,
+    black_transparent: bool,
     settings: &RasterSettings,
 ) {
     // Bounding box
@@ -1051,8 +1054,22 @@ fn rasterize_triangle_15(
                     Color15::WHITE
                 };
 
-                // Skip fully transparent pixels (0x0000 = CLUT transparency)
+                // Handle transparency based on black_transparent setting:
+                // - If black_transparent = true: skip both 0x0000 (transparent) and black pixels (r=g=b=0)
+                // - If black_transparent = false: only skip 0x0000, but render black pixels (convert to 0x8000)
+                let is_black = color.r5() == 0 && color.g5() == 0 && color.b5() == 0;
                 if color.is_transparent() {
+                    if is_black && !black_transparent {
+                        // Convert transparent black to drawable black
+                        color = Color15::BLACK_DRAWABLE;
+                    } else {
+                        // Skip truly transparent pixels
+                        w0 += a0_step;
+                        w1 += a1_step;
+                        continue;
+                    }
+                } else if black_transparent && is_black {
+                    // Skip black pixels when black_transparent is enabled
                     w0 += a0_step;
                     w1 += a1_step;
                     continue;
@@ -1214,6 +1231,7 @@ pub fn render_mesh(
                     vc3: vertices[face.v2].color,
                     normal: normal.scale(-1.0),
                     face_idx,
+                    black_transparent: face.black_transparent,
                 });
             }
         } else {
@@ -1239,6 +1257,7 @@ pub fn render_mesh(
                 vc3: vertices[face.v2].color,
                 normal,
                 face_idx,
+                black_transparent: face.black_transparent,
             });
 
             // Collect for wireframe overlay
@@ -1458,6 +1477,7 @@ pub fn render_mesh_15(
                     vc3: vertices[face.v2].color,
                     normal: normal.scale(-1.0),
                     face_idx,
+                    black_transparent: face.black_transparent,
                 });
             }
         } else {
@@ -1482,6 +1502,7 @@ pub fn render_mesh_15(
                 vc3: vertices[face.v2].color,
                 normal,
                 face_idx,
+                black_transparent: face.black_transparent,
             });
 
             if settings.wireframe_overlay {
@@ -1520,7 +1541,7 @@ pub fn render_mesh_15(
                 .copied()
                 .unwrap_or(BlendMode::Opaque);
 
-            rasterize_triangle_15(fb, surface, texture, blend_mode, settings);
+            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings);
         }
     }
 

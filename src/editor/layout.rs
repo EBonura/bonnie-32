@@ -1261,6 +1261,32 @@ fn draw_horizontal_face_container(
             }
         }
     }
+    content_y += 28.0;
+
+    // Black transparent toggle (PS1 CLUT-style transparency) - icon button
+    draw_text("Black", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+
+    let btn_x = content_x + 40.0;
+    let btn_size = 20.0;
+    let btn_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    let icon_char = if face.black_transparent { icon::EYE_OFF } else { icon::EYE };
+    let tooltip = if face.black_transparent { "Black = Transparent (click to make visible)" } else { "Black = Visible (click to make transparent)" };
+
+    if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    f.black_transparent = !f.black_transparent;
+                }
+            }
+        }
+    }
+
+    // Show current state as text
+    let state_text = if face.black_transparent { "Transparent" } else { "Visible" };
+    draw_text(state_text, (btn_x + btn_size + 6.0).floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
 
     // Extrude button (only for floors)
     if is_floor {
@@ -1952,6 +1978,31 @@ fn draw_wall_face_container(
             }
         }
     }
+    content_y += 28.0;
+
+    // Black transparent toggle (PS1 CLUT-style transparency) - icon button
+    draw_text("Black", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+
+    let btn_x = content_x + 40.0;
+    let btn_size = 20.0;
+    let btn_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    let icon_char = if wall.black_transparent { icon::EYE_OFF } else { icon::EYE };
+    let tooltip = if wall.black_transparent { "Black = Transparent (click to make visible)" } else { "Black = Visible (click to make transparent)" };
+
+    if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    w.black_transparent = !w.black_transparent;
+                }
+            }
+        }
+    }
+
+    // Show current state as text
+    let state_text = if wall.black_transparent { "Transparent" } else { "Visible" };
+    draw_text(state_text, (btn_x + btn_size + 6.0).floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
 
     container_height
 }
