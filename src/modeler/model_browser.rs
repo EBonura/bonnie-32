@@ -4,7 +4,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
-use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh};
+use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15};
 use super::mesh_editor::MeshProject;
 use std::path::PathBuf;
 
@@ -413,17 +413,30 @@ fn draw_orbit_preview(
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(25, 25, 35));
 
-    // Convert atlas to rasterizer texture
+    // Render settings - use RGB555 by default
+    let settings = RasterSettings::default();
+    let use_rgb555 = settings.use_rgb555;
+
+    // Convert atlas to appropriate texture format
     let atlas_texture = project.atlas.to_raster_texture();
-    let textures = [atlas_texture];
+    let atlas_texture_15 = if use_rgb555 {
+        Some(project.atlas.to_raster_texture_15())
+    } else {
+        None
+    };
 
     // Render all objects with texture
-    let settings = RasterSettings::default();
     for obj in &project.objects {
         if obj.visible {
             let (vertices, faces) = obj.mesh.to_render_data_textured();
             if !vertices.is_empty() {
-                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+                if use_rgb555 {
+                    let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
+                    render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings);
+                } else {
+                    let textures = [atlas_texture.clone()];
+                    render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+                }
             }
         }
     }

@@ -5,7 +5,7 @@
 
 use macroquad::prelude::*;
 use crate::rasterizer::{
-    Framebuffer, Texture as RasterTexture, render_mesh,
+    Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15,
     Light, RasterSettings, RasterTimings, ShadingMode, Color as RasterColor,
     Vec3, project, perspective_transform,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
@@ -118,6 +118,14 @@ pub fn draw_test_viewport(
     let mut render_raster_ms = 0.0;
     let mut raster_timings = RasterTimings::default();
 
+    // Convert textures to RGB555 if enabled
+    let use_rgb555 = game.raster_settings.use_rgb555;
+    let textures_15: Vec<_> = if use_rgb555 {
+        textures.iter().map(|t| t.to_15()).collect()
+    } else {
+        Vec::new()
+    };
+
     // Render each room with its own ambient setting
     for room in &level.rooms {
         let render_settings = RasterSettings {
@@ -133,7 +141,11 @@ pub fn draw_test_viewport(
 
         // Time actual rasterization (returns detailed sub-timings)
         let raster_start = FrameTimings::start();
-        let room_timings = render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings);
+        let room_timings = if use_rgb555 {
+            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &game.camera, &render_settings)
+        } else {
+            render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings)
+        };
         render_raster_ms += FrameTimings::elapsed_ms(raster_start);
         raster_timings.accumulate(&room_timings);
     }
@@ -430,13 +442,14 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
         "Overlay",       // 1
         "---",           // 2 - Separator
         "Affine UV",     // 3 - PS1 texture warping
-        "Vertex Snap",   // 4 - PS1 vertex jitter
+        "Fixed-Point",   // 4 - PS1 fixed-point math (jitter)
         "Low Res",       // 5 - 320x240
-        "Dithering",     // 6 - 4x4 Bayer
-        "Shading",       // 7 - None/Flat/Gouraud
-        "FPS",           // 8 - 30/60/Unlocked
-        "---",           // 9 - Separator
-        "Reset",         // 10
+        "RGB555",        // 6 - PS1 15-bit color
+        "Dithering",     // 7 - 4x4 Bayer
+        "Shading",       // 8 - None/Flat/Gouraud
+        "FPS",           // 9 - 30/60/Unlocked
+        "---",           // 10 - Separator
+        "Reset",         // 11
     ];
     let menu_h = 20.0 + items.len() as f32 * row_height + 14.0;
     let selected = game.debug_menu_selection;
@@ -534,10 +547,10 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                 }
             }
             4 => {
-                // Vertex snap (PS1 jitter)
-                draw_toggle(menu_x, y, game.raster_settings.vertex_snap);
+                // Fixed-point math (PS1 jitter)
+                draw_toggle(menu_x, y, game.raster_settings.use_fixed_point);
                 if is_selected && toggle_pressed(input) {
-                    game.raster_settings.vertex_snap = !game.raster_settings.vertex_snap;
+                    game.raster_settings.use_fixed_point = !game.raster_settings.use_fixed_point;
                 }
             }
             5 => {
@@ -548,13 +561,20 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                 }
             }
             6 => {
+                // RGB555 (PS1 15-bit color)
+                draw_toggle(menu_x, y, game.raster_settings.use_rgb555);
+                if is_selected && toggle_pressed(input) {
+                    game.raster_settings.use_rgb555 = !game.raster_settings.use_rgb555;
+                }
+            }
+            7 => {
                 // Dithering (4x4 Bayer)
                 draw_toggle(menu_x, y, game.raster_settings.dithering);
                 if is_selected && toggle_pressed(input) {
                     game.raster_settings.dithering = !game.raster_settings.dithering;
                 }
             }
-            7 => {
+            8 => {
                 // Shading mode (cycle: None -> Flat -> Gouraud)
                 let mode_name = match game.raster_settings.shading {
                     ShadingMode::None => "None",
@@ -582,7 +602,7 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     }
                 }
             }
-            8 => {
+            9 => {
                 // FPS limit (cycle: 30 -> 60 -> Unlocked)
                 draw_text(game.fps_limit.label(), menu_x + 100.0, y, 12.0, Color::from_rgba(100, 180, 255, 255));
 
@@ -597,7 +617,7 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     }
                 }
             }
-            10 => {
+            11 => {
                 // Reset game
                 draw_text("[Press A]", menu_x + 100.0, y, 12.0, Color::from_rgba(80, 80, 90, 255));
 
@@ -917,7 +937,7 @@ fn draw_wireframe_cylinder(
             return None;
         }
 
-        let proj = project(cam, false, fb.width, fb.height);
+        let proj = project(cam, fb.width, fb.height);
         Some((proj.x as i32, proj.y as i32, cam.z))
     };
 

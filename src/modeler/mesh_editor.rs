@@ -3,7 +3,7 @@
 //!
 //! Also includes PicoCAD-style mesh organization with named objects and texture atlas.
 
-use crate::rasterizer::{Vec3, Face, Vertex, Color as RasterColor};
+use crate::rasterizer::{Vec3, Face, Vertex, Color as RasterColor, Color15, Texture15, BlendMode};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -328,6 +328,38 @@ impl TextureAtlas {
             .collect();
 
         crate::rasterizer::Texture {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: String::from("atlas"),
+        }
+    }
+
+    /// Convert to a Texture15 (RGB555) for PS1-authentic rendering
+    pub fn to_raster_texture_15(&self) -> Texture15 {
+        let pixels: Vec<Color15> = (0..self.height)
+            .flat_map(|y| {
+                (0..self.width).map(move |x| {
+                    let idx = (y * self.width + x) * 4;
+                    let r = self.pixels[idx];
+                    let g = self.pixels[idx + 1];
+                    let b = self.pixels[idx + 2];
+                    let blend_mode = Self::u8_to_blend(self.pixels[idx + 3]);
+
+                    // Map to Color15:
+                    // - BlendMode::Erase -> transparent (0x0000)
+                    // - Non-Opaque -> semi-transparent bit set
+                    if blend_mode == BlendMode::Erase {
+                        Color15::TRANSPARENT
+                    } else {
+                        let semi = blend_mode != BlendMode::Opaque;
+                        Color15::from_rgb888_semi(r, g, b, semi)
+                    }
+                })
+            })
+            .collect();
+
+        Texture15 {
             width: self.width,
             height: self.height,
             pixels,
@@ -1245,6 +1277,7 @@ impl EditableMesh {
                 v1: f.v1,
                 v2: f.v2,
                 texture_id: None,
+                black_transparent: f.black_transparent,
             }
         }).collect();
 
@@ -1271,6 +1304,7 @@ impl EditableMesh {
                 v1: f.v1,
                 v2: f.v2,
                 texture_id: Some(0), // Use texture atlas (index 0)
+                black_transparent: f.black_transparent,
             }
         }).collect();
 

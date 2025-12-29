@@ -3,7 +3,7 @@
 
 use macroquad::prelude::get_time;
 use super::math::{perspective_transform, project, project_ortho, Vec3, NEAR_PLANE};
-use super::types::{BlendMode, Color, Face, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Vertex};
+use super::types::{BlendMode, Color, Color15, Face, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Texture15, Vertex};
 
 /// Framebuffer for software rendering
 pub struct Framebuffer {
@@ -99,6 +99,107 @@ impl Framebuffer {
                 self.pixels[pixel_idx + 1] = bytes[1];
                 self.pixels[pixel_idx + 2] = bytes[2];
                 self.pixels[pixel_idx + 3] = bytes[3];
+                return true;
+            }
+        }
+        false
+    }
+
+    // =========================================================================
+    // RGB555 (Color15) methods for PS1-authentic rendering
+    // =========================================================================
+
+    /// Set pixel using Color15 (RGB555)
+    #[inline]
+    pub fn set_pixel_15(&mut self, x: usize, y: usize, color: Color15) {
+        if x < self.width && y < self.height {
+            let idx = (y * self.width + x) * 4;
+            let rgba = color.to_rgba();
+            self.pixels[idx] = rgba[0];
+            self.pixels[idx + 1] = rgba[1];
+            self.pixels[idx + 2] = rgba[2];
+            self.pixels[idx + 3] = rgba[3];
+        }
+    }
+
+    /// Set pixel with depth test using Color15 (RGB555)
+    #[inline]
+    pub fn set_pixel_with_depth_15(&mut self, x: usize, y: usize, z: f32, color: Color15) -> bool {
+        if x < self.width && y < self.height {
+            let idx = y * self.width + x;
+            if z < self.zbuffer[idx] {
+                self.zbuffer[idx] = z;
+                let pixel_idx = idx * 4;
+                let rgba = color.to_rgba();
+                self.pixels[pixel_idx] = rgba[0];
+                self.pixels[pixel_idx + 1] = rgba[1];
+                self.pixels[pixel_idx + 2] = rgba[2];
+                self.pixels[pixel_idx + 3] = rgba[3];
+                return true;
+            }
+        }
+        false
+    }
+
+    /// PS1-authentic blending using Color15
+    /// If pixel's semi-transparency bit is set, apply face_blend_mode
+    /// Otherwise, write directly (opaque)
+    #[inline]
+    pub fn set_pixel_blended_15(&mut self, x: usize, y: usize, color: Color15, face_blend_mode: BlendMode) {
+        if x < self.width && y < self.height {
+            let idx = (y * self.width + x) * 4;
+
+            // Read existing pixel (back) from framebuffer
+            let back_r = self.pixels[idx];
+            let back_g = self.pixels[idx + 1];
+            let back_b = self.pixels[idx + 2];
+
+            // Apply blending based on semi-transparency bit and face blend mode
+            let (r, g, b) = if color.is_semi_transparent() {
+                // Apply the face's blend mode
+                blend_rgb555(color.r8(), color.g8(), color.b8(), back_r, back_g, back_b, face_blend_mode)
+            } else {
+                // Opaque - write directly
+                (color.r8(), color.g8(), color.b8())
+            };
+
+            self.pixels[idx] = r;
+            self.pixels[idx + 1] = g;
+            self.pixels[idx + 2] = b;
+            self.pixels[idx + 3] = 255;
+        }
+    }
+
+    /// Set pixel with depth test and PS1-authentic blending using Color15
+    #[inline]
+    pub fn set_pixel_with_depth_blended_15(
+        &mut self,
+        x: usize,
+        y: usize,
+        z: f32,
+        color: Color15,
+        face_blend_mode: BlendMode,
+    ) -> bool {
+        if x < self.width && y < self.height {
+            let idx = y * self.width + x;
+            if z < self.zbuffer[idx] {
+                self.zbuffer[idx] = z;
+
+                let pixel_idx = idx * 4;
+                let back_r = self.pixels[pixel_idx];
+                let back_g = self.pixels[pixel_idx + 1];
+                let back_b = self.pixels[pixel_idx + 2];
+
+                let (r, g, b) = if color.is_semi_transparent() {
+                    blend_rgb555(color.r8(), color.g8(), color.b8(), back_r, back_g, back_b, face_blend_mode)
+                } else {
+                    (color.r8(), color.g8(), color.b8())
+                };
+
+                self.pixels[pixel_idx] = r;
+                self.pixels[pixel_idx + 1] = g;
+                self.pixels[pixel_idx + 2] = b;
+                self.pixels[pixel_idx + 3] = 255;
                 return true;
             }
         }
@@ -438,6 +539,7 @@ struct Surface {
     pub vc3: Color, // Vertex color 3
     pub normal: Vec3, // Face normal (camera space)
     pub face_idx: usize,
+    pub black_transparent: bool, // If true, black pixels are transparent (PS1 CLUT-style)
 }
 
 /// Calculate shading intensity from a single directional light
@@ -519,6 +621,75 @@ fn shade_color_rgb(color: Color, shade_r: f32, shade_g: f32, shade_b: f32) -> Co
         (color.b as f32 * shade_b).min(255.0) as u8,
         color.blend,
     )
+}
+
+// =============================================================================
+// RGB555 Helper Functions
+// =============================================================================
+
+/// PS1-authentic blend operation for RGB555 colors
+/// front = new pixel, back = existing framebuffer pixel
+/// Returns blended (r, g, b) tuple
+#[inline]
+fn blend_rgb555(front_r: u8, front_g: u8, front_b: u8, back_r: u8, back_g: u8, back_b: u8, mode: BlendMode) -> (u8, u8, u8) {
+    match mode {
+        BlendMode::Opaque => (front_r, front_g, front_b),
+        BlendMode::Average => {
+            // Mode 0: 0.5*B + 0.5*F
+            (
+                ((back_r as u16 + front_r as u16) / 2) as u8,
+                ((back_g as u16 + front_g as u16) / 2) as u8,
+                ((back_b as u16 + front_b as u16) / 2) as u8,
+            )
+        }
+        BlendMode::Add => {
+            // Mode 1: B + F (clamped to 255)
+            (
+                (back_r as u16 + front_r as u16).min(255) as u8,
+                (back_g as u16 + front_g as u16).min(255) as u8,
+                (back_b as u16 + front_b as u16).min(255) as u8,
+            )
+        }
+        BlendMode::Subtract => {
+            // Mode 2: B - F (clamped to 0)
+            (
+                (back_r as i16 - front_r as i16).max(0) as u8,
+                (back_g as i16 - front_g as i16).max(0) as u8,
+                (back_b as i16 - front_b as i16).max(0) as u8,
+            )
+        }
+        BlendMode::AddQuarter => {
+            // Mode 3: B + 0.25*F (clamped to 255)
+            (
+                (back_r as u16 + front_r as u16 / 4).min(255) as u8,
+                (back_g as u16 + front_g as u16 / 4).min(255) as u8,
+                (back_b as u16 + front_b as u16 / 4).min(255) as u8,
+            )
+        }
+        BlendMode::Erase => {
+            // Erase: transparent (return back unchanged, though this shouldn't be called)
+            (back_r, back_g, back_b)
+        }
+    }
+}
+
+/// Apply PS1-style ordered dithering to a Color15
+/// Works directly in 5-bit space for authentic PS1 behavior
+#[inline]
+fn apply_dither_15(color: Color15, x: usize, y: usize) -> Color15 {
+    // Get dither value from matrix based on pixel position (0-15)
+    let dither = BAYER_4X4[y & 3][x & 3];
+
+    // PS1 offset formula scaled for 5-bit: (dither - 8) / 4 gives range -2 to +1
+    // This is smaller because we're in 5-bit space (0-31) not 8-bit (0-255)
+    let offset = (dither - 8) / 4;
+
+    // Apply offset to each 5-bit channel
+    let r = (color.r5() as i32 + offset).clamp(0, 31) as u8;
+    let g = (color.g5() as i32 + offset).clamp(0, 31) as u8;
+    let b = (color.b5() as i32 + offset).clamp(0, 31) as u8;
+
+    Color15::new_semi(r, g, b, color.is_semi_transparent())
 }
 
 /// PS1 4x4 ordered dithering matrix (Bayer pattern)
@@ -750,6 +921,213 @@ fn rasterize_triangle(
     }
 }
 
+/// Rasterize a single triangle using RGB555 (PS1-authentic mode)
+/// Uses Color15 for texture sampling and Color15 for pixel output
+/// Face blend mode is used when texture pixel has semi-transparency bit set
+/// black_transparent: if true, pure black pixels (before shading) are skipped as transparent
+fn rasterize_triangle_15(
+    fb: &mut Framebuffer,
+    surface: &Surface,
+    texture: Option<&Texture15>,
+    face_blend_mode: BlendMode,
+    black_transparent: bool,
+    settings: &RasterSettings,
+) {
+    // Bounding box
+    let min_x = surface.v1.x.min(surface.v2.x).min(surface.v3.x).max(0.0) as usize;
+    let max_x = (surface.v1.x.max(surface.v2.x).max(surface.v3.x) + 1.0).min(fb.width as f32) as usize;
+    let min_y = surface.v1.y.min(surface.v2.y).min(surface.v3.y).max(0.0) as usize;
+    let max_y = (surface.v1.y.max(surface.v2.y).max(surface.v3.y) + 1.0).min(fb.height as f32) as usize;
+
+    // Early exit for degenerate/off-screen triangles
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    // Pre-calculate flat shading if needed
+    let flat_shade = if settings.shading == ShadingMode::Flat {
+        let center_pos = (surface.w1 + surface.w2 + surface.w3).scale(1.0 / 3.0);
+        let world_normal = (surface.wn1 + surface.wn2 + surface.wn3).scale(1.0 / 3.0).normalize();
+        shade_multi_light_color(world_normal, center_pos, &settings.lights, settings.ambient)
+    } else {
+        (1.0, 1.0, 1.0)
+    };
+
+    // Pre-compute Gouraud vertex shading if needed
+    let gouraud_shades = if settings.shading == ShadingMode::Gouraud {
+        Some((
+            shade_multi_light_color(surface.wn1, surface.w1, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn2, surface.w2, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn3, surface.w3, &settings.lights, settings.ambient),
+        ))
+    } else {
+        None
+    };
+
+    // === EDGE FUNCTION SETUP ===
+    let v1 = surface.v1;
+    let v2 = surface.v2;
+    let v3 = surface.v3;
+
+    // Triangle area * 2 (used for normalization)
+    let area = (v2.y - v3.y) * (v1.x - v3.x) + (v3.x - v2.x) * (v1.y - v3.y);
+    if area.abs() < 0.00001 {
+        return; // Degenerate triangle
+    }
+    let inv_area = 1.0 / area;
+
+    // Edge function coefficients
+    let a0 = v2.y - v3.y;
+    let b0 = v3.x - v2.x;
+    let a1 = v3.y - v1.y;
+    let b1 = v1.x - v3.x;
+
+    // Starting point
+    let start_x = min_x as f32;
+    let start_y = min_y as f32;
+
+    // Initial edge function values at (start_x, start_y)
+    let w0_row_start = a0 * (start_x - v3.x) + b0 * (start_y - v3.y);
+    let w1_row_start = a1 * (start_x - v3.x) + b1 * (start_y - v3.y);
+
+    // Step increments
+    let a0_step = a0;
+    let b0_step = b0;
+    let a1_step = a1;
+    let b1_step = b1;
+
+    let mut w0_row = w0_row_start;
+    let mut w1_row = w1_row_start;
+
+    // Rasterize using incremental edge functions
+    for y in min_y..max_y {
+        let mut w0 = w0_row;
+        let mut w1 = w1_row;
+
+        for x in min_x..max_x {
+            // Convert to barycentric coordinates
+            let bc_x = w0 * inv_area;
+            let bc_y = w1 * inv_area;
+            let bc_z = 1.0 - bc_x - bc_y;
+
+            // Check if inside triangle
+            const ERR: f32 = -0.0001;
+            if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
+                // Interpolate depth
+                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+
+                // Z-buffer test
+                if settings.use_zbuffer {
+                    let idx = y * fb.width + x;
+                    if z >= fb.zbuffer[idx] {
+                        w0 += a0_step;
+                        w1 += a1_step;
+                        continue;
+                    }
+                }
+
+                // Interpolate UV coordinates
+                let (u, v) = if settings.affine_textures {
+                    // Affine (PS1 style) - linear interpolation
+                    let u = bc_x * surface.uv1.x + bc_y * surface.uv2.x + bc_z * surface.uv3.x;
+                    let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
+                    (u, v)
+                } else {
+                    // Perspective-correct interpolation
+                    let bcc_x = bc_x / v1.z;
+                    let bcc_y = bc_y / v2.z;
+                    let bcc_z = bc_z / v3.z;
+                    let bd = bcc_x + bcc_y + bcc_z;
+                    let bcc_x = bcc_x / bd;
+                    let bcc_y = bcc_y / bd;
+                    let bcc_z = bcc_z / bd;
+
+                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
+                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    (u, v)
+                };
+
+                // Sample texture (RGB555) or use white
+                let mut color = if let Some(tex) = texture {
+                    tex.sample(u, 1.0 - v)
+                } else {
+                    Color15::WHITE
+                };
+
+                // Handle transparency based on black_transparent setting:
+                // - If black_transparent = true: skip both 0x0000 (transparent) and black pixels (r=g=b=0)
+                // - If black_transparent = false: only skip 0x0000, but render black pixels (convert to 0x8000)
+                let is_black = color.r5() == 0 && color.g5() == 0 && color.b5() == 0;
+                if color.is_transparent() {
+                    if is_black && !black_transparent {
+                        // Convert transparent black to drawable black
+                        color = Color15::BLACK_DRAWABLE;
+                    } else {
+                        // Skip truly transparent pixels
+                        w0 += a0_step;
+                        w1 += a1_step;
+                        continue;
+                    }
+                } else if black_transparent && is_black {
+                    // Skip black pixels when black_transparent is enabled
+                    w0 += a0_step;
+                    w1 += a1_step;
+                    continue;
+                }
+
+                // Interpolate vertex colors (8-bit for modulation)
+                let vertex_r = (bc_x * surface.vc1.r as f32 + bc_y * surface.vc2.r as f32 + bc_z * surface.vc3.r as f32) as u8;
+                let vertex_g = (bc_x * surface.vc1.g as f32 + bc_y * surface.vc2.g as f32 + bc_z * surface.vc3.g as f32) as u8;
+                let vertex_b = (bc_x * surface.vc1.b as f32 + bc_y * surface.vc2.b as f32 + bc_z * surface.vc3.b as f32) as u8;
+
+                // Apply PS1-style texture modulation (in 5-bit space)
+                color = color.modulate(vertex_r, vertex_g, vertex_b);
+
+                // Apply shading (lighting)
+                let (shade_r, shade_g, shade_b) = match settings.shading {
+                    ShadingMode::None => (1.0, 1.0, 1.0),
+                    ShadingMode::Flat => flat_shade,
+                    ShadingMode::Gouraud => {
+                        let ((r1, g1, b1), (r2, g2, b2), (r3, g3, b3)) = gouraud_shades.unwrap();
+                        (
+                            bc_x * r1 + bc_y * r2 + bc_z * r3,
+                            bc_x * g1 + bc_y * g2 + bc_z * g3,
+                            bc_x * b1 + bc_y * b2 + bc_z * b3,
+                        )
+                    }
+                };
+
+                color = color.shade_rgb(shade_r, shade_g, shade_b);
+
+                // Apply PS1-style ordered dithering (in 5-bit space)
+                if settings.dithering {
+                    color = apply_dither_15(color, x, y);
+                }
+
+                // Write pixel with PS1-authentic semi-transparency handling
+                // If pixel's semi-transparency bit is set, use face_blend_mode
+                let idx = y * fb.width + x;
+                if z < fb.zbuffer[idx] {
+                    fb.zbuffer[idx] = z;
+                    if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, face_blend_mode);
+                    } else {
+                        fb.set_pixel_15(x, y, color);
+                    }
+                }
+            }
+
+            // Step to next pixel (x increment)
+            w0 += a0_step;
+            w1 += a1_step;
+        }
+
+        // Step to next row (y increment)
+        w0_row += b0_step;
+        w1_row += b1_step;
+    }
+}
+
 /// Render a mesh to the framebuffer
 /// Returns timing breakdown for profiling
 pub fn render_mesh(
@@ -771,17 +1149,37 @@ pub fn render_mesh(
     let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
 
     for v in vertices {
-        // Transform position to camera space
-        let rel_pos = v.pos - camera.position;
-        let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-        cam_space_positions.push(cam_pos);
-
-        // Project to screen - use ortho or perspective based on settings
-        let screen_pos = if let Some(ref ortho) = settings.ortho_projection {
-            project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height)
+        // Project to screen - use ortho, fixed-point, or float projection
+        let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
+            // Ortho: use float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
+            (screen, cam_pos)
+        } else if settings.use_fixed_point {
+            // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
+            let (sx, sy, depth) = super::fixed::project_fixed(
+                v.pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+            );
+            // Still need cam_pos for culling/shading (use float for this)
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
         } else {
-            project(cam_pos, settings.vertex_snap, fb.width, fb.height)
+            // Standard float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project(cam_pos, fb.width, fb.height);
+            (screen, cam_pos)
         };
+
+        cam_space_positions.push(cam_pos);
         projected.push(screen_pos);
 
         // Transform normal to camera space
@@ -853,6 +1251,7 @@ pub fn render_mesh(
                     vc3: vertices[face.v2].color,
                     normal: normal.scale(-1.0),
                     face_idx,
+                    black_transparent: face.black_transparent,
                 });
             }
         } else {
@@ -878,6 +1277,7 @@ pub fn render_mesh(
                 vc3: vertices[face.v2].color,
                 normal,
                 face_idx,
+                black_transparent: face.black_transparent,
             });
 
             // Collect for wireframe overlay
@@ -988,6 +1388,262 @@ pub fn render_mesh(
         let front_wireframe_color = Color::new(200, 200, 220);
         for (x0, y0, _z0, x1, y1, _z1) in unique_edges {
             // Draw without depth testing since these are on front faces (already visible)
+            fb.draw_line(x0, y0, x1, y1, front_wireframe_color);
+        }
+    }
+
+    timings.wireframe_ms = ((get_time() - wireframe_start) * 1000.0) as f32;
+
+    timings
+}
+
+/// Render a mesh using RGB555 textures (PS1-authentic mode)
+/// Uses Texture15 for texture sampling with proper semi-transparency handling
+pub fn render_mesh_15(
+    fb: &mut Framebuffer,
+    vertices: &[Vertex],
+    faces: &[Face],
+    textures: &[Texture15],
+    face_blend_modes: Option<&[BlendMode]>,
+    camera: &Camera,
+    settings: &RasterSettings,
+) -> RasterTimings {
+    let mut timings = RasterTimings::default();
+
+    // === TRANSFORM PHASE ===
+    let transform_start = get_time();
+
+    // Transform all vertices to camera space
+    let mut cam_space_positions: Vec<Vec3> = Vec::with_capacity(vertices.len());
+    let mut cam_space_normals: Vec<Vec3> = Vec::with_capacity(vertices.len());
+    let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
+
+    for v in vertices {
+        // Project to screen - use ortho, fixed-point, or float projection
+        let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
+            // Ortho: use float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
+            (screen, cam_pos)
+        } else if settings.use_fixed_point {
+            // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
+            let (sx, sy, depth) = super::fixed::project_fixed(
+                v.pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+            );
+            // Still need cam_pos for culling/shading (use float for this)
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
+        } else {
+            // Standard float path
+            let rel_pos = v.pos - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project(cam_pos, fb.width, fb.height);
+            (screen, cam_pos)
+        };
+
+        cam_space_positions.push(cam_pos);
+        projected.push(screen_pos);
+
+        // Transform normal to camera space
+        let cam_normal = perspective_transform(v.normal, camera.basis_x, camera.basis_y, camera.basis_z);
+        cam_space_normals.push(cam_normal.normalize());
+    }
+
+    timings.transform_ms = ((get_time() - transform_start) * 1000.0) as f32;
+
+    // === CULL PHASE ===
+    let cull_start = get_time();
+
+    // Build surfaces for front-faces and collect back-faces for wireframe
+    let mut surfaces: Vec<Surface> = Vec::with_capacity(faces.len());
+    let mut backface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+    let mut frontface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+
+    for (face_idx, face) in faces.iter().enumerate() {
+        // Get camera-space positions
+        let cv1 = cam_space_positions[face.v0];
+        let cv2 = cam_space_positions[face.v1];
+        let cv3 = cam_space_positions[face.v2];
+
+        // PS1-style: Skip triangles that have ANY vertex behind the near plane
+        if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
+            continue;
+        }
+
+        // Use pre-projected screen positions
+        let v1 = projected[face.v0];
+        let v2 = projected[face.v1];
+        let v3 = projected[face.v2];
+
+        // 2D screen-space backface culling (PS1-style)
+        let signed_area = (v2.x - v1.x) * (v3.y - v1.y) - (v3.x - v1.x) * (v2.y - v1.y);
+        let is_backface = signed_area <= 0.0;
+
+        // Compute geometric normal for shading (cross product in camera space)
+        let edge1 = cv2 - cv1;
+        let edge2 = cv3 - cv1;
+        let normal = edge1.cross(edge2).normalize();
+
+        if is_backface {
+            backface_wireframes.push((v1, v2, v3));
+
+            if !settings.backface_cull {
+                surfaces.push(Surface {
+                    v1,
+                    v2,
+                    v3,
+                    w1: vertices[face.v0].pos,
+                    w2: vertices[face.v1].pos,
+                    w3: vertices[face.v2].pos,
+                    vn1: cam_space_normals[face.v0].scale(-1.0),
+                    vn2: cam_space_normals[face.v1].scale(-1.0),
+                    vn3: cam_space_normals[face.v2].scale(-1.0),
+                    wn1: vertices[face.v0].normal.scale(-1.0),
+                    wn2: vertices[face.v1].normal.scale(-1.0),
+                    wn3: vertices[face.v2].normal.scale(-1.0),
+                    uv1: vertices[face.v0].uv,
+                    uv2: vertices[face.v1].uv,
+                    uv3: vertices[face.v2].uv,
+                    vc1: vertices[face.v0].color,
+                    vc2: vertices[face.v1].color,
+                    vc3: vertices[face.v2].color,
+                    normal: normal.scale(-1.0),
+                    face_idx,
+                    black_transparent: face.black_transparent,
+                });
+            }
+        } else {
+            surfaces.push(Surface {
+                v1,
+                v2,
+                v3,
+                w1: vertices[face.v0].pos,
+                w2: vertices[face.v1].pos,
+                w3: vertices[face.v2].pos,
+                vn1: cam_space_normals[face.v0],
+                vn2: cam_space_normals[face.v1],
+                vn3: cam_space_normals[face.v2],
+                wn1: vertices[face.v0].normal,
+                wn2: vertices[face.v1].normal,
+                wn3: vertices[face.v2].normal,
+                uv1: vertices[face.v0].uv,
+                uv2: vertices[face.v1].uv,
+                uv3: vertices[face.v2].uv,
+                vc1: vertices[face.v0].color,
+                vc2: vertices[face.v1].color,
+                vc3: vertices[face.v2].color,
+                normal,
+                face_idx,
+                black_transparent: face.black_transparent,
+            });
+
+            if settings.wireframe_overlay {
+                frontface_wireframes.push((v1, v2, v3));
+            }
+        }
+    }
+
+    timings.cull_ms = ((get_time() - cull_start) * 1000.0) as f32;
+
+    // === SORT PHASE ===
+    let sort_start = get_time();
+
+    if !settings.use_zbuffer {
+        surfaces.sort_by(|a, b| {
+            let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
+            let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
+            b_max_z.partial_cmp(&a_max_z).unwrap()
+        });
+    }
+
+    timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
+
+    // === DRAW PHASE ===
+    let draw_start = get_time();
+
+    if !settings.wireframe_overlay {
+        for surface in &surfaces {
+            let texture = faces[surface.face_idx]
+                .texture_id
+                .and_then(|id| textures.get(id));
+
+            // Get face blend mode (default to Opaque if not provided)
+            let blend_mode = face_blend_modes
+                .and_then(|modes| modes.get(surface.face_idx))
+                .copied()
+                .unwrap_or(BlendMode::Opaque);
+
+            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings);
+        }
+    }
+
+    timings.draw_ms = ((get_time() - draw_start) * 1000.0) as f32;
+
+    // === WIREFRAME PHASE ===
+    let wireframe_start = get_time();
+
+    if settings.backface_cull && settings.backface_wireframe {
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
+
+        for (v1, v2, v3) in &backface_wireframes {
+            let edges = [
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
+            ];
+
+            for (x0, y0, z0, x1, y1, z1) in edges {
+                let edge = if (x0, y0) < (x1, y1) {
+                    (x0, y0, z0, x1, y1, z1)
+                } else {
+                    (x1, y1, z1, x0, y0, z0)
+                };
+
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
+                    unique_edges.push(edge);
+                }
+            }
+        }
+
+        let wireframe_color = Color::new(80, 80, 100);
+        for (x0, y0, z0, x1, y1, z1) in unique_edges {
+            fb.draw_line_3d(x0, y0, z0, x1, y1, z1, wireframe_color);
+        }
+    }
+
+    if settings.wireframe_overlay && !frontface_wireframes.is_empty() {
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
+
+        for (v1, v2, v3) in &frontface_wireframes {
+            let edges = [
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
+            ];
+
+            for (x0, y0, z0, x1, y1, z1) in edges {
+                let edge = if (x0, y0) < (x1, y1) {
+                    (x0, y0, z0, x1, y1, z1)
+                } else {
+                    (x1, y1, z1, x0, y0, z0)
+                };
+
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
+                    unique_edges.push(edge);
+                }
+            }
+        }
+
+        let front_wireframe_color = Color::new(200, 200, 220);
+        for (x0, y0, _z0, x1, y1, _z1) in unique_edges {
             fb.draw_line(x0, y0, x1, y1, front_wireframe_color);
         }
     }

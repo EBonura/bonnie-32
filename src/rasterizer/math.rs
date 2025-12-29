@@ -108,11 +108,13 @@ pub fn perspective_transform(v: Vec3, cam_x: Vec3, cam_y: Vec3, cam_z: Vec3) -> 
     }
 }
 
-/// Project a 3D point to 2D screen coordinates
-/// If `snap` is true, coordinates are floored to integers (PS1 jitter effect)
+/// Project a 3D point to 2D screen coordinates (float path, no snapping)
 /// Returns Vec3 where x,y are screen coords and z is the ORIGINAL camera-space depth
 /// (needed for perspective-correct texture interpolation)
-pub fn project(v: Vec3, snap: bool, width: usize, height: usize) -> Vec3 {
+///
+/// Note: For PS1-authentic vertex jitter, use `use_fixed_point` setting which performs
+/// the entire transform+project pipeline in fixed-point math (1.3.12 format + UNR division).
+pub fn project(v: Vec3, width: usize, height: usize) -> Vec3 {
     const DISTANCE: f32 = 5.0;
     const SCALE: f32 = 0.75;
 
@@ -126,24 +128,11 @@ pub fn project(v: Vec3, snap: bool, width: usize, height: usize) -> Vec3 {
         return Vec3::new(width as f32 / 2.0, height as f32 / 2.0, v.z);
     }
 
-    let mut result = Vec3 {
-        x: (v.x * us) / denom,
-        y: (v.y * us) / denom,
+    Vec3 {
+        x: (v.x * us) / denom * vs + (width as f32 / 2.0),
+        y: (v.y * us) / denom * vs + (height as f32 / 2.0),
         z: v.z, // Store ORIGINAL camera-space Z for perspective-correct interpolation
-    };
-
-    // Scale to screen
-    result.x = result.x * vs + (width as f32 / 2.0);
-    result.y = result.y * vs + (height as f32 / 2.0);
-    // z stays as original camera-space depth
-
-    // PS1 vertex snapping
-    if snap {
-        result.x = result.x.floor();
-        result.y = result.y.floor();
     }
-
-    result
 }
 
 /// Orthographic projection (no perspective divide)

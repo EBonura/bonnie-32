@@ -13,7 +13,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext};
 use crate::rasterizer::{
-    Framebuffer, Texture as RasterTexture, render_mesh, Color as RasterColor, Vec3,
+    Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
     world_to_screen, world_to_screen_with_depth,
     point_to_segment_distance, point_in_triangle_2d,
@@ -128,6 +128,7 @@ pub fn draw_viewport_3d(
             for room_idx in affected_rooms {
                 if let Some(room) = state.level.rooms.get_mut(room_idx) {
                     room.cleanup_empty_sectors();
+                    room.trim_empty_edges();
                     room.recalculate_bounds();
                 }
             }
@@ -1366,6 +1367,14 @@ pub fn draw_viewport_3d(
         Vec::new()
     };
 
+    // Convert textures to RGB555 if enabled
+    let use_rgb555 = state.raster_settings.use_rgb555;
+    let textures_15: Vec<_> = if use_rgb555 {
+        textures.iter().map(|t| t.to_15()).collect()
+    } else {
+        Vec::new()
+    };
+
     // Render each room with its own ambient setting (skip hidden ones)
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         // Skip hidden rooms
@@ -1378,7 +1387,12 @@ pub fn draw_viewport_3d(
             ..state.raster_settings.clone()
         };
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
+
+        if use_rgb555 {
+            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &state.camera_3d, &render_settings);
+        } else {
+            render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
+        }
     }
 
     // Draw wall preview when in DrawWall mode (after geometry so depth testing works)
@@ -2531,7 +2545,7 @@ fn draw_filled_octahedron(
         let rel = p - camera.position;
         let cam = crate::rasterizer::perspective_transform(rel, camera.basis_x, camera.basis_y, camera.basis_z);
         if cam.z < 0.1 { return None; }
-        let proj = crate::rasterizer::project(cam, false, fb.width, fb.height);
+        let proj = crate::rasterizer::project(cam, fb.width, fb.height);
         Some((proj.x as i32, proj.y as i32, cam.z))
     };
 
@@ -3035,10 +3049,13 @@ fn find_hovered_elements(
     }
 
     // Check faces if no vertex or edge hovered
+    // Track the closest face by depth (smaller depth = closer to camera)
     if result.vertex.is_none() && result.edge.is_none() {
+        let mut best_face: Option<(usize, usize, usize, SectorFace, f32)> = None; // (room, gx, gz, face, depth)
+
         if let Some(room) = state.level.rooms.get(state.current_room) {
-            let room_y = room.position.y; // Y offset for world-space
-            'face_loop: for (gx, gz, sector) in room.iter_sectors() {
+            let room_y = room.position.y;
+            for (gx, gz, sector) in room.iter_sectors() {
                 let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
                 let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
 
@@ -3051,20 +3068,11 @@ fn find_hovered_elements(
                         Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
                     ];
 
-                    if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
-                        world_to_screen(corners[0], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                        world_to_screen(corners[1], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                        world_to_screen(corners[2], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                        world_to_screen(corners[3], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                    if let Some(depth) = check_quad_hit_with_depth(
+                        mouse_fb_x, mouse_fb_y, &corners, &state.camera_3d, fb_width, fb_height
                     ) {
-                        if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
-                           point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
-                            result.face = Some((state.current_room, gx, gz, SectorFace::Floor));
-                            break 'face_loop;
+                        if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
+                            best_face = Some((state.current_room, gx, gz, SectorFace::Floor, depth));
                         }
                     }
                 }
@@ -3078,20 +3086,11 @@ fn find_hovered_elements(
                         Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
                     ];
 
-                    if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
-                        world_to_screen(corners[0], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                        world_to_screen(corners[1], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                        world_to_screen(corners[2], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                        world_to_screen(corners[3], state.camera_3d.position, state.camera_3d.basis_x,
-                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                    if let Some(depth) = check_quad_hit_with_depth(
+                        mouse_fb_x, mouse_fb_y, &corners, &state.camera_3d, fb_width, fb_height
                     ) {
-                        if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
-                           point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
-                            result.face = Some((state.current_room, gx, gz, SectorFace::Ceiling));
-                            break 'face_loop;
+                        if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
+                            best_face = Some((state.current_room, gx, gz, SectorFace::Ceiling, depth));
                         }
                     }
                 }
@@ -3113,25 +3112,21 @@ fn find_hovered_elements(
                             Vec3::new(x0, room_y + wall.heights[3], z0),
                         ];
 
-                        if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2)), Some((sx3, sy3))) = (
-                            world_to_screen(wall_corners[0], state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                            world_to_screen(wall_corners[1], state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                            world_to_screen(wall_corners[2], state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                            world_to_screen(wall_corners[3], state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                        if let Some(depth) = check_quad_hit_with_depth(
+                            mouse_fb_x, mouse_fb_y, &wall_corners, &state.camera_3d, fb_width, fb_height
                         ) {
-                            if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) ||
-                               point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx2, sy2, sx3, sy3) {
-                                result.face = Some((state.current_room, gx, gz, make_face(i)));
-                                break 'face_loop;
+                            if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
+                                best_face = Some((state.current_room, gx, gz, make_face(i), depth));
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Use the closest face
+        if let Some((room_idx, gx, gz, face, _depth)) = best_face {
+            result.face = Some((room_idx, gx, gz, face));
         }
     }
 
@@ -3160,4 +3155,81 @@ fn find_hovered_elements(
     }
 
     result
+}
+
+/// Check if a point is inside a quad (4 corners) and return depth at that point if hit.
+/// Uses world_to_screen_with_depth to get screen coords + depth for each corner,
+/// then interpolates depth using barycentric coordinates.
+fn check_quad_hit_with_depth(
+    mouse_x: f32,
+    mouse_y: f32,
+    corners: &[Vec3; 4],
+    camera: &crate::rasterizer::Camera,
+    fb_width: usize,
+    fb_height: usize,
+) -> Option<f32> {
+    use crate::rasterizer::world_to_screen_with_depth;
+
+    // Get screen coords + depth for all 4 corners
+    let projected: Vec<Option<(f32, f32, f32)>> = corners.iter().map(|&c| {
+        world_to_screen_with_depth(c, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height)
+    }).collect();
+
+    // Need all 4 corners visible
+    let (sx0, sy0, d0) = projected[0]?;
+    let (sx1, sy1, d1) = projected[1]?;
+    let (sx2, sy2, d2) = projected[2]?;
+    let (sx3, sy3, d3) = projected[3]?;
+
+    // Check first triangle (0, 1, 2)
+    if point_in_triangle_2d(mouse_x, mouse_y, sx0, sy0, sx1, sy1, sx2, sy2) {
+        // Compute barycentric coords and interpolate depth
+        let depth = interpolate_depth_in_triangle(
+            mouse_x, mouse_y,
+            sx0, sy0, d0,
+            sx1, sy1, d1,
+            sx2, sy2, d2,
+        );
+        return Some(depth);
+    }
+
+    // Check second triangle (0, 2, 3)
+    if point_in_triangle_2d(mouse_x, mouse_y, sx0, sy0, sx2, sy2, sx3, sy3) {
+        let depth = interpolate_depth_in_triangle(
+            mouse_x, mouse_y,
+            sx0, sy0, d0,
+            sx2, sy2, d2,
+            sx3, sy3, d3,
+        );
+        return Some(depth);
+    }
+
+    None
+}
+
+/// Interpolate depth at a point inside a triangle using barycentric coordinates
+/// Uses signed area method for robustness
+fn interpolate_depth_in_triangle(
+    px: f32, py: f32,
+    x0: f32, y0: f32, d0: f32,
+    x1: f32, y1: f32, d1: f32,
+    x2: f32, y2: f32, d2: f32,
+) -> f32 {
+    // Signed area of full triangle (v0, v1, v2)
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if area.abs() < 0.0001 {
+        // Degenerate triangle, just return average depth
+        return (d0 + d1 + d2) / 3.0;
+    }
+
+    // Barycentric coordinates using signed areas of sub-triangles
+    // w0 = area(P, v1, v2) / area(v0, v1, v2)  -> weight for v0
+    // w1 = area(v0, P, v2) / area(v0, v1, v2)  -> weight for v1
+    // w2 = area(v0, v1, P) / area(v0, v1, v2)  -> weight for v2
+    let w0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) / area;
+    let w1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) / area;
+    let w2 = 1.0 - w0 - w1;
+
+    // Interpolate depth
+    w0 * d0 + w1 * d1 + w2 * d2
 }

@@ -437,11 +437,11 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.set_status(&format!("Room boundaries: {}", mode), 2.0);
     }
 
-    // Wireframe overlay toggle
-    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe Overlay", state.raster_settings.wireframe_overlay) {
+    // Wireframe toggle
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe", state.raster_settings.wireframe_overlay) {
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "ON" } else { "OFF" };
-        state.set_status(&format!("Wireframe overlay: {}", mode), 2.0);
+        state.set_status(&format!("Wireframe: {}", mode), 2.0);
     }
 
     toolbar.separator();
@@ -502,10 +502,10 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let mode = if state.raster_settings.affine_textures { "ON" } else { "OFF" };
         state.set_status(&format!("Affine textures: {}", mode), 2.0);
     }
-    if toolbar.icon_button_active(ctx, icon::MAGNET, icon_font, "Vertex Snap (PS1 jitter)", state.raster_settings.vertex_snap) {
-        state.raster_settings.vertex_snap = !state.raster_settings.vertex_snap;
-        let mode = if state.raster_settings.vertex_snap { "ON" } else { "OFF" };
-        state.set_status(&format!("Vertex snap: {}", mode), 2.0);
+    if toolbar.icon_button_active(ctx, icon::HASH, icon_font, "Fixed-Point Math (PS1 jitter)", state.raster_settings.use_fixed_point) {
+        state.raster_settings.use_fixed_point = !state.raster_settings.use_fixed_point;
+        let mode = if state.raster_settings.use_fixed_point { "ON" } else { "OFF" };
+        state.set_status(&format!("Fixed-point: {}", mode), 2.0);
     }
     if toolbar.icon_button_active(ctx, icon::SUN, icon_font, "Gouraud Shading", state.raster_settings.shading != crate::rasterizer::ShadingMode::None) {
         use crate::rasterizer::ShadingMode;
@@ -532,7 +532,18 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
         state.set_status(&format!("Aspect Ratio: {}", mode), 2.0);
     }
-
+    // Z-buffer toggle (ON = z-buffer, OFF = painter's algorithm)
+    if toolbar.icon_button_active(ctx, icon::ARROW_DOWN_UP, icon_font, "Z-Buffer (OFF = painter's algorithm)", state.raster_settings.use_zbuffer) {
+        state.raster_settings.use_zbuffer = !state.raster_settings.use_zbuffer;
+        let mode = if state.raster_settings.use_zbuffer { "Z-Buffer" } else { "Painter's Algorithm" };
+        state.set_status(&format!("Depth: {}", mode), 2.0);
+    }
+    // RGB555 toggle (PS1-authentic 15-bit color mode)
+    if toolbar.icon_button_active(ctx, icon::PALETTE, icon_font, "RGB555 (PS1 15-bit color mode)", state.raster_settings.use_rgb555) {
+        state.raster_settings.use_rgb555 = !state.raster_settings.use_rgb555;
+        let mode = if state.raster_settings.use_rgb555 { "RGB555 (15-bit)" } else { "RGB888 (24-bit)" };
+        state.set_status(&format!("Color: {}", mode), 2.0);
+    }
     toolbar.separator();
 
     // Current file label
@@ -1249,6 +1260,32 @@ fn draw_horizontal_face_container(
             }
         }
     }
+    content_y += 28.0;
+
+    // Black transparent toggle (PS1 CLUT-style transparency) - icon button
+    draw_text("Black", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+
+    let btn_x = content_x + 40.0;
+    let btn_size = 20.0;
+    let btn_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    let icon_char = if face.black_transparent { icon::EYE_OFF } else { icon::EYE };
+    let tooltip = if face.black_transparent { "Black = Transparent (click to make visible)" } else { "Black = Visible (click to make transparent)" };
+
+    if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    f.black_transparent = !f.black_transparent;
+                }
+            }
+        }
+    }
+
+    // Show current state as text
+    let state_text = if face.black_transparent { "Transparent" } else { "Visible" };
+    draw_text(state_text, (btn_x + btn_size + 6.0).floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
 
     // Extrude button (only for floors)
     if is_floor {
@@ -1940,6 +1977,31 @@ fn draw_wall_face_container(
             }
         }
     }
+    content_y += 28.0;
+
+    // Black transparent toggle (PS1 CLUT-style transparency) - icon button
+    draw_text("Black", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
+
+    let btn_x = content_x + 40.0;
+    let btn_size = 20.0;
+    let btn_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    let icon_char = if wall.black_transparent { icon::EYE_OFF } else { icon::EYE };
+    let tooltip = if wall.black_transparent { "Black = Transparent (click to make visible)" } else { "Black = Visible (click to make transparent)" };
+
+    if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    w.black_transparent = !w.black_transparent;
+                }
+            }
+        }
+    }
+
+    // Show current state as text
+    let state_text = if wall.black_transparent { "Transparent" } else { "Visible" };
+    draw_text(state_text, (btn_x + btn_size + 6.0).floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
 
     container_height
 }

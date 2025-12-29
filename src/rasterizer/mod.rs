@@ -15,6 +15,7 @@ mod math;
 mod types;
 mod render;
 pub mod ray;
+pub mod fixed;
 
 pub use math::*;
 pub use types::*;
