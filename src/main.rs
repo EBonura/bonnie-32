@@ -675,6 +675,8 @@ async fn main() {
 
                                         // Set the editable mesh
                                         ms.modeler_state.mesh = result.mesh;
+                                        // Sync to project so UV highlighting and other project-based features work
+                                        ms.modeler_state.sync_mesh_to_project();
                                         // Don't set current_file to OBJ path - this is an IMPORT, not opening a project
                                         // User must "Save As" to create a .ron project file
                                         ms.modeler_state.current_file = None;
@@ -736,6 +738,8 @@ async fn main() {
                                 // WASM fallback - just use preview mesh (already has scale/flip applied from preview)
                                 if let Some(mesh) = ms.mesh_browser.preview_mesh.take() {
                                     ms.modeler_state.mesh = mesh;
+                                    // Sync to project so UV highlighting and other project-based features work
+                                    ms.modeler_state.sync_mesh_to_project();
                                     // Don't set current_file to OBJ path - this is an IMPORT
                                     ms.modeler_state.current_file = None;
                                     ms.modeler_state.dirty = true;  // Needs saving
