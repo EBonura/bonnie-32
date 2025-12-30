@@ -959,6 +959,10 @@ pub struct Face {
     /// If false, black pixels are rendered as black
     #[serde(default = "default_black_transparent")]
     pub black_transparent: bool,
+    /// PS1 blend mode for this face (per-face, not per-pixel)
+    /// Controls how semi-transparent pixels are blended with the background
+    #[serde(default)]
+    pub blend_mode: BlendMode,
 }
 
 fn default_black_transparent() -> bool {
@@ -973,6 +977,7 @@ impl Face {
             v2,
             texture_id: None,
             black_transparent: true, // Default: black is transparent (PS1 style)
+            blend_mode: BlendMode::Opaque,
         }
     }
 
@@ -983,12 +988,19 @@ impl Face {
             v2,
             texture_id: Some(texture_id),
             black_transparent: true, // Default: black is transparent (PS1 style)
+            blend_mode: BlendMode::Opaque,
         }
     }
 
     /// Set the black_transparent flag (builder pattern)
     pub fn with_black_transparent(mut self, black_transparent: bool) -> Self {
         self.black_transparent = black_transparent;
+        self
+    }
+
+    /// Set the blend mode (builder pattern)
+    pub fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
         self
     }
 }

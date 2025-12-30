@@ -583,6 +583,8 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
     };
     draw_text(mode_label, x + 4.0, *y + 12.0, 11.0, TEXT_DIM);
     *y += line_height;
+
+    // Note: Face Properties (blend mode) is now in the right panel texture section
 }
 
 /// Draw lights section
@@ -670,48 +672,60 @@ fn draw_shortcuts_section(x: f32, y: &mut f32, _width: f32, max_y: f32) {
 // ============================================================================
 
 fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
-    // The atlas always takes the top portion, then tools below
-    // Calculate atlas area (square, centered horizontally)
+    let mut y = rect.y;
+    let padding = 4.0;
+
+    // === MODE TOGGLE (UV / Paint) at the very top ===
+    y += 2.0;
+    draw_mode_toggle(ctx, rect.x, &mut y, rect.w, state, icon_font);
+    y += 6.0;
+
+    // Calculate atlas area
     let atlas = &state.project.atlas;
     let atlas_w = atlas.width as f32;
     let atlas_h = atlas.height as f32;
 
-    let padding = 4.0;
     let available_w = rect.w - padding * 2.0;
 
-    // Atlas preview takes up to 60% of height or available width (whichever is smaller)
-    let max_atlas_h = rect.h * 0.55;
+    // Atlas preview takes up to 50% of remaining height
+    let max_atlas_h = (rect.bottom() - y) * 0.45;
     let atlas_scale = (available_w / atlas_w).min(max_atlas_h / atlas_h);
     let atlas_screen_w = atlas_w * atlas_scale;
     let atlas_screen_h = atlas_h * atlas_scale;
 
     let atlas_x = rect.x + (rect.w - atlas_screen_w) * 0.5;
-    let atlas_y = rect.y + padding;
+    let atlas_y = y;
 
     // Draw atlas preview
     draw_atlas_preview(ctx, atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, atlas_scale, state);
 
     // Tools start below atlas
-    let mut y = atlas_y + atlas_screen_h + 8.0;
+    y = atlas_y + atlas_screen_h + 8.0;
 
     // Atlas size selector (always visible)
     draw_atlas_size_selector(ctx, rect.x, &mut y, rect.w, state);
     y += 4.0;
 
-    // === UV TOOLS SECTION ===
-    draw_section_label(rect.x, &mut y, rect.w, "UV Tools");
-    draw_uv_tools_section(ctx, rect.x, &mut y, rect.w, state, icon_font);
-    y += 4.0;
+    // === MODE-SPECIFIC TOOLS ===
+    if state.atlas_edit_mode == AtlasEditMode::Uv {
+        // UV Mode: show UV tools
+        draw_section_label(rect.x, &mut y, rect.w, "UV Tools");
+        draw_uv_tools_content(ctx, rect.x, &mut y, rect.w, state, icon_font);
+        y += 4.0;
 
-    // === PAINT TOOLS SECTION ===
-    draw_section_label(rect.x, &mut y, rect.w, "Paint Tools");
-    draw_paint_tools_section(ctx, rect.x, &mut y, rect.w, rect.bottom(), state, icon_font);
-    y += 4.0;
-
-    // === CLUT SECTION ===
-    draw_section_label(rect.x, &mut y, rect.w, "CLUT");
-    let remaining_height = (rect.bottom() - y - 4.0).max(60.0);
-    draw_clut_editor_panel(ctx, rect.x, y, rect.w, remaining_height, state, icon_font);
+        // Face Properties (blend mode) when faces are selected
+        if let super::state::ModelerSelection::Faces(face_indices) = &state.selection {
+            if !face_indices.is_empty() {
+                draw_section_label(rect.x, &mut y, rect.w, "Face Properties");
+                draw_face_properties(ctx, rect.x, &mut y, rect.w, state, icon_font);
+                y += 4.0;
+            }
+        }
+    } else {
+        // Paint Mode: show paint tools (includes CLUT editor)
+        draw_section_label(rect.x, &mut y, rect.w, "Paint Tools");
+        draw_paint_tools_content(ctx, rect.x, &mut y, rect.w, state, icon_font);
+    }
 
     // Handle atlas interactions (painting, UV editing)
     let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
@@ -874,7 +888,270 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
     *y += btn_h + 4.0;
 }
 
-/// Draw UV tools section
+/// Draw UV/Paint mode toggle at the top of the right panel
+fn draw_mode_toggle(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let btn_w = (width - 12.0) / 2.0;
+    let btn_h = 22.0;
+    let spacing = 4.0;
+
+    // UV button
+    let uv_rect = Rect::new(x + 4.0, *y, btn_w, btn_h);
+    let uv_active = state.atlas_edit_mode == AtlasEditMode::Uv;
+    let uv_hovered = ctx.mouse.inside(&uv_rect);
+
+    let uv_bg = if uv_active {
+        Color::from_rgba(70, 130, 180, 255)
+    } else if uv_hovered {
+        Color::from_rgba(60, 60, 68, 255)
+    } else {
+        Color::from_rgba(45, 45, 52, 255)
+    };
+    draw_rectangle(uv_rect.x, uv_rect.y, uv_rect.w, uv_rect.h, uv_bg);
+    draw_rectangle_lines(uv_rect.x, uv_rect.y, uv_rect.w, uv_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    // UV icon and label
+    if let Some(font) = icon_font {
+        draw_text_ex(&icon::MOVE.to_string(), uv_rect.x + 6.0, uv_rect.y + 16.0,
+            TextParams { font: Some(font), font_size: 14, color: if uv_active { WHITE } else { TEXT_COLOR }, ..Default::default() });
+    }
+    draw_text("UV", uv_rect.x + 22.0, uv_rect.y + 15.0, 12.0, if uv_active { WHITE } else { TEXT_COLOR });
+
+    if ctx.mouse.clicked(&uv_rect) {
+        state.atlas_edit_mode = AtlasEditMode::Uv;
+    }
+
+    // Paint button
+    let paint_rect = Rect::new(uv_rect.right() + spacing, *y, btn_w, btn_h);
+    let paint_active = state.atlas_edit_mode == AtlasEditMode::Paint;
+    let paint_hovered = ctx.mouse.inside(&paint_rect);
+
+    let paint_bg = if paint_active {
+        Color::from_rgba(70, 130, 180, 255)
+    } else if paint_hovered {
+        Color::from_rgba(60, 60, 68, 255)
+    } else {
+        Color::from_rgba(45, 45, 52, 255)
+    };
+    draw_rectangle(paint_rect.x, paint_rect.y, paint_rect.w, paint_rect.h, paint_bg);
+    draw_rectangle_lines(paint_rect.x, paint_rect.y, paint_rect.w, paint_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Paint icon and label
+    if let Some(font) = icon_font {
+        draw_text_ex(&icon::BRUSH.to_string(), paint_rect.x + 6.0, paint_rect.y + 16.0,
+            TextParams { font: Some(font), font_size: 14, color: if paint_active { WHITE } else { TEXT_COLOR }, ..Default::default() });
+    }
+    draw_text("Paint", paint_rect.x + 22.0, paint_rect.y + 15.0, 12.0, if paint_active { WHITE } else { TEXT_COLOR });
+
+    if ctx.mouse.clicked(&paint_rect) {
+        state.atlas_edit_mode = AtlasEditMode::Paint;
+        state.uv_selection.clear();
+    }
+
+    *y += btn_h + 2.0;
+}
+
+/// Draw UV tools content (without mode toggle - that's now at top)
+fn draw_uv_tools_content(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let btn_size = 20.0;
+    let btn_spacing = 2.0;
+
+    // Transform buttons
+    let has_selection = !state.uv_selection.is_empty();
+    let buttons: &[(char, &str, &str)] = &[
+        (icon::FLIP_HORIZONTAL, "Flip H", "uv_flip_h"),
+        (icon::FLIP_VERTICAL, "Flip V", "uv_flip_v"),
+        (icon::ROTATE_CW, "Rotate CW", "uv_rot_cw"),
+        (icon::REFRESH_CW, "Reset UVs", "uv_reset"),
+    ];
+
+    let mut btn_x = x + 4.0;
+    for (icon_char, tooltip, action) in buttons {
+        let btn_rect = Rect::new(btn_x, *y, btn_size, btn_size);
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if !has_selection {
+            Color::from_rgba(40, 40, 45, 255)
+        } else if hovered {
+            Color::from_rgba(80, 80, 90, 255)
+        } else {
+            Color::from_rgba(55, 55, 60, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let icon_color = if has_selection { TEXT_COLOR } else { Color::from_rgba(80, 80, 85, 255) };
+        draw_icon_centered(icon_font, *icon_char, &btn_rect, 12.0, icon_color);
+
+        if has_selection && hovered && is_mouse_button_pressed(MouseButton::Left) {
+            match *action {
+                "uv_flip_h" => flip_selected_uvs(state, true, false),
+                "uv_flip_v" => flip_selected_uvs(state, false, true),
+                "uv_rot_cw" => rotate_selected_uvs(state, true),
+                "uv_reset" => reset_selected_uvs(state),
+                _ => {}
+            }
+        }
+
+        if hovered {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+
+        btn_x += btn_size + btn_spacing;
+    }
+
+    *y += btn_size + 4.0;
+}
+
+/// Draw paint tools content (without mode toggle - that's now at top)
+fn draw_paint_tools_content(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let btn_size = 20.0;
+
+    // Brush type buttons
+    let brush_rect = Rect::new(x + 4.0, *y, btn_size, btn_size);
+    let brush_selected = state.brush_type == super::state::BrushType::Square;
+    if icon_button_active(ctx, brush_rect, icon::BRUSH, icon_font, "Brush (B)", brush_selected) {
+        state.brush_type = super::state::BrushType::Square;
+    }
+
+    let fill_rect = Rect::new(brush_rect.x + btn_size + 2.0, *y, btn_size, btn_size);
+    let fill_selected = state.brush_type == super::state::BrushType::Fill;
+    if icon_button_active(ctx, fill_rect, icon::PAINT_BUCKET, icon_font, "Fill (F)", fill_selected) {
+        state.brush_type = super::state::BrushType::Fill;
+    }
+
+    // Brush size slider (for square brush)
+    if state.brush_type == super::state::BrushType::Square {
+        let slider_x = fill_rect.x + btn_size + 8.0;
+        let slider_w = width - (slider_x - x) - 30.0;
+        let slider_h = 12.0;
+        let slider_y = *y + (btn_size - slider_h) / 2.0;
+
+        let track_rect = Rect::new(slider_x, slider_y, slider_w.max(40.0), slider_h);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+        let min_size = 1.0;
+        let max_size = 16.0;
+        let fill_ratio = (state.brush_size - min_size) / (max_size - min_size);
+        let fill_width = fill_ratio * track_rect.w;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, slider_h, ACCENT_COLOR);
+
+        draw_text(&format!("{}", state.brush_size as i32), slider_x + track_rect.w + 4.0, *y + 14.0, 10.0, TEXT_DIM);
+
+        // Handle slider interaction
+        if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && !state.brush_size_slider_active {
+            state.brush_size_slider_active = true;
+        }
+        if state.brush_size_slider_active {
+            if ctx.mouse.left_down {
+                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
+                state.brush_size = (min_size + (rel_x / track_rect.w) * (max_size - min_size)).round().clamp(min_size, max_size);
+            } else {
+                state.brush_size_slider_active = false;
+            }
+        }
+    }
+
+    *y += btn_size + 4.0;
+
+    // CLUT Editor section (only in Paint mode)
+    draw_section_label(x, y, width, "CLUT");
+    let clut_height = 200.0; // Fixed height for CLUT editor
+    draw_clut_editor_panel(ctx, x, *y, width, clut_height, state, icon_font);
+    *y += clut_height + 4.0;
+}
+
+/// Draw face properties section (blend mode for selected faces)
+fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &mut ModelerState, _icon_font: Option<&Font>) {
+    use crate::rasterizer::BlendMode;
+
+    // Get selected face indices
+    let face_indices = if let super::state::ModelerSelection::Faces(indices) = &state.selection {
+        indices.clone()
+    } else {
+        return;
+    };
+
+    if face_indices.is_empty() {
+        return;
+    }
+
+    // Get current blend mode from first selected face
+    let current_blend = face_indices.first()
+        .and_then(|&idx| state.mesh.faces.get(idx))
+        .map(|f| f.blend_mode)
+        .unwrap_or(BlendMode::Opaque);
+
+    // Check if all selected faces have the same blend mode
+    let all_same = face_indices.iter()
+        .filter_map(|&idx| state.mesh.faces.get(idx))
+        .all(|f| f.blend_mode == current_blend);
+
+    // Blend mode label
+    draw_text("Blend:", x + 4.0, *y + 12.0, 11.0, TEXT_DIM);
+
+    // Blend mode buttons (inline row)
+    let btn_modes = [
+        (BlendMode::Opaque, "O", "Opaque"),
+        (BlendMode::Average, "A", "Average (50/50)"),
+        (BlendMode::Add, "+", "Additive"),
+        (BlendMode::Subtract, "-", "Subtractive"),
+        (BlendMode::AddQuarter, "Q", "Quarter-Add"),
+    ];
+
+    let btn_width = 22.0;
+    let btn_height = 18.0;
+    let mut bx = x + 40.0;
+
+    for (mode, label, tooltip) in btn_modes.iter() {
+        let btn_rect = Rect::new(bx, *y, btn_width, btn_height);
+        let is_selected = all_same && current_blend == *mode;
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        // Draw button background
+        let bg_color = if is_selected {
+            Color::from_rgba(70, 130, 180, 255)
+        } else if hovered {
+            Color::from_rgba(60, 60, 68, 255)
+        } else {
+            Color::from_rgba(50, 50, 58, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg_color);
+        draw_rectangle_lines(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+        // Draw label
+        let text_color = if is_selected { WHITE } else { TEXT_COLOR };
+        let text_x = btn_rect.x + (btn_rect.w - measure_text(label, None, 10, 1.0).width) / 2.0;
+        draw_text(label, text_x, btn_rect.y + 13.0, 10.0, text_color);
+
+        // Tooltip
+        if hovered {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+
+        // Click handler
+        if ctx.mouse.clicked(&btn_rect) {
+            // Apply to all selected faces
+            for &face_idx in &face_indices {
+                if let Some(face) = state.mesh.faces.get_mut(face_idx) {
+                    face.blend_mode = *mode;
+                }
+            }
+            state.sync_mesh_to_project();
+            state.dirty = true;
+        }
+
+        bx += btn_width + 2.0;
+    }
+
+    *y += btn_height + 4.0;
+
+    // Show "Mixed" indicator if faces have different blend modes
+    if !all_same {
+        draw_text("(Mixed)", x + 4.0, *y + 10.0, 10.0, Color::from_rgba(180, 140, 60, 255));
+        *y += 14.0;
+    }
+}
+
+/// Draw UV tools section (legacy - kept for compatibility but not used in new layout)
 fn draw_uv_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
     let btn_size = 20.0;
     let btn_spacing = 2.0;
@@ -933,7 +1210,7 @@ fn draw_uv_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, 
 }
 
 /// Draw paint tools section
-fn draw_paint_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, max_y: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+fn draw_paint_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, _max_y: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
     let btn_size = 20.0;
 
     // Paint mode toggle
@@ -989,30 +1266,7 @@ fn draw_paint_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32
         }
     }
 
-    *y += btn_size + 6.0;
-
-    // Color picker (compact version)
-    if *y + 80.0 < max_y {
-        let picker_result = draw_ps1_color_picker_with_blend_mode(
-            ctx,
-            x + 4.0,
-            *y,
-            width - 8.0,
-            state.paint_color,
-            state.paint_blend_mode,
-            "Color",
-            &mut state.color_picker_slider,
-        );
-
-        if let Some(new_color) = picker_result.color {
-            state.paint_color = new_color;
-        }
-        if let Some(new_blend) = picker_result.blend_mode {
-            state.paint_blend_mode = new_blend;
-        }
-
-        *y += ps1_color_picker_with_blend_mode_height();
-    }
+    *y += btn_size + 4.0;
 }
 
 /// Handle atlas interactions (painting and UV editing)
@@ -1982,37 +2236,6 @@ fn draw_clut_editor_panel(
         state.set_status("Added 8-bit CLUT", 1.0);
     }
 
-    // Quantize button (create CLUT from current atlas with auto-detected depth)
-    let btn_quant_rect = Rect::new(x + padding + (btn_w + 4.0) * 2.0, cur_y, btn_w + 10.0, btn_h);
-    let hovered_quant = ctx.mouse.inside(&btn_quant_rect);
-    let bg_quant = if hovered_quant {
-        Color::from_rgba(70, 90, 80, 255)
-    } else {
-        Color::from_rgba(50, 70, 55, 255)
-    };
-    draw_rectangle(btn_quant_rect.x, btn_quant_rect.y, btn_quant_rect.w, btn_quant_rect.h, bg_quant);
-    draw_text("Quantize", btn_quant_rect.x + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
-    if hovered_quant {
-        ctx.set_tooltip("Auto-quantize atlas (4-bit if <=15 colors, 8-bit otherwise)", ctx.mouse.x, ctx.mouse.y);
-    }
-
-    if hovered_quant && is_mouse_button_pressed(MouseButton::Left) {
-        // Auto-detect optimal CLUT depth based on unique color count
-        let name = format!("Quantized {}", state.project.clut_pool.len() + 1);
-        let (indexed_atlas, clut, color_count) = super::quantize::quantize_atlas_auto(&state.project.atlas, &name);
-        let depth_label = clut.depth.short_label();
-        let id = state.project.clut_pool.add_clut(clut);
-        state.project.indexed_atlas = Some(super::mesh_editor::IndexedAtlas {
-            width: indexed_atlas.width,
-            height: indexed_atlas.height,
-            depth: indexed_atlas.depth,
-            indices: indexed_atlas.indices,
-            default_clut: id,
-        });
-        state.selected_clut = Some(id);
-        state.set_status(&format!("Quantized atlas: {} colors -> {} CLUT", color_count, depth_label), 2.0);
-    }
-
     cur_y += btn_h + 4.0;
 
     // List of CLUTs in pool
@@ -2735,10 +2958,16 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                     v2: f.v2,
                     texture_id: Some(0),
                     black_transparent: f.black_transparent,
+                    blend_mode: f.blend_mode,
                 }
             }).collect();
 
             if !vertices.is_empty() && !faces.is_empty() {
+                // Collect per-face blend modes
+                let blend_modes: Vec<crate::rasterizer::BlendMode> = faces.iter()
+                    .map(|f| f.blend_mode)
+                    .collect();
+
                 if use_rgb555 {
                     // RGB555 rendering path
                     let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
@@ -2747,7 +2976,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         &vertices,
                         &faces,
                         &textures_15,
-                        None,
+                        Some(&blend_modes),
                         &ortho_camera,
                         &ortho_settings,
                     );

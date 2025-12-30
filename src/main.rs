@@ -684,7 +684,8 @@ async fn main() {
                                                 }
                                                 TextureImportResult::Quantized { atlas, mut indexed, clut, color_count } => {
                                                     ms.modeler_state.project.atlas = atlas;
-                                                    // Add CLUT to pool and get ID
+                                                    // Clear existing CLUTs and add only the imported one
+                                                    ms.modeler_state.project.clut_pool.clear();
                                                     let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
                                                     indexed.default_clut = clut_id;
                                                     let depth_label = indexed.depth.short_label();

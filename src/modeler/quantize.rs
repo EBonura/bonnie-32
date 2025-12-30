@@ -244,19 +244,23 @@ fn find_nearest_color(target: &Color15, palette: &[Color15]) -> u8 {
 }
 
 /// Count unique colors in an RGBA pixel array (ignoring transparency)
-/// Returns the number of unique RGB colors (not counting fully transparent pixels)
+/// Returns the number of unique RGB555 colors (not counting fully transparent pixels)
+/// Colors are counted in RGB555 space since that's what PS1 uses
 pub fn count_unique_colors(rgba_pixels: &[u8]) -> usize {
     use std::collections::HashSet;
 
-    let mut unique_colors: HashSet<u32> = HashSet::new();
+    let mut unique_colors: HashSet<u16> = HashSet::new();
 
     for chunk in rgba_pixels.chunks(4) {
         // Skip fully transparent pixels
         if chunk[3] == 0 {
             continue;
         }
-        // Pack RGB into u32 for hashing (ignore alpha)
-        let packed = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
+        // Convert to RGB555 and pack (this matches Color15::from_rgb888)
+        let r5 = chunk[0] >> 3;
+        let g5 = chunk[1] >> 3;
+        let b5 = chunk[2] >> 3;
+        let packed = ((r5 as u16) << 10) | ((g5 as u16) << 5) | (b5 as u16);
         unique_colors.insert(packed);
     }
 
@@ -264,10 +268,11 @@ pub fn count_unique_colors(rgba_pixels: &[u8]) -> usize {
 }
 
 /// Count unique colors in a TextureAtlas (convenience wrapper)
+/// Colors are counted in RGB555 space since that's what PS1 uses
 pub fn count_atlas_colors(atlas: &super::mesh_editor::TextureAtlas) -> usize {
     use std::collections::HashSet;
 
-    let mut unique_colors: HashSet<u32> = HashSet::new();
+    let mut unique_colors: HashSet<u16> = HashSet::new();
 
     for y in 0..atlas.height {
         for x in 0..atlas.width {
@@ -276,8 +281,11 @@ pub fn count_atlas_colors(atlas: &super::mesh_editor::TextureAtlas) -> usize {
             if color.blend == crate::rasterizer::BlendMode::Erase {
                 continue;
             }
-            // Pack RGB into u32 for hashing
-            let packed = ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32);
+            // Convert to RGB555 and pack (matches Color15::from_rgb888)
+            let r5 = color.r >> 3;
+            let g5 = color.g >> 3;
+            let b5 = color.b >> 3;
+            let packed = ((r5 as u16) << 10) | ((g5 as u16) << 5) | (b5 as u16);
             unique_colors.insert(packed);
         }
     }

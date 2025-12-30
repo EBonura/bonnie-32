@@ -553,6 +553,12 @@ impl ClutPool {
     pub fn as_slice(&self) -> &[Clut] {
         &self.cluts
     }
+
+    /// Clear all CLUTs from the pool (for import operations)
+    pub fn clear(&mut self) {
+        self.cluts.clear();
+        self.next_id = 1;
+    }
 }
 
 impl Default for ClutPool {
@@ -1475,6 +1481,7 @@ impl EditableMesh {
                 v2: f.v2,
                 texture_id: None,
                 black_transparent: f.black_transparent,
+                blend_mode: f.blend_mode,
             }
         }).collect();
 
@@ -1502,6 +1509,7 @@ impl EditableMesh {
                 v2: f.v2,
                 texture_id: Some(0), // Use texture atlas (index 0)
                 black_transparent: f.black_transparent,
+                blend_mode: f.blend_mode,
             }
         }).collect();
 

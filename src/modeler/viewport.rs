@@ -625,21 +625,26 @@ pub fn draw_modeler_viewport(
                 v2: f.v2,
                 texture_id: Some(0),
                 black_transparent: f.black_transparent,
+                blend_mode: f.blend_mode,
             }
         }).collect();
 
         if !vertices.is_empty() && !faces.is_empty() {
+            // Collect per-face blend modes
+            let blend_modes: Vec<crate::rasterizer::BlendMode> = faces.iter()
+                .map(|f| f.blend_mode)
+                .collect();
+
             if use_rgb555 {
                 // RGB555 rendering path
-                // Blend modes come from texture pixels (semi-transparency bit)
-                // Default to Opaque per-face since blend is encoded in texture
+                // Per-face blend modes + per-pixel STP bit (PS1-authentic)
                 let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
                 render_mesh_15(
                     fb,
                     &vertices,
                     &faces,
                     &textures_15,
-                    None, // Blend modes from texture pixels, not per-face
+                    Some(&blend_modes),
                     &state.camera,
                     &state.raster_settings,
                 );
