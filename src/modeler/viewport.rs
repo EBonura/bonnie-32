@@ -283,6 +283,11 @@ fn handle_drag_move(
     // Check if we're already in a free move drag
     let is_free_moving = state.drag_manager.active.is_free_move();
 
+    // Skip if ortho viewport owns this drag (ortho handles it directly)
+    if state.ortho_drag_viewport.is_some() {
+        return;
+    }
+
     if is_free_moving {
         if ctx.mouse.left_down {
             // Update the drag with current mouse position
@@ -1644,6 +1649,11 @@ fn handle_move_gizmo(
 
     // Check if DragManager has an active move drag
     let is_dragging = state.drag_manager.is_dragging() && state.drag_manager.active.is_move();
+
+    // Skip if ortho viewport owns this drag
+    if state.ortho_drag_viewport.is_some() {
+        return;
+    }
 
     // Handle ongoing drag with DragManager
     if is_dragging {

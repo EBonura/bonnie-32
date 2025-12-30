@@ -701,8 +701,10 @@ pub struct ModelerState {
     pub hovered_face: Option<usize>,
 
     // Gizmo hover state
-    /// Which gizmo axis is being hovered (for highlighting)
+    /// Which gizmo axis is being hovered (for highlighting) - perspective view
     pub gizmo_hovered_axis: Option<Axis>,
+    /// Which gizmo axis is being hovered in ortho views
+    pub ortho_gizmo_hovered_axis: Option<Axis>,
 
     // Modal transform state (G/S/R keys) - now uses DragManager for actual transform
     pub modal_transform: ModalTransform,
@@ -850,6 +852,7 @@ impl ModelerState {
             hovered_face: None,
 
             gizmo_hovered_axis: None,
+            ortho_gizmo_hovered_axis: None,
 
             modal_transform: ModalTransform::None,
 

@@ -1840,6 +1840,108 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     }
 
     // =========================================================================
+    // Draw transform gizmo in ortho views (2-axis version)
+    // =========================================================================
+    if !state.selection.is_empty() && state.tool_box.active_transform_tool().is_some() {
+        if let Some(center) = state.selection.compute_center(&state.mesh) {
+            // Project center to screen using world_to_ortho directly
+            let (cx, cy) = match viewport_id {
+                ViewportId::Top => world_to_ortho(center.x, center.z),
+                ViewportId::Front => world_to_ortho(center.x, center.y),
+                ViewportId::Side => world_to_ortho(center.z, center.y),
+                ViewportId::Perspective => (0.0, 0.0),
+            };
+
+            // Only draw if center is in viewport
+            if cx >= rect.x && cx <= rect.right() && cy >= rect.y && cy <= rect.bottom() {
+                let gizmo_length = 40.0; // Fixed screen-space length
+
+                // Determine which world axes map to screen X and Y for this ortho view
+                let (x_color, y_color) = match viewport_id {
+                    ViewportId::Top => (RED, BLUE),    // X right, Z up
+                    ViewportId::Front => (RED, GREEN), // X right, Y up
+                    ViewportId::Side => (BLUE, GREEN), // Z right, Y up
+                    ViewportId::Perspective => (WHITE, WHITE),
+                };
+
+                // Screen directions: right is +X, up is -Y (screen coords)
+                let x_end = (cx + gizmo_length, cy);
+                let y_end = (cx, cy - gizmo_length);
+
+                // Check which axis is hovered
+                let dist_to_x = point_to_line_dist(ctx.mouse.x, ctx.mouse.y, cx, cy, x_end.0, x_end.1);
+                let dist_to_y = point_to_line_dist(ctx.mouse.x, ctx.mouse.y, cx, cy, y_end.0, y_end.1);
+
+                let hover_threshold = 8.0;
+                let x_hovered = inside_viewport && dist_to_x < hover_threshold && dist_to_x < dist_to_y;
+                let y_hovered = inside_viewport && dist_to_y < hover_threshold && dist_to_y < dist_to_x;
+
+                // Update gizmo hover state for ortho views
+                if x_hovered {
+                    state.ortho_gizmo_hovered_axis = Some(match viewport_id {
+                        ViewportId::Top => super::state::Axis::X,
+                        ViewportId::Front => super::state::Axis::X,
+                        ViewportId::Side => super::state::Axis::Z,
+                        _ => super::state::Axis::X,
+                    });
+                } else if y_hovered {
+                    state.ortho_gizmo_hovered_axis = Some(match viewport_id {
+                        ViewportId::Top => super::state::Axis::Z,
+                        ViewportId::Front => super::state::Axis::Y,
+                        ViewportId::Side => super::state::Axis::Y,
+                        _ => super::state::Axis::Y,
+                    });
+                } else if inside_viewport {
+                    state.ortho_gizmo_hovered_axis = None;
+                }
+
+                // Draw colors (brighten on hover)
+                let x_draw_color = if x_hovered { YELLOW } else { Color::new(x_color.r * 0.8, x_color.g * 0.8, x_color.b * 0.8, 1.0) };
+                let y_draw_color = if y_hovered { YELLOW } else { Color::new(y_color.r * 0.8, y_color.g * 0.8, y_color.b * 0.8, 1.0) };
+
+                // Draw gizmo lines
+                let line_thickness = 2.0;
+                draw_line(cx, cy, x_end.0, x_end.1, line_thickness, x_draw_color);
+                draw_line(cx, cy, y_end.0, y_end.1, line_thickness, y_draw_color);
+
+                // Draw arrowheads for move gizmo
+                if matches!(state.tool_box.active_transform_tool(), Some(ModelerToolId::Move)) {
+                    let arrow_size = 8.0;
+                    // X arrow (pointing right)
+                    draw_triangle(
+                        Vec2::new(x_end.0, x_end.1),
+                        Vec2::new(x_end.0 - arrow_size, x_end.1 - arrow_size * 0.5),
+                        Vec2::new(x_end.0 - arrow_size, x_end.1 + arrow_size * 0.5),
+                        x_draw_color,
+                    );
+                    // Y arrow (pointing up)
+                    draw_triangle(
+                        Vec2::new(y_end.0, y_end.1),
+                        Vec2::new(y_end.0 - arrow_size * 0.5, y_end.1 + arrow_size),
+                        Vec2::new(y_end.0 + arrow_size * 0.5, y_end.1 + arrow_size),
+                        y_draw_color,
+                    );
+                }
+
+                // Draw small squares for scale gizmo
+                if matches!(state.tool_box.active_transform_tool(), Some(ModelerToolId::Scale)) {
+                    let box_size = 6.0;
+                    draw_rectangle(x_end.0 - box_size/2.0, x_end.1 - box_size/2.0, box_size, box_size, x_draw_color);
+                    draw_rectangle(y_end.0 - box_size/2.0, y_end.1 - box_size/2.0, box_size, box_size, y_draw_color);
+                }
+
+                // Draw circles for rotate gizmo
+                if matches!(state.tool_box.active_transform_tool(), Some(ModelerToolId::Rotate)) {
+                    draw_circle_lines(cx, cy, gizmo_length * 0.8, 1.5, Color::new(0.6, 0.6, 0.6, 0.8));
+                }
+
+                // Draw center dot
+                draw_circle(cx, cy, 4.0, WHITE);
+            }
+        }
+    }
+
+    // =========================================================================
     // Handle click to select in ortho views
     // =========================================================================
     if inside_viewport && state.active_viewport == viewport_id && is_mouse_button_pressed(MouseButton::Left) && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() {
@@ -1906,19 +2008,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         // Get zoom value before any mutable borrows
         let ortho_zoom = state.get_ortho_camera(viewport_id).zoom;
 
-        // Screen to world delta helper for this ortho view
-        let screen_to_world_delta = |dx: f32, dy: f32| -> crate::rasterizer::Vec3 {
-            let world_dx = dx / ortho_zoom;
-            let world_dy = -dy / ortho_zoom; // Y inverted
-
-            match viewport_id {
-                ViewportId::Top => crate::rasterizer::Vec3::new(world_dx, 0.0, world_dy),    // XZ plane
-                ViewportId::Front => crate::rasterizer::Vec3::new(world_dx, world_dy, 0.0),  // XY plane
-                ViewportId::Side => crate::rasterizer::Vec3::new(0.0, world_dy, world_dx),   // ZY plane
-                ViewportId::Perspective => crate::rasterizer::Vec3::ZERO,
-            }
-        };
-
         // Start drag on left-down (when we have selection and not clicking to select)
         // Use ortho_drag_pending_start to detect drag vs click, similar to box select
         if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && !state.drag_manager.is_dragging() {
@@ -1975,40 +2064,59 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             }
         }
 
-        // Continue ortho drag (if we're the active ortho drag viewport)
-        if state.drag_manager.active.is_free_move() && state.ortho_drag_viewport == Some(viewport_id) {
-            if ctx.mouse.left_down {
-                // Get mouse delta from drag start
-                if let Some(drag_state) = &state.drag_manager.state {
-                    let dx = ctx.mouse.x - drag_state.initial_mouse.0;
-                    let dy = ctx.mouse.y - drag_state.initial_mouse.1;
+    }
 
-                    let delta = screen_to_world_delta(dx, dy);
+    // Continue ortho drag (if we're the active ortho drag viewport)
+    // This is OUTSIDE the inside_viewport check so drag continues even if mouse leaves viewport
+    if state.drag_manager.active.is_free_move() && state.ortho_drag_viewport == Some(viewport_id) {
+        // Use the stored zoom from when drag started
+        let drag_zoom = state.ortho_drag_zoom;
 
-                    // Apply delta to initial positions
-                    if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
-                        for (idx, start_pos) in &tracker.initial_positions {
-                            if let Some(vert) = state.mesh.vertices.get_mut(*idx) {
-                                vert.pos = *start_pos + delta;
+        // Screen to world delta helper using stored zoom
+        let screen_to_world_delta = |dx: f32, dy: f32| -> crate::rasterizer::Vec3 {
+            let world_dx = dx / drag_zoom;
+            let world_dy = -dy / drag_zoom; // Y inverted
 
-                                // Apply grid snapping if enabled
-                                if state.snap_settings.enabled && !is_key_down(KeyCode::Z) {
-                                    let snap = state.snap_settings.grid_size;
-                                    vert.pos.x = (vert.pos.x / snap).round() * snap;
-                                    vert.pos.y = (vert.pos.y / snap).round() * snap;
-                                    vert.pos.z = (vert.pos.z / snap).round() * snap;
-                                }
+            match viewport_id {
+                ViewportId::Top => crate::rasterizer::Vec3::new(world_dx, 0.0, world_dy),    // XZ plane
+                ViewportId::Front => crate::rasterizer::Vec3::new(world_dx, world_dy, 0.0),  // XY plane
+                ViewportId::Side => crate::rasterizer::Vec3::new(0.0, world_dy, world_dx),   // ZY plane
+                ViewportId::Perspective => crate::rasterizer::Vec3::ZERO,
+            }
+        };
+
+        if ctx.mouse.left_down {
+            // Get mouse delta from drag start
+            if let Some(drag_state) = &state.drag_manager.state {
+                let dx = ctx.mouse.x - drag_state.initial_mouse.0;
+                let dy = ctx.mouse.y - drag_state.initial_mouse.1;
+
+                let delta = screen_to_world_delta(dx, dy);
+
+                // Apply delta to initial positions
+                if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
+                    for (idx, start_pos) in tracker.initial_positions.iter() {
+                        if let Some(vert) = state.mesh.vertices.get_mut(*idx) {
+                            let new_pos = *start_pos + delta;
+                            vert.pos = new_pos;
+
+                            // Apply grid snapping if enabled
+                            if state.snap_settings.enabled && !is_key_down(KeyCode::Z) {
+                                let snap = state.snap_settings.grid_size;
+                                vert.pos.x = (vert.pos.x / snap).round() * snap;
+                                vert.pos.y = (vert.pos.y / snap).round() * snap;
+                                vert.pos.z = (vert.pos.z / snap).round() * snap;
                             }
                         }
-                        state.dirty = true;
                     }
+                    state.dirty = true;
                 }
-            } else {
-                // End drag
-                state.drag_manager.end();
-                state.ortho_drag_viewport = None;
-                state.sync_mesh_to_project();
             }
+        } else {
+            // End drag
+            state.drag_manager.end();
+            state.ortho_drag_viewport = None;
+            state.sync_mesh_to_project();
         }
     }
 
