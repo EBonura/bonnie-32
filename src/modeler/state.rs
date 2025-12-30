@@ -463,24 +463,21 @@ pub enum BrushType {
     Fill,
 }
 
-/// Atlas editing mode - UV vertex editing, painting, or CLUT editing
+/// Atlas editing mode - UV vertex editing or painting (with integrated CLUT)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AtlasEditMode {
     /// Move UV vertices
     #[default]
     Uv,
-    /// Paint on the texture atlas
+    /// Paint on the texture atlas (CLUT palette integrated here)
     Paint,
-    /// Edit CLUT (Color Look-Up Table) palettes
-    Clut,
 }
 
 impl AtlasEditMode {
     pub fn toggle(&self) -> Self {
         match self {
             AtlasEditMode::Uv => AtlasEditMode::Paint,
-            AtlasEditMode::Paint => AtlasEditMode::Clut,
-            AtlasEditMode::Clut => AtlasEditMode::Uv,
+            AtlasEditMode::Paint => AtlasEditMode::Uv,
         }
     }
 
@@ -488,13 +485,12 @@ impl AtlasEditMode {
         match self {
             AtlasEditMode::Uv => "UV",
             AtlasEditMode::Paint => "Paint",
-            AtlasEditMode::Clut => "CLUT",
         }
     }
 
     /// All available modes for tab bar
-    pub fn all() -> [AtlasEditMode; 3] {
-        [AtlasEditMode::Uv, AtlasEditMode::Paint, AtlasEditMode::Clut]
+    pub fn all() -> [AtlasEditMode; 2] {
+        [AtlasEditMode::Uv, AtlasEditMode::Paint]
     }
 }
 

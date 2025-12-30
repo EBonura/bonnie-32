@@ -56,10 +56,6 @@ pub struct ModelerLayout {
     pub main_split: SplitPanel,
     /// Right split (center viewport | right panels)
     pub right_split: SplitPanel,
-    /// Left vertical split (hierarchy/dopesheet | UV editor)
-    pub left_split: SplitPanel,
-    /// Right vertical split (atlas | properties)
-    pub right_panel_split: SplitPanel,
     /// Timeline height
     pub timeline_height: f32,
     /// Action registry for keyboard shortcuts
@@ -69,10 +65,8 @@ pub struct ModelerLayout {
 impl ModelerLayout {
     pub fn new() -> Self {
         Self {
-            main_split: SplitPanel::horizontal(100).with_ratio(0.20).with_min_size(150.0),
-            right_split: SplitPanel::horizontal(101).with_ratio(0.80).with_min_size(150.0),
-            left_split: SplitPanel::vertical(102).with_ratio(0.5).with_min_size(100.0),
-            right_panel_split: SplitPanel::vertical(103).with_ratio(0.4).with_min_size(80.0),
+            main_split: SplitPanel::horizontal(100).with_ratio(0.18).with_min_size(150.0),
+            right_split: SplitPanel::horizontal(101).with_ratio(0.78).with_min_size(150.0),
             timeline_height: 80.0,
             actions: create_modeler_actions(),
         }
@@ -119,26 +113,17 @@ pub fn draw_modeler(
     // Right split: center viewport | right panels
     let (center_rect, right_rect) = layout.right_split.update(ctx, rest_rect);
 
-    // Left panel: Overview only (full height now, UV/Atlas merged into right side)
-    let hierarchy_rect = left_rect;
-
-    // Right split: Texture/UV panel | properties
-    let (texture_rect, props_rect) = layout.right_panel_split.update(ctx, right_rect);
-
-    // Draw panels - simplified for mesh-only workflow
-    draw_panel(hierarchy_rect, Some("Overview"), Color::from_rgba(35, 35, 40, 255));
-    draw_overview_panel(ctx, panel_content_rect(hierarchy_rect, true), state, icon_font);
+    // Draw panels with collapsible sections
+    // Left panel: Overview + Selection + Lights + Shortcuts
+    draw_panel(left_rect, None, Color::from_rgba(35, 35, 40, 255));
+    draw_left_panel(ctx, panel_content_rect(left_rect, false), state, icon_font);
 
     // Draw 4-panel viewport (PicoCAD-style)
     draw_4panel_viewport(ctx, center_rect, state, fb);
 
-    // Unified Texture/UV panel (like PicoCAD - V toggles between build and texture editing)
-    let texture_title = if state.view_mode == ViewMode::Texture { "Texture (Editing)" } else { "Texture (View)" };
-    draw_panel(texture_rect, Some(texture_title), Color::from_rgba(35, 35, 40, 255));
-    draw_texture_uv_panel(ctx, panel_content_rect(texture_rect, true), state, icon_font);
-
-    draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
-    draw_properties_panel(ctx, panel_content_rect(props_rect, true), state, icon_font);
+    // Right panel: Atlas + UV Tools + Paint Tools + CLUT
+    draw_panel(right_rect, None, Color::from_rgba(35, 35, 40, 255));
+    draw_right_panel(ctx, panel_content_rect(right_rect, false), state, icon_font);
 
     // Draw timeline if in animate mode
     if let Some(tl_rect) = timeline_rect {
@@ -468,6 +453,637 @@ fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
     }
 }
 
+// ============================================================================
+// Left Panel (Overview + Selection + Lights + Shortcuts)
+// ============================================================================
+
+/// Draw a simple section label (non-collapsible)
+fn draw_section_label(x: f32, y: &mut f32, width: f32, label: &str) {
+    draw_rectangle(x, *y, width, 18.0, Color::from_rgba(45, 45, 52, 255));
+    draw_text(label, x + 4.0, *y + 13.0, 11.0, TEXT_COLOR);
+    *y += 20.0;
+}
+
+fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let mut y = rect.y;
+    let width = rect.w;
+    let x = rect.x;
+
+    // === OVERVIEW SECTION ===
+    draw_section_label(x, &mut y, width, "Overview");
+    let overview_height = (rect.h * 0.35).min(180.0);
+    let overview_rect = Rect::new(x, y, width, overview_height);
+    draw_overview_content(ctx, overview_rect, state, icon_font);
+    y += overview_height + 4.0;
+
+    // === SELECTION SECTION ===
+    draw_section_label(x, &mut y, width, "Selection");
+    draw_selection_info(ctx, x, &mut y, width, state);
+    y += 4.0;
+
+    // === LIGHTS SECTION ===
+    draw_section_label(x, &mut y, width, "Lights");
+    draw_lights_section(ctx, x, &mut y, width, state, icon_font);
+    y += 4.0;
+
+    // === SHORTCUTS SECTION ===
+    draw_section_label(x, &mut y, width, "Shortcuts");
+    draw_shortcuts_section(x, &mut y, width, rect.bottom());
+}
+
+/// Draw overview content (object list with visibility toggles)
+fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let line_height = 18.0;
+    let mut y = rect.y;
+
+    // Collect click actions first (to avoid borrow issues)
+    let mut select_idx: Option<usize> = None;
+    let mut toggle_vis_idx: Option<usize> = None;
+
+    let obj_count = state.project.objects.len();
+    for idx in 0..obj_count {
+        if y + line_height > rect.bottom() {
+            break;
+        }
+
+        let obj = &state.project.objects[idx];
+        let is_selected = state.project.selected_object == Some(idx);
+        let item_rect = Rect::new(rect.x, y, rect.w, line_height);
+
+        // Selection highlight
+        if is_selected {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+        } else if ctx.mouse.inside(&item_rect) {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
+        }
+
+        // Visibility toggle (eye icon)
+        let vis_rect = Rect::new(rect.x + 2.0, y + 1.0, 16.0, 16.0);
+        let vis_icon = if obj.visible { icon::EYE } else { icon::EYE_OFF };
+        let vis_color = if obj.visible { TEXT_COLOR } else { TEXT_DIM };
+        draw_icon_centered(icon_font, vis_icon, &vis_rect, 11.0, vis_color);
+
+        if ctx.mouse.inside(&vis_rect) && ctx.mouse.left_pressed {
+            toggle_vis_idx = Some(idx);
+        }
+
+        // Object name with face count
+        let fc = obj.mesh.face_count();
+        let name_color = poly_count_color(fc);
+        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, 11.0, name_color);
+
+        // Handle selection click (not on visibility toggle)
+        let name_rect = Rect::new(rect.x + 20.0, y, rect.w - 20.0, line_height);
+        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed && toggle_vis_idx.is_none() {
+            select_idx = Some(idx);
+        }
+
+        y += line_height;
+    }
+
+    // Apply actions after the loop
+    if let Some(idx) = toggle_vis_idx {
+        state.project.objects[idx].visible = !state.project.objects[idx].visible;
+    } else if let Some(idx) = select_idx {
+        state.project.selected_object = Some(idx);
+        state.sync_mesh_from_project();
+    }
+}
+
+/// Draw selection info (what's selected, tool, etc.)
+fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &ModelerState) {
+    let line_height = 16.0;
+
+    // Selection type
+    let sel_text = match &state.selection {
+        super::state::ModelerSelection::None => "Nothing selected".to_string(),
+        super::state::ModelerSelection::Mesh => "Mesh (whole)".to_string(),
+        super::state::ModelerSelection::Vertices(v) => format!("{} vertex(es)", v.len()),
+        super::state::ModelerSelection::Edges(e) => format!("{} edge(s)", e.len()),
+        super::state::ModelerSelection::Faces(f) => format!("{} face(s)", f.len()),
+    };
+    draw_text(&sel_text, x + 4.0, *y + 12.0, 11.0, TEXT_COLOR);
+    *y += line_height;
+
+    // Current tool
+    let tool_label = match state.tool_box.active_transform_tool() {
+        Some(ModelerToolId::Move) => "Tool: Move (G)",
+        Some(ModelerToolId::Rotate) => "Tool: Rotate (R)",
+        Some(ModelerToolId::Scale) => "Tool: Scale (S)",
+        _ => "Tool: Select",
+    };
+    draw_text(tool_label, x + 4.0, *y + 12.0, 11.0, TEXT_DIM);
+    *y += line_height;
+
+    // Select mode
+    let mode_label = match state.select_mode {
+        super::state::SelectMode::Vertex => "Mode: Vertex (1)",
+        super::state::SelectMode::Edge => "Mode: Edge (2)",
+        super::state::SelectMode::Face => "Mode: Face (3)",
+    };
+    draw_text(mode_label, x + 4.0, *y + 12.0, 11.0, TEXT_DIM);
+    *y += line_height;
+}
+
+/// Draw lights section
+fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let line_height = 18.0;
+    let btn_size = 18.0;
+
+    // Light count and add/remove buttons
+    let light_count = state.raster_settings.lights.len();
+    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, 11.0, TEXT_COLOR);
+
+    // Add button
+    let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
+    if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add light") {
+        use crate::rasterizer::{Light, LightType, Vec3};
+        state.raster_settings.lights.push(Light {
+            light_type: LightType::Directional { direction: Vec3::new(-1.0, -1.0, -1.0).normalize() },
+            color: crate::rasterizer::Color::new(255, 255, 255),
+            intensity: 0.5,
+            enabled: true,
+            name: format!("Light {}", light_count + 1),
+        });
+    }
+
+    // Remove button
+    let rem_rect = Rect::new(x + width - btn_size - 4.0, *y, btn_size, btn_size);
+    if icon_button(ctx, rem_rect, icon::MINUS, icon_font, "Remove light") && light_count > 0 {
+        state.raster_settings.lights.pop();
+    }
+
+    *y += btn_size + 4.0;
+
+    // List lights
+    let mut toggle_idx: Option<usize> = None;
+    for (i, light) in state.raster_settings.lights.iter().enumerate() {
+        let toggle_rect = Rect::new(x + 4.0, *y, 50.0, 14.0);
+        let toggle_color = if light.enabled { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+        draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+
+        let type_str = match &light.light_type {
+            crate::rasterizer::LightType::Directional { .. } => "Dir",
+            crate::rasterizer::LightType::Point { .. } => "Pt",
+            crate::rasterizer::LightType::Spot { .. } => "Sp",
+        };
+        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, 9.0, TEXT_COLOR);
+
+        if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
+            toggle_idx = Some(i);
+        }
+
+        // Intensity
+        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, 9.0, TEXT_DIM);
+
+        *y += line_height;
+    }
+
+    if let Some(i) = toggle_idx {
+        state.raster_settings.lights[i].enabled = !state.raster_settings.lights[i].enabled;
+    }
+}
+
+/// Draw shortcuts reference section
+fn draw_shortcuts_section(x: f32, y: &mut f32, _width: f32, max_y: f32) {
+    let shortcuts = [
+        ("G/R/S", "Move/Rotate/Scale"),
+        ("E", "Extrude face"),
+        ("X/Del", "Delete"),
+        ("1/2/3", "Vert/Edge/Face"),
+        ("V", "Toggle Build/UV"),
+        ("Space", "Fullscreen viewport"),
+        ("Ctrl+Z/Y", "Undo/Redo"),
+    ];
+
+    for (key, desc) in shortcuts {
+        if *y + 14.0 > max_y {
+            break;
+        }
+        draw_text(&format!("{}: {}", key, desc), x + 4.0, *y + 10.0, 9.0, TEXT_DIM);
+        *y += 14.0;
+    }
+}
+
+// ============================================================================
+// Right Panel (Atlas + UV Tools + Paint Tools + CLUT)
+// ============================================================================
+
+fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    // The atlas always takes the top portion, then tools below
+    // Calculate atlas area (square, centered horizontally)
+    let atlas = &state.project.atlas;
+    let atlas_w = atlas.width as f32;
+    let atlas_h = atlas.height as f32;
+
+    let padding = 4.0;
+    let available_w = rect.w - padding * 2.0;
+
+    // Atlas preview takes up to 60% of height or available width (whichever is smaller)
+    let max_atlas_h = rect.h * 0.55;
+    let atlas_scale = (available_w / atlas_w).min(max_atlas_h / atlas_h);
+    let atlas_screen_w = atlas_w * atlas_scale;
+    let atlas_screen_h = atlas_h * atlas_scale;
+
+    let atlas_x = rect.x + (rect.w - atlas_screen_w) * 0.5;
+    let atlas_y = rect.y + padding;
+
+    // Draw atlas preview
+    draw_atlas_preview(ctx, atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, atlas_scale, state);
+
+    // Tools start below atlas
+    let mut y = atlas_y + atlas_screen_h + 8.0;
+
+    // Atlas size selector (always visible)
+    draw_atlas_size_selector(ctx, rect.x, &mut y, rect.w, state);
+    y += 4.0;
+
+    // === UV TOOLS SECTION ===
+    draw_section_label(rect.x, &mut y, rect.w, "UV Tools");
+    draw_uv_tools_section(ctx, rect.x, &mut y, rect.w, state, icon_font);
+    y += 4.0;
+
+    // === PAINT TOOLS SECTION ===
+    draw_section_label(rect.x, &mut y, rect.w, "Paint Tools");
+    draw_paint_tools_section(ctx, rect.x, &mut y, rect.w, rect.bottom(), state, icon_font);
+    y += 4.0;
+
+    // === CLUT SECTION ===
+    draw_section_label(rect.x, &mut y, rect.w, "CLUT");
+    let remaining_height = (rect.bottom() - y - 4.0).max(60.0);
+    draw_clut_editor_panel(ctx, rect.x, y, rect.w, remaining_height, state, icon_font);
+
+    // Handle atlas interactions (painting, UV editing)
+    let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
+    handle_atlas_interaction(ctx, atlas_rect, atlas_scale, state);
+}
+
+/// Draw the atlas preview (texture + UV overlay)
+fn draw_atlas_preview(
+    _ctx: &mut UiContext,
+    atlas_x: f32,
+    atlas_y: f32,
+    atlas_screen_w: f32,
+    atlas_screen_h: f32,
+    scale: f32,
+    state: &ModelerState,
+) {
+    let atlas = &state.project.atlas;
+    let atlas_width = atlas.width;
+    let atlas_height = atlas.height;
+
+    // Draw checkerboard background
+    let checker_size = 8.0;
+    let check_cols = (atlas_screen_w / checker_size).ceil() as usize;
+    let check_rows = (atlas_screen_h / checker_size).ceil() as usize;
+    for cy in 0..check_rows {
+        for cx in 0..check_cols {
+            let color = if (cx + cy) % 2 == 0 {
+                Color::from_rgba(40, 40, 45, 255)
+            } else {
+                Color::from_rgba(55, 55, 60, 255)
+            };
+            let px = atlas_x + cx as f32 * checker_size;
+            let py = atlas_y + cy as f32 * checker_size;
+            let pw = checker_size.min(atlas_x + atlas_screen_w - px);
+            let ph = checker_size.min(atlas_y + atlas_screen_h - py);
+            if pw > 0.0 && ph > 0.0 {
+                draw_rectangle(px, py, pw, ph, color);
+            }
+        }
+    }
+
+    // Draw texture pixels
+    let pixels_per_block = (1.0 / scale).max(1.0) as usize;
+    for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
+        for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
+            let pixel = state.project.atlas.get_pixel(bx, by);
+            if pixel.is_transparent() {
+                continue;
+            }
+            let px = atlas_x + bx as f32 * scale;
+            let py = atlas_y + by as f32 * scale;
+            let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
+            let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
+            if pw > 0.0 && ph > 0.0 {
+                let alpha = match pixel.blend {
+                    crate::rasterizer::BlendMode::Opaque => 255,
+                    crate::rasterizer::BlendMode::Average => 128,
+                    crate::rasterizer::BlendMode::Add => 200,
+                    crate::rasterizer::BlendMode::Subtract => 200,
+                    crate::rasterizer::BlendMode::AddQuarter => 64,
+                    crate::rasterizer::BlendMode::Erase => 0,
+                };
+                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, alpha));
+            }
+        }
+    }
+
+    // Draw border
+    draw_rectangle_lines(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, 1.0, Color::from_rgba(100, 100, 105, 255));
+
+    // Draw UV overlay for selected faces
+    let atlas_w = atlas_width as f32;
+    let atlas_h = atlas_height as f32;
+
+    let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
+        let px = (u * atlas_w).floor();
+        let py = ((1.0 - v) * atlas_h).floor();
+        (atlas_x + (px + 0.5) * scale, atlas_y + (py + 0.5) * scale)
+    };
+
+    if let Some(obj) = state.project.selected() {
+        let face_edge_color = Color::from_rgba(255, 200, 100, 255);
+        let vertex_color = Color::from_rgba(255, 255, 255, 255);
+        let selected_vertex_color = Color::from_rgba(100, 200, 255, 255);
+
+        if let super::state::ModelerSelection::Faces(selected_faces) = &state.selection {
+            for &fi in selected_faces {
+                if let Some(face) = obj.mesh.faces.get(fi) {
+                    let v0 = &obj.mesh.vertices[face.v0];
+                    let v1 = &obj.mesh.vertices[face.v1];
+                    let v2 = &obj.mesh.vertices[face.v2];
+
+                    let screen_uvs = [
+                        uv_to_screen(v0.uv.x, v0.uv.y),
+                        uv_to_screen(v1.uv.x, v1.uv.y),
+                        uv_to_screen(v2.uv.x, v2.uv.y),
+                    ];
+
+                    // Draw edges
+                    for i in 0..3 {
+                        let j = (i + 1) % 3;
+                        draw_line(
+                            screen_uvs[i].0, screen_uvs[i].1,
+                            screen_uvs[j].0, screen_uvs[j].1,
+                            2.0, face_edge_color,
+                        );
+                    }
+
+                    // Draw vertices (only in UV mode)
+                    if state.atlas_edit_mode == AtlasEditMode::Uv {
+                        for (vi, (sx, sy)) in [(face.v0, screen_uvs[0]), (face.v1, screen_uvs[1]), (face.v2, screen_uvs[2])] {
+                            let is_selected = state.uv_selection.contains(&vi);
+                            let color = if is_selected { selected_vertex_color } else { vertex_color };
+                            let size = if is_selected { 8.0 } else { 6.0 };
+                            draw_rectangle(sx - size * 0.5, sy - size * 0.5, size, size, color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Draw atlas size selector buttons
+fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &mut ModelerState) {
+    let sizes = [(32, "32"), (64, "64"), (128, "128"), (256, "256")];
+    let btn_h = 18.0;
+    let btn_spacing = 2.0;
+
+    draw_text("Size:", x + 4.0, *y + 12.0, 10.0, TEXT_DIM);
+
+    let mut btn_x = x + 32.0;
+    for (size, label) in sizes {
+        let btn_w = label.len() as f32 * 7.0 + 6.0;
+        let btn_rect = Rect::new(btn_x, *y, btn_w, btn_h);
+        let is_current = state.project.atlas.width == size;
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_current {
+            ACCENT_COLOR
+        } else if hovered {
+            Color::from_rgba(70, 70, 75, 255)
+        } else {
+            Color::from_rgba(50, 50, 55, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let text_color = if is_current { WHITE } else { TEXT_DIM };
+        draw_text(label, btn_x + 3.0, *y + 12.0, 10.0, text_color);
+
+        if hovered && is_mouse_button_pressed(MouseButton::Left) && !is_current {
+            state.push_undo_with_atlas("Resize Atlas");
+            state.project.atlas.resize(size, size);
+            state.dirty = true;
+        }
+
+        btn_x += btn_w + btn_spacing;
+    }
+
+    *y += btn_h + 4.0;
+}
+
+/// Draw UV tools section
+fn draw_uv_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let btn_size = 20.0;
+    let btn_spacing = 2.0;
+
+    // UV mode toggle
+    let uv_active = state.atlas_edit_mode == AtlasEditMode::Uv;
+    let uv_rect = Rect::new(x + 4.0, *y, btn_size, btn_size);
+    if icon_button_active(ctx, uv_rect, icon::MOVE, icon_font, "UV Edit Mode (V)", uv_active) {
+        state.atlas_edit_mode = AtlasEditMode::Uv;
+    }
+
+    // Transform buttons
+    let has_selection = !state.uv_selection.is_empty();
+    let buttons: &[(char, &str, &str)] = &[
+        (icon::FLIP_HORIZONTAL, "Flip H", "uv_flip_h"),
+        (icon::FLIP_VERTICAL, "Flip V", "uv_flip_v"),
+        (icon::ROTATE_CW, "Rotate CW", "uv_rot_cw"),
+        (icon::REFRESH_CW, "Reset UVs", "uv_reset"),
+    ];
+
+    let mut btn_x = uv_rect.x + btn_size + 8.0;
+    for (icon_char, tooltip, action) in buttons {
+        let btn_rect = Rect::new(btn_x, *y, btn_size, btn_size);
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if !has_selection {
+            Color::from_rgba(40, 40, 45, 255)
+        } else if hovered {
+            Color::from_rgba(80, 80, 90, 255)
+        } else {
+            Color::from_rgba(55, 55, 60, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let icon_color = if has_selection { TEXT_COLOR } else { Color::from_rgba(80, 80, 85, 255) };
+        draw_icon_centered(icon_font, *icon_char, &btn_rect, 12.0, icon_color);
+
+        if has_selection && hovered && is_mouse_button_pressed(MouseButton::Left) {
+            match *action {
+                "uv_flip_h" => flip_selected_uvs(state, true, false),
+                "uv_flip_v" => flip_selected_uvs(state, false, true),
+                "uv_rot_cw" => rotate_selected_uvs(state, true),
+                "uv_reset" => reset_selected_uvs(state),
+                _ => {}
+            }
+        }
+
+        if hovered {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+
+        btn_x += btn_size + btn_spacing;
+    }
+
+    *y += btn_size + 4.0;
+}
+
+/// Draw paint tools section
+fn draw_paint_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, max_y: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let btn_size = 20.0;
+
+    // Paint mode toggle
+    let paint_active = state.atlas_edit_mode == AtlasEditMode::Paint;
+    let paint_rect = Rect::new(x + 4.0, *y, btn_size, btn_size);
+    if icon_button_active(ctx, paint_rect, icon::BRUSH, icon_font, "Paint Mode (V)", paint_active) {
+        state.atlas_edit_mode = AtlasEditMode::Paint;
+        state.uv_selection.clear();
+    }
+
+    // Brush type buttons
+    let brush_rect = Rect::new(paint_rect.x + btn_size + 8.0, *y, btn_size, btn_size);
+    let brush_selected = state.brush_type == super::state::BrushType::Square;
+    if icon_button_active(ctx, brush_rect, icon::BRUSH, icon_font, "Brush (B)", brush_selected) {
+        state.brush_type = super::state::BrushType::Square;
+    }
+
+    let fill_rect = Rect::new(brush_rect.x + btn_size + 2.0, *y, btn_size, btn_size);
+    let fill_selected = state.brush_type == super::state::BrushType::Fill;
+    if icon_button_active(ctx, fill_rect, icon::PAINT_BUCKET, icon_font, "Fill (F)", fill_selected) {
+        state.brush_type = super::state::BrushType::Fill;
+    }
+
+    // Brush size slider (for square brush)
+    if state.brush_type == super::state::BrushType::Square {
+        let slider_x = fill_rect.x + btn_size + 8.0;
+        let slider_w = width - (slider_x - x) - 30.0;
+        let slider_h = 12.0;
+        let slider_y = *y + (btn_size - slider_h) / 2.0;
+
+        let track_rect = Rect::new(slider_x, slider_y, slider_w.max(40.0), slider_h);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+        let min_size = 1.0;
+        let max_size = 16.0;
+        let fill_ratio = (state.brush_size - min_size) / (max_size - min_size);
+        let fill_width = fill_ratio * track_rect.w;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, slider_h, ACCENT_COLOR);
+
+        draw_text(&format!("{}", state.brush_size as i32), slider_x + track_rect.w + 4.0, *y + 14.0, 10.0, TEXT_DIM);
+
+        // Handle slider interaction
+        if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && !state.brush_size_slider_active {
+            state.brush_size_slider_active = true;
+        }
+        if state.brush_size_slider_active {
+            if ctx.mouse.left_down {
+                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
+                state.brush_size = (min_size + (rel_x / track_rect.w) * (max_size - min_size)).round().clamp(min_size, max_size);
+            } else {
+                state.brush_size_slider_active = false;
+            }
+        }
+    }
+
+    *y += btn_size + 6.0;
+
+    // Color picker (compact version)
+    if *y + 80.0 < max_y {
+        let picker_result = draw_ps1_color_picker_with_blend_mode(
+            ctx,
+            x + 4.0,
+            *y,
+            width - 8.0,
+            state.paint_color,
+            state.paint_blend_mode,
+            "Color",
+            &mut state.color_picker_slider,
+        );
+
+        if let Some(new_color) = picker_result.color {
+            state.paint_color = new_color;
+        }
+        if let Some(new_blend) = picker_result.blend_mode {
+            state.paint_blend_mode = new_blend;
+        }
+
+        *y += ps1_color_picker_with_blend_mode_height();
+    }
+}
+
+/// Handle atlas interactions (painting and UV editing)
+fn handle_atlas_interaction(_ctx: &mut UiContext, atlas_rect: Rect, scale: f32, state: &mut ModelerState) {
+    let (mx, my) = mouse_position();
+    let inside_atlas = atlas_rect.contains(mx, my);
+
+    if !inside_atlas {
+        state.paint_stroke_active = false;
+        return;
+    }
+
+    // Painting
+    if state.atlas_edit_mode == AtlasEditMode::Paint {
+        let px = ((mx - atlas_rect.x) / scale) as usize;
+        let py = ((my - atlas_rect.y) / scale) as usize;
+
+        match state.brush_type {
+            super::state::BrushType::Square => {
+                if is_mouse_button_down(MouseButton::Left) {
+                    if !state.paint_stroke_active {
+                        state.push_undo_with_atlas("Paint");
+                        state.paint_stroke_active = true;
+                    }
+                    let brush = state.brush_size as usize;
+                    for dy in 0..brush {
+                        for dx in 0..brush {
+                            state.project.atlas.set_pixel_blended(px + dx, py + dy, state.paint_color, state.paint_blend_mode);
+                        }
+                    }
+                    state.dirty = true;
+                } else {
+                    state.paint_stroke_active = false;
+                }
+            }
+            super::state::BrushType::Fill => {
+                if is_mouse_button_pressed(MouseButton::Left) {
+                    state.push_undo_with_atlas("Fill");
+                    let fill_color = crate::rasterizer::Color::with_blend(
+                        state.paint_color.r,
+                        state.paint_color.g,
+                        state.paint_color.b,
+                        state.paint_blend_mode,
+                    );
+                    state.project.atlas.flood_fill(px, py, fill_color);
+                    state.dirty = true;
+                }
+            }
+        }
+
+        // Draw brush cursor
+        let cursor_x = atlas_rect.x + ((mx - atlas_rect.x) / scale).floor() * scale;
+        let cursor_y = atlas_rect.y + ((my - atlas_rect.y) / scale).floor() * scale;
+        match state.brush_type {
+            super::state::BrushType::Square => {
+                let cursor_w = state.brush_size * scale;
+                draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
+            }
+            super::state::BrushType::Fill => {
+                let cx = cursor_x + scale * 0.5;
+                let cy = cursor_y + scale * 0.5;
+                draw_line(cx - 6.0, cy, cx + 6.0, cy, 1.0, Color::from_rgba(255, 255, 255, 200));
+                draw_line(cx, cy - 6.0, cx, cy + 6.0, 1.0, Color::from_rgba(255, 255, 255, 200));
+            }
+        }
+    }
+
+    // UV editing interactions would go here
+    // (For now, keeping it simpler - full UV editing from original code can be added later)
+}
+
 /// Unified Texture/UV Panel - combines atlas display with UV editing
 /// Press V to toggle between View mode (read-only) and Edit mode (interactive)
 fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
@@ -477,10 +1093,66 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let atlas_w = atlas_width as f32;
     let atlas_h = atlas_height as f32;
 
-    // Reserve space for PS1 color picker at bottom (swatch + 3 RGB sliders + blend mode + presets + label + brush tools)
-    let palette_height = ps1_color_picker_with_blend_mode_height() + 20.0 + 24.0; // 72 + 20 for label + 24 for brush tools
-    let header_height = 20.0;
-    let atlas_area_height = rect.h - palette_height - header_height;
+    // Atlas uses full available height - no reserved bottom panel space
+    // Paint tools appear below the atlas (panel content extends downward)
+    let header_height = 22.0;
+    let atlas_area_height = rect.h - header_height;
+
+    // ========================================================================
+    // Header: Mode Icon Buttons (UV | Paint)
+    // ========================================================================
+    use crate::ui::{icon, draw_icon_centered};
+
+    let btn_size = header_height - 4.0;
+    let btn_y = rect.y + 2.0;
+    let btn_spacing = 2.0;
+
+    // UV mode button (Move icon)
+    let uv_btn_rect = Rect::new(rect.x + 4.0, btn_y, btn_size, btn_size);
+    let uv_active = state.atlas_edit_mode == AtlasEditMode::Uv;
+    let uv_hovered = ctx.mouse.inside(&uv_btn_rect);
+
+    let uv_bg = if uv_active {
+        ACCENT_COLOR
+    } else if uv_hovered {
+        Color::from_rgba(70, 70, 75, 255)
+    } else {
+        Color::from_rgba(50, 50, 55, 255)
+    };
+    draw_rectangle(uv_btn_rect.x, uv_btn_rect.y, uv_btn_rect.w, uv_btn_rect.h, uv_bg);
+    let uv_icon_color = if uv_active { Color::from_rgba(30, 30, 35, 255) } else { TEXT_COLOR };
+    draw_icon_centered(icon_font, icon::MOVE, &uv_btn_rect, 12.0, uv_icon_color);
+
+    if uv_hovered {
+        ctx.set_tooltip("UV Edit Mode", ctx.mouse.x, ctx.mouse.y);
+        if is_mouse_button_pressed(MouseButton::Left) {
+            state.atlas_edit_mode = AtlasEditMode::Uv;
+        }
+    }
+
+    // Paint mode button (Brush icon)
+    let paint_btn_rect = Rect::new(uv_btn_rect.x + btn_size + btn_spacing, btn_y, btn_size, btn_size);
+    let paint_active = state.atlas_edit_mode == AtlasEditMode::Paint;
+    let paint_hovered = ctx.mouse.inside(&paint_btn_rect);
+
+    let paint_bg = if paint_active {
+        ACCENT_COLOR
+    } else if paint_hovered {
+        Color::from_rgba(70, 70, 75, 255)
+    } else {
+        Color::from_rgba(50, 50, 55, 255)
+    };
+    draw_rectangle(paint_btn_rect.x, paint_btn_rect.y, paint_btn_rect.w, paint_btn_rect.h, paint_bg);
+    let paint_icon_color = if paint_active { Color::from_rgba(30, 30, 35, 255) } else { TEXT_COLOR };
+    draw_icon_centered(icon_font, icon::BRUSH, &paint_btn_rect, 12.0, paint_icon_color);
+
+    if paint_hovered {
+        ctx.set_tooltip("Paint Mode", ctx.mouse.x, ctx.mouse.y);
+        if is_mouse_button_pressed(MouseButton::Left) {
+            state.atlas_edit_mode = AtlasEditMode::Paint;
+            state.uv_selection.clear();
+        }
+    }
 
     // Scale to fit panel
     let padding = 4.0;
@@ -1029,18 +1701,18 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     }
 
     // ========================================================================
-    // Bottom Panel: Mode-specific UI (Paint vs CLUT)
+    // Bottom Panel: Paint mode UI (color picker, brush tools, CLUT editor)
+    // Positioned below the atlas
     // ========================================================================
-    let palette_y = rect.y + rect.h - palette_height;
-    draw_line(rect.x, palette_y, rect.x + rect.w, palette_y, 1.0, Color::from_rgba(60, 60, 65, 255));
+    if state.atlas_edit_mode == AtlasEditMode::Paint {
+        let tools_y = atlas_y + atlas_screen_h + 8.0; // Below atlas with some padding
+        draw_line(rect.x, tools_y - 4.0, rect.x + rect.w, tools_y - 4.0, 1.0, Color::from_rgba(60, 60, 65, 255));
 
-    // Paint mode: PS1 Color Picker with Blend Mode
-    if state.atlas_edit_mode == AtlasEditMode::Paint || state.atlas_edit_mode == AtlasEditMode::Uv {
         // Draw PS1 color picker with blend mode selector
         let picker_result = draw_ps1_color_picker_with_blend_mode(
             ctx,
             rect.x + 4.0,
-            palette_y + 14.0,
+            tools_y,
             rect.w - 8.0,
             state.paint_color,
             state.paint_blend_mode,
@@ -1057,14 +1729,9 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         if let Some(new_blend) = picker_result.blend_mode {
             state.paint_blend_mode = new_blend;
         }
-    } else if state.atlas_edit_mode == AtlasEditMode::Clut {
-        // CLUT mode: Palette editor UI
-        draw_clut_editor_panel(ctx, rect.x, palette_y, rect.w, palette_height, state, icon_font);
-    }
 
-    // Brush type icon buttons (below color picker, only in Paint mode)
-    if state.atlas_edit_mode == AtlasEditMode::Paint {
-        let brush_tools_y = palette_y + 14.0 + ps1_color_picker_with_blend_mode_height() + 4.0;
+        // Brush type icon buttons (below color picker)
+        let brush_tools_y = tools_y + ps1_color_picker_with_blend_mode_height() + 4.0;
 
         let btn_size = 22.0;
         let btn_x = rect.x + 4.0;
@@ -1130,17 +1797,25 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                 }
             }
         }
+
+        // ========================================================================
+        // CLUT Editor (integrated into Paint mode)
+        // ========================================================================
+        let clut_y = brush_tools_y + btn_size + 8.0;
+        let clut_height = (rect.y + rect.h - clut_y - 4.0).max(100.0); // Use remaining space
+        draw_clut_editor_panel(ctx, rect.x, clut_y, rect.w, clut_height, state, icon_font);
     }
 
-    // Atlas size selector buttons
+    // Atlas size selector buttons (positioned after mode icon buttons)
     let sizes = [(32, "32"), (64, "64"), (128, "128"), (256, "256")];
-    let mut btn_x = rect.x + 4.0;
-    let btn_y = rect.y + 2.0;
-    let btn_h = 16.0;
+    let mode_btns_end = paint_btn_rect.x + paint_btn_rect.w;
+    let mut size_btn_x = mode_btns_end + 8.0; // After UV|Paint icon buttons + spacing
+    let size_btn_y = rect.y + 2.0;
+    let size_btn_h = header_height - 4.0;
 
     for (size, label) in sizes {
         let btn_w = label.len() as f32 * 7.0 + 6.0;
-        let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
+        let btn_rect = Rect::new(size_btn_x, size_btn_y, btn_w, size_btn_h);
         let is_current = atlas_width == size;
         let hovered = ctx.mouse.inside(&btn_rect);
 
@@ -1156,7 +1831,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
         // Button text
         let text_color = if is_current { WHITE } else { TEXT_DIM };
-        draw_text(label, btn_x + 3.0, btn_y + 12.0, 11.0, text_color);
+        draw_text(label, size_btn_x + 3.0, size_btn_y + 12.0, 11.0, text_color);
 
         // Handle click - resize atlas
         if hovered && is_mouse_button_pressed(MouseButton::Left) && !is_current {
@@ -1166,14 +1841,12 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             state.set_status(&format!("Atlas resized to {}x{}", size, size), 1.0);
         }
 
-        btn_x += btn_w + 2.0;
+        size_btn_x += btn_w + 2.0;
     }
 
     // UV Transform buttons (only in UV mode)
     if state.atlas_edit_mode == AtlasEditMode::Uv {
-        btn_x += 8.0; // Add some spacing
-
-        use crate::ui::{icon, draw_icon_centered};
+        size_btn_x += 8.0; // Add some spacing
 
         // Lucide icon buttons for UV transforms: (icon, tooltip, action_id)
         let uv_buttons: &[(char, &str, &str)] = &[
@@ -1187,7 +1860,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
         for (icon_char, tooltip, action) in uv_buttons {
             let btn_w = 20.0;
-            let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
+            let btn_rect = Rect::new(size_btn_x, size_btn_y, btn_w, size_btn_h);
             let hovered = ctx.mouse.inside(&btn_rect);
             let enabled = has_selection;
 
@@ -1226,20 +1899,9 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                 draw_text(tooltip_text, tx + 4.0, ty + 10.0, 10.0, TEXT_COLOR);
             }
 
-            btn_x += btn_w + 2.0;
+            size_btn_x += btn_w + 2.0;
         }
     }
-
-    // Mode indicator (UV vs Paint vs CLUT)
-    // Note: V/B/F shortcuts are handled through ActionRegistry in handle_actions()
-    let mode_text = match state.atlas_edit_mode {
-        AtlasEditMode::Uv => "UV (V)",
-        AtlasEditMode::Paint => "Paint (V)",
-        AtlasEditMode::Clut => "CLUT (V)",
-    };
-    let mode_color = ACCENT_COLOR;
-    let text_width = mode_text.len() as f32 * 6.0;
-    draw_text(mode_text, rect.x + rect.w - text_width - 8.0, rect.y + 14.0, 11.0, mode_color);
 
     // Show UV modal transform indicator (when G/S/R is active)
     if state.uv_modal_transform != super::state::UvModalTransform::None {
@@ -3213,12 +3875,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
         if state.atlas_edit_mode == AtlasEditMode::Paint {
             state.uv_selection.clear();
         }
-        let mode = match state.atlas_edit_mode {
-            AtlasEditMode::Uv => "UV",
-            AtlasEditMode::Paint => "Paint",
-            AtlasEditMode::Clut => "CLUT",
-        };
-        state.set_status(&format!("Atlas mode: {}", mode), 1.0);
+        state.set_status(&format!("Atlas mode: {}", state.atlas_edit_mode.label()), 1.0);
     }
     if actions.triggered("brush.square", &ctx) {
         state.brush_type = super::state::BrushType::Square;

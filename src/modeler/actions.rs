@@ -356,7 +356,6 @@ pub fn create_modeler_actions() -> ActionRegistry {
     registry.register(
         Action::new("atlas.toggle_mode")
             .label("Toggle UV/Paint")
-            .shortcut(Shortcut::key(KeyCode::V))
             .status_tip("Toggle between UV editing and Paint mode")
             .category("Atlas")
             .enabled_when(|ctx| ctx.has_flag(flags::TEXTURE_MODE)),
