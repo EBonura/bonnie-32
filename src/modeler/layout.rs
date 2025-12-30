@@ -2177,7 +2177,7 @@ fn draw_clut_editor_panel(
     x: f32,
     y: f32,
     width: f32,
-    height: f32,
+    _height: f32,
     state: &mut ModelerState,
     _icon_font: Option<&Font>,
 ) {
@@ -2297,17 +2297,14 @@ fn draw_clut_editor_panel(
     // ========================================================================
     if let Some(clut_id) = state.selected_clut {
         if let Some(clut) = state.project.clut_pool.get(clut_id) {
-            let remaining_height = height - (cur_y - y) - 4.0;
-
             // Draw palette grid
             let grid_size = match clut.depth {
                 ClutDepth::Bpp4 => 4,  // 4x4 grid
                 ClutDepth::Bpp8 => 16, // 16x16 grid
             };
 
-            let cell_size = ((width - padding * 2.0) / grid_size as f32)
-                .min(remaining_height / grid_size as f32)
-                .min(16.0); // Max 16px per cell
+            // Fill available width (prioritize using full width for the palette)
+            let cell_size = (width - padding * 2.0) / grid_size as f32;
 
             let grid_w = cell_size * grid_size as f32;
             let grid_x = x + (width - grid_w) * 0.5;

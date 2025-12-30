@@ -637,12 +637,19 @@ async fn main() {
                             let flip_normals = ms.mesh_browser.flip_normals;
                             let flip_h = ms.mesh_browser.flip_horizontal;
                             let flip_v = ms.mesh_browser.flip_vertical;
+                            let clut_depth_override = ms.mesh_browser.clut_depth_override;
 
                             #[cfg(not(target_arch = "wasm32"))]
                             {
-                                // Use full import with texture loading and auto-quantization
-                                // Auto-detects optimal CLUT depth based on unique color count
-                                match ObjImporter::import_with_auto_quantize(&path, scale) {
+                                // Import with texture - either auto-detect or forced CLUT depth
+                                let import_result = if let Some(depth) = clut_depth_override {
+                                    // Force specific CLUT depth
+                                    ObjImporter::import_with_texture(&path, scale, Some(depth))
+                                } else {
+                                    // Auto-detect optimal CLUT depth
+                                    ObjImporter::import_with_auto_quantize(&path, scale)
+                                };
+                                match import_result {
                                     Ok(mut result) => {
                                         // Flip normals if requested
                                         if flip_normals {
@@ -691,7 +698,9 @@ async fn main() {
                                                     let depth_label = indexed.depth.short_label();
                                                     ms.modeler_state.project.indexed_atlas = Some(indexed);
                                                     ms.modeler_state.selected_clut = Some(clut_id);
-                                                    texture_status = format!(" + CLUT {} ({} colors)", depth_label, color_count);
+                                                    // Show "(forced)" if user manually selected the depth
+                                                    let forced = if clut_depth_override.is_some() { " forced" } else { "" };
+                                                    texture_status = format!(" + CLUT {}{} ({} colors)", depth_label, forced, color_count);
                                                 }
                                             }
                                         }

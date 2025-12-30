@@ -4,7 +4,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, icon, icon_button, icon_button_active, ACCENT_COLOR, TEXT_COLOR};
-use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
+use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid, ClutDepth};
 use crate::world::SECTOR_SIZE;
 use super::mesh_editor::{EditableMesh, TextureAtlas};
 use super::obj_import::ObjImporter;
@@ -194,6 +194,8 @@ pub struct MeshBrowser {
     pub show_texture: bool,
     /// Scroll offset for texture preview panel
     pub texture_scroll_offset: f32,
+    /// CLUT depth override for import (None = auto-detect based on color count)
+    pub clut_depth_override: Option<ClutDepth>,
 }
 
 impl Default for MeshBrowser {
@@ -222,6 +224,7 @@ impl Default for MeshBrowser {
             preview_atlases: Vec::new(),
             show_texture: true, // Show textures by default
             texture_scroll_offset: 0.0,
+            clut_depth_override: None, // Auto-detect by default
         }
     }
 }
@@ -654,6 +657,53 @@ pub fn draw_mesh_browser(
         browser.flip_vertical = !browser.flip_vertical;
         if browser.preview_mesh.is_some() {
             action = MeshBrowserAction::ReloadPreview;
+        }
+    }
+
+    // CLUT depth selector (Auto / 4-bit / 8-bit)
+    let clut_label_x = dialog_x + 340.0;
+    draw_text("CLUT:", clut_label_x, footer_y + 22.0, 12.0, TEXT_COLOR);
+
+    let clut_btn_w = 36.0;
+    let clut_btn_h = 20.0;
+    let clut_btn_y = footer_y + 12.0;
+
+    // Auto button
+    let auto_rect = Rect::new(clut_label_x + 40.0, clut_btn_y, clut_btn_w, clut_btn_h);
+    let auto_selected = browser.clut_depth_override.is_none();
+    let auto_bg = if auto_selected { ACCENT_COLOR } else { Color::from_rgba(60, 60, 70, 255) };
+    draw_rectangle(auto_rect.x, auto_rect.y, auto_rect.w, auto_rect.h, auto_bg);
+    draw_text("Auto", auto_rect.x + 4.0, auto_rect.y + 14.0, 11.0, if auto_selected { WHITE } else { TEXT_COLOR });
+    if ctx.mouse.inside(&auto_rect) {
+        ctx.set_tooltip("Auto-detect CLUT depth based on color count", ctx.mouse.x, ctx.mouse.y);
+        if is_mouse_button_pressed(MouseButton::Left) {
+            browser.clut_depth_override = None;
+        }
+    }
+
+    // 4-bit button
+    let bpp4_rect = Rect::new(auto_rect.x + clut_btn_w + 2.0, clut_btn_y, clut_btn_w, clut_btn_h);
+    let bpp4_selected = browser.clut_depth_override == Some(ClutDepth::Bpp4);
+    let bpp4_bg = if bpp4_selected { ACCENT_COLOR } else { Color::from_rgba(60, 60, 70, 255) };
+    draw_rectangle(bpp4_rect.x, bpp4_rect.y, bpp4_rect.w, bpp4_rect.h, bpp4_bg);
+    draw_text("4-bit", bpp4_rect.x + 4.0, bpp4_rect.y + 14.0, 11.0, if bpp4_selected { WHITE } else { TEXT_COLOR });
+    if ctx.mouse.inside(&bpp4_rect) {
+        ctx.set_tooltip("Force 4-bit CLUT (16 colors) - reduces dithering artifacts", ctx.mouse.x, ctx.mouse.y);
+        if is_mouse_button_pressed(MouseButton::Left) {
+            browser.clut_depth_override = Some(ClutDepth::Bpp4);
+        }
+    }
+
+    // 8-bit button
+    let bpp8_rect = Rect::new(bpp4_rect.x + clut_btn_w + 2.0, clut_btn_y, clut_btn_w, clut_btn_h);
+    let bpp8_selected = browser.clut_depth_override == Some(ClutDepth::Bpp8);
+    let bpp8_bg = if bpp8_selected { ACCENT_COLOR } else { Color::from_rgba(60, 60, 70, 255) };
+    draw_rectangle(bpp8_rect.x, bpp8_rect.y, bpp8_rect.w, bpp8_rect.h, bpp8_bg);
+    draw_text("8-bit", bpp8_rect.x + 4.0, bpp8_rect.y + 14.0, 11.0, if bpp8_selected { WHITE } else { TEXT_COLOR });
+    if ctx.mouse.inside(&bpp8_rect) {
+        ctx.set_tooltip("Force 8-bit CLUT (256 colors) - preserves more detail", ctx.mouse.x, ctx.mouse.y);
+        if is_mouse_button_pressed(MouseButton::Left) {
+            browser.clut_depth_override = Some(ClutDepth::Bpp8);
         }
     }
 
