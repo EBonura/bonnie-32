@@ -4,7 +4,8 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
-use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15};
+use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
+use crate::world::SECTOR_SIZE;
 use super::mesh_editor::MeshProject;
 use std::path::PathBuf;
 
@@ -125,8 +126,9 @@ impl Default for ModelBrowser {
             preview_project: None,
             orbit_yaw: 0.5,
             orbit_pitch: 0.3,
-            orbit_distance: 300.0,
-            orbit_center: Vec3::new(0.0, 50.0, 0.0),
+            // Scale: 1024 units = 1 meter
+            orbit_distance: 4096.0, // 4 meters back
+            orbit_center: Vec3::new(0.0, 1024.0, 0.0), // 1 meter height
             dragging: false,
             last_mouse: (0.0, 0.0),
             scroll_offset: 0.0,
@@ -185,10 +187,12 @@ impl ModelBrowser {
             let size_y = max_y - min_y;
             let size_z = max_z - min_z;
             let diagonal = (size_x * size_x + size_y * size_y + size_z * size_z).sqrt();
-            self.orbit_distance = diagonal.max(150.0) * 1.5;
+            // Min distance 2 meters (2048 units), scale by 1.5x model size
+            self.orbit_distance = diagonal.max(2048.0) * 1.5;
         } else {
-            self.orbit_center = Vec3::new(0.0, 50.0, 0.0);
-            self.orbit_distance = 300.0;
+            // Fallback: 1024 units = 1 meter
+            self.orbit_center = Vec3::new(0.0, 1024.0, 0.0);
+            self.orbit_distance = 4096.0;
         }
 
         self.preview_project = Some(project);
@@ -460,49 +464,15 @@ fn draw_orbit_preview(
     );
 }
 
-/// Draw a simple grid on the floor (Y=0 plane) with depth testing
+/// Draw a floor grid matching the world editor
+/// Uses SECTOR_SIZE (1024 units = 1 meter) per grid cell - same scale everywhere
 fn draw_preview_grid(fb: &mut Framebuffer, camera: &Camera) {
-    use crate::rasterizer::world_to_screen;
-
     let grid_color = RasterColor::new(50, 50, 60);
-    let grid_size = 200.0;
-    let grid_step = 25.0;
-    let half = grid_size / 2.0;
+    let x_axis_color = RasterColor::new(100, 60, 60); // Red-ish for X axis
+    let z_axis_color = RasterColor::new(60, 60, 100); // Blue-ish for Z axis
 
-    // Helper to draw a 3D line with depth testing
-    let draw_line_depth = |fb: &mut Framebuffer, p0: Vec3, p1: Vec3, color: RasterColor| {
-        // Calculate relative positions and depths
-        let rel0 = p0 - camera.position;
-        let rel1 = p1 - camera.position;
-        let z0 = rel0.dot(camera.basis_z);
-        let z1 = rel1.dot(camera.basis_z);
-
-        // Skip if both behind camera
-        if z0 <= 0.1 && z1 <= 0.1 {
-            return;
-        }
-
-        let screen0 = world_to_screen(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-        let screen1 = world_to_screen(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-
-        if let (Some((x0, y0)), Some((x1, y1))) = (screen0, screen1) {
-            // Use draw_line_3d which respects z-buffer
-            fb.draw_line_3d(x0 as i32, y0 as i32, z0, x1 as i32, y1 as i32, z1, color);
-        }
-    };
-
-    // Draw grid lines
-    let mut x = -half;
-    while x <= half {
-        draw_line_depth(fb, Vec3::new(x, 0.0, -half), Vec3::new(x, 0.0, half), grid_color);
-        x += grid_step;
-    }
-
-    let mut z = -half;
-    while z <= half {
-        draw_line_depth(fb, Vec3::new(-half, 0.0, z), Vec3::new(half, 0.0, z), grid_color);
-        z += grid_step;
-    }
+    // 1024 units per grid cell, 10 cells in each direction (10240 unit extent)
+    draw_floor_grid(fb, camera, 0.0, SECTOR_SIZE, SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
 }
 
 /// Draw a close button (X)

@@ -3,19 +3,24 @@
 //! Modal dialog for browsing and previewing OBJ mesh files.
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR, TEXT_COLOR};
-use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, world_to_screen};
-use super::mesh_editor::EditableMesh;
+use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, icon, icon_button, icon_button_active, ACCENT_COLOR, TEXT_COLOR};
+use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
+use crate::world::SECTOR_SIZE;
+use super::mesh_editor::{EditableMesh, TextureAtlas};
 use super::obj_import::ObjImporter;
 use std::path::PathBuf;
 
-/// Info about a mesh file
+/// Info about a mesh file (and its associated texture)
 #[derive(Debug, Clone)]
 pub struct MeshInfo {
     /// Display name (file stem)
     pub name: String,
-    /// Full path to the file
+    /// Full path to the OBJ file
     pub path: PathBuf,
+    /// Primary texture path (PNG with same name)
+    pub texture_path: Option<PathBuf>,
+    /// Additional texture paths (_tex0.png, _tex1.png, etc.)
+    pub additional_textures: Vec<PathBuf>,
     /// Vertex count (from parsing)
     pub vertex_count: usize,
     /// Face count (from parsing)
@@ -28,25 +33,71 @@ pub fn discover_meshes() -> Vec<MeshInfo> {
     let meshes_dir = PathBuf::from("assets/meshes");
     let mut meshes = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(&meshes_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "obj") {
-                let name = path.file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
+    // Helper to find associated textures for an OBJ file
+    // Returns (primary_texture, additional_textures)
+    fn find_textures(obj_path: &PathBuf) -> (Option<PathBuf>, Vec<PathBuf>) {
+        let stem = match obj_path.file_stem() {
+            Some(s) => s.to_string_lossy().to_string(),
+            None => return (None, Vec::new()),
+        };
+        let parent = match obj_path.parent() {
+            Some(p) => p,
+            None => return (None, Vec::new()),
+        };
 
-                // Parse to get vertex/face counts
-                let (vertex_count, face_count) = if let Ok(mesh) = ObjImporter::load_from_file(&path) {
-                    (mesh.vertices.len(), mesh.faces.len())
-                } else {
-                    (0, 0)
-                };
+        let mut primary = None;
+        let mut additional = Vec::new();
 
-                meshes.push(MeshInfo { name, path, vertex_count, face_count });
+        // Check for primary texture (same name.png)
+        let png_path = parent.join(format!("{}.png", stem));
+        if png_path.exists() {
+            primary = Some(png_path);
+        }
+
+        // Check for additional textures (_tex0.png, _tex1.png, etc.)
+        for i in 0..16 {
+            let tex_path = parent.join(format!("{}_tex{}.png", stem, i));
+            if tex_path.exists() {
+                additional.push(tex_path);
+            } else if i > 0 {
+                // Stop at first gap after tex0
+                break;
+            }
+        }
+
+        (primary, additional)
+    }
+
+    // Helper to scan a directory for OBJ files
+    fn scan_dir(dir: &PathBuf, meshes: &mut Vec<MeshInfo>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Recursively scan subdirectories
+                    scan_dir(&path, meshes);
+                } else if path.extension().map_or(false, |ext| ext == "obj") {
+                    let name = path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    // Find associated textures
+                    let (texture_path, additional_textures) = find_textures(&path);
+
+                    // Parse to get vertex/face counts
+                    let (vertex_count, face_count) = if let Ok(mesh) = ObjImporter::load_from_file(&path) {
+                        (mesh.vertices.len(), mesh.faces.len())
+                    } else {
+                        (0, 0)
+                    };
+
+                    meshes.push(MeshInfo { name, path, texture_path, additional_textures, vertex_count, face_count });
+                }
             }
         }
     }
+
+    scan_dir(&meshes_dir, &mut meshes);
 
     // Sort by name
     meshes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -87,7 +138,8 @@ pub async fn load_mesh_list() -> Vec<MeshInfo> {
         let path = PathBuf::from(format!("assets/meshes/{}", line));
 
         // We don't have vertex/face counts until we load the mesh
-        meshes.push(MeshInfo { name, path, vertex_count: 0, face_count: 0 });
+        // For WASM, texture path is discovered at load time
+        meshes.push(MeshInfo { name, path, texture_path: None, additional_textures: Vec::new(), vertex_count: 0, face_count: 0 });
     }
 
     meshes
@@ -126,10 +178,22 @@ pub struct MeshBrowser {
     pub scroll_offset: f32,
     /// Scale multiplier for imported meshes (OBJ meshes are often small)
     pub import_scale: f32,
+    /// Whether to flip normals on import (for meshes with inverted winding)
+    pub flip_normals: bool,
+    /// Whether to flip mesh horizontally (mirror X)
+    pub flip_horizontal: bool,
+    /// Whether to flip mesh vertically (mirror Y)
+    pub flip_vertical: bool,
     /// Path pending async load (WASM)
     pub pending_load_path: Option<PathBuf>,
     /// Whether we need to async load the mesh list (WASM)
     pub pending_load_list: bool,
+    /// Preview texture atlases (primary + additional _texN.png files)
+    pub preview_atlases: Vec<TextureAtlas>,
+    /// Whether to show texture in preview (if available)
+    pub show_texture: bool,
+    /// Scroll offset for texture preview panel
+    pub texture_scroll_offset: f32,
 }
 
 impl Default for MeshBrowser {
@@ -141,14 +205,23 @@ impl Default for MeshBrowser {
             preview_mesh: None,
             orbit_yaw: 0.5,
             orbit_pitch: 0.3,
-            orbit_distance: 300.0,
-            orbit_center: Vec3::new(0.0, 0.0, 0.0),
+            // Scale: 1024 units = 1 meter
+            orbit_distance: 4096.0, // 4 meters back
+            orbit_center: Vec3::new(0.0, 1024.0, 0.0), // 1 meter height
             dragging: false,
             last_mouse: (0.0, 0.0),
             scroll_offset: 0.0,
-            import_scale: 100.0, // OBJ meshes are typically ~1 unit, scale up to match world
+            // OBJ meshes are typically ~1 unit = 1 meter in source
+            // Scale to 1024 units = 1 meter (our scale)
+            import_scale: 1024.0,
+            flip_normals: false,
+            flip_horizontal: false,
+            flip_vertical: false,
             pending_load_path: None,
             pending_load_list: false,
+            preview_atlases: Vec::new(),
+            show_texture: true, // Show textures by default
+            texture_scroll_offset: 0.0,
         }
     }
 }
@@ -160,17 +233,36 @@ impl MeshBrowser {
         self.meshes = meshes;
         self.selected_index = None;
         self.preview_mesh = None;
+        self.preview_atlases.clear();
         self.scroll_offset = 0.0;
+        self.texture_scroll_offset = 0.0;
     }
 
     /// Close the browser
     pub fn close(&mut self) {
         self.open = false;
         self.preview_mesh = None;
+        self.preview_atlases.clear();
     }
 
-    /// Set the preview mesh
+    /// Set the preview mesh (resets camera view)
     pub fn set_preview(&mut self, mesh: EditableMesh) {
+        self.update_preview_camera(&mesh);
+        self.preview_mesh = Some(mesh);
+        // Reset view angle on initial load
+        self.orbit_yaw = 0.8;
+        self.orbit_pitch = 0.3;
+    }
+
+    /// Update preview mesh without resetting camera angles (for scale/flip changes)
+    pub fn update_preview(&mut self, mesh: EditableMesh) {
+        self.update_preview_camera(&mesh);
+        self.preview_mesh = Some(mesh);
+        // Keep current orbit_yaw and orbit_pitch
+    }
+
+    /// Update camera center and distance based on mesh bounds
+    fn update_preview_camera(&mut self, mesh: &EditableMesh) {
         // Calculate bounding box to center camera
         let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
@@ -197,20 +289,29 @@ impl MeshBrowser {
             let size_y = max.y - min.y;
             let size_z = max.z - min.z;
             let diagonal = (size_x * size_x + size_y * size_y + size_z * size_z).sqrt();
-            self.orbit_distance = diagonal.max(0.5) * 2.0;
+            // Min distance 2 meters (2048 units), scale by 2x model size
+            self.orbit_distance = diagonal.max(2048.0) * 2.0;
         } else {
-            self.orbit_center = Vec3::new(0.0, 0.0, 0.0);
-            self.orbit_distance = 2.0;
+            // Fallback: 1024 units = 1 meter
+            self.orbit_center = Vec3::new(0.0, 1024.0, 0.0);
+            self.orbit_distance = 4096.0;
         }
-
-        self.preview_mesh = Some(mesh);
-        self.orbit_yaw = 0.8;
-        self.orbit_pitch = 0.3;
     }
 
     /// Get the currently selected mesh info
     pub fn selected_mesh(&self) -> Option<&MeshInfo> {
         self.selected_index.and_then(|i| self.meshes.get(i))
+    }
+
+    /// Set the preview texture atlases (primary first, then additional)
+    pub fn set_preview_atlases(&mut self, atlases: Vec<TextureAtlas>) {
+        self.preview_atlases = atlases;
+        self.texture_scroll_offset = 0.0;
+    }
+
+    /// Get the primary preview atlas (for 3D rendering)
+    pub fn preview_atlas(&self) -> Option<&TextureAtlas> {
+        self.preview_atlases.first()
     }
 }
 
@@ -224,6 +325,8 @@ pub enum MeshBrowserAction {
     OpenMesh,
     /// User cancelled
     Cancel,
+    /// Preview settings changed (scale or flip), reload preview
+    ReloadPreview,
 }
 
 /// Draw the mesh browser modal dialog
@@ -272,7 +375,17 @@ pub fn draw_mesh_browser(
     let list_rect = Rect::new(dialog_x + 8.0, content_y, list_w, content_h);
     let item_h = 28.0;
 
-    let items: Vec<String> = browser.meshes.iter().map(|m| m.name.clone()).collect();
+    // Build display names with texture indicator
+    let items: Vec<String> = browser.meshes.iter().map(|m| {
+        let tex_count = (if m.texture_path.is_some() { 1 } else { 0 }) + m.additional_textures.len();
+        if tex_count > 1 {
+            format!("{} [{}]", m.name, tex_count) // Show texture count for multi-texture
+        } else if tex_count == 1 {
+            format!("{} \u{e002}", m.name) // Image icon for single texture
+        } else {
+            m.name.clone()
+        }
+    }).collect();
 
     let list_result = draw_scrollable_list(
         ctx,
@@ -291,9 +404,10 @@ pub fn draw_mesh_browser(
         }
     }
 
-    // Preview panel (right)
+    // Preview panels - split into 3D view and texture preview
+    let tex_panel_w = 200.0; // Wider panel for better texture visibility
     let preview_x = dialog_x + list_w + 16.0;
-    let preview_w = dialog_w - list_w - 24.0;
+    let preview_w = dialog_w - list_w - tex_panel_w - 32.0;
     let preview_rect = Rect::new(preview_x, content_y, preview_w, content_h);
 
     draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h, Color::from_rgba(20, 20, 25, 255));
@@ -304,17 +418,32 @@ pub fn draw_mesh_browser(
     if has_preview {
         draw_orbit_preview(ctx, browser, preview_rect, fb);
 
-        // Draw stats at bottom of preview
+        // Draw stats at bottom of preview (two lines: counts + bounding box)
         if let Some(idx) = browser.selected_index {
             if let Some(info) = browser.meshes.get(idx) {
-                let stats_y = preview_rect.bottom() - 24.0;
-                draw_rectangle(preview_rect.x, stats_y, preview_rect.w, 24.0, Color::from_rgba(30, 30, 35, 200));
+                let stats_h = 38.0; // Two lines of text
+                let stats_y = preview_rect.bottom() - stats_h;
+                draw_rectangle(preview_rect.x, stats_y, preview_rect.w, stats_h, Color::from_rgba(30, 30, 35, 200));
 
+                // Line 1: Vertex and face counts
                 let stats_text = format!(
                     "Vertices: {}  Faces: {}",
                     info.vertex_count, info.face_count
                 );
-                draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
+                draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 14.0, 12.0, Color::from_rgba(180, 180, 180, 255));
+
+                // Line 2: Bounding box dimensions (computed from preview mesh)
+                if let Some(mesh) = &browser.preview_mesh {
+                    let (min, max) = compute_mesh_bounds(mesh);
+                    let size_x = max.x - min.x;
+                    let size_y = max.y - min.y;
+                    let size_z = max.z - min.z;
+                    let bbox_text = format!(
+                        "Size: {:.0} x {:.0} x {:.0} units",
+                        size_x, size_y, size_z
+                    );
+                    draw_text(&bbox_text, preview_rect.x + 8.0, stats_y + 30.0, 12.0, Color::from_rgba(140, 180, 140, 255));
+                }
             }
         }
     } else if has_selection {
@@ -326,6 +455,126 @@ pub fn draw_mesh_browser(
         draw_text("Select a mesh to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
     }
 
+    // Texture preview panel (right side)
+    let tex_panel_x = preview_rect.right() + 8.0;
+    let tex_panel_rect = Rect::new(tex_panel_x, content_y, tex_panel_w, content_h);
+    draw_rectangle(tex_panel_rect.x, tex_panel_rect.y, tex_panel_rect.w, tex_panel_rect.h, Color::from_rgba(25, 25, 30, 255));
+    draw_rectangle_lines(tex_panel_rect.x, tex_panel_rect.y, tex_panel_rect.w, tex_panel_rect.h, 1.0, Color::from_rgba(50, 50, 55, 255));
+
+    // Draw texture label with count
+    let tex_count = browser.preview_atlases.len();
+    let tex_label = if tex_count > 1 {
+        format!("Textures ({})", tex_count)
+    } else {
+        "Texture".to_string()
+    };
+    draw_text(&tex_label, tex_panel_rect.x + 8.0, tex_panel_rect.y + 16.0, 12.0, Color::from_rgba(120, 120, 120, 255));
+
+    // Draw textures or "No texture" message
+    if !browser.preview_atlases.is_empty() {
+        // Content area for textures (below label)
+        let tex_content_y = tex_panel_rect.y + 24.0;
+        let tex_content_h = content_h - 32.0;
+        let tex_content_rect = Rect::new(tex_panel_rect.x + 4.0, tex_content_y, tex_panel_w - 8.0, tex_content_h);
+
+        // Calculate layout: each texture gets a square thumbnail + label
+        let thumb_size = tex_content_rect.w - 8.0; // Use full width minus padding
+        let item_h = thumb_size + 24.0; // Thumbnail + label space
+        let total_height = item_h * tex_count as f32;
+
+        // Handle scrolling if content is taller than panel
+        if ctx.mouse.inside(&tex_content_rect) {
+            let scroll = ctx.mouse.scroll;
+            if scroll != 0.0 {
+                let max_scroll = (total_height - tex_content_h).max(0.0);
+                browser.texture_scroll_offset = (browser.texture_scroll_offset - scroll * 8.0).clamp(0.0, max_scroll);
+            }
+        }
+
+        // Enable scissor clipping for texture panel (prevents overflow)
+        let dpi = screen_dpi_scale();
+        gl_use_default_material();
+        unsafe {
+            get_internal_gl().quad_gl.scissor(
+                Some((
+                    (tex_content_rect.x * dpi) as i32,
+                    (tex_content_rect.y * dpi) as i32,
+                    (tex_content_rect.w * dpi) as i32,
+                    (tex_content_h * dpi) as i32,
+                ))
+            );
+        }
+
+        // Draw each texture
+        for (i, atlas) in browser.preview_atlases.iter().enumerate() {
+            let item_y = tex_content_y + i as f32 * item_h - browser.texture_scroll_offset;
+
+            // Skip if completely off-screen (optimization only, scissor handles actual clipping)
+            if item_y + item_h < tex_content_y - 50.0 || item_y > tex_content_y + tex_content_h + 50.0 {
+                continue;
+            }
+
+            // Convert atlas to RGBA for display
+            let atlas_w = atlas.width;
+            let atlas_h = atlas.height;
+            let mut rgba = vec![0u8; atlas_w * atlas_h * 4];
+            for y in 0..atlas_h {
+                for x in 0..atlas_w {
+                    let pixel = atlas.get_pixel(x, y);
+                    let idx = (y * atlas_w + x) * 4;
+                    rgba[idx] = pixel.r;
+                    rgba[idx + 1] = pixel.g;
+                    rgba[idx + 2] = pixel.b;
+                    rgba[idx + 3] = 255;
+                }
+            }
+
+            // Create texture
+            let tex = Texture2D::from_rgba8(atlas_w as u16, atlas_h as u16, &rgba);
+            tex.set_filter(FilterMode::Nearest);
+
+            // Scale to fit thumbnail area (preserve aspect ratio)
+            let scale = (thumb_size / atlas_w as f32).min(thumb_size / atlas_h as f32);
+            let scaled_w = atlas_w as f32 * scale;
+            let scaled_h = atlas_h as f32 * scale;
+            let tex_x = tex_content_rect.x + (tex_content_rect.w - scaled_w) * 0.5;
+            let tex_y = item_y + 2.0;
+
+            draw_texture_ex(
+                &tex,
+                tex_x,
+                tex_y,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(scaled_w, scaled_h)),
+                    ..Default::default()
+                },
+            );
+
+            // Draw border
+            draw_rectangle_lines(tex_x, tex_y, scaled_w, scaled_h, 1.0, Color::from_rgba(70, 70, 75, 255));
+
+            // Draw label
+            let label_y = item_y + thumb_size + 14.0;
+            let label = if tex_count > 1 {
+                format!("tex{} ({}x{})", i, atlas_w, atlas_h)
+            } else {
+                format!("{}x{}", atlas_w, atlas_h)
+            };
+            draw_text(&label, tex_content_rect.x, label_y, 10.0, Color::from_rgba(100, 100, 100, 255));
+        }
+
+        // Disable scissor clipping
+        unsafe {
+            get_internal_gl().quad_gl.scissor(None);
+        }
+    } else {
+        // No texture message
+        let msg_y = tex_panel_rect.y + tex_panel_rect.h * 0.5;
+        draw_text("No texture", tex_panel_rect.x + 30.0, msg_y - 6.0, 12.0, Color::from_rgba(80, 80, 80, 255));
+        draw_text("available", tex_panel_rect.x + 35.0, msg_y + 8.0, 12.0, Color::from_rgba(80, 80, 80, 255));
+    }
+
     // Footer with buttons
     let footer_y = dialog_y + dialog_h - 44.0;
     draw_rectangle(dialog_x, footer_y, dialog_w, 44.0, Color::from_rgba(40, 40, 48, 255));
@@ -335,17 +584,77 @@ pub fn draw_mesh_browser(
     let scale_minus_rect = Rect::new(dialog_x + 60.0, footer_y + 8.0, 28.0, 28.0);
     let scale_plus_rect = Rect::new(dialog_x + 150.0, footer_y + 8.0, 28.0, 28.0);
 
-    if draw_text_button(ctx, scale_minus_rect, "-", Color::from_rgba(60, 60, 70, 255)) {
-        browser.import_scale = (browser.import_scale / 2.0).max(1.0);
+    if icon_button(ctx, scale_minus_rect, icon::MINUS, icon_font, "Decrease Scale (halve)") {
+        // Allow scaling down to 0.001 for very large source models
+        browser.import_scale = (browser.import_scale / 2.0).max(0.001);
+        if browser.preview_mesh.is_some() {
+            action = MeshBrowserAction::ReloadPreview;
+        }
     }
 
-    // Display current scale
-    let scale_text = format!("{:.0}", browser.import_scale);
+    // Display current scale (use appropriate format based on value)
+    let scale_text = if browser.import_scale >= 1.0 {
+        format!("{:.0}", browser.import_scale)
+    } else if browser.import_scale >= 0.01 {
+        format!("{:.2}", browser.import_scale)
+    } else {
+        format!("{:.3}", browser.import_scale)
+    };
     let text_width = measure_text(&scale_text, None, 14, 1.0).width;
     draw_text(&scale_text, dialog_x + 104.0 - text_width / 2.0, footer_y + 22.0, 14.0, TEXT_COLOR);
 
-    if draw_text_button(ctx, scale_plus_rect, "+", Color::from_rgba(60, 60, 70, 255)) {
-        browser.import_scale = (browser.import_scale * 2.0).min(1000.0);
+    if icon_button(ctx, scale_plus_rect, icon::PLUS, icon_font, "Increase Scale (double)") {
+        // Allow scaling up to 1,000,000 for very small source models
+        browser.import_scale = (browser.import_scale * 2.0).min(1_000_000.0);
+        if browser.preview_mesh.is_some() {
+            action = MeshBrowserAction::ReloadPreview;
+        }
+    }
+
+    // Flip normals toggle
+    let flip_rect = Rect::new(dialog_x + 190.0, footer_y + 8.0, 28.0, 28.0);
+    if icon_button_active(ctx, flip_rect, icon::FLIP_VERTICAL, icon_font, "Flip Normals", browser.flip_normals) {
+        browser.flip_normals = !browser.flip_normals;
+        if browser.preview_mesh.is_some() {
+            action = MeshBrowserAction::ReloadPreview;
+        }
+    }
+
+    // Texture toggle (only enabled if texture is available)
+    let tex_rect = Rect::new(dialog_x + 230.0, footer_y + 8.0, 28.0, 28.0);
+    let has_texture = !browser.preview_atlases.is_empty();
+    let tex_icon = if browser.show_texture { icon::EYE } else { icon::EYE_OFF };
+    let tex_tooltip = if has_texture {
+        if browser.show_texture { "Hide Texture" } else { "Show Texture" }
+    } else {
+        "No Texture Available"
+    };
+    if has_texture {
+        if icon_button_active(ctx, tex_rect, tex_icon, icon_font, tex_tooltip, browser.show_texture) {
+            browser.show_texture = !browser.show_texture;
+        }
+    } else {
+        // Draw disabled button
+        draw_rectangle(tex_rect.x, tex_rect.y, tex_rect.w, tex_rect.h, Color::from_rgba(35, 35, 40, 255));
+        draw_icon_centered(icon_font, icon::EYE_OFF, &tex_rect, 14.0, Color::from_rgba(60, 60, 60, 255));
+    }
+
+    // Flip horizontal (mirror X axis) - toggle state and reload
+    let flip_h_rect = Rect::new(dialog_x + 270.0, footer_y + 8.0, 28.0, 28.0);
+    if icon_button_active(ctx, flip_h_rect, icon::FLIP_HORIZONTAL, icon_font, "Flip Horizontal (mirror X)", browser.flip_horizontal) {
+        browser.flip_horizontal = !browser.flip_horizontal;
+        if browser.preview_mesh.is_some() {
+            action = MeshBrowserAction::ReloadPreview;
+        }
+    }
+
+    // Flip vertical (mirror Y axis) - toggle state and reload
+    let flip_v_rect = Rect::new(dialog_x + 300.0, footer_y + 8.0, 28.0, 28.0);
+    if icon_button_active(ctx, flip_v_rect, icon::FLIP_VERTICAL, icon_font, "Flip Vertical (mirror Y)", browser.flip_vertical) {
+        browser.flip_vertical = !browser.flip_vertical;
+        if browser.preview_mesh.is_some() {
+            action = MeshBrowserAction::ReloadPreview;
+        }
     }
 
     // Cancel button
@@ -398,9 +707,11 @@ fn draw_orbit_preview(
 
         // Scroll to zoom (use ctx.mouse.scroll to respect modal blocking)
         // Minimum 0.3 to stay safely outside the 0.1 near plane
+        // Use 2% steps (0.02) for fine control - 10% was too sensitive
+        // Max 5000 to handle large scaled meshes (100x scale = ~200 unit meshes)
         let scroll = ctx.mouse.scroll;
         if scroll != 0.0 {
-            browser.orbit_distance = (browser.orbit_distance * (1.0 - scroll * 0.1)).clamp(0.3, 500.0);
+            browser.orbit_distance = (browser.orbit_distance * (1.0 - scroll * 0.02)).clamp(0.3, 5000.0);
         }
     } else {
         browser.dragging = false;
@@ -441,10 +752,27 @@ fn draw_orbit_preview(
     let settings = RasterSettings::default();
 
     if !mesh.vertices.is_empty() {
-        if settings.use_rgb555 {
-            render_mesh_15(fb, &mesh.vertices, &mesh.faces, &[], None, &camera, &settings);
+        // Check if we should render with texture (use primary atlas for preview)
+        if browser.show_texture && browser.preview_atlas().is_some() {
+            let atlas = browser.preview_atlas().unwrap();
+            let (vertices, faces) = mesh.to_render_data_textured();
+
+            if settings.use_rgb555 {
+                let atlas_texture_15 = atlas.to_raster_texture_15();
+                let textures_15 = [atlas_texture_15];
+                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings);
+            } else {
+                let atlas_texture = atlas.to_raster_texture();
+                let textures = [atlas_texture];
+                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+            }
         } else {
-            render_mesh(fb, &mesh.vertices, &mesh.faces, &[], &camera, &settings);
+            // Render without texture
+            if settings.use_rgb555 {
+                render_mesh_15(fb, &mesh.vertices, &mesh.faces, &[], None, &camera, &settings);
+            } else {
+                render_mesh(fb, &mesh.vertices, &mesh.faces, &[], &camera, &settings);
+            }
         }
     }
 
@@ -467,46 +795,38 @@ fn draw_orbit_preview(
     );
 }
 
-/// Draw a simple grid on the floor (Y=0 plane) with depth testing
+/// Compute the bounding box of a mesh, returning (min, max) corners
+fn compute_mesh_bounds(mesh: &EditableMesh) -> (Vec3, Vec3) {
+    let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+    let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+
+    for vertex in &mesh.vertices {
+        min.x = min.x.min(vertex.pos.x);
+        min.y = min.y.min(vertex.pos.y);
+        min.z = min.z.min(vertex.pos.z);
+        max.x = max.x.max(vertex.pos.x);
+        max.y = max.y.max(vertex.pos.y);
+        max.z = max.z.max(vertex.pos.z);
+    }
+
+    // Handle empty mesh case
+    if min.x == f32::MAX {
+        min = Vec3::new(0.0, 0.0, 0.0);
+        max = Vec3::new(0.0, 0.0, 0.0);
+    }
+
+    (min, max)
+}
+
+/// Draw a floor grid matching the world editor
+/// Uses SECTOR_SIZE (1024 units) per grid cell - same scale everywhere
 fn draw_preview_grid(fb: &mut Framebuffer, camera: &Camera) {
     let grid_color = RasterColor::new(50, 50, 60);
-    let grid_size = 2.0;
-    let grid_step = 0.25;
-    let half = grid_size / 2.0;
+    let x_axis_color = RasterColor::new(100, 60, 60); // Red-ish for X axis
+    let z_axis_color = RasterColor::new(60, 60, 100); // Blue-ish for Z axis
 
-    // Helper to draw a 3D line with depth testing
-    let draw_line_depth = |fb: &mut Framebuffer, p0: Vec3, p1: Vec3, color: RasterColor| {
-        // Calculate relative positions and depths
-        let rel0 = p0 - camera.position;
-        let rel1 = p1 - camera.position;
-        let z0 = rel0.dot(camera.basis_z);
-        let z1 = rel1.dot(camera.basis_z);
-
-        // Skip if both behind camera
-        if z0 <= 0.1 && z1 <= 0.1 {
-            return;
-        }
-
-        let screen0 = world_to_screen(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-        let screen1 = world_to_screen(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-
-        if let (Some((x0, y0)), Some((x1, y1))) = (screen0, screen1) {
-            fb.draw_line_3d(x0 as i32, y0 as i32, z0, x1 as i32, y1 as i32, z1, color);
-        }
-    };
-
-    // Draw grid lines
-    let mut x = -half;
-    while x <= half {
-        draw_line_depth(fb, Vec3::new(x, 0.0, -half), Vec3::new(x, 0.0, half), grid_color);
-        x += grid_step;
-    }
-
-    let mut z = -half;
-    while z <= half {
-        draw_line_depth(fb, Vec3::new(-half, 0.0, z), Vec3::new(half, 0.0, z), grid_color);
-        z += grid_step;
-    }
+    // 1024 units per grid cell, 10 cells in each direction (10240 unit extent)
+    draw_floor_grid(fb, camera, 0.0, SECTOR_SIZE, SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
 }
 
 /// Draw a close button (X)
@@ -551,4 +871,42 @@ fn draw_text_button_enabled(ctx: &mut UiContext, rect: Rect, text: &str, bg_colo
     draw_text(text, tx, ty, 14.0, text_color);
 
     clicked
+}
+
+/// Flip mesh horizontally (mirror all vertices along X axis)
+/// Public so it can be called from main.rs during import
+pub fn apply_mesh_flip_horizontal(mesh: &mut EditableMesh) {
+    // Find the center X to mirror around
+    let (min, max) = compute_mesh_bounds(mesh);
+    let center_x = (min.x + max.x) / 2.0;
+
+    // Mirror each vertex X position around center
+    for vertex in &mut mesh.vertices {
+        vertex.pos.x = center_x - (vertex.pos.x - center_x);
+    }
+
+    // Reverse face winding to maintain correct normals after mirror
+    // Swap v1 and v2 to reverse winding order
+    for face in &mut mesh.faces {
+        std::mem::swap(&mut face.v1, &mut face.v2);
+    }
+}
+
+/// Flip mesh vertically (mirror all vertices along Y axis)
+/// Public so it can be called from main.rs during import
+pub fn apply_mesh_flip_vertical(mesh: &mut EditableMesh) {
+    // Find the center Y to mirror around
+    let (min, max) = compute_mesh_bounds(mesh);
+    let center_y = (min.y + max.y) / 2.0;
+
+    // Mirror each vertex Y position around center
+    for vertex in &mut mesh.vertices {
+        vertex.pos.y = center_y - (vertex.pos.y - center_y);
+    }
+
+    // Reverse face winding to maintain correct normals after mirror
+    // Swap v1 and v2 to reverse winding order
+    for face in &mut mesh.faces {
+        std::mem::swap(&mut face.v1, &mut face.v2);
+    }
 }

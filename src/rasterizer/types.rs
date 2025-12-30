@@ -240,6 +240,276 @@ impl<'de> Deserialize<'de> for Color15 {
 }
 
 // =============================================================================
+// PS1 CLUT (Color Look-Up Table) Types
+// =============================================================================
+
+/// PS1 CLUT depth modes
+/// 4-bit = 16 colors, 8-bit = 256 colors
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClutDepth {
+    /// 4-bit indexed (16 colors) - smallest, most VRAM efficient
+    #[default]
+    Bpp4,
+    /// 8-bit indexed (256 colors) - more colors, still efficient
+    Bpp8,
+}
+
+impl ClutDepth {
+    /// Number of colors in this CLUT depth
+    #[inline]
+    pub fn color_count(&self) -> usize {
+        match self {
+            ClutDepth::Bpp4 => 16,
+            ClutDepth::Bpp8 => 256,
+        }
+    }
+
+    /// Bits per pixel
+    #[inline]
+    pub fn bits_per_pixel(&self) -> usize {
+        match self {
+            ClutDepth::Bpp4 => 4,
+            ClutDepth::Bpp8 => 8,
+        }
+    }
+
+    /// Maximum valid index for this depth
+    #[inline]
+    pub fn max_index(&self) -> u8 {
+        match self {
+            ClutDepth::Bpp4 => 15,
+            ClutDepth::Bpp8 => 255,
+        }
+    }
+
+    /// Label for UI display
+    pub fn label(&self) -> &'static str {
+        match self {
+            ClutDepth::Bpp4 => "4-bit (16)",
+            ClutDepth::Bpp8 => "8-bit (256)",
+        }
+    }
+
+    /// Short label for UI badges
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            ClutDepth::Bpp4 => "4b",
+            ClutDepth::Bpp8 => "8b",
+        }
+    }
+}
+
+/// Unique identifier for CLUTs in the global pool
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct ClutId(pub u32);
+
+impl ClutId {
+    /// Invalid/unassigned CLUT ID
+    pub const NONE: ClutId = ClutId(0);
+
+    /// Check if this is a valid (non-zero) ID
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.0 != 0
+    }
+}
+
+/// PS1-authentic Color Look-Up Table (CLUT)
+///
+/// Stores 16 (4-bit) or 256 (8-bit) Color15 entries.
+/// Index 0 is typically transparent (0x0000) for sprite transparency.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Clut {
+    /// Unique identifier in the CLUT pool
+    pub id: ClutId,
+    /// Human-readable name
+    pub name: String,
+    /// CLUT depth (4-bit or 8-bit)
+    pub depth: ClutDepth,
+    /// Color entries (16 for 4-bit, 256 for 8-bit)
+    /// Entry at index 0 is typically Color15::TRANSPARENT for PS1-style color keying
+    pub colors: Vec<Color15>,
+}
+
+impl Clut {
+    /// Create a new 4-bit (16 color) CLUT with default grayscale ramp
+    pub fn new_4bit(name: impl Into<String>) -> Self {
+        let mut colors = Vec::with_capacity(16);
+        // Index 0 = transparent (PS1 convention)
+        colors.push(Color15::TRANSPARENT);
+        // Indices 1-15 = grayscale ramp
+        for i in 1..16 {
+            let v = (i * 2) as u8; // 2, 4, 6, ... 30
+            colors.push(Color15::new(v, v, v));
+        }
+        Self {
+            id: ClutId::NONE,
+            name: name.into(),
+            depth: ClutDepth::Bpp4,
+            colors,
+        }
+    }
+
+    /// Create a new 8-bit (256 color) CLUT with default grayscale ramp
+    pub fn new_8bit(name: impl Into<String>) -> Self {
+        let mut colors = Vec::with_capacity(256);
+        // Index 0 = transparent
+        colors.push(Color15::TRANSPARENT);
+        // Indices 1-255 = grayscale with wrap
+        for i in 1..256 {
+            let v = ((i * 31) / 255) as u8;
+            colors.push(Color15::new(v, v, v));
+        }
+        Self {
+            id: ClutId::NONE,
+            name: name.into(),
+            depth: ClutDepth::Bpp8,
+            colors,
+        }
+    }
+
+    /// Create an empty CLUT (all transparent) with given depth
+    pub fn new_empty(name: impl Into<String>, depth: ClutDepth) -> Self {
+        Self {
+            id: ClutId::NONE,
+            name: name.into(),
+            depth,
+            colors: vec![Color15::TRANSPARENT; depth.color_count()],
+        }
+    }
+
+    /// Look up color by palette index
+    /// Returns TRANSPARENT for out-of-bounds indices
+    #[inline]
+    pub fn lookup(&self, index: u8) -> Color15 {
+        let idx = index as usize;
+        if idx < self.colors.len() {
+            self.colors[idx]
+        } else {
+            Color15::TRANSPARENT
+        }
+    }
+
+    /// Set color at palette index
+    /// Silently ignores out-of-bounds indices
+    pub fn set_color(&mut self, index: u8, color: Color15) {
+        let idx = index as usize;
+        if idx < self.colors.len() {
+            self.colors[idx] = color;
+        }
+    }
+
+    /// Get color at index (with bounds check)
+    pub fn get_color(&self, index: u8) -> Option<Color15> {
+        self.colors.get(index as usize).copied()
+    }
+
+    /// Number of colors in this CLUT
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.colors.len()
+    }
+
+    /// Check if CLUT is empty (should never be true for valid CLUTs)
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.colors.is_empty()
+    }
+}
+
+/// PS1-authentic indexed texture
+///
+/// Stores palette indices (0-15 for 4-bit, 0-255 for 8-bit) instead of colors.
+/// Actual colors are looked up from a CLUT at render time.
+/// This enables palette swapping (same texture, different CLUT = different colors).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedTexture {
+    pub width: usize,
+    pub height: usize,
+    /// CLUT depth determines valid index range
+    pub depth: ClutDepth,
+    /// Palette indices for each pixel
+    pub indices: Vec<u8>,
+    /// Default CLUT ID for this texture
+    pub default_clut: ClutId,
+    /// Human-readable name
+    pub name: String,
+}
+
+impl IndexedTexture {
+    /// Create a new indexed texture filled with index 0 (transparent)
+    pub fn new(width: usize, height: usize, depth: ClutDepth) -> Self {
+        Self {
+            width,
+            height,
+            depth,
+            indices: vec![0; width * height],
+            default_clut: ClutId::NONE,
+            name: String::new(),
+        }
+    }
+
+    /// Sample palette index at UV coordinates (PS1-style, no filtering)
+    #[inline]
+    pub fn sample_index(&self, u: f32, v: f32) -> u8 {
+        let u_wrapped = u.rem_euclid(1.0);
+        let v_wrapped = v.rem_euclid(1.0);
+        let tx = ((u_wrapped * self.width as f32) as usize).min(self.width.saturating_sub(1));
+        let ty = ((v_wrapped * self.height as f32) as usize).min(self.height.saturating_sub(1));
+        self.indices.get(ty * self.width + tx).copied().unwrap_or(0)
+    }
+
+    /// Sample with CLUT lookup - returns final Color15
+    #[inline]
+    pub fn sample(&self, u: f32, v: f32, clut: &Clut) -> Color15 {
+        let index = self.sample_index(u, v);
+        clut.lookup(index)
+    }
+
+    /// Get palette index at pixel coordinates
+    pub fn get_index(&self, x: usize, y: usize) -> u8 {
+        if x < self.width && y < self.height {
+            self.indices.get(y * self.width + x).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// Set palette index at pixel coordinates
+    /// Index is clamped to valid range for the CLUT depth
+    pub fn set_index(&mut self, x: usize, y: usize, index: u8) {
+        if x < self.width && y < self.height {
+            let clamped = index.min(self.depth.max_index());
+            if let Some(pixel) = self.indices.get_mut(y * self.width + x) {
+                *pixel = clamped;
+            }
+        }
+    }
+
+    /// Total number of pixels
+    #[inline]
+    pub fn pixel_count(&self) -> usize {
+        self.width * self.height
+    }
+
+    /// Convert to direct-color Texture15 using a CLUT
+    /// Useful for preview or export
+    pub fn to_texture15(&self, clut: &Clut) -> Texture15 {
+        let pixels: Vec<Color15> = self.indices
+            .iter()
+            .map(|&idx| clut.lookup(idx))
+            .collect();
+
+        Texture15 {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: self.name.clone(),
+        }
+    }
+}
+
+// =============================================================================
 // PS1 RGB555 Texture Type
 // =============================================================================
 

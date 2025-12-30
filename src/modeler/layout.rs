@@ -4,6 +4,7 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry, draw_icon_centered};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
+use crate::rasterizer::{ClutDepth, Clut, Color15};
 use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
 use super::tools::ModelerToolId;
 use super::viewport::draw_modeler_viewport;
@@ -1028,103 +1029,111 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     }
 
     // ========================================================================
-    // PS1 Color Picker with Blend Mode (PS1 uses discrete modes, not alpha)
+    // Bottom Panel: Mode-specific UI (Paint vs CLUT)
     // ========================================================================
     let palette_y = rect.y + rect.h - palette_height;
     draw_line(rect.x, palette_y, rect.x + rect.w, palette_y, 1.0, Color::from_rgba(60, 60, 65, 255));
 
-    // Draw PS1 color picker with blend mode selector
-    let picker_result = draw_ps1_color_picker_with_blend_mode(
-        ctx,
-        rect.x + 4.0,
-        palette_y + 14.0,
-        rect.w - 8.0,
-        state.paint_color,
-        state.paint_blend_mode,
-        "Paint Color (PS1 15-bit)",
-        &mut state.color_picker_slider,
-    );
-
-    // Update paint color if changed
-    if let Some(new_color) = picker_result.color {
-        state.paint_color = new_color;
-    }
-
-    // Update blend mode if changed
-    if let Some(new_blend) = picker_result.blend_mode {
-        state.paint_blend_mode = new_blend;
-    }
-
-    // Brush type icon buttons (below color picker)
-    let brush_tools_y = palette_y + 14.0 + ps1_color_picker_with_blend_mode_height() + 4.0;
-
-    let btn_size = 22.0;
-    let btn_x = rect.x + 4.0;
-
-    // Brush icon button
-    let brush_rect = Rect::new(btn_x, brush_tools_y, btn_size, btn_size);
-    let brush_selected = state.brush_type == super::state::BrushType::Square;
-    if icon_button_active(ctx, brush_rect, icon::BRUSH, icon_font, "Brush (B)", brush_selected) {
-        state.brush_type = super::state::BrushType::Square;
-    }
-
-    // Fill icon button
-    let fill_rect = Rect::new(btn_x + btn_size + 2.0, brush_tools_y, btn_size, btn_size);
-    let fill_selected = state.brush_type == super::state::BrushType::Fill;
-    if icon_button_active(ctx, fill_rect, icon::PAINT_BUCKET, icon_font, "Fill (F)", fill_selected) {
-        state.brush_type = super::state::BrushType::Fill;
-    }
-
-    // Brush size slider (only show for square brush)
-    if state.brush_type == super::state::BrushType::Square {
-        let slider_x = fill_rect.x + btn_size + 8.0;
-        let slider_w = rect.w - (slider_x - rect.x) - 30.0; // Leave room for value
-        let slider_h = 12.0;
-        let slider_y = brush_tools_y + (btn_size - slider_h) / 2.0;
-
-        // Slider track background
-        let track_rect = Rect::new(slider_x, slider_y, slider_w, slider_h);
-        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::from_rgba(40, 40, 45, 255));
-
-        // Slider fill (brush size 1-16)
-        let min_size = 1.0;
-        let max_size = 16.0;
-        let fill_ratio = (state.brush_size - min_size) / (max_size - min_size);
-        let fill_width = fill_ratio * slider_w;
-        draw_rectangle(track_rect.x, track_rect.y, fill_width, slider_h, ACCENT_COLOR);
-
-        // Slider handle
-        let handle_x = track_rect.x + fill_width - 2.0;
-        draw_rectangle(handle_x.max(track_rect.x), track_rect.y, 4.0, slider_h, WHITE);
-
-        // Value display
-        draw_text(
-            &format!("{}", state.brush_size as i32),
-            slider_x + slider_w + 4.0,
-            brush_tools_y + 15.0,
-            11.0,
-            TEXT_DIM,
+    // Paint mode: PS1 Color Picker with Blend Mode
+    if state.atlas_edit_mode == AtlasEditMode::Paint || state.atlas_edit_mode == AtlasEditMode::Uv {
+        // Draw PS1 color picker with blend mode selector
+        let picker_result = draw_ps1_color_picker_with_blend_mode(
+            ctx,
+            rect.x + 4.0,
+            palette_y + 14.0,
+            rect.w - 8.0,
+            state.paint_color,
+            state.paint_blend_mode,
+            "Paint Color (PS1 15-bit)",
+            &mut state.color_picker_slider,
         );
 
-        // Handle slider interaction
-        let hovered = ctx.mouse.inside(&track_rect);
-        if hovered && ctx.mouse.left_down && !state.brush_size_slider_active {
-            state.brush_size_slider_active = true;
+        // Update paint color if changed
+        if let Some(new_color) = picker_result.color {
+            state.paint_color = new_color;
         }
 
-        if state.brush_size_slider_active {
-            if ctx.mouse.left_down {
-                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_w);
-                let new_size = min_size + (rel_x / slider_w) * (max_size - min_size);
-                state.brush_size = new_size.round().clamp(min_size, max_size);
-            } else {
-                state.brush_size_slider_active = false;
+        // Update blend mode if changed
+        if let Some(new_blend) = picker_result.blend_mode {
+            state.paint_blend_mode = new_blend;
+        }
+    } else if state.atlas_edit_mode == AtlasEditMode::Clut {
+        // CLUT mode: Palette editor UI
+        draw_clut_editor_panel(ctx, rect.x, palette_y, rect.w, palette_height, state, icon_font);
+    }
+
+    // Brush type icon buttons (below color picker, only in Paint mode)
+    if state.atlas_edit_mode == AtlasEditMode::Paint {
+        let brush_tools_y = palette_y + 14.0 + ps1_color_picker_with_blend_mode_height() + 4.0;
+
+        let btn_size = 22.0;
+        let btn_x = rect.x + 4.0;
+
+        // Brush icon button
+        let brush_rect = Rect::new(btn_x, brush_tools_y, btn_size, btn_size);
+        let brush_selected = state.brush_type == super::state::BrushType::Square;
+        if icon_button_active(ctx, brush_rect, icon::BRUSH, icon_font, "Brush (B)", brush_selected) {
+            state.brush_type = super::state::BrushType::Square;
+        }
+
+        // Fill icon button
+        let fill_rect = Rect::new(btn_x + btn_size + 2.0, brush_tools_y, btn_size, btn_size);
+        let fill_selected = state.brush_type == super::state::BrushType::Fill;
+        if icon_button_active(ctx, fill_rect, icon::PAINT_BUCKET, icon_font, "Fill (F)", fill_selected) {
+            state.brush_type = super::state::BrushType::Fill;
+        }
+
+        // Brush size slider (only show for square brush)
+        if state.brush_type == super::state::BrushType::Square {
+            let slider_x = fill_rect.x + btn_size + 8.0;
+            let slider_w = rect.w - (slider_x - rect.x) - 30.0; // Leave room for value
+            let slider_h = 12.0;
+            let slider_y = brush_tools_y + (btn_size - slider_h) / 2.0;
+
+            // Slider track background
+            let track_rect = Rect::new(slider_x, slider_y, slider_w, slider_h);
+            draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+            // Slider fill (brush size 1-16)
+            let min_size = 1.0;
+            let max_size = 16.0;
+            let fill_ratio = (state.brush_size - min_size) / (max_size - min_size);
+            let fill_width = fill_ratio * slider_w;
+            draw_rectangle(track_rect.x, track_rect.y, fill_width, slider_h, ACCENT_COLOR);
+
+            // Slider handle
+            let handle_x = track_rect.x + fill_width - 2.0;
+            draw_rectangle(handle_x.max(track_rect.x), track_rect.y, 4.0, slider_h, WHITE);
+
+            // Value display
+            draw_text(
+                &format!("{}", state.brush_size as i32),
+                slider_x + slider_w + 4.0,
+                brush_tools_y + 15.0,
+                11.0,
+                TEXT_DIM,
+            );
+
+            // Handle slider interaction
+            let hovered = ctx.mouse.inside(&track_rect);
+            if hovered && ctx.mouse.left_down && !state.brush_size_slider_active {
+                state.brush_size_slider_active = true;
+            }
+
+            if state.brush_size_slider_active {
+                if ctx.mouse.left_down {
+                    let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_w);
+                    let new_size = min_size + (rel_x / slider_w) * (max_size - min_size);
+                    state.brush_size = new_size.round().clamp(min_size, max_size);
+                } else {
+                    state.brush_size_slider_active = false;
+                }
             }
         }
     }
 
     // Atlas size selector buttons
-    let sizes = [(32, "32"), (64, "64"), (128, "128")];
+    let sizes = [(32, "32"), (64, "64"), (128, "128"), (256, "256")];
     let mut btn_x = rect.x + 4.0;
     let btn_y = rect.y + 2.0;
     let btn_h = 16.0;
@@ -1221,11 +1230,12 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         }
     }
 
-    // Mode indicator (UV vs Paint)
+    // Mode indicator (UV vs Paint vs CLUT)
     // Note: V/B/F shortcuts are handled through ActionRegistry in handle_actions()
     let mode_text = match state.atlas_edit_mode {
         AtlasEditMode::Uv => "UV (V)",
         AtlasEditMode::Paint => "Paint (V)",
+        AtlasEditMode::Clut => "CLUT (V)",
     };
     let mode_color = ACCENT_COLOR;
     let text_width = mode_text.len() as f32 * 6.0;
@@ -1241,6 +1251,343 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         };
         let indicator_color = Color::from_rgba(255, 200, 100, 255);
         draw_text(transform_text, rect.x + 8.0, rect.y + rect.h - 8.0, 11.0, indicator_color);
+    }
+}
+
+/// Draw the CLUT (Color Look-Up Table) editor panel
+/// Shows: CLUT pool list, palette grid (4x4 or 16x16), color editor (RGB555 sliders)
+fn draw_clut_editor_panel(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    state: &mut ModelerState,
+    _icon_font: Option<&Font>,
+) {
+    let padding = 4.0;
+    let mut cur_y = y + padding;
+
+    // ========================================================================
+    // Section 1: CLUT Pool List with buttons
+    // ========================================================================
+    draw_text("CLUT Pool", x + padding, cur_y + 10.0, 11.0, TEXT_DIM);
+    cur_y += 14.0;
+
+    // Buttons to add new CLUTs
+    let btn_h = 18.0;
+    let btn_w = 50.0;
+
+    // [+ 4-bit] button
+    let btn_4bit_rect = Rect::new(x + padding, cur_y, btn_w, btn_h);
+    let hovered_4bit = ctx.mouse.inside(&btn_4bit_rect);
+    let bg_4bit = if hovered_4bit {
+        Color::from_rgba(70, 70, 80, 255)
+    } else {
+        Color::from_rgba(50, 50, 55, 255)
+    };
+    draw_rectangle(btn_4bit_rect.x, btn_4bit_rect.y, btn_4bit_rect.w, btn_4bit_rect.h, bg_4bit);
+    draw_text("+ 4-bit", x + padding + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+
+    if hovered_4bit && is_mouse_button_pressed(MouseButton::Left) {
+        let clut = Clut::new_4bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
+        let id = state.project.clut_pool.add_clut(clut);
+        state.selected_clut = Some(id);
+        state.set_status("Added 4-bit CLUT", 1.0);
+    }
+
+    // [+ 8-bit] button
+    let btn_8bit_rect = Rect::new(x + padding + btn_w + 4.0, cur_y, btn_w, btn_h);
+    let hovered_8bit = ctx.mouse.inside(&btn_8bit_rect);
+    let bg_8bit = if hovered_8bit {
+        Color::from_rgba(70, 70, 80, 255)
+    } else {
+        Color::from_rgba(50, 50, 55, 255)
+    };
+    draw_rectangle(btn_8bit_rect.x, btn_8bit_rect.y, btn_8bit_rect.w, btn_8bit_rect.h, bg_8bit);
+    draw_text("+ 8-bit", btn_8bit_rect.x + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+
+    if hovered_8bit && is_mouse_button_pressed(MouseButton::Left) {
+        let clut = Clut::new_8bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
+        let id = state.project.clut_pool.add_clut(clut);
+        state.selected_clut = Some(id);
+        state.set_status("Added 8-bit CLUT", 1.0);
+    }
+
+    // Quantize button (create CLUT from current atlas)
+    let btn_quant_rect = Rect::new(x + padding + (btn_w + 4.0) * 2.0, cur_y, btn_w + 10.0, btn_h);
+    let hovered_quant = ctx.mouse.inside(&btn_quant_rect);
+    let bg_quant = if hovered_quant {
+        Color::from_rgba(70, 90, 80, 255)
+    } else {
+        Color::from_rgba(50, 70, 55, 255)
+    };
+    draw_rectangle(btn_quant_rect.x, btn_quant_rect.y, btn_quant_rect.w, btn_quant_rect.h, bg_quant);
+    draw_text("Quantize", btn_quant_rect.x + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+
+    if hovered_quant && is_mouse_button_pressed(MouseButton::Left) {
+        // Quantize the current atlas to indexed + CLUT
+        let depth = if state.project.clut_pool.is_empty() {
+            ClutDepth::Bpp4 // Default to 4-bit
+        } else if let Some(id) = state.selected_clut {
+            // Match depth of selected CLUT
+            state.project.clut_pool.get(id).map(|c| c.depth).unwrap_or(ClutDepth::Bpp4)
+        } else {
+            ClutDepth::Bpp4
+        };
+
+        let name = format!("Quantized {}", state.project.clut_pool.len() + 1);
+        let (indexed_atlas, clut) = super::quantize::quantize_atlas(&state.project.atlas, depth, &name);
+        let id = state.project.clut_pool.add_clut(clut);
+        state.project.indexed_atlas = Some(super::mesh_editor::IndexedAtlas {
+            width: indexed_atlas.width,
+            height: indexed_atlas.height,
+            depth: indexed_atlas.depth,
+            indices: indexed_atlas.indices,
+            default_clut: id,
+        });
+        state.selected_clut = Some(id);
+        state.set_status(&format!("Quantized atlas to {} colors", depth.color_count()), 1.5);
+    }
+
+    cur_y += btn_h + 4.0;
+
+    // List of CLUTs in pool
+    let list_height = 40.0;
+    let item_height = 16.0;
+
+    // Draw list background
+    draw_rectangle(x + padding, cur_y, width - padding * 2.0, list_height, Color::from_rgba(30, 30, 35, 255));
+
+    // Draw CLUT items
+    let clut_count = state.project.clut_pool.len();
+    if clut_count == 0 {
+        draw_text("(empty)", x + padding + 4.0, cur_y + 12.0, 10.0, TEXT_DIM);
+    } else {
+        let mut item_y = cur_y + 2.0;
+        for clut in state.project.clut_pool.iter() {
+            if item_y + item_height > cur_y + list_height {
+                break; // Scroll limit
+            }
+
+            let item_rect = Rect::new(x + padding + 2.0, item_y, width - padding * 2.0 - 4.0, item_height);
+            let is_selected = state.selected_clut == Some(clut.id);
+            let hovered = ctx.mouse.inside(&item_rect);
+
+            // Background
+            let bg = if is_selected {
+                ACCENT_COLOR
+            } else if hovered {
+                Color::from_rgba(50, 50, 55, 255)
+            } else {
+                Color::from_rgba(30, 30, 35, 0)
+            };
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, bg);
+
+            // Name + depth badge
+            let text_color = if is_selected { WHITE } else { TEXT_COLOR };
+            draw_text(&clut.name, item_rect.x + 2.0, item_y + 11.0, 10.0, text_color);
+
+            // Depth badge
+            let badge_text = clut.depth.short_label();
+            let badge_x = item_rect.x + item_rect.w - 24.0;
+            draw_rectangle(badge_x, item_y + 2.0, 20.0, 12.0, Color::from_rgba(60, 60, 70, 255));
+            draw_text(badge_text, badge_x + 2.0, item_y + 11.0, 9.0, TEXT_DIM);
+
+            // Handle click
+            if hovered && is_mouse_button_pressed(MouseButton::Left) {
+                state.selected_clut = Some(clut.id);
+                state.selected_clut_entry = 0;
+            }
+
+            item_y += item_height;
+        }
+    }
+
+    cur_y += list_height + 4.0;
+
+    // ========================================================================
+    // Section 2: Palette Grid (4x4 for 4-bit, 16x16 for 8-bit)
+    // ========================================================================
+    if let Some(clut_id) = state.selected_clut {
+        if let Some(clut) = state.project.clut_pool.get(clut_id) {
+            let remaining_height = height - (cur_y - y) - 4.0;
+
+            // Draw palette grid
+            let grid_size = match clut.depth {
+                ClutDepth::Bpp4 => 4,  // 4x4 grid
+                ClutDepth::Bpp8 => 16, // 16x16 grid
+            };
+
+            let cell_size = ((width - padding * 2.0) / grid_size as f32)
+                .min(remaining_height / grid_size as f32)
+                .min(16.0); // Max 16px per cell
+
+            let grid_w = cell_size * grid_size as f32;
+            let grid_x = x + (width - grid_w) * 0.5;
+            let grid_y = cur_y;
+
+            for gy in 0..grid_size {
+                for gx in 0..grid_size {
+                    let idx = gy * grid_size + gx;
+                    if idx >= clut.colors.len() {
+                        break;
+                    }
+
+                    let cell_x = grid_x + gx as f32 * cell_size;
+                    let cell_y = grid_y + gy as f32 * cell_size;
+                    let cell_rect = Rect::new(cell_x, cell_y, cell_size, cell_size);
+
+                    // Get color
+                    let color15 = clut.colors[idx];
+                    let (r8, g8, b8) = (color15.r8(), color15.g8(), color15.b8());
+
+                    // Draw color cell
+                    if color15.is_transparent() {
+                        // Checkerboard for transparent
+                        let check = 4.0;
+                        for cy in 0..2 {
+                            for cx in 0..2 {
+                                let c = if (cx + cy) % 2 == 0 {
+                                    Color::from_rgba(60, 60, 65, 255)
+                                } else {
+                                    Color::from_rgba(40, 40, 45, 255)
+                                };
+                                draw_rectangle(
+                                    cell_x + cx as f32 * check,
+                                    cell_y + cy as f32 * check,
+                                    check.min(cell_size - cx as f32 * check),
+                                    check.min(cell_size - cy as f32 * check),
+                                    c,
+                                );
+                            }
+                        }
+                    } else {
+                        draw_rectangle(cell_x, cell_y, cell_size, cell_size, Color::from_rgba(r8, g8, b8, 255));
+                    }
+
+                    // Selection highlight
+                    let is_selected = state.selected_clut_entry == idx;
+                    let hovered = ctx.mouse.inside(&cell_rect);
+
+                    if is_selected {
+                        draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 2.0, WHITE);
+                    } else if hovered {
+                        draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::from_rgba(255, 255, 255, 100));
+                    }
+
+                    // Handle click to select
+                    if hovered && is_mouse_button_pressed(MouseButton::Left) {
+                        state.selected_clut_entry = idx;
+                        state.active_palette_index = idx as u8;
+                    }
+                }
+            }
+
+            cur_y += grid_size as f32 * cell_size + 4.0;
+
+            // ========================================================================
+            // Section 3: Color15 Editor (R/G/B 5-bit sliders)
+            // ========================================================================
+            if state.selected_clut_entry < clut.colors.len() {
+                let color = clut.colors[state.selected_clut_entry];
+
+                // Index label
+                draw_text(
+                    &format!("Index: {}", state.selected_clut_entry),
+                    x + padding,
+                    cur_y + 10.0,
+                    10.0,
+                    TEXT_DIM,
+                );
+
+                // Semi-transparent toggle
+                let semi_x = x + padding + 60.0;
+                let semi_rect = Rect::new(semi_x, cur_y, 14.0, 14.0);
+                let is_semi = color.is_semi_transparent();
+                let semi_bg = if is_semi { ACCENT_COLOR } else { Color::from_rgba(50, 50, 55, 255) };
+                draw_rectangle(semi_rect.x, semi_rect.y, semi_rect.w, semi_rect.h, semi_bg);
+                if is_semi {
+                    draw_text("✓", semi_x + 2.0, cur_y + 11.0, 10.0, WHITE);
+                }
+                draw_text("Semi-trans", semi_x + 18.0, cur_y + 10.0, 10.0, TEXT_COLOR);
+
+                if ctx.mouse.inside(&semi_rect) && is_mouse_button_pressed(MouseButton::Left) {
+                    // Toggle semi-transparent bit
+                    if let Some(clut_mut) = state.project.clut_pool.get_mut(clut_id) {
+                        let c = &mut clut_mut.colors[state.selected_clut_entry];
+                        *c = Color15::new_semi(c.r5(), c.g5(), c.b5(), !c.is_semi_transparent());
+                        state.dirty = true;
+                    }
+                }
+
+                cur_y += 16.0;
+
+                // RGB sliders (5-bit, 0-31)
+                let slider_w = width - padding * 2.0 - 40.0;
+                let slider_h = 10.0;
+
+                let channels = [
+                    ("R", color.r5(), Color::from_rgba(180, 80, 80, 255), 0),
+                    ("G", color.g5(), Color::from_rgba(80, 180, 80, 255), 1),
+                    ("B", color.b5(), Color::from_rgba(80, 80, 180, 255), 2),
+                ];
+
+                for (label, value, tint, slider_idx) in channels {
+                    let slider_x = x + padding + 14.0;
+                    let track_rect = Rect::new(slider_x, cur_y, slider_w, slider_h);
+
+                    // Label
+                    draw_text(label, x + padding, cur_y + 8.0, 10.0, tint);
+
+                    // Track background
+                    draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::from_rgba(30, 30, 35, 255));
+
+                    // Fill
+                    let fill_ratio = value as f32 / 31.0;
+                    draw_rectangle(track_rect.x, track_rect.y, track_rect.w * fill_ratio, slider_h, tint);
+
+                    // Handle
+                    let handle_x = track_rect.x + track_rect.w * fill_ratio - 2.0;
+                    draw_rectangle(handle_x.max(track_rect.x), track_rect.y, 4.0, slider_h, WHITE);
+
+                    // Value
+                    draw_text(&format!("{}", value), track_rect.x + track_rect.w + 4.0, cur_y + 8.0, 10.0, TEXT_DIM);
+
+                    // Handle slider interaction
+                    let hovered = ctx.mouse.inside(&track_rect);
+                    if hovered && ctx.mouse.left_down && state.clut_color_slider.is_none() {
+                        state.clut_color_slider = Some(slider_idx);
+                    }
+
+                    if state.clut_color_slider == Some(slider_idx) {
+                        if ctx.mouse.left_down {
+                            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_w);
+                            let new_val = ((rel_x / slider_w) * 31.0).round() as u8;
+
+                            if let Some(clut_mut) = state.project.clut_pool.get_mut(clut_id) {
+                                let c = clut_mut.colors[state.selected_clut_entry];
+                                let semi = c.is_semi_transparent();
+                                let (r, g, b) = match slider_idx {
+                                    0 => (new_val, c.g5(), c.b5()),
+                                    1 => (c.r5(), new_val, c.b5()),
+                                    _ => (c.r5(), c.g5(), new_val),
+                                };
+                                clut_mut.colors[state.selected_clut_entry] = Color15::new_semi(r, g, b, semi);
+                                state.dirty = true;
+                            }
+                        } else {
+                            state.clut_color_slider = None;
+                        }
+                    }
+
+                    cur_y += slider_h + 4.0;
+                }
+            }
+        }
+    } else {
+        // No CLUT selected - show hint
+        draw_text("Select or create a CLUT", x + padding, cur_y + 10.0, 10.0, TEXT_DIM);
     }
 }
 
@@ -1505,8 +1852,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     let zoom = ortho_cam.zoom;
     let center = ortho_cam.center;
 
-    // Draw grid
-    let grid_size = state.snap_settings.grid_size;
+    // Draw grid - use SECTOR_SIZE (1024 units = 1 meter) for consistency with 3D view
+    let grid_size = crate::world::SECTOR_SIZE;
     let grid_color = Color::from_rgba(45, 45, 50, 255);
     let axis_color = Color::from_rgba(80, 80, 85, 255);
 
@@ -2868,6 +3215,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
         let mode = match state.atlas_edit_mode {
             AtlasEditMode::Uv => "UV",
             AtlasEditMode::Paint => "Paint",
+            AtlasEditMode::Clut => "CLUT",
         };
         state.set_status(&format!("Atlas mode: {}", mode), 1.0);
     }

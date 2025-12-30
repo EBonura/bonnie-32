@@ -3,7 +3,7 @@
 
 use macroquad::prelude::get_time;
 use super::math::{perspective_transform, project, project_ortho, Vec3, NEAR_PLANE};
-use super::types::{BlendMode, Color, Color15, Face, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Texture15, Vertex};
+use super::types::{BlendMode, Color, Color15, Clut, Face, IndexedTexture, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Texture15, Vertex};
 
 /// Framebuffer for software rendering
 pub struct Framebuffer {
@@ -1408,6 +1408,233 @@ fn rasterize_triangle_15(
         }
 
         // Step to next row (y increment)
+        w0_row += b0_step;
+        w1_row += b1_step;
+    }
+}
+
+/// Rasterize a triangle with indexed texture + CLUT lookup
+///
+/// This is the PS1-authentic rendering path:
+/// 1. Sample palette INDEX from indexed texture
+/// 2. Look up actual COLOR in CLUT
+/// 3. Continue with standard PS1 pipeline (modulation, shading, dithering)
+fn rasterize_triangle_indexed(
+    fb: &mut Framebuffer,
+    surface: &Surface,
+    indexed_texture: Option<&IndexedTexture>,
+    clut: Option<&Clut>,
+    face_blend_mode: BlendMode,
+    black_transparent: bool,
+    settings: &RasterSettings,
+) {
+    // Bounding box
+    let min_x = surface.v1.x.min(surface.v2.x).min(surface.v3.x).max(0.0) as usize;
+    let max_x = (surface.v1.x.max(surface.v2.x).max(surface.v3.x) + 1.0).min(fb.width as f32) as usize;
+    let min_y = surface.v1.y.min(surface.v2.y).min(surface.v3.y).max(0.0) as usize;
+    let max_y = (surface.v1.y.max(surface.v2.y).max(surface.v3.y) + 1.0).min(fb.height as f32) as usize;
+
+    // Early exit for degenerate/off-screen triangles
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    // Pre-calculate flat shading if needed
+    let flat_shade = if settings.shading == ShadingMode::Flat {
+        let center_pos = (surface.w1 + surface.w2 + surface.w3).scale(1.0 / 3.0);
+        let world_normal = (surface.wn1 + surface.wn2 + surface.wn3).scale(1.0 / 3.0).normalize();
+        shade_multi_light_color(world_normal, center_pos, &settings.lights, settings.ambient)
+    } else {
+        (1.0, 1.0, 1.0)
+    };
+
+    // Pre-compute Gouraud vertex shading if needed
+    let gouraud_shades = if settings.shading == ShadingMode::Gouraud {
+        Some((
+            shade_multi_light_color(surface.wn1, surface.w1, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn2, surface.w2, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn3, surface.w3, &settings.lights, settings.ambient),
+        ))
+    } else {
+        None
+    };
+
+    // === EDGE FUNCTION SETUP ===
+    let v1 = surface.v1;
+    let v2 = surface.v2;
+    let v3 = surface.v3;
+
+    // Triangle area * 2 (used for normalization)
+    let area = (v2.y - v3.y) * (v1.x - v3.x) + (v3.x - v2.x) * (v1.y - v3.y);
+    if area.abs() < 0.00001 {
+        return; // Degenerate triangle
+    }
+    let inv_area = 1.0 / area;
+
+    // Edge function coefficients
+    let a0 = v2.y - v3.y;
+    let b0 = v3.x - v2.x;
+    let a1 = v3.y - v1.y;
+    let b1 = v1.x - v3.x;
+
+    // Starting point
+    let start_x = min_x as f32;
+    let start_y = min_y as f32;
+
+    // Initial edge function values at (start_x, start_y)
+    let w0_row_start = a0 * (start_x - v3.x) + b0 * (start_y - v3.y);
+    let w1_row_start = a1 * (start_x - v3.x) + b1 * (start_y - v3.y);
+
+    // Step increments
+    let a0_step = a0;
+    let b0_step = b0;
+    let a1_step = a1;
+    let b1_step = b1;
+
+    let mut w0_row = w0_row_start;
+    let mut w1_row = w1_row_start;
+
+    // Rasterize using incremental edge functions
+    for y in min_y..max_y {
+        let mut w0 = w0_row;
+        let mut w1 = w1_row;
+
+        for x in min_x..max_x {
+            // Convert to barycentric coordinates
+            let bc_x = w0 * inv_area;
+            let bc_y = w1 * inv_area;
+            let bc_z = 1.0 - bc_x - bc_y;
+
+            // Check if inside triangle
+            const ERR: f32 = -0.0001;
+            if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
+                // Interpolate depth
+                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+
+                // Z-buffer test
+                if settings.use_zbuffer {
+                    let idx = y * fb.width + x;
+                    if z >= fb.zbuffer[idx] {
+                        w0 += a0_step;
+                        w1 += a1_step;
+                        continue;
+                    }
+                }
+
+                // Interpolate UV coordinates
+                let (u, v) = if settings.affine_textures {
+                    // Affine (PS1 style) - linear interpolation
+                    let u = bc_x * surface.uv1.x + bc_y * surface.uv2.x + bc_z * surface.uv3.x;
+                    let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
+                    (u, v)
+                } else {
+                    // Perspective-correct interpolation
+                    let bcc_x = bc_x / v1.z;
+                    let bcc_y = bc_y / v2.z;
+                    let bcc_z = bc_z / v3.z;
+                    let bd = bcc_x + bcc_y + bcc_z;
+                    let bcc_x = bcc_x / bd;
+                    let bcc_y = bcc_y / bd;
+                    let bcc_z = bcc_z / bd;
+
+                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
+                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    (u, v)
+                };
+
+                // === CLUT LOOKUP: Sample index from texture, then look up in CLUT ===
+                let mut color = match (indexed_texture, clut) {
+                    (Some(tex), Some(clut)) => {
+                        let index = tex.sample_index(u, 1.0 - v);
+                        clut.lookup(index)
+                    }
+                    (Some(tex), None) => {
+                        // No CLUT: use index as grayscale (for debugging)
+                        let index = tex.sample_index(u, 1.0 - v);
+                        let v = (index as u16 * 31 / 255) as u8;
+                        Color15::new(v, v, v)
+                    }
+                    _ => Color15::WHITE,
+                };
+
+                // Handle transparency based on black_transparent setting
+                let is_black = color.r5() == 0 && color.g5() == 0 && color.b5() == 0;
+                if color.is_transparent() {
+                    if is_black && !black_transparent {
+                        color = Color15::BLACK_DRAWABLE;
+                    } else {
+                        w0 += a0_step;
+                        w1 += a1_step;
+                        continue;
+                    }
+                } else if black_transparent && is_black {
+                    w0 += a0_step;
+                    w1 += a1_step;
+                    continue;
+                }
+
+                // === PS1-AUTHENTIC COLOR PIPELINE ===
+                // Expand texture from 5-bit to 8-bit
+                let tex_r8 = expand_5_to_8(color.r5());
+                let tex_g8 = expand_5_to_8(color.g5());
+                let tex_b8 = expand_5_to_8(color.b5());
+
+                // Interpolate vertex colors
+                let vertex_r = (bc_x * surface.vc1.r as f32 + bc_y * surface.vc2.r as f32 + bc_z * surface.vc3.r as f32) as u8;
+                let vertex_g = (bc_x * surface.vc1.g as f32 + bc_y * surface.vc2.g as f32 + bc_z * surface.vc3.g as f32) as u8;
+                let vertex_b = (bc_x * surface.vc1.b as f32 + bc_y * surface.vc2.b as f32 + bc_z * surface.vc3.b as f32) as u8;
+
+                // Apply PS1-style texture modulation
+                let mod_r8 = ((tex_r8 as u32 * vertex_r as u32) / 128).min(255) as u8;
+                let mod_g8 = ((tex_g8 as u32 * vertex_g as u32) / 128).min(255) as u8;
+                let mod_b8 = ((tex_b8 as u32 * vertex_b as u32) / 128).min(255) as u8;
+
+                // Apply shading
+                let (shade_r, shade_g, shade_b) = match settings.shading {
+                    ShadingMode::None => (1.0, 1.0, 1.0),
+                    ShadingMode::Flat => flat_shade,
+                    ShadingMode::Gouraud => {
+                        let ((r1, g1, b1), (r2, g2, b2), (r3, g3, b3)) = gouraud_shades.unwrap();
+                        (
+                            bc_x * r1 + bc_y * r2 + bc_z * r3,
+                            bc_x * g1 + bc_y * g2 + bc_z * g3,
+                            bc_x * b1 + bc_y * b2 + bc_z * b3,
+                        )
+                    }
+                };
+
+                let shaded_r8 = (mod_r8 as f32 * shade_r.clamp(0.0, 2.0)).min(255.0) as u8;
+                let shaded_g8 = (mod_g8 as f32 * shade_g.clamp(0.0, 2.0)).min(255.0) as u8;
+                let shaded_b8 = (mod_b8 as f32 * shade_b.clamp(0.0, 2.0)).min(255.0) as u8;
+
+                // Final quantization with dithering
+                let (r5, g5, b5) = if settings.dithering {
+                    dither_and_quantize(shaded_r8, shaded_g8, shaded_b8, x, y)
+                } else {
+                    (shaded_r8 >> 3, shaded_g8 >> 3, shaded_b8 >> 3)
+                };
+
+                // Create final color, preserving semi-transparency
+                let is_all_black = r5 == 0 && g5 == 0 && b5 == 0;
+                let semi = color.is_semi_transparent() || is_all_black;
+                let color = Color15::new_semi(r5, g5, b5, semi);
+
+                // Write pixel
+                let idx = y * fb.width + x;
+                if z < fb.zbuffer[idx] {
+                    fb.zbuffer[idx] = z;
+                    if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, face_blend_mode);
+                    } else {
+                        fb.set_pixel_15(x, y, color);
+                    }
+                }
+            }
+
+            w0 += a0_step;
+            w1 += a1_step;
+        }
+
         w0_row += b0_step;
         w1_row += b1_step;
     }

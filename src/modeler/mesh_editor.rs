@@ -3,7 +3,7 @@
 //!
 //! Also includes PicoCAD-style mesh organization with named objects and texture atlas.
 
-use crate::rasterizer::{Vec3, Face, Vertex, Color as RasterColor, Color15, Texture15, BlendMode};
+use crate::rasterizer::{Vec3, Face, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -59,8 +59,24 @@ pub struct MeshProject {
     pub name: String,
     /// All mesh objects in the project
     pub objects: Vec<MeshObject>,
-    /// The texture atlas (serialized as raw RGBA)
+    /// The texture atlas (serialized as raw RGBA) - kept for backwards compat
     pub atlas: TextureAtlas,
+
+    // ---- PS1 CLUT System ----
+
+    /// Optional indexed atlas (stores palette indices instead of colors)
+    /// When present, this is the authoritative texture data
+    #[serde(default)]
+    pub indexed_atlas: Option<IndexedAtlas>,
+
+    /// Global CLUT pool (shared across all textures)
+    #[serde(default)]
+    pub clut_pool: ClutPool,
+
+    /// Preview CLUT override (for testing palette swaps without changing default)
+    #[serde(skip)]
+    pub preview_clut: Option<ClutId>,
+
     /// Currently selected object index
     #[serde(skip)]
     pub selected_object: Option<usize>,
@@ -70,8 +86,12 @@ impl MeshProject {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            objects: vec![MeshObject::cube("object", 50.0)],
+            // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
+            objects: vec![MeshObject::cube("object", 1024.0)],
             atlas: TextureAtlas::new(128, 128),
+            indexed_atlas: None,
+            clut_pool: ClutPool::default(),
+            preview_clut: None,
             selected_object: Some(0),
         }
     }
@@ -445,6 +465,183 @@ impl<'de> Deserialize<'de> for TextureAtlas {
             height: data.height,
             pixels,
         })
+    }
+}
+
+// ============================================================================
+// CLUT Pool (Global palette storage like PS1 VRAM)
+// ============================================================================
+
+/// Global CLUT pool - shared across all textures in a project
+///
+/// Mimics PS1 VRAM where CLUTs are stored as 16x1 or 256x1 pixel strips.
+/// Multiple textures can reference the same CLUT for palette swapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClutPool {
+    /// All CLUTs in the pool
+    cluts: Vec<Clut>,
+    /// Next ID to assign (starts at 1, 0 is reserved for NONE)
+    next_id: u32,
+}
+
+impl ClutPool {
+    /// Create a new pool with a default grayscale CLUT
+    pub fn new() -> Self {
+        let mut pool = Self {
+            cluts: Vec::new(),
+            next_id: 1,
+        };
+        // Add a default 4-bit grayscale CLUT
+        pool.add_clut(Clut::new_4bit("Default"));
+        pool
+    }
+
+    /// Add a CLUT to the pool and return its assigned ID
+    pub fn add_clut(&mut self, mut clut: Clut) -> ClutId {
+        let id = ClutId(self.next_id);
+        self.next_id += 1;
+        clut.id = id;
+        self.cluts.push(clut);
+        id
+    }
+
+    /// Get CLUT by ID
+    pub fn get(&self, id: ClutId) -> Option<&Clut> {
+        self.cluts.iter().find(|c| c.id == id)
+    }
+
+    /// Get mutable CLUT by ID
+    pub fn get_mut(&mut self, id: ClutId) -> Option<&mut Clut> {
+        self.cluts.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Remove CLUT by ID, returns the removed CLUT
+    pub fn remove(&mut self, id: ClutId) -> Option<Clut> {
+        if let Some(pos) = self.cluts.iter().position(|c| c.id == id) {
+            Some(self.cluts.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Get the first CLUT ID (useful as default)
+    pub fn first_id(&self) -> Option<ClutId> {
+        self.cluts.first().map(|c| c.id)
+    }
+
+    /// Iterate over all CLUTs
+    pub fn iter(&self) -> impl Iterator<Item = &Clut> {
+        self.cluts.iter()
+    }
+
+    /// Iterate over all CLUTs mutably
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Clut> {
+        self.cluts.iter_mut()
+    }
+
+    /// Number of CLUTs in the pool
+    pub fn len(&self) -> usize {
+        self.cluts.len()
+    }
+
+    /// Check if pool is empty
+    pub fn is_empty(&self) -> bool {
+        self.cluts.is_empty()
+    }
+
+    /// Get all CLUTs as a slice
+    pub fn as_slice(&self) -> &[Clut] {
+        &self.cluts
+    }
+}
+
+impl Default for ClutPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Indexed Atlas (parallel to TextureAtlas, stores palette indices)
+// ============================================================================
+
+/// Indexed texture atlas storing palette indices instead of colors
+///
+/// Works alongside TextureAtlas - the RGBA atlas is kept for backwards
+/// compatibility and preview, while this stores the actual indexed data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedAtlas {
+    pub width: usize,
+    pub height: usize,
+    /// CLUT depth (4-bit or 8-bit)
+    pub depth: ClutDepth,
+    /// Palette indices for each pixel (one byte per pixel)
+    pub indices: Vec<u8>,
+    /// Default CLUT ID for rendering this atlas
+    pub default_clut: ClutId,
+}
+
+impl IndexedAtlas {
+    /// Create a new indexed atlas filled with index 0 (transparent)
+    pub fn new(width: usize, height: usize, depth: ClutDepth) -> Self {
+        Self {
+            width,
+            height,
+            depth,
+            indices: vec![0; width * height],
+            default_clut: ClutId::NONE,
+        }
+    }
+
+    /// Get palette index at pixel coordinates
+    pub fn get_index(&self, x: usize, y: usize) -> u8 {
+        if x < self.width && y < self.height {
+            self.indices.get(y * self.width + x).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// Set palette index at pixel coordinates
+    pub fn set_index(&mut self, x: usize, y: usize, index: u8) {
+        if x < self.width && y < self.height {
+            let clamped = index.min(self.depth.max_index());
+            if let Some(pixel) = self.indices.get_mut(y * self.width + x) {
+                *pixel = clamped;
+            }
+        }
+    }
+
+    /// Convert to IndexedTexture for rendering
+    pub fn to_indexed_texture(&self, name: &str) -> IndexedTexture {
+        IndexedTexture {
+            width: self.width,
+            height: self.height,
+            depth: self.depth,
+            indices: self.indices.clone(),
+            default_clut: self.default_clut,
+            name: name.to_string(),
+        }
+    }
+
+    /// Convert to Texture15 using a CLUT (for preview/backwards compat)
+    pub fn to_texture15(&self, clut: &Clut, name: &str) -> Texture15 {
+        let pixels: Vec<Color15> = self.indices
+            .iter()
+            .map(|&idx| clut.lookup(idx))
+            .collect();
+
+        Texture15 {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: name.to_string(),
+        }
+    }
+
+    /// Total number of pixels
+    pub fn pixel_count(&self) -> usize {
+        self.width * self.height
     }
 }
 

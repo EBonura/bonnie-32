@@ -65,8 +65,9 @@ pub struct OrthoCamera {
 impl Default for OrthoCamera {
     fn default() -> Self {
         Self {
-            zoom: 2.0,
-            center: Vec2::new(0.0, 50.0), // Centered, slightly elevated
+            // Scale: 1024 units = 1 meter
+            zoom: 0.1, // Zoomed out more for larger scale
+            center: Vec2::new(0.0, 1024.0), // Centered at 1 meter height
         }
     }
 }
@@ -462,7 +463,7 @@ pub enum BrushType {
     Fill,
 }
 
-/// Atlas editing mode - UV vertex editing vs painting
+/// Atlas editing mode - UV vertex editing, painting, or CLUT editing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AtlasEditMode {
     /// Move UV vertices
@@ -470,13 +471,16 @@ pub enum AtlasEditMode {
     Uv,
     /// Paint on the texture atlas
     Paint,
+    /// Edit CLUT (Color Look-Up Table) palettes
+    Clut,
 }
 
 impl AtlasEditMode {
     pub fn toggle(&self) -> Self {
         match self {
             AtlasEditMode::Uv => AtlasEditMode::Paint,
-            AtlasEditMode::Paint => AtlasEditMode::Uv,
+            AtlasEditMode::Paint => AtlasEditMode::Clut,
+            AtlasEditMode::Clut => AtlasEditMode::Uv,
         }
     }
 
@@ -484,7 +488,13 @@ impl AtlasEditMode {
         match self {
             AtlasEditMode::Uv => "UV",
             AtlasEditMode::Paint => "Paint",
+            AtlasEditMode::Clut => "CLUT",
         }
+    }
+
+    /// All available modes for tab bar
+    pub fn all() -> [AtlasEditMode; 3] {
+        [AtlasEditMode::Uv, AtlasEditMode::Paint, AtlasEditMode::Clut]
     }
 }
 
@@ -644,10 +654,17 @@ pub struct ModelerState {
     pub brush_size: f32,
     pub brush_type: BrushType,
     pub paint_mode: PaintMode,
-    pub atlas_edit_mode: AtlasEditMode, // UV editing vs painting (V to toggle)
+    pub atlas_edit_mode: AtlasEditMode, // UV editing vs painting vs CLUT (V to toggle)
     pub color_picker_slider: Option<usize>, // Active slider in color picker (0=R, 1=G, 2=B)
     pub brush_size_slider_active: bool, // True while dragging brush size slider
     pub paint_stroke_active: bool, // True while painting (for undo grouping)
+
+    // CLUT editing state
+    pub selected_clut: Option<crate::rasterizer::ClutId>, // Currently selected CLUT in pool
+    pub selected_clut_entry: usize,                       // Selected palette index (0-15 or 0-255)
+    pub active_palette_index: u8,                         // Palette index for indexed painting
+    pub clut_preview_active: bool,                        // Live palette swap preview in viewport
+    pub clut_color_slider: Option<usize>,                 // Active slider in CLUT color editor
 
     // Vertex linking: when true, move coincident vertices together
     pub vertex_linking: bool,
@@ -749,8 +766,9 @@ pub struct UndoState {
 impl ModelerState {
     pub fn new() -> Self {
         // Orbit camera setup
-        let orbit_target = Vec3::new(0.0, 50.0, 0.0); // Center of scene, slightly elevated
-        let orbit_distance = 400.0;
+        // Scale: 1024 units = 1 meter (SECTOR_SIZE)
+        let orbit_target = Vec3::new(0.0, 1024.0, 0.0); // Center at 1 meter height
+        let orbit_distance = 4096.0; // 4 meters back
         let orbit_azimuth = 0.8;      // ~45 degrees
         let orbit_elevation = 0.3;    // ~17 degrees up
 
@@ -815,6 +833,13 @@ impl ModelerState {
             color_picker_slider: None,
             brush_size_slider_active: false,
             paint_stroke_active: false,
+
+            // CLUT editing defaults
+            selected_clut: None,
+            selected_clut_entry: 1, // Default to index 1 (index 0 is transparent)
+            active_palette_index: 1,
+            clut_preview_active: false,
+            clut_color_slider: None,
 
             vertex_linking: true, // Default on: move coincident vertices together
 
@@ -1080,7 +1105,8 @@ impl ModelerState {
     /// Create a new project (replaces current)
     pub fn new_project(&mut self) {
         self.project = MeshProject::default();
-        self.mesh = EditableMesh::cube(50.0);
+        // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
+        self.mesh = EditableMesh::cube(1024.0);
         self.current_file = None;
         self.selection.clear();
         self.dirty = false;

@@ -457,7 +457,8 @@ pub fn draw_modeler_viewport(
         let scroll = ctx.mouse.scroll;
         if scroll != 0.0 {
             let zoom_factor = if scroll > 0.0 { 0.98 } else { 1.02 };
-            state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(50.0, 2000.0);
+            // Scale: 1024 units = 1 meter, allow 1m to 40m camera distance
+            state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(1024.0, 40960.0);
             state.sync_camera_from_orbit();
         }
     }
@@ -554,7 +555,8 @@ pub fn draw_modeler_viewport(
     let grid_color = RasterColor::new(50, 50, 60);
     let x_axis_color = RasterColor::new(100, 60, 60); // Red-ish for X axis
     let z_axis_color = RasterColor::new(60, 60, 100); // Blue-ish for Z axis
-    draw_floor_grid(fb, &state.camera, 0.0, 50.0, 500.0, grid_color, x_axis_color, z_axis_color);
+    // Use SECTOR_SIZE (1024 units) per grid cell - same scale as world editor
+    draw_floor_grid(fb, &state.camera, 0.0, crate::world::SECTOR_SIZE, crate::world::SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
 
     // Render all visible objects
     // Convert atlas to rasterizer texture (shared by all objects)
@@ -562,9 +564,24 @@ pub fn draw_modeler_viewport(
     let use_rgb555 = state.raster_settings.use_rgb555;
 
     // Pre-convert atlas to appropriate format
+    // If we have an indexed atlas with a CLUT, use that for authentic PS1 rendering
     let atlas_texture = state.project.atlas.to_raster_texture();
     let atlas_texture_15 = if use_rgb555 {
-        Some(state.project.atlas.to_raster_texture_15())
+        // Check if we have indexed atlas + CLUT for authentic rendering
+        if let Some(ref indexed_atlas) = state.project.indexed_atlas {
+            // Determine which CLUT to use: preview override or default
+            let clut_id = state.project.preview_clut.unwrap_or(indexed_atlas.default_clut);
+            if let Some(clut) = state.project.clut_pool.get(clut_id) {
+                // Convert indexed atlas -> Texture15 using CLUT lookup
+                Some(indexed_atlas.to_texture15(clut, "indexed_atlas"))
+            } else {
+                // Fallback to regular atlas if CLUT not found
+                Some(state.project.atlas.to_raster_texture_15())
+            }
+        } else {
+            // No indexed atlas, use regular atlas
+            Some(state.project.atlas.to_raster_texture_15())
+        }
     } else {
         None
     };
