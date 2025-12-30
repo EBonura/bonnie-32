@@ -34,7 +34,7 @@ use super::tool::ToolRegistry;
 #[derive(Debug, Clone, Default)]
 pub struct ToolBox {
     /// Stack of active tools (most recently activated at back)
-    modal_tool_stack: Vec<&'static str>,
+    pub(crate) modal_tool_stack: Vec<&'static str>,
 
     /// Groups where only one tool can be active at a time
     /// Each inner Vec contains tool IDs that are mutually exclusive
