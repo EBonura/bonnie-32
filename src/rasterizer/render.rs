@@ -2024,3 +2024,136 @@ pub fn create_test_cube() -> (Vec<Vertex>, Vec<Face>) {
 
     (vertices, faces)
 }
+
+// =============================================================================
+// Shared 3D line drawing with near-plane clipping
+// =============================================================================
+
+/// Draw a 3D line with proper near-plane clipping.
+/// Used by both world editor and modeler for grid/wireframe rendering.
+pub fn draw_3d_line_clipped(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    p0: Vec3,
+    p1: Vec3,
+    color: Color,
+) {
+    use super::math::{world_to_screen, NEAR_PLANE};
+
+    // Transform to camera space
+    let rel0 = p0 - camera.position;
+    let rel1 = p1 - camera.position;
+
+    let z0 = rel0.dot(camera.basis_z);
+    let z1 = rel1.dot(camera.basis_z);
+
+    // Both behind camera - skip entirely
+    if z0 <= NEAR_PLANE && z1 <= NEAR_PLANE {
+        return;
+    }
+
+    // Clip line to near plane if needed
+    let (clipped_p0, clipped_p1) = if z0 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p0 = p0 + (p1 - p0) * t;
+        (new_p0, p1)
+    } else if z1 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p1 = p0 + (p1 - p0) * t;
+        (p0, new_p1)
+    } else {
+        (p0, p1)
+    };
+
+    // Project clipped endpoints to screen space
+    let s0 = world_to_screen(
+        clipped_p0,
+        camera.position,
+        camera.basis_x,
+        camera.basis_y,
+        camera.basis_z,
+        fb.width,
+        fb.height,
+    );
+    let s1 = world_to_screen(
+        clipped_p1,
+        camera.position,
+        camera.basis_x,
+        camera.basis_y,
+        camera.basis_z,
+        fb.width,
+        fb.height,
+    );
+
+    if let (Some((x0, y0)), Some((x1, y1))) = (s0, s1) {
+        fb.draw_line(x0 as i32, y0 as i32, x1 as i32, y1 as i32, color);
+    }
+}
+
+/// Draw a floor grid on a horizontal plane.
+/// Uses short segments for better near-plane clipping behavior.
+///
+/// # Arguments
+/// * `fb` - Framebuffer to draw to
+/// * `camera` - Camera for projection
+/// * `y` - Y height of the grid plane
+/// * `spacing` - Distance between grid lines
+/// * `extent` - Half-size of the grid (grid goes from -extent to +extent)
+/// * `grid_color` - Color for regular grid lines
+/// * `x_axis_color` - Color for the X axis (line at Z=0)
+/// * `z_axis_color` - Color for the Z axis (line at X=0)
+pub fn draw_floor_grid(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    y: f32,
+    spacing: f32,
+    extent: f32,
+    grid_color: Color,
+    x_axis_color: Color,
+    z_axis_color: Color,
+) {
+    // Use shorter segments for better clipping behavior
+    let segment_length = spacing;
+
+    // X-parallel lines (varying X, fixed Z)
+    let mut z = -extent;
+    while z <= extent {
+        let is_z_axis = z.abs() < 0.001;
+        let color = if is_z_axis { z_axis_color } else { grid_color };
+
+        let mut x = -extent;
+        while x < extent {
+            let x_end = (x + segment_length).min(extent);
+            draw_3d_line_clipped(
+                fb,
+                camera,
+                Vec3::new(x, y, z),
+                Vec3::new(x_end, y, z),
+                color,
+            );
+            x += segment_length;
+        }
+        z += spacing;
+    }
+
+    // Z-parallel lines (fixed X, varying Z)
+    let mut x = -extent;
+    while x <= extent {
+        let is_x_axis = x.abs() < 0.001;
+        let color = if is_x_axis { x_axis_color } else { grid_color };
+
+        let mut z = -extent;
+        while z < extent {
+            let z_end = (z + segment_length).min(extent);
+            draw_3d_line_clipped(
+                fb,
+                camera,
+                Vec3::new(x, y, z),
+                Vec3::new(x, y, z_end),
+                color,
+            );
+            z += segment_length;
+        }
+        x += spacing;
+    }
+}

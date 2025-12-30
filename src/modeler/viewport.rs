@@ -7,7 +7,7 @@ use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
-    world_to_screen,
+    world_to_screen, draw_floor_grid,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform};
 use super::drag::{DragUpdateResult, ActiveDrag};
@@ -550,8 +550,11 @@ pub fn draw_modeler_viewport(
     // Clear and render
     fb.clear(RasterColor::new(30, 30, 35));
 
-    // Draw grid
-    draw_grid(fb, &state.camera, 0.0, 50.0, 10);
+    // Draw grid (using shared function from rasterizer)
+    let grid_color = RasterColor::new(50, 50, 60);
+    let x_axis_color = RasterColor::new(100, 60, 60); // Red-ish for X axis
+    let z_axis_color = RasterColor::new(60, 60, 100); // Blue-ish for Z axis
+    draw_floor_grid(fb, &state.camera, 0.0, 50.0, 500.0, grid_color, x_axis_color, z_axis_color);
 
     // Render all visible objects
     // Convert atlas to rasterizer texture (shared by all objects)
@@ -868,55 +871,6 @@ fn apply_box_selection(
             }
         }
         _ => {}
-    }
-}
-
-/// Draw grid on the floor plane
-fn draw_grid(fb: &mut Framebuffer, camera: &crate::rasterizer::Camera, y: f32, spacing: f32, count: i32) {
-    let grid_color = RasterColor::new(50, 50, 55);
-    let axis_color = RasterColor::new(80, 80, 85);
-
-    for i in -count..=count {
-        let offset = i as f32 * spacing;
-        let color = if i == 0 { axis_color } else { grid_color };
-
-        // Lines along X
-        draw_3d_line(fb, camera,
-            Vec3::new(-count as f32 * spacing, y, offset),
-            Vec3::new(count as f32 * spacing, y, offset),
-            color);
-
-        // Lines along Z
-        draw_3d_line(fb, camera,
-            Vec3::new(offset, y, -count as f32 * spacing),
-            Vec3::new(offset, y, count as f32 * spacing),
-            color);
-    }
-}
-
-/// Draw a 3D line using framebuffer coordinates
-fn draw_3d_line(fb: &mut Framebuffer, camera: &crate::rasterizer::Camera, start: Vec3, end: Vec3, color: RasterColor) {
-    let start_screen = world_to_screen(
-        start,
-        camera.position,
-        camera.basis_x,
-        camera.basis_y,
-        camera.basis_z,
-        fb.width,
-        fb.height,
-    );
-    let end_screen = world_to_screen(
-        end,
-        camera.position,
-        camera.basis_x,
-        camera.basis_y,
-        camera.basis_z,
-        fb.width,
-        fb.height,
-    );
-
-    if let (Some((x0, y0)), Some((x1, y1))) = (start_screen, end_screen) {
-        fb.draw_line(x0 as i32, y0 as i32, x1 as i32, y1 as i32, color);
     }
 }
 
