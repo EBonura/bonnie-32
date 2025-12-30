@@ -1288,6 +1288,9 @@ fn draw_clut_editor_panel(
     };
     draw_rectangle(btn_4bit_rect.x, btn_4bit_rect.y, btn_4bit_rect.w, btn_4bit_rect.h, bg_4bit);
     draw_text("+ 4-bit", x + padding + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+    if hovered_4bit {
+        ctx.set_tooltip("Add 4-bit CLUT (16 colors)", ctx.mouse.x, ctx.mouse.y);
+    }
 
     if hovered_4bit && is_mouse_button_pressed(MouseButton::Left) {
         let clut = Clut::new_4bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
@@ -1306,6 +1309,9 @@ fn draw_clut_editor_panel(
     };
     draw_rectangle(btn_8bit_rect.x, btn_8bit_rect.y, btn_8bit_rect.w, btn_8bit_rect.h, bg_8bit);
     draw_text("+ 8-bit", btn_8bit_rect.x + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+    if hovered_8bit {
+        ctx.set_tooltip("Add 8-bit CLUT (256 colors)", ctx.mouse.x, ctx.mouse.y);
+    }
 
     if hovered_8bit && is_mouse_button_pressed(MouseButton::Left) {
         let clut = Clut::new_8bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
@@ -1314,7 +1320,7 @@ fn draw_clut_editor_panel(
         state.set_status("Added 8-bit CLUT", 1.0);
     }
 
-    // Quantize button (create CLUT from current atlas)
+    // Quantize button (create CLUT from current atlas with auto-detected depth)
     let btn_quant_rect = Rect::new(x + padding + (btn_w + 4.0) * 2.0, cur_y, btn_w + 10.0, btn_h);
     let hovered_quant = ctx.mouse.inside(&btn_quant_rect);
     let bg_quant = if hovered_quant {
@@ -1324,20 +1330,15 @@ fn draw_clut_editor_panel(
     };
     draw_rectangle(btn_quant_rect.x, btn_quant_rect.y, btn_quant_rect.w, btn_quant_rect.h, bg_quant);
     draw_text("Quantize", btn_quant_rect.x + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+    if hovered_quant {
+        ctx.set_tooltip("Auto-quantize atlas (4-bit if <=15 colors, 8-bit otherwise)", ctx.mouse.x, ctx.mouse.y);
+    }
 
     if hovered_quant && is_mouse_button_pressed(MouseButton::Left) {
-        // Quantize the current atlas to indexed + CLUT
-        let depth = if state.project.clut_pool.is_empty() {
-            ClutDepth::Bpp4 // Default to 4-bit
-        } else if let Some(id) = state.selected_clut {
-            // Match depth of selected CLUT
-            state.project.clut_pool.get(id).map(|c| c.depth).unwrap_or(ClutDepth::Bpp4)
-        } else {
-            ClutDepth::Bpp4
-        };
-
+        // Auto-detect optimal CLUT depth based on unique color count
         let name = format!("Quantized {}", state.project.clut_pool.len() + 1);
-        let (indexed_atlas, clut) = super::quantize::quantize_atlas(&state.project.atlas, depth, &name);
+        let (indexed_atlas, clut, color_count) = super::quantize::quantize_atlas_auto(&state.project.atlas, &name);
+        let depth_label = clut.depth.short_label();
         let id = state.project.clut_pool.add_clut(clut);
         state.project.indexed_atlas = Some(super::mesh_editor::IndexedAtlas {
             width: indexed_atlas.width,
@@ -1347,7 +1348,7 @@ fn draw_clut_editor_panel(
             default_clut: id,
         });
         state.selected_clut = Some(id);
-        state.set_status(&format!("Quantized atlas to {} colors", depth.color_count()), 1.5);
+        state.set_status(&format!("Quantized atlas: {} colors -> {} CLUT", color_count, depth_label), 2.0);
     }
 
     cur_y += btn_h + 4.0;

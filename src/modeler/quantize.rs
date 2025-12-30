@@ -243,6 +243,72 @@ fn find_nearest_color(target: &Color15, palette: &[Color15]) -> u8 {
     best_idx
 }
 
+/// Count unique colors in an RGBA pixel array (ignoring transparency)
+/// Returns the number of unique RGB colors (not counting fully transparent pixels)
+pub fn count_unique_colors(rgba_pixels: &[u8]) -> usize {
+    use std::collections::HashSet;
+
+    let mut unique_colors: HashSet<u32> = HashSet::new();
+
+    for chunk in rgba_pixels.chunks(4) {
+        // Skip fully transparent pixels
+        if chunk[3] == 0 {
+            continue;
+        }
+        // Pack RGB into u32 for hashing (ignore alpha)
+        let packed = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
+        unique_colors.insert(packed);
+    }
+
+    unique_colors.len()
+}
+
+/// Count unique colors in a TextureAtlas (convenience wrapper)
+pub fn count_atlas_colors(atlas: &super::mesh_editor::TextureAtlas) -> usize {
+    use std::collections::HashSet;
+
+    let mut unique_colors: HashSet<u32> = HashSet::new();
+
+    for y in 0..atlas.height {
+        for x in 0..atlas.width {
+            let color = atlas.get_pixel(x, y);
+            // Skip transparent pixels
+            if color.blend == crate::rasterizer::BlendMode::Erase {
+                continue;
+            }
+            // Pack RGB into u32 for hashing
+            let packed = ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32);
+            unique_colors.insert(packed);
+        }
+    }
+
+    unique_colors.len()
+}
+
+/// Determine optimal CLUT depth based on unique color count
+/// Returns Bpp4 (16 colors) if <= 15 unique colors (index 0 reserved for transparent)
+/// Returns Bpp8 (256 colors) otherwise
+pub fn optimal_clut_depth(unique_colors: usize) -> ClutDepth {
+    // Reserve index 0 for transparent, so we can fit up to 15 colors in 4-bit
+    if unique_colors <= 15 {
+        ClutDepth::Bpp4
+    } else {
+        ClutDepth::Bpp8
+    }
+}
+
+/// Auto-quantize a TextureAtlas, automatically choosing optimal CLUT depth
+/// Returns (IndexedAtlas, Clut, detected_color_count)
+pub fn quantize_atlas_auto(
+    atlas: &super::mesh_editor::TextureAtlas,
+    name: &str,
+) -> (super::mesh_editor::IndexedAtlas, Clut, usize) {
+    let color_count = count_atlas_colors(atlas);
+    let depth = optimal_clut_depth(color_count);
+    let (indexed, clut) = quantize_atlas(atlas, depth, name);
+    (indexed, clut, color_count)
+}
+
 /// Quantize a TextureAtlas to an IndexedAtlas + Clut
 ///
 /// Convenience function for converting existing RGBA atlases to indexed format.

@@ -301,6 +301,82 @@ impl ObjImporter {
         Ok(atlas)
     }
 
+    /// Load a PNG and auto-quantize with optimal CLUT depth (4-bit if ≤15 colors, 8-bit otherwise)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_png_and_quantize_auto(
+        png_path: &Path,
+        name: &str,
+    ) -> Result<(TextureAtlas, IndexedAtlas, Clut, usize), ObjError> {
+        use image::GenericImageView;
+
+        let img = image::open(png_path)
+            .map_err(|e| ObjError::Io(format!("Failed to load PNG: {}", e)))?;
+
+        let (width, height) = img.dimensions();
+
+        // Determine target atlas size (power of 2, max 512)
+        let dim = match width.max(height) {
+            0..=64 => 64,
+            65..=128 => 128,
+            129..=256 => 256,
+            _ => 512,
+        };
+
+        // Scale image to target size
+        let rgba = img.to_rgba8();
+        let mut pixels = Vec::with_capacity(dim * dim * 4);
+
+        for y in 0..dim {
+            for x in 0..dim {
+                let src_x = (x * width as usize / dim).min(width as usize - 1);
+                let src_y = (y * height as usize / dim).min(height as usize - 1);
+                let pixel = rgba.get_pixel(src_x as u32, src_y as u32);
+                pixels.push(pixel[0]);
+                pixels.push(pixel[1]);
+                pixels.push(pixel[2]);
+                pixels.push(pixel[3]);
+            }
+        }
+
+        // Count unique colors to determine optimal depth
+        let unique_colors = super::quantize::count_unique_colors(&pixels);
+        let depth = super::quantize::optimal_clut_depth(unique_colors);
+
+        // Use quantize module to create indexed atlas + CLUT
+        let result = super::quantize::quantize_image(&pixels, dim, dim, depth, name);
+
+        // Also create a regular TextureAtlas for backwards compatibility
+        let mut atlas = TextureAtlas::new(dim, dim);
+        for y in 0..dim {
+            for x in 0..dim {
+                let idx = (y * dim + x) * 4;
+                let blend = if pixels[idx + 3] == 0 {
+                    crate::rasterizer::BlendMode::Erase
+                } else {
+                    crate::rasterizer::BlendMode::Opaque
+                };
+                let color = crate::rasterizer::Color::with_blend(
+                    pixels[idx],
+                    pixels[idx + 1],
+                    pixels[idx + 2],
+                    blend,
+                );
+                atlas.set_pixel(x, y, color);
+            }
+        }
+
+        // Convert IndexedTexture to IndexedAtlas
+        let indexed_atlas = IndexedAtlas {
+            width: result.texture.width,
+            height: result.texture.height,
+            depth: result.texture.depth,
+            indices: result.texture.indices,
+            default_clut: crate::rasterizer::ClutId::NONE, // Will be set when added to pool
+        };
+
+        Ok((atlas, indexed_atlas, result.clut, unique_colors))
+    }
+
     /// Load a PNG and quantize it to indexed format with CLUT
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_png_and_quantize(
@@ -396,12 +472,16 @@ impl ObjImporter {
         let texture_path = Self::find_texture_for_obj(obj_path);
         let texture_result = if let Some(ref tex_path) = texture_path {
             if let Some(depth) = quantize_depth {
-                // Load and quantize
+                // Load and quantize with specified depth
                 let name = obj_path.file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Imported".to_string());
                 match Self::load_png_and_quantize(tex_path, depth, &name) {
-                    Ok((atlas, indexed, clut)) => Some(TextureImportResult::Quantized { atlas, indexed, clut }),
+                    Ok((atlas, indexed, clut)) => {
+                        // Count colors for info (since we specified depth manually)
+                        let color_count = super::quantize::count_atlas_colors(&atlas);
+                        Some(TextureImportResult::Quantized { atlas, indexed, clut, color_count })
+                    }
                     Err(_) => None,
                 }
             } else {
@@ -410,6 +490,47 @@ impl ObjImporter {
                     Ok(atlas) => Some(TextureImportResult::Atlas(atlas)),
                     Err(_) => None,
                 }
+            }
+        } else {
+            None
+        };
+
+        Ok(ObjImportResult {
+            mesh,
+            texture: texture_result,
+            texture_path,
+        })
+    }
+
+    /// Complete import with auto-detected CLUT depth based on color count
+    /// Uses 4-bit (16 colors) if image has ≤15 unique colors, 8-bit otherwise
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn import_with_auto_quantize(
+        obj_path: &Path,
+        scale: f32,
+    ) -> Result<ObjImportResult, ObjError> {
+        // Load mesh
+        let mut mesh = Self::load_from_file(obj_path)?;
+
+        // Apply scale
+        for vertex in &mut mesh.vertices {
+            vertex.pos = vertex.pos * scale;
+        }
+
+        // Compute normals if missing
+        Self::compute_face_normals(&mut mesh);
+
+        // Find and load texture with auto-detection
+        let texture_path = Self::find_texture_for_obj(obj_path);
+        let texture_result = if let Some(ref tex_path) = texture_path {
+            let name = obj_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Imported".to_string());
+            match Self::load_png_and_quantize_auto(tex_path, &name) {
+                Ok((atlas, indexed, clut, color_count)) => {
+                    Some(TextureImportResult::Quantized { atlas, indexed, clut, color_count })
+                }
+                Err(_) => None,
             }
         } else {
             None
@@ -464,6 +585,8 @@ pub enum TextureImportResult {
         atlas: TextureAtlas,
         indexed: IndexedAtlas,
         clut: Clut,
+        /// Number of unique colors detected in the original image
+        color_count: usize,
     },
 }
 

@@ -640,11 +640,9 @@ async fn main() {
 
                             #[cfg(not(target_arch = "wasm32"))]
                             {
-                                // Use full import with texture loading and quantization
-                                // Default to 8-bit CLUT (256 colors) for PS1 models
-                                let quantize_depth = Some(rasterizer::ClutDepth::Bpp8);
-
-                                match ObjImporter::import_with_texture(&path, scale, quantize_depth) {
+                                // Use full import with texture loading and auto-quantization
+                                // Auto-detects optimal CLUT depth based on unique color count
+                                match ObjImporter::import_with_auto_quantize(&path, scale) {
                                     Ok(mut result) => {
                                         // Flip normals if requested
                                         if flip_normals {
@@ -684,14 +682,15 @@ async fn main() {
                                                     ms.modeler_state.project.atlas = atlas;
                                                     texture_status = " + texture".to_string();
                                                 }
-                                                TextureImportResult::Quantized { atlas, mut indexed, clut } => {
+                                                TextureImportResult::Quantized { atlas, mut indexed, clut, color_count } => {
                                                     ms.modeler_state.project.atlas = atlas;
                                                     // Add CLUT to pool and get ID
                                                     let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
                                                     indexed.default_clut = clut_id;
+                                                    let depth_label = indexed.depth.short_label();
                                                     ms.modeler_state.project.indexed_atlas = Some(indexed);
                                                     ms.modeler_state.selected_clut = Some(clut_id);
-                                                    texture_status = " + indexed texture + CLUT".to_string();
+                                                    texture_status = format!(" + CLUT {} ({} colors)", depth_label, color_count);
                                                 }
                                             }
                                         }
