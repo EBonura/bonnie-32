@@ -568,7 +568,8 @@ pub fn draw_modeler_viewport(
         }
 
         // Use state.mesh for selected object (has edits), project mesh for others
-        let mesh = if state.project.selected_object == Some(obj_idx) {
+        // Also use state.mesh for obj 0 as fallback (in case selected_object is None)
+        let mesh = if state.project.selected_object == Some(obj_idx) || (obj_idx == 0 && state.project.selected_object.is_none()) {
             &state.mesh
         } else {
             &obj.mesh

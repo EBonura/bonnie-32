@@ -1685,6 +1685,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         };
 
         // Render all visible objects
+        // NOTE: Always use state.mesh for obj_idx=0 since that's typically the only object
+        // and state.mesh contains live edits during drag operations
         for (obj_idx, obj) in state.project.objects.iter().enumerate() {
             // Skip hidden objects
             if !obj.visible {
@@ -1692,7 +1694,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             }
 
             // Use state.mesh for selected object (has edits), project mesh for others
-            let obj_mesh = if state.project.selected_object == Some(obj_idx) {
+            // Also use state.mesh for obj 0 as fallback (in case selected_object is None)
+            let obj_mesh = if state.project.selected_object == Some(obj_idx) || (obj_idx == 0 && state.project.selected_object.is_none()) {
                 &state.mesh
             } else {
                 &obj.mesh

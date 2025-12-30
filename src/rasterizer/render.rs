@@ -1491,8 +1491,11 @@ pub fn render_mesh(
         // PS1-style: Skip triangles that have ANY vertex behind the near plane
         // This is conservative but simple and matches PS1 behavior
         // (Games were designed to not let geometry get too close to camera)
-        if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
-            continue;
+        // NOTE: Skip near-plane culling for orthographic projection (camera Z is meaningless)
+        if settings.ortho_projection.is_none() {
+            if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
+                continue;
+            }
         }
 
         // Use pre-projected screen positions
@@ -1759,8 +1762,11 @@ pub fn render_mesh_15(
         let cv3 = cam_space_positions[face.v2];
 
         // PS1-style: Skip triangles that have ANY vertex behind the near plane
-        if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
-            continue;
+        // NOTE: Skip near-plane culling for orthographic projection (camera Z is meaningless)
+        if settings.ortho_projection.is_none() {
+            if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
+                continue;
+            }
         }
 
         // Use pre-projected screen positions
