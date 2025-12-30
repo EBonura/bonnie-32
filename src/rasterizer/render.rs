@@ -54,6 +54,249 @@ impl Framebuffer {
         }
     }
 
+    /// Clear framebuffer with a vertical gradient (skybox effect)
+    /// top_color at y=0, bottom_color at y=height-1
+    pub fn clear_gradient(&mut self, top_color: Color, bottom_color: Color) {
+        let h = self.height;
+        for y in 0..h {
+            // Linear interpolation factor (0.0 at top, 1.0 at bottom)
+            let t = if h > 1 { y as f32 / (h - 1) as f32 } else { 0.0 };
+            let color = top_color.lerp(bottom_color, t);
+            let bytes = color.to_bytes();
+
+            for x in 0..self.width {
+                let idx = (y * self.width + x) * 4;
+                self.pixels[idx] = bytes[0];
+                self.pixels[idx + 1] = bytes[1];
+                self.pixels[idx + 2] = bytes[2];
+                self.pixels[idx + 3] = bytes[3];
+                self.zbuffer[y * self.width + x] = f32::MAX;
+            }
+        }
+    }
+
+    /// Render PS1 Spyro-style skybox with all effects
+    /// Renders: base sphere (gradient + sun glow + clouds), stars, and 3D mountains
+    pub fn render_skybox(
+        &mut self,
+        skybox: &crate::world::Skybox,
+        camera: &super::Camera,
+        time: f32,
+    ) {
+        use super::math::{perspective_transform, project};
+
+        // 1. Render base skybox sphere (gradient + sun glow + clouds baked in vertex colors)
+        let cam_pos = (camera.position.x, camera.position.y, camera.position.z);
+        let (vertices, faces) = skybox.generate_mesh(cam_pos, time);
+
+        // Transform and project all vertices
+        let mut projected: Vec<(f32, f32, f32)> = Vec::with_capacity(vertices.len());
+
+        for v in &vertices {
+            let world_pos = super::math::Vec3::new(v.pos.0, v.pos.1, v.pos.2);
+            let rel_pos = world_pos - camera.position;
+            let cam_space = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+
+            // Skip vertices behind camera
+            if cam_space.z <= 0.1 {
+                projected.push((f32::NAN, f32::NAN, f32::NAN));
+                continue;
+            }
+
+            let screen = project(cam_space, self.width, self.height);
+            projected.push((screen.x, screen.y, cam_space.z));
+        }
+
+        // Render each triangle
+        for face in &faces {
+            let p0 = projected[face[0]];
+            let p1 = projected[face[1]];
+            let p2 = projected[face[2]];
+
+            // Skip if any vertex is behind camera
+            if p0.0.is_nan() || p1.0.is_nan() || p2.0.is_nan() {
+                continue;
+            }
+
+            // Screen-space backface culling (looking from inside the sphere)
+            // We want triangles with NEGATIVE signed area (facing inward toward camera)
+            let signed_area = (p1.0 - p0.0) * (p2.1 - p0.1) - (p2.0 - p0.0) * (p1.1 - p0.1);
+            if signed_area >= 0.0 {
+                continue; // Front-facing (outward) - skip when inside sphere
+            }
+
+            // Get vertex colors
+            let c0 = vertices[face[0]].color;
+            let c1 = vertices[face[1]].color;
+            let c2 = vertices[face[2]].color;
+
+            // Rasterize triangle with Gouraud-shaded vertex colors
+            self.rasterize_skybox_triangle(
+                (p0.0, p0.1), (p1.0, p1.1), (p2.0, p2.1),
+                c0, c1, c2,
+            );
+        }
+
+        // 2. Render stars (screen-space diamond sparkles)
+        // Stars are rendered after the sphere (which now includes 3D mountains)
+        if skybox.stars.enabled {
+            self.render_stars(skybox, camera, time);
+        }
+    }
+
+    /// Render star field as screen-space diamond sparkles
+    fn render_stars(
+        &mut self,
+        skybox: &crate::world::Skybox,
+        camera: &super::Camera,
+        time: f32,
+    ) {
+        use std::f32::consts::PI;
+        use super::math::{perspective_transform, project, Vec3};
+
+        let stars = &skybox.stars;
+        let mut rng_seed = stars.seed as u64;
+
+        // Simple LCG for deterministic pseudo-random
+        let mut next_rand = || -> f32 {
+            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (rng_seed >> 16) as f32 / 65536.0
+        };
+
+        for _ in 0..stars.count {
+            // Deterministic pseudo-random star positions
+            let theta = next_rand() * 2.0 * PI;
+            let phi_max = skybox.horizon * PI; // Only above horizon
+            let phi = next_rand() * phi_max;
+
+            // Convert spherical to world direction
+            let y = phi.cos();
+            let ring_radius = phi.sin();
+            let x = ring_radius * theta.cos();
+            let z = ring_radius * theta.sin();
+
+            let dir = Vec3::new(x, y, z);
+
+            // Transform to camera space
+            let cam_space = perspective_transform(dir * 10000.0, camera.basis_x, camera.basis_y, camera.basis_z);
+
+            if cam_space.z > 0.1 {
+                let screen = project(cam_space, self.width, self.height);
+
+                // Twinkle animation
+                let mut brightness = 1.0f32;
+                if stars.twinkle_speed > 0.0 {
+                    let phase = next_rand() * 2.0 * PI;
+                    brightness = 0.5 + 0.5 * (time * stars.twinkle_speed + phase).sin();
+                }
+
+                // Draw diamond sparkle
+                let color = Color::new(
+                    (stars.color.r as f32 * brightness) as u8,
+                    (stars.color.g as f32 * brightness) as u8,
+                    (stars.color.b as f32 * brightness) as u8,
+                );
+                self.draw_star_diamond(screen.x as i32, screen.y as i32, stars.size, color);
+            }
+        }
+    }
+
+    /// Draw a small diamond/cross star shape
+    fn draw_star_diamond(&mut self, cx: i32, cy: i32, size: f32, color: Color) {
+        let s = size.max(1.0) as i32;
+
+        // Center pixel (always)
+        self.set_pixel_safe(cx, cy, color);
+
+        if s >= 2 {
+            // 4-point diamond
+            let dim_color = Color::new(
+                (color.r as f32 * 0.7) as u8,
+                (color.g as f32 * 0.7) as u8,
+                (color.b as f32 * 0.7) as u8,
+            );
+            self.set_pixel_safe(cx - 1, cy, dim_color);
+            self.set_pixel_safe(cx + 1, cy, dim_color);
+            self.set_pixel_safe(cx, cy - 1, dim_color);
+            self.set_pixel_safe(cx, cy + 1, dim_color);
+        }
+
+        if s >= 3 {
+            // Extended points
+            let faint_color = Color::new(
+                (color.r as f32 * 0.4) as u8,
+                (color.g as f32 * 0.4) as u8,
+                (color.b as f32 * 0.4) as u8,
+            );
+            self.set_pixel_safe(cx - 2, cy, faint_color);
+            self.set_pixel_safe(cx + 2, cy, faint_color);
+            self.set_pixel_safe(cx, cy - 2, faint_color);
+            self.set_pixel_safe(cx, cy + 2, faint_color);
+        }
+    }
+
+    fn set_pixel_safe(&mut self, x: i32, y: i32, color: Color) {
+        if x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32 {
+            self.set_pixel(x as usize, y as usize, color);
+        }
+    }
+
+    /// Rasterize a single skybox triangle with Gouraud vertex color interpolation
+    /// No depth testing, no textures - just pure vertex colors
+    #[allow(dead_code)]
+    fn rasterize_skybox_triangle(
+        &mut self,
+        p0: (f32, f32),
+        p1: (f32, f32),
+        p2: (f32, f32),
+        c0: Color,
+        c1: Color,
+        c2: Color,
+    ) {
+        // Calculate bounding box
+        let min_x = p0.0.min(p1.0).min(p2.0).max(0.0) as usize;
+        let max_x = p0.0.max(p1.0).max(p2.0).min(self.width as f32 - 1.0) as usize;
+        let min_y = p0.1.min(p1.1).min(p2.1).max(0.0) as usize;
+        let max_y = p0.1.max(p1.1).max(p2.1).min(self.height as f32 - 1.0) as usize;
+
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
+
+        // Edge equations for barycentric coords
+        let denom = (p1.1 - p2.1) * (p0.0 - p2.0) + (p2.0 - p1.0) * (p0.1 - p2.1);
+        if denom.abs() < 0.0001 {
+            return; // Degenerate triangle
+        }
+        let inv_denom = 1.0 / denom;
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+
+                // Barycentric coordinates
+                let w0 = ((p1.1 - p2.1) * (px - p2.0) + (p2.0 - p1.0) * (py - p2.1)) * inv_denom;
+                let w1 = ((p2.1 - p0.1) * (px - p2.0) + (p0.0 - p2.0) * (py - p2.1)) * inv_denom;
+                let w2 = 1.0 - w0 - w1;
+
+                // Check if inside triangle
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    // Interpolate vertex colors
+                    let r = (c0.r as f32 * w0 + c1.r as f32 * w1 + c2.r as f32 * w2) as u8;
+                    let g = (c0.g as f32 * w0 + c1.g as f32 * w1 + c2.g as f32 * w2) as u8;
+                    let b = (c0.b as f32 * w0 + c1.b as f32 * w1 + c2.b as f32 * w2) as u8;
+
+                    let idx = (y * self.width + x) * 4;
+                    self.pixels[idx] = r;
+                    self.pixels[idx + 1] = g;
+                    self.pixels[idx + 2] = b;
+                    self.pixels[idx + 3] = 255;
+                }
+            }
+        }
+    }
+
     pub fn set_pixel(&mut self, x: usize, y: usize, color: Color) {
         if x < self.width && y < self.height {
             let idx = (y * self.width + x) * 4;

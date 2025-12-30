@@ -1139,8 +1139,14 @@ pub fn draw_viewport_3d(
         state.sync_camera_from_orbit();
     }
 
-    // Clear framebuffer
-    fb.clear(RasterColor::new(30, 30, 40));
+    // Clear framebuffer - use 3D skybox if configured
+    if let Some(skybox) = &state.level.skybox {
+        fb.clear(RasterColor::new(0, 0, 0));
+        let time = macroquad::prelude::get_time() as f32;
+        fb.render_skybox(skybox, &state.camera_3d, time);
+    } else {
+        fb.clear(RasterColor::new(30, 30, 40));
+    }
 
     // Draw main floor grid (large, fixed extent)
     if state.show_grid {

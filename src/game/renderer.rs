@@ -82,8 +82,15 @@ pub fn draw_test_viewport(
     // === CLEAR PHASE ===
     let clear_start = FrameTimings::start();
 
-    // Clear framebuffer to dark gray
-    fb.clear(RasterColor::new(20, 22, 28));
+    // Clear framebuffer - if skybox, render 3D sphere; otherwise solid color
+    if let Some(skybox) = &level.skybox {
+        // Clear to black first, then render 3D skybox sphere
+        fb.clear(RasterColor::new(0, 0, 0));
+        let time = macroquad::prelude::get_time() as f32;
+        fb.render_skybox(skybox, &game.camera, time);
+    } else {
+        fb.clear(RasterColor::new(20, 22, 28));
+    }
 
     let clear_ms = FrameTimings::elapsed_ms(clear_start);
 
