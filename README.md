@@ -1,6 +1,6 @@
 # Bonnie Engine
 
-[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
+[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Created by [Emanuele Bonura](https://bonnie-games.itch.io/)**
