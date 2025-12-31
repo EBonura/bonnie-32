@@ -2485,7 +2485,7 @@ impl Room {
             // Projected mode: UVs based on absolute world Y position
             // This creates globally aligned texture mapping across adjacent walls
 
-            // Get base UVs to extract the U coordinates and any X offset
+            // Get base UVs to extract the U coordinates
             let base_uvs = wall.uv.unwrap_or([
                 Vec2::new(0.0, 1.0),  // bottom-left
                 Vec2::new(1.0, 1.0),  // bottom-right
@@ -2503,14 +2503,13 @@ impl Room {
             ];
 
             // Calculate V based on absolute world position
-            // V = world_y / SECTOR_SIZE (1 texture repeat per SECTOR_SIZE units)
-            // V increases downward (higher Y = lower V), so we negate
-            // Use fract() to keep UV in 0-1 range for tiling
+            // V = -world_y / SECTOR_SIZE (higher Y = lower V value, texture wraps via rasterizer)
+            // Don't use fract() - let the rasterizer handle wrapping to maintain continuous interpolation
             [
-                Vec2::new(base_uvs[0].x, 1.0 - (world_heights[0] / SECTOR_SIZE).fract()),
-                Vec2::new(base_uvs[1].x, 1.0 - (world_heights[1] / SECTOR_SIZE).fract()),
-                Vec2::new(base_uvs[2].x, 1.0 - (world_heights[2] / SECTOR_SIZE).fract()),
-                Vec2::new(base_uvs[3].x, 1.0 - (world_heights[3] / SECTOR_SIZE).fract()),
+                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE),
+                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE),
+                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE),
+                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE),
             ]
         } else {
             // Default mode: standard per-vertex UVs
