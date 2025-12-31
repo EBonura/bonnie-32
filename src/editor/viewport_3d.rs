@@ -592,9 +592,6 @@ pub fn draw_viewport_3d(
                     edges_to_drag.push((room_idx, gx, gz, face_idx, edge_idx, wall_face.clone()));
 
                     // Add vertices for all edges to drag
-                    let mut avg_height = 0.0;
-                    let mut height_count = 0;
-
                     for (r_idx, gx, gz, face_idx, edge_idx, wf) in &edges_to_drag {
                         if let Some(room) = state.level.rooms.get(*r_idx) {
                             if let Some(sector) = room.get_sector(*gx, *gz) {
@@ -615,15 +612,11 @@ pub fn draw_viewport_3d(
                                         if !state.dragging_sector_vertices.contains(&key0) {
                                             state.dragging_sector_vertices.push(key0);
                                             state.drag_initial_heights.push(h[corner0]);
-                                            avg_height += h[corner0];
-                                            height_count += 1;
                                         }
                                         let key1 = (*r_idx, *gx, *gz, face, corner1);
                                         if !state.dragging_sector_vertices.contains(&key1) {
                                             state.dragging_sector_vertices.push(key1);
                                             state.drag_initial_heights.push(h[corner1]);
-                                            avg_height += h[corner1];
-                                            height_count += 1;
                                         }
 
                                         // If linking, find coincident vertices for the edge across ALL rooms
@@ -690,15 +683,11 @@ pub fn draw_viewport_3d(
                                             if !state.dragging_sector_vertices.contains(&key0) {
                                                 state.dragging_sector_vertices.push(key0);
                                                 state.drag_initial_heights.push(h[corner0]);
-                                                avg_height += h[corner0];
-                                                height_count += 1;
                                             }
                                             let key1 = (*r_idx, *gx, *gz, *wall_face, corner1);
                                             if !state.dragging_sector_vertices.contains(&key1) {
                                                 state.dragging_sector_vertices.push(key1);
                                                 state.drag_initial_heights.push(h[corner1]);
-                                                avg_height += h[corner1];
-                                                height_count += 1;
                                             }
                                         }
                                     }
@@ -707,9 +696,11 @@ pub fn draw_viewport_3d(
                         }
                     }
 
-                    // Set drag plane to average height
-                    if height_count > 0 {
-                        state.viewport_drag_plane_y = avg_height / height_count as f32;
+                    // Set drag plane to average height of ALL vertices (including linked ones)
+                    // This prevents jumping when linked vertices have different room-relative heights
+                    if !state.drag_initial_heights.is_empty() {
+                        state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
+                            / state.drag_initial_heights.len() as f32;
                     }
                 } else if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
                     // Object selection/dragging - checked before lights and faces
@@ -788,9 +779,6 @@ pub fn draw_viewport_3d(
                     }
 
                     // Add vertices for all faces to drag
-                    let mut avg_height = 0.0;
-                    let mut height_count = 0;
-
                     for (r_idx, gx, gz, face) in &faces_to_drag {
                         if let Some(room) = state.level.rooms.get(*r_idx) {
                             if let Some(sector) = room.get_sector(*gx, *gz) {
@@ -807,8 +795,6 @@ pub fn draw_viewport_3d(
                                         if !state.dragging_sector_vertices.contains(&key) {
                                             state.dragging_sector_vertices.push(key);
                                             state.drag_initial_heights.push(h[corner]);
-                                            avg_height += h[corner];
-                                            height_count += 1;
                                         }
                                     }
 
@@ -861,8 +847,6 @@ pub fn draw_viewport_3d(
                                                 if !state.dragging_sector_vertices.contains(&key) {
                                                     state.dragging_sector_vertices.push(key);
                                                     state.drag_initial_heights.push(wall.heights[corner]);
-                                                    avg_height += wall.heights[corner];
-                                                    height_count += 1;
                                                 }
                                             }
                                         }
@@ -873,9 +857,11 @@ pub fn draw_viewport_3d(
                         }
                     }
 
-                    // Set drag plane to average height of all dragged vertices
-                    if height_count > 0 {
-                        state.viewport_drag_plane_y = avg_height / height_count as f32;
+                    // Set drag plane to average height of ALL vertices (including linked ones)
+                    // This prevents jumping when linked vertices have different room-relative heights
+                    if !state.drag_initial_heights.is_empty() {
+                        state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
+                            / state.drag_initial_heights.len() as f32;
                     }
                 } else {
                     // Clicked on nothing - clear selection (unless Shift is held)
