@@ -1023,6 +1023,15 @@ pub enum FaceNormalMode {
     Back,   // Normal faces inward (flipped)
 }
 
+/// UV projection mode for sloped faces
+/// Controls how UVs are interpolated across the face's triangles
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UvProjection {
+    #[default]
+    Default,    // Standard per-vertex UV interpolation (may cause seams on sloped faces)
+    Projected,  // Project UVs as if the face were flat (uniform texture across face)
+}
+
 /// A horizontal face (floor or ceiling)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizontalFace {
@@ -1200,35 +1209,61 @@ pub struct VerticalFace {
     /// If true, pure black pixels (RGB 0,0,0) are treated as transparent (PS1 CLUT-style)
     #[serde(default = "default_true")]
     pub black_transparent: bool,
+    /// UV projection mode for sloped walls
+    #[serde(default)]
+    pub uv_projection: UvProjection,
 }
 
 impl VerticalFace {
+    /// Compute 1:1 texel UV mapping based on wall height
+    /// x_scale = 1.0 (wall width is always SECTOR_SIZE)
+    /// y_scale = wall_height / SECTOR_SIZE
+    fn compute_1to1_uv(heights: &[f32; 4]) -> [Vec2; 4] {
+        let bottom = (heights[0] + heights[1]) / 2.0;
+        let top = (heights[2] + heights[3]) / 2.0;
+        let wall_height = (top - bottom).abs();
+        let v_scale = wall_height / SECTOR_SIZE;
+
+        // UV corners: [bottom-left, bottom-right, top-right, top-left]
+        // Default UV with x_scale=1.0, y_scale=v_scale, no rotation, no offset
+        [
+            Vec2::new(0.0, v_scale),  // bottom-left
+            Vec2::new(1.0, v_scale),  // bottom-right
+            Vec2::new(1.0, 0.0),      // top-right
+            Vec2::new(0.0, 0.0),      // top-left
+        ]
+    }
+
     /// Create a wall from bottom to top (all corners at same heights)
     pub fn new(y_bottom: f32, y_top: f32, texture: TextureRef) -> Self {
+        let heights = [y_bottom, y_bottom, y_top, y_top];
         Self {
-            heights: [y_bottom, y_bottom, y_top, y_top],
+            uv: Some(Self::compute_1to1_uv(&heights)),
+            heights,
             texture,
-            uv: None,
             solid: true,
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
+            uv_projection: UvProjection::default(),
         }
     }
 
     /// Create a wall with individual corner heights for sloped surfaces
     /// Heights order: [bottom-left, bottom-right, top-right, top-left]
     pub fn new_sloped(bl: f32, br: f32, tr: f32, tl: f32, texture: TextureRef) -> Self {
+        let heights = [bl, br, tr, tl];
         Self {
-            heights: [bl, br, tr, tl],
+            uv: Some(Self::compute_1to1_uv(&heights)),
+            heights,
             texture,
-            uv: None,
             solid: true,
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
+            uv_projection: UvProjection::default(),
         }
     }
 
@@ -2445,13 +2480,46 @@ impl Room {
             }
         };
 
-        // Default UVs for wall
-        let uvs = wall.uv.unwrap_or([
-            Vec2::new(0.0, 1.0),  // bottom-left
-            Vec2::new(1.0, 1.0),  // bottom-right
-            Vec2::new(1.0, 0.0),  // top-right
-            Vec2::new(0.0, 0.0),  // top-left
-        ]);
+        // Calculate UVs based on projection mode
+        let uvs = if wall.uv_projection == UvProjection::Projected {
+            // Projected mode: UVs based on absolute world Y position
+            // This creates globally aligned texture mapping across adjacent walls
+
+            // Get base UVs to extract the U coordinates
+            let base_uvs = wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ]);
+
+            // Calculate world Y positions (including room y_offset)
+            // heights order: [bottom-left, bottom-right, top-right, top-left]
+            let world_heights = [
+                y_offset + wall.heights[0],
+                y_offset + wall.heights[1],
+                y_offset + wall.heights[2],
+                y_offset + wall.heights[3],
+            ];
+
+            // Calculate V based on absolute world position
+            // V = -world_y / SECTOR_SIZE (higher Y = lower V value, texture wraps via rasterizer)
+            // Don't use fract() - let the rasterizer handle wrapping to maintain continuous interpolation
+            [
+                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE),
+                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE),
+                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE),
+                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE),
+            ]
+        } else {
+            // Default mode: standard per-vertex UVs
+            wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ])
+        };
 
         let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
 

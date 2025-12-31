@@ -94,6 +94,7 @@ pub mod icon {
     pub const FLIP_VERTICAL: char = '\u{e21a}';   // flip-vertical-2
     pub const ROTATE_CW: char = '\u{e147}';       // rotate-cw
     pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
+    pub const RATIO: char = '\u{e4e8}';           // ratio (1:1 texel mapping)
 
     // Geometry operations
     pub const UNFOLD_VERTICAL: char = '\u{e1a0}'; // unfold-vertical (extrude)

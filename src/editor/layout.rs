@@ -245,7 +245,9 @@ pub fn draw_editor(
     let (grid_rect, room_props_rect) = layout.left_split.update(ctx, left_rect);
 
     // Right split: texture palette | face properties
-    let (texture_rect, props_rect) = layout.right_panel_split.update(ctx, right_rect);
+    // Use layout() first to get rects, then handle_input() AFTER drawing contents
+    // This allows widgets inside the panels to claim drags before the divider can
+    let (texture_rect, props_rect) = layout.right_panel_split.layout(right_rect);
 
     // Split grid_rect: Skybox panel (fixed height) | 2D Grid
     let skybox_panel_height = 195.0;
@@ -292,6 +294,10 @@ pub fn draw_editor(
 
     draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
     draw_properties(ctx, panel_content_rect(props_rect, true), state, icon_font);
+
+    // Handle right panel split input AFTER drawing contents
+    // This allows UV controls and other widgets to claim drags first
+    layout.right_panel_split.handle_input(ctx, right_rect);
 
     // Draw status bar
     draw_status_bar(status_rect, state);
@@ -627,7 +633,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
 
-    // Edit actions
+    // Edit actions (unified undo/redo for both level and selection changes)
     if actions.triggered("edit.undo", &actx) {
         state.undo();
     }
@@ -674,7 +680,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
                 if let Some(room) = state.level.rooms.get_mut(room_idx) {
                     let new_index = room.objects.len();
                     room.objects.push(new_obj);
-                    state.selection = Selection::Object { room: room_idx, index: new_index };
+                    state.set_selection(Selection::Object { room: room_idx, index: new_index });
                     state.set_status("Object pasted", 2.0);
                 }
             } else {
@@ -1801,13 +1807,13 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floo
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    // Add space for UV info, controls, buttons, color, color picker, normal mode, and extrude
-    let uv_lines = if face.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
+    // Add space for UV coordinates, controls, buttons, color, color picker, normal mode, and extrude
+    let uv_lines = 1; // Just coordinates
     header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + extrude_button_height
 }
 
 /// Calculate height needed for a wall face container
-fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
+fn wall_face_container_height(_wall: &crate::world::VerticalFace) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
     let button_row_height = 24.0;
@@ -1816,8 +1822,8 @@ fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
     let lines = 3; // texture, y range, blend
-    // Add space for UV info, controls, buttons, color, color picker, and normal mode
-    let uv_lines = if wall.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
+    // Add space for UV coordinates, controls, buttons, color, color picker, and normal mode
+    let uv_lines = 1; // Just coordinates
     header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height
 }
 
@@ -1889,18 +1895,15 @@ fn draw_horizontal_face_container(
     content_y += line_height;
 
     // UV coordinates display
-    let uv_label_color = Color::from_rgba(150, 150, 150, 255);
-    if let Some(uv) = &face.uv {
-        draw_text("UV: Custom", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-        // Show UV coordinates compactly
-        draw_text(&format!("  [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
-            content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
-        content_y += line_height;
-    } else {
-        draw_text("UV: Default", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-    }
+    let uv = face.uv.unwrap_or([
+        crate::rasterizer::Vec2::new(0.0, 0.0),  // NW
+        crate::rasterizer::Vec2::new(1.0, 0.0),  // NE
+        crate::rasterizer::Vec2::new(1.0, 1.0),  // SE
+        crate::rasterizer::Vec2::new(0.0, 1.0),  // SW
+    ]);
+    draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+        content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
+    content_y += line_height;
 
     // UV parameter editing controls
     let controls_width = width - CONTAINER_PADDING * 2.0;
@@ -2475,7 +2478,7 @@ fn draw_uv_controls(
     let value_start = x + link_btn_size + 4.0 + label_width;
     let ox_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, ox_rect, params.x_offset, 0.1, 1001,
+        ctx, ox_rect, params.x_offset, 0.1, 2001,
         &mut state.uv_drag_active[0], &mut state.uv_drag_start_value[0], &mut state.uv_drag_start_x[0],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 0)),
     );
@@ -2489,7 +2492,7 @@ fn draw_uv_controls(
     }
     let oy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, oy_rect, params.y_offset, 0.1, 1002,
+        ctx, oy_rect, params.y_offset, 0.1, 2002,
         &mut state.uv_drag_active[1], &mut state.uv_drag_start_value[1], &mut state.uv_drag_start_x[1],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 1)),
     );
@@ -2513,31 +2516,37 @@ fn draw_uv_controls(
     draw_text("Scale", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
     let sx_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, sx_rect, params.x_scale, 0.1, 1003,
+        ctx, sx_rect, params.x_scale, 0.25, 2003,
         &mut state.uv_drag_active[2], &mut state.uv_drag_start_value[2], &mut state.uv_drag_start_x[2],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 2)),
     );
     if let Some(v) = result.value {
         let old_scale = params.x_scale;
-        params.x_scale = v.max(0.01_f32); // Prevent zero/negative scale
+        // Snap to 0.25 increments to match level geometry
+        params.x_scale = (v * 4.0).round() / 4.0;
+        params.x_scale = params.x_scale.max(0.25); // Minimum 0.25 scale
         if state.uv_scale_linked && old_scale > 0.001 {
             let ratio = params.x_scale / old_scale;
-            params.y_scale = (params.y_scale * ratio).max(0.01);
+            params.y_scale = ((params.y_scale * ratio) * 4.0).round() / 4.0;
+            params.y_scale = params.y_scale.max(0.25);
         }
         changed = true;
     }
     let sy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, sy_rect, params.y_scale, 0.1, 1004,
+        ctx, sy_rect, params.y_scale, 0.25, 2004,
         &mut state.uv_drag_active[3], &mut state.uv_drag_start_value[3], &mut state.uv_drag_start_x[3],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 3)),
     );
     if let Some(v) = result.value {
         let old_scale = params.y_scale;
-        params.y_scale = v.max(0.01_f32);
+        // Snap to 0.25 increments to match level geometry
+        params.y_scale = (v * 4.0).round() / 4.0;
+        params.y_scale = params.y_scale.max(0.25); // Minimum 0.25 scale
         if state.uv_scale_linked && old_scale > 0.001 {
             let ratio = params.y_scale / old_scale;
-            params.x_scale = (params.x_scale * ratio).max(0.01);
+            params.x_scale = ((params.x_scale * ratio) * 4.0).round() / 4.0;
+            params.x_scale = params.x_scale.max(0.25);
         }
         changed = true;
     }
@@ -2547,7 +2556,7 @@ fn draw_uv_controls(
     draw_text("Angle", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
     let angle_rect = Rect::new(value_start, current_y, width - value_start + x - 4.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, angle_rect, params.angle, 1.0, 1005,
+        ctx, angle_rect, params.angle, 1.0, 2005,
         &mut state.uv_drag_active[4], &mut state.uv_drag_start_value[4], &mut state.uv_drag_start_x[4],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 4)),
     );
@@ -2609,18 +2618,15 @@ fn draw_wall_face_container(
     content_y += line_height;
 
     // UV coordinates display
-    let uv_label_color = Color::from_rgba(150, 150, 150, 255);
-    if let Some(uv) = &wall.uv {
-        draw_text("UV: Custom", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-        // Show UV coordinates compactly
-        draw_text(&format!("  [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
-            content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
-        content_y += line_height;
-    } else {
-        draw_text("UV: Default", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-    }
+    let uv = wall.uv.unwrap_or([
+        crate::rasterizer::Vec2::new(0.0, 1.0),  // bottom-left
+        crate::rasterizer::Vec2::new(1.0, 1.0),  // bottom-right
+        crate::rasterizer::Vec2::new(1.0, 0.0),  // top-right
+        crate::rasterizer::Vec2::new(0.0, 0.0),  // top-left
+    ]);
+    draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+        content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
+    content_y += line_height;
 
     // UV parameter editing controls
     let controls_width = width - CONTAINER_PADDING * 2.0;
@@ -2641,14 +2647,39 @@ fn draw_wall_face_container(
     let btn_spacing = 4.0;
     let mut btn_x = content_x;
 
+    // Collect all wall selections (primary + multi-selection) for UV operations
+    let collect_wall_selections = |state: &EditorState| -> Vec<(usize, usize, usize, crate::world::Direction, usize)> {
+        let mut walls = Vec::new();
+        let mut all_selections: Vec<super::Selection> = vec![state.selection.clone()];
+        all_selections.extend(state.multi_selection.clone());
+
+        for sel in all_selections {
+            if let super::Selection::SectorFace { room, x, z, face } = sel {
+                match face {
+                    super::SectorFace::WallNorth(i) => walls.push((room, x, z, crate::world::Direction::North, i)),
+                    super::SectorFace::WallEast(i) => walls.push((room, x, z, crate::world::Direction::East, i)),
+                    super::SectorFace::WallSouth(i) => walls.push((room, x, z, crate::world::Direction::South, i)),
+                    super::SectorFace::WallWest(i) => walls.push((room, x, z, crate::world::Direction::West, i)),
+                    _ => {} // Skip floor/ceiling for wall UV operations
+                }
+            }
+        }
+        walls
+    };
+
     // Reset UV button
     let reset_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, reset_rect, icon::REFRESH_CW, icon_font, "Reset UV") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    w.uv = None;
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            w.uv = None;
+                        }
+                    }
                 }
             }
         }
@@ -2658,11 +2689,16 @@ fn draw_wall_face_container(
     // Flip Horizontal button
     let flip_h_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, flip_h_rect, icon::FLIP_HORIZONTAL, icon_font, "Flip UV Horizontal") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    flip_uv_horizontal(&mut w.uv);
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            flip_uv_horizontal(&mut w.uv);
+                        }
+                    }
                 }
             }
         }
@@ -2672,11 +2708,16 @@ fn draw_wall_face_container(
     // Flip Vertical button
     let flip_v_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, flip_v_rect, icon::FLIP_VERTICAL, icon_font, "Flip UV Vertical") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    flip_uv_vertical(&mut w.uv);
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            flip_uv_vertical(&mut w.uv);
+                        }
+                    }
                 }
             }
         }
@@ -2686,11 +2727,68 @@ fn draw_wall_face_container(
     // Rotate 90° CW button
     let rotate_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, rotate_rect, icon::ROTATE_CW, icon_font, "Rotate UV 90° CW") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    rotate_uv_cw(&mut w.uv);
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            rotate_uv_cw(&mut w.uv);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // 1:1 Texel mapping button - resets H scale and sets V scale to match wall height
+    let texel_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, texel_rect, icon::RATIO, icon_font, "1:1 Texel Mapping") {
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            // Calculate V scale based on wall height relative to SECTOR_SIZE
+                            let wall_height = w.height();
+                            let v_scale = wall_height / crate::world::SECTOR_SIZE;
+                            let mut params = extract_uv_params(&w.uv);
+                            params.x_scale = 1.0; // Wall width is always SECTOR_SIZE
+                            params.y_scale = v_scale;
+                            w.uv = Some(apply_uv_params(&params));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // UV Projection toggle - makes texture appear flat on sloped walls
+    let is_projected = wall.uv_projection == crate::world::UvProjection::Projected;
+    let proj_icon = if is_projected { icon::LAYERS } else { icon::SCAN };
+    let proj_tooltip = if is_projected { "UV Projection: ON (click to disable)" } else { "UV Projection: OFF (click for uniform texture on slopes)" };
+    let proj_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, proj_rect, proj_icon, icon_font, proj_tooltip) {
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            let new_projection = if is_projected {
+                crate::world::UvProjection::Default
+            } else {
+                crate::world::UvProjection::Projected
+            };
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            w.uv_projection = new_projection;
+                        }
+                    }
                 }
             }
         }

@@ -72,6 +72,20 @@ pub enum Selection {
     Object { room: usize, index: usize },
 }
 
+/// Snapshot of selection state for undo/redo
+#[derive(Debug, Clone)]
+pub struct SelectionSnapshot {
+    pub selection: Selection,
+    pub multi_selection: Vec<Selection>,
+}
+
+/// Unified undo event - either a level change or a selection change
+#[derive(Debug, Clone)]
+pub enum UndoEvent {
+    Level(Level),
+    Selection(SelectionSnapshot),
+}
+
 impl Selection {
     /// Check if this selection includes a specific sector (either whole sector or face within it)
     pub fn includes_sector(&self, room_idx: usize, sx: usize, sz: usize) -> bool {
@@ -163,9 +177,9 @@ pub struct EditorState {
     /// Vertex editing mode
     pub link_coincident_vertices: bool, // When true, moving a vertex moves all vertices at same position
 
-    /// Undo/redo (simple version - just level snapshots)
-    pub undo_stack: Vec<Level>,
-    pub redo_stack: Vec<Level>,
+    /// Unified undo/redo stack (level and selection changes in order)
+    pub undo_stack: Vec<UndoEvent>,
+    pub redo_stack: Vec<UndoEvent>,
 
     /// Dirty flag (unsaved changes)
     pub dirty: bool,
@@ -432,6 +446,7 @@ impl EditorState {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.selection = Selection::None;
+        self.multi_selection.clear();
         self.selected_vertex_indices.clear();
         self.portals_dirty = true; // Recalculate portals for loaded level
         // Clamp current_room to valid range
@@ -441,6 +456,8 @@ impl EditorState {
     }
 
     /// Set the current selection and clear vertex color selection
+    /// Does NOT auto-save undo - caller should call save_selection_undo() BEFORE
+    /// modifying any selection state (including toggle/clear multi_selection)
     pub fn set_selection(&mut self, selection: Selection) {
         self.selection = selection;
         self.selected_vertex_indices.clear();
@@ -462,31 +479,79 @@ impl EditorState {
         None
     }
 
-    /// Save current state for undo
+    /// Save current level state for undo
     pub fn save_undo(&mut self) {
-        self.undo_stack.push(self.level.clone());
+        self.undo_stack.push(UndoEvent::Level(self.level.clone()));
         self.redo_stack.clear();
         self.dirty = true;
 
         // Limit undo stack size
-        if self.undo_stack.len() > 50 {
+        if self.undo_stack.len() > 100 {
             self.undo_stack.remove(0);
         }
     }
 
-    /// Undo last action
-    pub fn undo(&mut self) {
-        if let Some(prev) = self.undo_stack.pop() {
-            self.redo_stack.push(self.level.clone());
-            self.level = prev;
+    /// Save current selection state for undo
+    pub fn save_selection_undo(&mut self) {
+        // Don't save if selection hasn't changed from the last selection snapshot
+        for event in self.undo_stack.iter().rev() {
+            if let UndoEvent::Selection(last) = event {
+                if last.selection == self.selection && last.multi_selection == self.multi_selection {
+                    return; // No change from last selection snapshot
+                }
+                break; // Found a different selection snapshot
+            }
+        }
+
+        self.undo_stack.push(UndoEvent::Selection(SelectionSnapshot {
+            selection: self.selection.clone(),
+            multi_selection: self.multi_selection.clone(),
+        }));
+        self.redo_stack.clear();
+
+        // Limit stack size
+        if self.undo_stack.len() > 100 {
+            self.undo_stack.remove(0);
         }
     }
 
-    /// Redo last undone action
+    /// Undo last action (level or selection)
+    pub fn undo(&mut self) {
+        if let Some(event) = self.undo_stack.pop() {
+            match event {
+                UndoEvent::Level(prev_level) => {
+                    self.redo_stack.push(UndoEvent::Level(self.level.clone()));
+                    self.level = prev_level;
+                }
+                UndoEvent::Selection(prev_sel) => {
+                    self.redo_stack.push(UndoEvent::Selection(SelectionSnapshot {
+                        selection: self.selection.clone(),
+                        multi_selection: self.multi_selection.clone(),
+                    }));
+                    self.set_selection(prev_sel.selection);
+                    self.multi_selection = prev_sel.multi_selection;
+                }
+            }
+        }
+    }
+
+    /// Redo last undone action (level or selection)
     pub fn redo(&mut self) {
-        if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(self.level.clone());
-            self.level = next;
+        if let Some(event) = self.redo_stack.pop() {
+            match event {
+                UndoEvent::Level(next_level) => {
+                    self.undo_stack.push(UndoEvent::Level(self.level.clone()));
+                    self.level = next_level;
+                }
+                UndoEvent::Selection(next_sel) => {
+                    self.undo_stack.push(UndoEvent::Selection(SelectionSnapshot {
+                        selection: self.selection.clone(),
+                        multi_selection: self.multi_selection.clone(),
+                    }));
+                    self.set_selection(next_sel.selection);
+                    self.multi_selection = next_sel.multi_selection;
+                }
+            }
         }
     }
 
@@ -522,6 +587,7 @@ impl EditorState {
     }
 
     /// Add a selection to the multi-selection list (if not already present)
+    /// Note: Caller should call save_selection_undo() before a batch of selection changes
     pub fn add_to_multi_selection(&mut self, selection: Selection) {
         if !matches!(selection, Selection::None) && !self.is_multi_selected(&selection) {
             self.multi_selection.push(selection);
@@ -529,6 +595,7 @@ impl EditorState {
     }
 
     /// Clear multi-selection
+    /// Note: Caller should call save_selection_undo() before a batch of selection changes
     pub fn clear_multi_selection(&mut self) {
         self.multi_selection.clear();
     }
@@ -536,6 +603,7 @@ impl EditorState {
     /// Toggle a selection in the multi-selection list
     /// Also ensures the current primary selection is in multi_selection
     /// (so Shift+click after a regular click keeps the first item selected)
+    /// Note: Does not auto-save undo - caller should use set_selection() after, which will save
     pub fn toggle_multi_selection(&mut self, selection: Selection) {
         // First, ensure the current primary selection is in multi_selection
         // This handles the case where user clicks A, then Shift+clicks B
