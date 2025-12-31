@@ -1215,12 +1215,32 @@ pub struct VerticalFace {
 }
 
 impl VerticalFace {
+    /// Compute 1:1 texel UV mapping based on wall height
+    /// x_scale = 1.0 (wall width is always SECTOR_SIZE)
+    /// y_scale = wall_height / SECTOR_SIZE
+    fn compute_1to1_uv(heights: &[f32; 4]) -> [Vec2; 4] {
+        let bottom = (heights[0] + heights[1]) / 2.0;
+        let top = (heights[2] + heights[3]) / 2.0;
+        let wall_height = (top - bottom).abs();
+        let v_scale = wall_height / SECTOR_SIZE;
+
+        // UV corners: [bottom-left, bottom-right, top-right, top-left]
+        // Default UV with x_scale=1.0, y_scale=v_scale, no rotation, no offset
+        [
+            Vec2::new(0.0, v_scale),  // bottom-left
+            Vec2::new(1.0, v_scale),  // bottom-right
+            Vec2::new(1.0, 0.0),      // top-right
+            Vec2::new(0.0, 0.0),      // top-left
+        ]
+    }
+
     /// Create a wall from bottom to top (all corners at same heights)
     pub fn new(y_bottom: f32, y_top: f32, texture: TextureRef) -> Self {
+        let heights = [y_bottom, y_bottom, y_top, y_top];
         Self {
-            heights: [y_bottom, y_bottom, y_top, y_top],
+            uv: Some(Self::compute_1to1_uv(&heights)),
+            heights,
             texture,
-            uv: None,
             solid: true,
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
@@ -1233,10 +1253,11 @@ impl VerticalFace {
     /// Create a wall with individual corner heights for sloped surfaces
     /// Heights order: [bottom-left, bottom-right, top-right, top-left]
     pub fn new_sloped(bl: f32, br: f32, tr: f32, tl: f32, texture: TextureRef) -> Self {
+        let heights = [bl, br, tr, tl];
         Self {
-            heights: [bl, br, tr, tl],
+            uv: Some(Self::compute_1to1_uv(&heights)),
+            heights,
             texture,
-            uv: None,
             solid: true,
             blend_mode: BlendMode::Opaque,
             colors: [Color::NEUTRAL; 4],
