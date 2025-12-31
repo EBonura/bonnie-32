@@ -3058,7 +3058,8 @@ fn collect_all_room_vertices(state: &EditorState) -> VertexData {
     all_vertices
 }
 
-/// Find hovered elements in Select mode (vertex > edge > face priority)
+/// Find hovered elements in Select mode using depth-based selection.
+/// The element closest to the camera wins, regardless of type (vertex/edge/face).
 fn find_hovered_elements(
     state: &EditorState,
     mouse_fb: (f32, f32),
@@ -3072,9 +3073,17 @@ fn find_hovered_elements(
     const VERTEX_THRESHOLD: f32 = 10.0;
     const EDGE_THRESHOLD: f32 = 8.0;
 
-    // Check vertices first (highest priority)
+    // Track which type wins: 0=vertex, 1=edge, 2=face
+    let mut best_type: usize = 0;
+
+    // Temporary storage for best vertex/edge with depth
+    let mut best_vertex: Option<(usize, usize, usize, usize, SectorFace, f32, f32)> = None; // + depth
+    let mut best_edge: Option<(usize, usize, usize, usize, usize, Option<SectorFace>, f32, f32)> = None; // + depth
+    let mut best_face: Option<(usize, usize, usize, SectorFace, f32)> = None;
+
+    // Check vertices with depth
     for (world_pos, room_idx, gx, gz, corner_idx, face) in all_vertices {
-        if let Some((sx, sy)) = world_to_screen(
+        if let Some((sx, sy, depth)) = world_to_screen_with_depth(
             *world_pos,
             state.camera_3d.position,
             state.camera_3d.basis_x,
@@ -3083,200 +3092,223 @@ fn find_hovered_elements(
             fb_width,
             fb_height,
         ) {
-            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-            if dist < VERTEX_THRESHOLD {
-                if result.vertex.map_or(true, |(_, _, _, _, _, best_dist)| dist < best_dist) {
-                    result.vertex = Some((*room_idx, *gx, *gz, *corner_idx, *face, dist));
+            let screen_dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+            if screen_dist < VERTEX_THRESHOLD {
+                // Check if this is closer than current best vertex
+                if best_vertex.map_or(true, |(_, _, _, _, _, _, best_d)| depth < best_d) {
+                    best_vertex = Some((*room_idx, *gx, *gz, *corner_idx, *face, screen_dist, depth));
                 }
             }
         }
     }
 
-    // Check edges if no vertex hovered
-    if result.vertex.is_none() {
-        if let Some(room) = state.level.rooms.get(state.current_room) {
-            let room_y = room.position.y; // Y offset for world-space
-            for (gx, gz, sector) in room.iter_sectors() {
-                let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-                let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+    // Check edges with depth
+    if let Some(room) = state.level.rooms.get(state.current_room) {
+        let room_y = room.position.y;
+        for (gx, gz, sector) in room.iter_sectors() {
+            let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+            let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
 
-                // Check floor edges
-                if let Some(floor) = &sector.floor {
-                    let corners = [
-                        Vec3::new(base_x, room_y + floor.heights[0], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
-                    ];
-                    for edge_idx in 0..4 {
-                        let v0 = corners[edge_idx];
-                        let v1 = corners[(edge_idx + 1) % 4];
-                        if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                            world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                            world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height)
-                        ) {
-                            let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
-                            if dist < EDGE_THRESHOLD {
-                                if result.edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
-                                    result.edge = Some((state.current_room, gx, gz, 0, edge_idx, None, dist));
-                                }
-                            }
+            // Helper to check an edge and update best_edge if closer
+            let mut check_edge = |v0: Vec3, v1: Vec3, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace>| {
+                if let (Some((sx0, sy0, d0)), Some((sx1, sy1, d1))) = (
+                    world_to_screen_with_depth(v0, state.camera_3d.position, state.camera_3d.basis_x,
+                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
+                    world_to_screen_with_depth(v1, state.camera_3d.position, state.camera_3d.basis_x,
+                        state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height)
+                ) {
+                    let screen_dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
+                    if screen_dist < EDGE_THRESHOLD {
+                        // Interpolate depth along the edge based on closest point
+                        let edge_depth = interpolate_edge_depth(
+                            mouse_fb_x, mouse_fb_y, sx0, sy0, d0, sx1, sy1, d1
+                        );
+                        if best_edge.map_or(true, |(_, _, _, _, _, _, _, best_d)| edge_depth < best_d) {
+                            best_edge = Some((state.current_room, gx, gz, face_idx, edge_idx, wall_face, screen_dist, edge_depth));
                         }
                     }
                 }
+            };
 
-                // Check ceiling edges
-                if let Some(ceiling) = &sector.ceiling {
-                    let corners = [
-                        Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
-                    ];
-                    for edge_idx in 0..4 {
-                        let v0 = corners[edge_idx];
-                        let v1 = corners[(edge_idx + 1) % 4];
-                        if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                            world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                            world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height)
-                        ) {
-                            let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
-                            if dist < EDGE_THRESHOLD {
-                                if result.edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
-                                    result.edge = Some((state.current_room, gx, gz, 1, edge_idx, None, dist));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Check wall edges
-                let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-                    (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-                    (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-                    (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-                    (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+            // Check floor edges
+            if let Some(floor) = &sector.floor {
+                let corners = [
+                    Vec3::new(base_x, room_y + floor.heights[0], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
                 ];
+                for edge_idx in 0..4 {
+                    check_edge(corners[edge_idx], corners[(edge_idx + 1) % 4], 0, edge_idx, None);
+                }
+            }
 
-                for (walls, x0, z0, x1, z1, make_face) in wall_configs {
-                    for (i, wall) in walls.iter().enumerate() {
-                        let wall_corners = [
-                            Vec3::new(x0, room_y + wall.heights[0], z0),
-                            Vec3::new(x1, room_y + wall.heights[1], z1),
-                            Vec3::new(x1, room_y + wall.heights[2], z1),
-                            Vec3::new(x0, room_y + wall.heights[3], z0),
-                        ];
-                        for edge_idx in 0..4 {
-                            let v0 = wall_corners[edge_idx];
-                            let v1 = wall_corners[(edge_idx + 1) % 4];
-                            if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                                world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
-                                world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
-                                    state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height)
-                            ) {
-                                let dist = point_to_segment_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
-                                if dist < EDGE_THRESHOLD {
-                                    if result.edge.map_or(true, |(_, _, _, _, _, _, best_dist)| dist < best_dist) {
-                                        let wall_face = make_face(i);
-                                        result.edge = Some((state.current_room, gx, gz, 2, edge_idx, Some(wall_face), dist));
-                                    }
-                                }
-                            }
-                        }
+            // Check ceiling edges
+            if let Some(ceiling) = &sector.ceiling {
+                let corners = [
+                    Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
+                ];
+                for edge_idx in 0..4 {
+                    check_edge(corners[edge_idx], corners[(edge_idx + 1) % 4], 1, edge_idx, None);
+                }
+            }
+
+            // Check wall edges
+            let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
+                (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
+                (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
+                (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
+                (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+            ];
+
+            for (walls, x0, z0, x1, z1, make_face) in wall_configs {
+                for (i, wall) in walls.iter().enumerate() {
+                    let wall_corners = [
+                        Vec3::new(x0, room_y + wall.heights[0], z0),
+                        Vec3::new(x1, room_y + wall.heights[1], z1),
+                        Vec3::new(x1, room_y + wall.heights[2], z1),
+                        Vec3::new(x0, room_y + wall.heights[3], z0),
+                    ];
+                    for edge_idx in 0..4 {
+                        check_edge(wall_corners[edge_idx], wall_corners[(edge_idx + 1) % 4], 2, edge_idx, Some(make_face(i)));
                     }
                 }
             }
         }
     }
 
-    // Check faces if no vertex or edge hovered
-    // Track the closest face by depth (smaller depth = closer to camera)
-    if result.vertex.is_none() && result.edge.is_none() {
-        let mut best_face: Option<(usize, usize, usize, SectorFace, f32)> = None; // (room, gx, gz, face, depth)
+    // Check faces (already uses depth)
+    if let Some(room) = state.level.rooms.get(state.current_room) {
+        let room_y = room.position.y;
+        for (gx, gz, sector) in room.iter_sectors() {
+            let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+            let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
 
-        if let Some(room) = state.level.rooms.get(state.current_room) {
-            let room_y = room.position.y;
-            for (gx, gz, sector) in room.iter_sectors() {
-                let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-                let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
-
-                // Check floor
-                if let Some(floor) = &sector.floor {
-                    let corners = [
-                        Vec3::new(base_x, room_y + floor.heights[0], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
-                    ];
-
-                    if let Some(depth) = check_quad_hit_with_depth(
-                        mouse_fb_x, mouse_fb_y, &corners, &state.camera_3d, fb_width, fb_height
-                    ) {
-                        if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
-                            best_face = Some((state.current_room, gx, gz, SectorFace::Floor, depth));
-                        }
-                    }
-                }
-
-                // Check ceiling
-                if let Some(ceiling) = &sector.ceiling {
-                    let corners = [
-                        Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
-                    ];
-
-                    if let Some(depth) = check_quad_hit_with_depth(
-                        mouse_fb_x, mouse_fb_y, &corners, &state.camera_3d, fb_width, fb_height
-                    ) {
-                        if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
-                            best_face = Some((state.current_room, gx, gz, SectorFace::Ceiling, depth));
-                        }
-                    }
-                }
-
-                // Check walls
-                let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-                    (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-                    (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-                    (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-                    (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+            // Check floor
+            if let Some(floor) = &sector.floor {
+                let corners = [
+                    Vec3::new(base_x, room_y + floor.heights[0], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
                 ];
 
-                for (walls, x0, z0, x1, z1, make_face) in wall_configs {
-                    for (i, wall) in walls.iter().enumerate() {
-                        let wall_corners = [
-                            Vec3::new(x0, room_y + wall.heights[0], z0),
-                            Vec3::new(x1, room_y + wall.heights[1], z1),
-                            Vec3::new(x1, room_y + wall.heights[2], z1),
-                            Vec3::new(x0, room_y + wall.heights[3], z0),
-                        ];
+                if let Some(depth) = check_quad_hit_with_depth(
+                    mouse_fb_x, mouse_fb_y, &corners, &state.camera_3d, fb_width, fb_height
+                ) {
+                    if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
+                        best_face = Some((state.current_room, gx, gz, SectorFace::Floor, depth));
+                    }
+                }
+            }
 
-                        if let Some(depth) = check_quad_hit_with_depth(
-                            mouse_fb_x, mouse_fb_y, &wall_corners, &state.camera_3d, fb_width, fb_height
-                        ) {
-                            if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
-                                best_face = Some((state.current_room, gx, gz, make_face(i), depth));
-                            }
+            // Check ceiling
+            if let Some(ceiling) = &sector.ceiling {
+                let corners = [
+                    Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
+                ];
+
+                if let Some(depth) = check_quad_hit_with_depth(
+                    mouse_fb_x, mouse_fb_y, &corners, &state.camera_3d, fb_width, fb_height
+                ) {
+                    if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
+                        best_face = Some((state.current_room, gx, gz, SectorFace::Ceiling, depth));
+                    }
+                }
+            }
+
+            // Check walls
+            let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
+                (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
+                (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
+                (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
+                (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+            ];
+
+            for (walls, x0, z0, x1, z1, make_face) in wall_configs {
+                for (i, wall) in walls.iter().enumerate() {
+                    let wall_corners = [
+                        Vec3::new(x0, room_y + wall.heights[0], z0),
+                        Vec3::new(x1, room_y + wall.heights[1], z1),
+                        Vec3::new(x1, room_y + wall.heights[2], z1),
+                        Vec3::new(x0, room_y + wall.heights[3], z0),
+                    ];
+
+                    if let Some(depth) = check_quad_hit_with_depth(
+                        mouse_fb_x, mouse_fb_y, &wall_corners, &state.camera_3d, fb_width, fb_height
+                    ) {
+                        if best_face.map_or(true, |(_, _, _, _, best_depth)| depth < best_depth) {
+                            best_face = Some((state.current_room, gx, gz, make_face(i), depth));
                         }
                     }
                 }
             }
         }
+    }
 
-        // Use the closest face
-        if let Some((room_idx, gx, gz, face, _depth)) = best_face {
-            result.face = Some((room_idx, gx, gz, face));
+    // Depth tolerance as percentage - when depths are within this ratio of each other,
+    // use priority ordering (vertex > edge > face) instead of strict depth comparison.
+    // 1% means depths within 1% are considered "same depth".
+    const DEPTH_TOLERANCE_PERCENT: f32 = 0.01;
+
+    // Collect candidates with their depths and priorities (lower type = higher priority)
+    let mut candidates: Vec<(f32, usize)> = Vec::new(); // (depth, type) where type: 0=vertex, 1=edge, 2=face
+
+    if let Some((_, _, _, _, _, _, vertex_depth)) = best_vertex {
+        candidates.push((vertex_depth, 0));
+    }
+    if let Some((_, _, _, _, _, _, _, edge_depth)) = best_edge {
+        candidates.push((edge_depth, 1));
+    }
+    if let Some((_, _, _, _, face_depth)) = best_face {
+        candidates.push((face_depth, 2));
+    }
+
+    // Find the winner: closest depth, but when depths are within tolerance, lower type wins
+    if !candidates.is_empty() {
+        // Sort by depth first
+        candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // The closest candidate
+        let (closest_depth, _) = candidates[0];
+        let tolerance = closest_depth * DEPTH_TOLERANCE_PERCENT;
+
+        // Among all candidates within tolerance of the closest, pick the one with lowest type (highest priority)
+        best_type = candidates.iter()
+            .filter(|(d, _)| (*d - closest_depth).abs() < tolerance)
+            .map(|(_, t)| *t)
+            .min()
+            .unwrap_or(candidates[0].1);
+    }
+
+    // Set result based on which type won
+    match best_type {
+        0 => {
+            if let Some((room_idx, gx, gz, corner_idx, face, screen_dist, _)) = best_vertex {
+                result.vertex = Some((room_idx, gx, gz, corner_idx, face, screen_dist));
+            }
         }
+        1 => {
+            if let Some((room_idx, gx, gz, face_idx, edge_idx, wall_face, screen_dist, _)) = best_edge {
+                result.edge = Some((room_idx, gx, gz, face_idx, edge_idx, wall_face, screen_dist));
+            }
+        }
+        2 => {
+            if let Some((room_idx, gx, gz, face, _)) = best_face {
+                result.face = Some((room_idx, gx, gz, face));
+            }
+        }
+        _ => {}
     }
 
     // Check objects (level objects like spawns, lights, triggers, etc.)
+    // Objects use screen distance for now (they're point markers)
     const OBJECT_THRESHOLD: f32 = 12.0;
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         for (obj_idx, obj) in room.objects.iter().enumerate() {
@@ -3301,6 +3333,29 @@ fn find_hovered_elements(
     }
 
     result
+}
+
+/// Interpolate depth along an edge based on the closest point to the mouse.
+fn interpolate_edge_depth(
+    mx: f32, my: f32,           // Mouse position
+    x0: f32, y0: f32, d0: f32,  // Edge start (screen x, y, depth)
+    x1: f32, y1: f32, d1: f32,  // Edge end (screen x, y, depth)
+) -> f32 {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len_sq = dx * dx + dy * dy;
+
+    if len_sq < 0.0001 {
+        // Degenerate edge, return average depth
+        return (d0 + d1) * 0.5;
+    }
+
+    // Project mouse onto edge line, clamped to [0, 1]
+    let t = ((mx - x0) * dx + (my - y0) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    // Interpolate depth
+    d0 + t * (d1 - d0)
 }
 
 /// Check if a point is inside a quad (4 corners) and return depth at that point if hit.
