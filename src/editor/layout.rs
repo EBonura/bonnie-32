@@ -2513,31 +2513,37 @@ fn draw_uv_controls(
     draw_text("Scale", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
     let sx_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, sx_rect, params.x_scale, 0.1, 1003,
+        ctx, sx_rect, params.x_scale, 0.25, 1003,
         &mut state.uv_drag_active[2], &mut state.uv_drag_start_value[2], &mut state.uv_drag_start_x[2],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 2)),
     );
     if let Some(v) = result.value {
         let old_scale = params.x_scale;
-        params.x_scale = v.max(0.01_f32); // Prevent zero/negative scale
+        // Snap to 0.25 increments to match level geometry
+        params.x_scale = (v * 4.0).round() / 4.0;
+        params.x_scale = params.x_scale.max(0.25); // Minimum 0.25 scale
         if state.uv_scale_linked && old_scale > 0.001 {
             let ratio = params.x_scale / old_scale;
-            params.y_scale = (params.y_scale * ratio).max(0.01);
+            params.y_scale = ((params.y_scale * ratio) * 4.0).round() / 4.0;
+            params.y_scale = params.y_scale.max(0.25);
         }
         changed = true;
     }
     let sy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, sy_rect, params.y_scale, 0.1, 1004,
+        ctx, sy_rect, params.y_scale, 0.25, 1004,
         &mut state.uv_drag_active[3], &mut state.uv_drag_start_value[3], &mut state.uv_drag_start_x[3],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 3)),
     );
     if let Some(v) = result.value {
         let old_scale = params.y_scale;
-        params.y_scale = v.max(0.01_f32);
+        // Snap to 0.25 increments to match level geometry
+        params.y_scale = (v * 4.0).round() / 4.0;
+        params.y_scale = params.y_scale.max(0.25); // Minimum 0.25 scale
         if state.uv_scale_linked && old_scale > 0.001 {
             let ratio = params.y_scale / old_scale;
-            params.x_scale = (params.x_scale * ratio).max(0.01);
+            params.x_scale = ((params.x_scale * ratio) * 4.0).round() / 4.0;
+            params.x_scale = params.x_scale.max(0.25);
         }
         changed = true;
     }
@@ -2691,6 +2697,28 @@ fn draw_wall_face_container(
             if let Some(s) = r.get_sector_mut(gx, gz) {
                 if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
                     rotate_uv_cw(&mut w.uv);
+                }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // 1:1 Texel mapping button - resets H scale and sets V scale to match wall height
+    let texel_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, texel_rect, icon::RATIO, icon_font, "1:1 Texel Mapping") {
+        state.save_undo();
+        // Calculate V scale based on wall height relative to SECTOR_SIZE
+        // SECTOR_SIZE (1024) maps to UV scale 1.0, so a 512-high wall needs scale 0.5
+        // H scale is always 1.0 since wall width is always SECTOR_SIZE
+        let wall_height = wall.height();
+        let v_scale = wall_height / crate::world::SECTOR_SIZE;
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    let mut params = extract_uv_params(&w.uv);
+                    params.x_scale = 1.0; // Wall width is always SECTOR_SIZE
+                    params.y_scale = v_scale;
+                    w.uv = Some(apply_uv_params(&params));
                 }
             }
         }
