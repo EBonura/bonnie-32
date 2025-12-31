@@ -667,7 +667,7 @@ impl EditorState {
             // Find the texture index within the pack
             if let Some(pack) = self.texture_packs.get(idx) {
                 if let Some(tex_idx) = pack.textures.iter().position(|t| t.name == tex_ref.name) {
-                    // Calculate scroll position to show the texture
+                    // Calculate scroll position to show the texture at the top of visible area
                     // Constants from texture_palette.rs
                     const THUMB_SIZE: f32 = 48.0;
                     const THUMB_PADDING: f32 = 4.0;
@@ -678,10 +678,11 @@ impl EditorState {
                     let cols = cols.max(1);
 
                     let row = tex_idx / cols;
+                    // Position this row at top of visible area
                     let row_y = row as f32 * (THUMB_SIZE + THUMB_PADDING);
 
-                    // Set scroll to show this row (with some margin above)
-                    self.texture_scroll = (row_y - THUMB_SIZE).max(0.0);
+                    // Set scroll to show this row at the top (texture_palette will clamp to valid range)
+                    self.texture_scroll = row_y;
                 }
             }
         }
