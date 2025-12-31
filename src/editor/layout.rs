@@ -348,10 +348,18 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     // Edit operations
     if toolbar.icon_button(ctx, icon::UNDO, icon_font, "Undo") {
-        state.undo();
+        if state.can_undo_selection() {
+            state.undo_selection();
+        } else {
+            state.undo();
+        }
     }
     if toolbar.icon_button(ctx, icon::REDO, icon_font, "Redo") {
-        state.redo();
+        if state.can_redo_selection() {
+            state.redo_selection();
+        } else {
+            state.redo();
+        }
     }
 
     toolbar.separator();
@@ -634,11 +642,21 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     }
 
     // Edit actions
+    // Undo: first try selection undo, then level undo
     if actions.triggered("edit.undo", &actx) {
-        state.undo();
+        if state.can_undo_selection() {
+            state.undo_selection();
+        } else {
+            state.undo();
+        }
     }
+    // Redo: first try selection redo, then level redo
     if actions.triggered("edit.redo", &actx) {
-        state.redo();
+        if state.can_redo_selection() {
+            state.redo_selection();
+        } else {
+            state.redo();
+        }
     }
 
     // Copy selected object
@@ -680,7 +698,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
                 if let Some(room) = state.level.rooms.get_mut(room_idx) {
                     let new_index = room.objects.len();
                     room.objects.push(new_obj);
-                    state.selection = Selection::Object { room: room_idx, index: new_index };
+                    state.set_selection(Selection::Object { room: room_idx, index: new_index });
                     state.set_status("Object pasted", 2.0);
                 }
             } else {

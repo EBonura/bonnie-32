@@ -93,7 +93,7 @@ pub fn draw_viewport_3d(
 
     // Clear selection with Escape key
     if inside_viewport && is_key_pressed(KeyCode::Escape) && state.selection != Selection::None {
-        state.selection = Selection::None;
+        state.set_selection(Selection::None);
         state.set_status("Selection cleared", 0.5);
     }
 
@@ -470,7 +470,8 @@ pub fn draw_viewport_3d(
                     } else {
                         state.clear_multi_selection();
                     }
-                    // Use direct assignment to preserve vertex index selection
+                    // Save selection for undo, but use direct assignment to preserve vertex index selection
+                    state.save_selection_undo();
                     state.selection = new_selection;
 
                     // Scroll texture palette to show this face's texture
@@ -580,7 +581,8 @@ pub fn draw_viewport_3d(
                             state.clear_multi_selection();
                         }
                     }
-                    // Use direct assignment to preserve vertex selection
+                    // Save selection for undo, but use direct assignment to preserve vertex selection
+                    state.save_selection_undo();
                     state.selection = new_selection;
 
                     // Scroll texture palette to show this face's texture
@@ -799,7 +801,7 @@ pub fn draw_viewport_3d(
                         }
                     } else {
                         // Select object
-                        state.selection = Selection::Object { room: obj_room_idx, index: obj_idx };
+                        state.set_selection(Selection::Object { room: obj_room_idx, index: obj_idx });
                         state.set_status("Object selected", 1.0);
                     }
                 } else if let Some((room_idx, gx, gz, face)) = hovered_face {
@@ -1120,7 +1122,7 @@ pub fn draw_viewport_3d(
             // PlaceObject mode - select existing objects in 3D (placement is in 2D grid view)
             else if state.tool == EditorTool::PlaceObject {
                 if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
-                    state.selection = Selection::Object { room: obj_room_idx, index: obj_idx };
+                    state.set_selection(Selection::Object { room: obj_room_idx, index: obj_idx });
                     state.set_status("Object selected", 1.0);
                 } else {
                     state.set_status("Use 2D grid view to place objects", 2.0);

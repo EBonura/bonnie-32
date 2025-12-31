@@ -72,6 +72,13 @@ pub enum Selection {
     Object { room: usize, index: usize },
 }
 
+/// Snapshot of selection state for undo/redo
+#[derive(Debug, Clone)]
+pub struct SelectionSnapshot {
+    pub selection: Selection,
+    pub multi_selection: Vec<Selection>,
+}
+
 impl Selection {
     /// Check if this selection includes a specific sector (either whole sector or face within it)
     pub fn includes_sector(&self, room_idx: usize, sx: usize, sz: usize) -> bool {
@@ -166,6 +173,10 @@ pub struct EditorState {
     /// Undo/redo (simple version - just level snapshots)
     pub undo_stack: Vec<Level>,
     pub redo_stack: Vec<Level>,
+
+    /// Selection history for undo/redo
+    pub selection_undo_stack: Vec<SelectionSnapshot>,
+    pub selection_redo_stack: Vec<SelectionSnapshot>,
 
     /// Dirty flag (unsaved changes)
     pub dirty: bool,
@@ -354,6 +365,8 @@ impl EditorState {
             link_coincident_vertices: true, // Default to linked mode
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            selection_undo_stack: Vec::new(),
+            selection_redo_stack: Vec::new(),
             dirty: false,
             status_message: None,
             viewport_last_mouse: (0.0, 0.0),
@@ -431,7 +444,10 @@ impl EditorState {
         self.dirty = false;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.selection_undo_stack.clear();
+        self.selection_redo_stack.clear();
         self.selection = Selection::None;
+        self.multi_selection.clear();
         self.selected_vertex_indices.clear();
         self.portals_dirty = true; // Recalculate portals for loaded level
         // Clamp current_room to valid range
@@ -441,7 +457,16 @@ impl EditorState {
     }
 
     /// Set the current selection and clear vertex color selection
+    /// Also saves to selection history for undo
     pub fn set_selection(&mut self, selection: Selection) {
+        // Save current selection to undo stack before changing
+        self.save_selection_undo();
+        self.selection = selection;
+        self.selected_vertex_indices.clear();
+    }
+
+    /// Set selection without saving to undo (for internal use during undo/redo)
+    fn set_selection_no_undo(&mut self, selection: Selection) {
         self.selection = selection;
         self.selected_vertex_indices.clear();
     }
@@ -490,6 +515,65 @@ impl EditorState {
         }
     }
 
+    /// Save current selection state for undo
+    pub fn save_selection_undo(&mut self) {
+        // Don't save if selection hasn't changed from the last snapshot
+        if let Some(last) = self.selection_undo_stack.last() {
+            if last.selection == self.selection && last.multi_selection == self.multi_selection {
+                return; // No change, don't save duplicate
+            }
+        }
+
+        self.selection_undo_stack.push(SelectionSnapshot {
+            selection: self.selection.clone(),
+            multi_selection: self.multi_selection.clone(),
+        });
+        self.selection_redo_stack.clear();
+
+        // Limit stack size
+        if self.selection_undo_stack.len() > 50 {
+            self.selection_undo_stack.remove(0);
+        }
+    }
+
+    /// Undo last selection change
+    pub fn undo_selection(&mut self) {
+        if let Some(prev) = self.selection_undo_stack.pop() {
+            // Save current state to redo stack
+            self.selection_redo_stack.push(SelectionSnapshot {
+                selection: self.selection.clone(),
+                multi_selection: self.multi_selection.clone(),
+            });
+            // Restore previous state
+            self.set_selection_no_undo(prev.selection);
+            self.multi_selection = prev.multi_selection;
+        }
+    }
+
+    /// Redo last undone selection change
+    pub fn redo_selection(&mut self) {
+        if let Some(next) = self.selection_redo_stack.pop() {
+            // Save current state to undo stack
+            self.selection_undo_stack.push(SelectionSnapshot {
+                selection: self.selection.clone(),
+                multi_selection: self.multi_selection.clone(),
+            });
+            // Restore next state
+            self.set_selection_no_undo(next.selection);
+            self.multi_selection = next.multi_selection;
+        }
+    }
+
+    /// Check if there are selection changes to undo
+    pub fn can_undo_selection(&self) -> bool {
+        !self.selection_undo_stack.is_empty()
+    }
+
+    /// Check if there are selection changes to redo
+    pub fn can_redo_selection(&self) -> bool {
+        !self.selection_redo_stack.is_empty()
+    }
+
     /// Get current room being edited
     pub fn current_room(&self) -> Option<&crate::world::Room> {
         self.level.rooms.get(self.current_room)
@@ -524,19 +608,25 @@ impl EditorState {
     /// Add a selection to the multi-selection list (if not already present)
     pub fn add_to_multi_selection(&mut self, selection: Selection) {
         if !matches!(selection, Selection::None) && !self.is_multi_selected(&selection) {
+            self.save_selection_undo();
             self.multi_selection.push(selection);
         }
     }
 
     /// Clear multi-selection
     pub fn clear_multi_selection(&mut self) {
-        self.multi_selection.clear();
+        if !self.multi_selection.is_empty() {
+            self.save_selection_undo();
+            self.multi_selection.clear();
+        }
     }
 
     /// Toggle a selection in the multi-selection list
     /// Also ensures the current primary selection is in multi_selection
     /// (so Shift+click after a regular click keeps the first item selected)
     pub fn toggle_multi_selection(&mut self, selection: Selection) {
+        self.save_selection_undo();
+
         // First, ensure the current primary selection is in multi_selection
         // This handles the case where user clicks A, then Shift+clicks B
         if !matches!(self.selection, Selection::None) {

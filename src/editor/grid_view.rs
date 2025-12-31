@@ -1300,7 +1300,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 );
                                 let obj_name = state.selected_object_type.display_name();
                                 if let Ok(idx) = state.level.add_object(current_room_idx, new_object) {
-                                    state.selection = super::Selection::Object { room: current_room_idx, index: idx };
+                                    state.set_selection(super::Selection::Object { room: current_room_idx, index: idx });
                                     state.set_status(&format!("{} placed", obj_name), 1.0);
                                 }
                             }
