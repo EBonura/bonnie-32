@@ -245,7 +245,9 @@ pub fn draw_editor(
     let (grid_rect, room_props_rect) = layout.left_split.update(ctx, left_rect);
 
     // Right split: texture palette | face properties
-    let (texture_rect, props_rect) = layout.right_panel_split.update(ctx, right_rect);
+    // Use layout() first to get rects, then handle_input() AFTER drawing contents
+    // This allows widgets inside the panels to claim drags before the divider can
+    let (texture_rect, props_rect) = layout.right_panel_split.layout(right_rect);
 
     // Split grid_rect: Skybox panel (fixed height) | 2D Grid
     let skybox_panel_height = 195.0;
@@ -292,6 +294,10 @@ pub fn draw_editor(
 
     draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
     draw_properties(ctx, panel_content_rect(props_rect, true), state, icon_font);
+
+    // Handle right panel split input AFTER drawing contents
+    // This allows UV controls and other widgets to claim drags first
+    layout.right_panel_split.handle_input(ctx, right_rect);
 
     // Draw status bar
     draw_status_bar(status_rect, state);
@@ -1801,13 +1807,13 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floo
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    // Add space for UV info, controls, buttons, color, color picker, normal mode, and extrude
-    let uv_lines = if face.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
+    // Add space for UV coordinates, controls, buttons, color, color picker, normal mode, and extrude
+    let uv_lines = 1; // Just coordinates
     header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + extrude_button_height
 }
 
 /// Calculate height needed for a wall face container
-fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
+fn wall_face_container_height(_wall: &crate::world::VerticalFace) -> f32 {
     let line_height = 18.0;
     let header_height = 22.0;
     let button_row_height = 24.0;
@@ -1816,8 +1822,8 @@ fn wall_face_container_height(wall: &crate::world::VerticalFace) -> f32 {
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
     let lines = 3; // texture, y range, blend
-    // Add space for UV info, controls, buttons, color, color picker, and normal mode
-    let uv_lines = if wall.uv.is_some() { 2 } else { 1 }; // "Custom UVs" or "Default UVs"
+    // Add space for UV coordinates, controls, buttons, color, color picker, and normal mode
+    let uv_lines = 1; // Just coordinates
     header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height
 }
 
@@ -1889,18 +1895,15 @@ fn draw_horizontal_face_container(
     content_y += line_height;
 
     // UV coordinates display
-    let uv_label_color = Color::from_rgba(150, 150, 150, 255);
-    if let Some(uv) = &face.uv {
-        draw_text("UV: Custom", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-        // Show UV coordinates compactly
-        draw_text(&format!("  [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
-            content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
-        content_y += line_height;
-    } else {
-        draw_text("UV: Default", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-    }
+    let uv = face.uv.unwrap_or([
+        crate::rasterizer::Vec2::new(0.0, 0.0),  // NW
+        crate::rasterizer::Vec2::new(1.0, 0.0),  // NE
+        crate::rasterizer::Vec2::new(1.0, 1.0),  // SE
+        crate::rasterizer::Vec2::new(0.0, 1.0),  // SW
+    ]);
+    draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+        content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
+    content_y += line_height;
 
     // UV parameter editing controls
     let controls_width = width - CONTAINER_PADDING * 2.0;
@@ -2475,7 +2478,7 @@ fn draw_uv_controls(
     let value_start = x + link_btn_size + 4.0 + label_width;
     let ox_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, ox_rect, params.x_offset, 0.1, 1001,
+        ctx, ox_rect, params.x_offset, 0.1, 2001,
         &mut state.uv_drag_active[0], &mut state.uv_drag_start_value[0], &mut state.uv_drag_start_x[0],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 0)),
     );
@@ -2489,7 +2492,7 @@ fn draw_uv_controls(
     }
     let oy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, oy_rect, params.y_offset, 0.1, 1002,
+        ctx, oy_rect, params.y_offset, 0.1, 2002,
         &mut state.uv_drag_active[1], &mut state.uv_drag_start_value[1], &mut state.uv_drag_start_x[1],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 1)),
     );
@@ -2513,7 +2516,7 @@ fn draw_uv_controls(
     draw_text("Scale", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
     let sx_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, sx_rect, params.x_scale, 0.25, 1003,
+        ctx, sx_rect, params.x_scale, 0.25, 2003,
         &mut state.uv_drag_active[2], &mut state.uv_drag_start_value[2], &mut state.uv_drag_start_x[2],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 2)),
     );
@@ -2531,7 +2534,7 @@ fn draw_uv_controls(
     }
     let sy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, sy_rect, params.y_scale, 0.25, 1004,
+        ctx, sy_rect, params.y_scale, 0.25, 2004,
         &mut state.uv_drag_active[3], &mut state.uv_drag_start_value[3], &mut state.uv_drag_start_x[3],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 3)),
     );
@@ -2553,7 +2556,7 @@ fn draw_uv_controls(
     draw_text("Angle", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
     let angle_rect = Rect::new(value_start, current_y, width - value_start + x - 4.0, row_height);
     let result = draw_drag_value_compact_editable(
-        ctx, angle_rect, params.angle, 1.0, 1005,
+        ctx, angle_rect, params.angle, 1.0, 2005,
         &mut state.uv_drag_active[4], &mut state.uv_drag_start_value[4], &mut state.uv_drag_start_x[4],
         Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 4)),
     );
@@ -2615,18 +2618,15 @@ fn draw_wall_face_container(
     content_y += line_height;
 
     // UV coordinates display
-    let uv_label_color = Color::from_rgba(150, 150, 150, 255);
-    if let Some(uv) = &wall.uv {
-        draw_text("UV: Custom", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-        // Show UV coordinates compactly
-        draw_text(&format!("  [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
-            content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
-        content_y += line_height;
-    } else {
-        draw_text("UV: Default", content_x.floor(), (content_y + 12.0).floor(), 13.0, uv_label_color);
-        content_y += line_height;
-    }
+    let uv = wall.uv.unwrap_or([
+        crate::rasterizer::Vec2::new(0.0, 1.0),  // bottom-left
+        crate::rasterizer::Vec2::new(1.0, 1.0),  // bottom-right
+        crate::rasterizer::Vec2::new(1.0, 0.0),  // top-right
+        crate::rasterizer::Vec2::new(0.0, 0.0),  // top-left
+    ]);
+    draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+        content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
+    content_y += line_height;
 
     // UV parameter editing controls
     let controls_width = width - CONTAINER_PADDING * 2.0;

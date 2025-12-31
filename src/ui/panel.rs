@@ -50,18 +50,28 @@ impl SplitPanel {
         self
     }
 
-    /// Update and render the split panel
-    /// Returns (first_rect, second_rect) for the two child areas
-    pub fn update(&mut self, ctx: &mut UiContext, bounds: Rect) -> (Rect, Rect) {
+    /// Get layout without processing input - call this first to get child rects
+    /// Then draw panel contents, then call handle_input() to process divider dragging
+    pub fn layout(&self, bounds: Rect) -> (Rect, Rect) {
+        self.child_rects(bounds)
+    }
+
+    /// Handle input and draw divider - call AFTER drawing panel contents
+    /// This allows widgets inside panels to claim drags before the divider can
+    pub fn handle_input(&mut self, ctx: &mut UiContext, bounds: Rect) {
         let divider_rect = self.divider_rect(bounds);
 
         // Handle divider dragging
-        if ctx.mouse.inside(&divider_rect) {
+        // Only set hot/start drag if something else isn't already being dragged
+        // This allows widgets inside the panels to claim drags first
+        let can_interact = ctx.dragging.is_none();
+        if can_interact && ctx.mouse.inside(&divider_rect) {
             ctx.set_hot(self.id);
-        }
 
-        if ctx.is_hot(self.id) && ctx.mouse.left_pressed {
-            ctx.start_drag(self.id);
+            // Only start drag if mouse was just pressed (not already down)
+            if ctx.mouse.left_pressed {
+                ctx.start_drag(self.id);
+            }
         }
 
         if ctx.is_dragging(self.id) {
@@ -86,8 +96,12 @@ impl SplitPanel {
             Color::from_rgba(60, 60, 60, 255)
         };
         draw_rectangle(divider_rect.x, divider_rect.y, divider_rect.w, divider_rect.h, color);
+    }
 
-        // Return child rects
+    /// Update and render the split panel (legacy method - combines layout and input)
+    /// Returns (first_rect, second_rect) for the two child areas
+    pub fn update(&mut self, ctx: &mut UiContext, bounds: Rect) -> (Rect, Rect) {
+        self.handle_input(ctx, bounds);
         self.child_rects(bounds)
     }
 
