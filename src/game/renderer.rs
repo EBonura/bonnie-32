@@ -244,6 +244,47 @@ pub fn draw_test_viewport(
         draw_debug_menu(game, &rect, input, level);
     }
 
+    // Show warning if no player start exists in level
+    if level.get_player_start().is_none() {
+        let msg = "No Player Start in level";
+        let hint = "Add a PlayerStart spawn point in World Editor";
+        let font_size = 16.0;
+        let hint_size = 12.0;
+
+        // Center the message
+        let msg_width = msg.len() as f32 * font_size * 0.5;
+        let hint_width = hint.len() as f32 * hint_size * 0.5;
+        let center_x = rect.x + rect.w / 2.0;
+        let center_y = rect.y + rect.h / 2.0;
+
+        // Draw semi-transparent background
+        let bg_w = msg_width.max(hint_width) + 40.0;
+        let bg_h = 60.0;
+        draw_rectangle(
+            center_x - bg_w / 2.0,
+            center_y - bg_h / 2.0,
+            bg_w,
+            bg_h,
+            Color::from_rgba(0, 0, 0, 180),
+        );
+
+        // Draw warning text
+        draw_text(
+            msg,
+            center_x - msg_width / 2.0,
+            center_y - 5.0,
+            font_size,
+            Color::from_rgba(255, 200, 50, 255),
+        );
+        draw_text(
+            hint,
+            center_x - hint_width / 2.0,
+            center_y + 18.0,
+            hint_size,
+            Color::from_rgba(180, 180, 180, 255),
+        );
+    }
+
     let ui_ms = FrameTimings::elapsed_ms(ui_start);
 
     // Store frame timings for display

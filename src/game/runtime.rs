@@ -384,6 +384,13 @@ impl GameToolState {
         self.playing = false;
     }
 
+    /// Full reset for loading a new level (resets entities, camera, and texture cache)
+    pub fn reset_for_new_level(&mut self) {
+        self.reset();
+        self.reset_camera();
+        self.textures_15_cache.clear();
+    }
+
     /// Spawn the player entity at a position using level settings
     pub fn spawn_player(&mut self, position: Vec3, level: &Level) {
         let player = self.world.spawn_player(position, 100, &level.player_settings);

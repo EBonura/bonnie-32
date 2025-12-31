@@ -176,6 +176,11 @@ async fn main() {
                         app.world_editor.example_browser.pending_load_list = true;
                     }
                 }
+                // Reset game state when switching to Test tab
+                // This ensures player spawns fresh from current level's PlayerStart
+                if tool == Tool::Test {
+                    app.game.reset();
+                }
                 app.set_active_tool(tool);
             }
         }
@@ -262,6 +267,8 @@ async fn main() {
                                     ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
                                     ws.editor_state.sync_camera_from_orbit();
                                     ws.editor_state.load_level(level, PathBuf::from(&filename));
+                                    // Reset game state for the new level
+                                    app.game.reset_for_new_level();
                                     ws.editor_state.set_status(&format!("Uploaded {}", filename), 3.0);
                                 }
                                 Err(e) => {
@@ -292,7 +299,7 @@ async fn main() {
                 );
 
                 // Handle editor actions (including opening example browser)
-                handle_editor_action(action, ws);
+                handle_editor_action(action, ws, &mut app.game);
 
                 // Draw example browser overlay if open
                 if ws.example_browser.open {
@@ -353,6 +360,8 @@ async fn main() {
                                 ws.editor_state.sync_camera_from_orbit();
                                 // Use load_level to preserve texture packs (important for WASM)
                                 ws.editor_state.load_level(level, path);
+                                // Reset game state for the new level
+                                app.game.reset_for_new_level();
                                 ws.editor_state.set_status(&format!("Opened: {}", name), 3.0);
                                 ws.example_browser.close();
                             }
@@ -375,6 +384,8 @@ async fn main() {
                             ws.editor_state.sync_camera_from_orbit();
                             ws.editor_state.load_level(new_level, PathBuf::from("assets/levels/untitled.ron"));
                             ws.editor_state.current_file = None; // New level has no file yet
+                            // Reset game state for the new level
+                            app.game.reset_for_new_level();
                             ws.editor_state.set_status("New level created", 3.0);
                             ws.example_browser.close();
                         }
@@ -929,7 +940,7 @@ fn next_available_model_name() -> PathBuf {
     models_dir.join(format!("model_{:03}.ron", next_num))
 }
 
-fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
+fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, game: &mut game::GameToolState) {
     match action {
         EditorAction::Play => {
             ws.editor_state.set_status("Game preview coming soon", 2.0);
@@ -1055,6 +1066,8 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
                         ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
                         ws.editor_state.sync_camera_from_orbit();
                         ws.editor_state.load_level(level, path.clone());
+                        // Reset game state for the new level
+                        game.reset_for_new_level();
                         ws.editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
                     }
                     Err(e) => {
@@ -1142,6 +1155,8 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState) {
                     ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
                     ws.editor_state.sync_camera_from_orbit();
                     ws.editor_state.load_level(level, path.clone());
+                    // Reset game state for the new level
+                    game.reset_for_new_level();
                     ws.editor_state.set_status(&format!("Loaded {}", path.display()), 3.0);
                 }
                 Err(e) => {
