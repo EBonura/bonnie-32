@@ -2482,13 +2482,10 @@ impl Room {
 
         // Calculate UVs based on projection mode
         let uvs = if wall.uv_projection == UvProjection::Projected {
-            // Projected mode: UVs based on normalized position within wall bounds
-            // This creates uniform texture mapping regardless of slope
-            let min_y = wall.heights.iter().cloned().fold(f32::INFINITY, f32::min);
-            let max_y = wall.heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let height_range = (max_y - min_y).max(0.001); // Avoid division by zero
+            // Projected mode: UVs based on absolute world Y position
+            // This creates globally aligned texture mapping across adjacent walls
 
-            // Get base UVs (custom or default)
+            // Get base UVs to extract the U coordinates and any X offset
             let base_uvs = wall.uv.unwrap_or([
                 Vec2::new(0.0, 1.0),  // bottom-left
                 Vec2::new(1.0, 1.0),  // bottom-right
@@ -2496,18 +2493,24 @@ impl Room {
                 Vec2::new(0.0, 0.0),  // top-left
             ]);
 
-            // Calculate UV scale from base UVs (difference between top and bottom)
-            let uv_bottom = (base_uvs[0].y + base_uvs[1].y) / 2.0; // Average of bottom corners
-            let uv_top = (base_uvs[2].y + base_uvs[3].y) / 2.0;    // Average of top corners
-            let uv_range = uv_bottom - uv_top; // Typically 1.0 (V goes 1->0 from bottom to top)
-
-            // Project each corner's V based on its height within the wall's range
+            // Calculate world Y positions (including room y_offset)
             // heights order: [bottom-left, bottom-right, top-right, top-left]
+            let world_heights = [
+                y_offset + wall.heights[0],
+                y_offset + wall.heights[1],
+                y_offset + wall.heights[2],
+                y_offset + wall.heights[3],
+            ];
+
+            // Calculate V based on absolute world position
+            // V = world_y / SECTOR_SIZE (1 texture repeat per SECTOR_SIZE units)
+            // V increases downward (higher Y = lower V), so we negate
+            // Use fract() to keep UV in 0-1 range for tiling
             [
-                Vec2::new(base_uvs[0].x, uv_top + uv_range * (1.0 - (wall.heights[0] - min_y) / height_range)),
-                Vec2::new(base_uvs[1].x, uv_top + uv_range * (1.0 - (wall.heights[1] - min_y) / height_range)),
-                Vec2::new(base_uvs[2].x, uv_top + uv_range * (1.0 - (wall.heights[2] - min_y) / height_range)),
-                Vec2::new(base_uvs[3].x, uv_top + uv_range * (1.0 - (wall.heights[3] - min_y) / height_range)),
+                Vec2::new(base_uvs[0].x, 1.0 - (world_heights[0] / SECTOR_SIZE).fract()),
+                Vec2::new(base_uvs[1].x, 1.0 - (world_heights[1] / SECTOR_SIZE).fract()),
+                Vec2::new(base_uvs[2].x, 1.0 - (world_heights[2] / SECTOR_SIZE).fract()),
+                Vec2::new(base_uvs[3].x, 1.0 - (world_heights[3] / SECTOR_SIZE).fract()),
             ]
         } else {
             // Default mode: standard per-vertex UVs
