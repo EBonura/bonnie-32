@@ -242,6 +242,15 @@ pub fn draw_test_viewport(
     // Draw debug menu overlay if open (top-left, blocks gameplay for D-pad navigation)
     if game.options_menu_open {
         draw_debug_menu(game, &rect, input, level);
+    } else {
+        // Show collapsed hint when menu is closed
+        let hint = "[ESC] Menu";
+        let hint_w = 70.0;
+        let hint_h = 16.0;
+        let hint_x = rect.x + 4.0;
+        let hint_y = rect.y + 4.0;
+        draw_rectangle(hint_x, hint_y, hint_w, hint_h, Color::from_rgba(0, 0, 0, 120));
+        draw_text(hint, hint_x + 4.0, hint_y + 12.0, 11.0, Color::from_rgba(180, 180, 180, 200));
     }
 
     // Show warning if no player start exists in level
