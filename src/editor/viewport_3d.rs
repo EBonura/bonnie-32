@@ -514,6 +514,13 @@ pub fn draw_viewport_3d(
                                 }
                             }
                         }
+
+                        // After finding all linked vertices, set viewport_drag_plane_y to average
+                        // This ensures no jump on first frame when linked vertices have different room-relative heights
+                        if !state.drag_initial_heights.is_empty() {
+                            state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
+                                / state.drag_initial_heights.len() as f32;
+                        }
                     }
                 } else if let Some((room_idx, gx, gz, face_idx, edge_idx, wall_face, _)) = hovered_edge {
                     // Start dragging edge (both vertices)
