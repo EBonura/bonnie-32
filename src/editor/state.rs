@@ -218,6 +218,7 @@ pub struct EditorState {
     pub texture_packs: Vec<TexturePack>,
     pub selected_pack: usize,
     pub texture_scroll: f32,
+    pub texture_palette_width: f32, // Actual width for scroll calculations
 
     /// Properties panel scroll offset
     pub properties_scroll: f32,
@@ -379,6 +380,7 @@ impl EditorState {
             texture_packs,
             selected_pack: 0,
             texture_scroll: 0.0,
+            texture_palette_width: 200.0, // Default, updated by draw_texture_palette
             properties_scroll: 0.0,
             uv_drag_active: [false; 5],
             uv_drag_start_value: [0.0; 5],
@@ -672,8 +674,8 @@ impl EditorState {
                     const THUMB_SIZE: f32 = 48.0;
                     const THUMB_PADDING: f32 = 4.0;
 
-                    // Estimate visible area (typical texture palette width ~200px)
-                    let palette_width = 200.0;
+                    // Use actual palette width (updated by draw_texture_palette)
+                    let palette_width = self.texture_palette_width;
                     let cols = ((palette_width - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING)).floor() as usize;
                     let cols = cols.max(1);
 

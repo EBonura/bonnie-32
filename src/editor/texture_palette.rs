@@ -27,6 +27,9 @@ pub fn draw_texture_palette(
     // Content area (below header)
     let content_rect = Rect::new(rect.x, rect.y + HEADER_HEIGHT, rect.w, rect.h - HEADER_HEIGHT);
 
+    // Store actual width for scroll_to_texture calculations
+    state.texture_palette_width = content_rect.w;
+
     // Get texture count without borrowing state
     let texture_count = state.texture_packs
         .get(state.selected_pack)
