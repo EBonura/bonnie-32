@@ -279,7 +279,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     toolbar.separator();
 
     // Mesh stats
-    let stats = format!("Verts:{} Faces:{}", state.mesh.vertex_count(), state.mesh.face_count());
+    let stats = format!("Verts:{} Faces:{}", state.mesh().vertex_count(), state.mesh().face_count());
     toolbar.label(&stats);
 
     toolbar.separator();
@@ -546,7 +546,7 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         state.project.objects[idx].visible = !state.project.objects[idx].visible;
     } else if let Some(idx) = select_idx {
         state.project.selected_object = Some(idx);
-        state.sync_mesh_from_project();
+        // Project is single source of truth - mesh() reads from it directly
     }
 }
 
@@ -1076,13 +1076,13 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
 
     // Get current blend mode from first selected face
     let current_blend = face_indices.first()
-        .and_then(|&idx| state.mesh.faces.get(idx))
+        .and_then(|&idx| state.mesh().faces.get(idx))
         .map(|f| f.blend_mode)
         .unwrap_or(BlendMode::Opaque);
 
     // Check if all selected faces have the same blend mode
     let all_same = face_indices.iter()
-        .filter_map(|&idx| state.mesh.faces.get(idx))
+        .filter_map(|&idx| state.mesh().faces.get(idx))
         .all(|f| f.blend_mode == current_blend);
 
     // Blend mode label
@@ -1130,12 +1130,13 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         // Click handler
         if ctx.mouse.clicked(&btn_rect) {
             // Apply to all selected faces
-            for &face_idx in &face_indices {
-                if let Some(face) = state.mesh.faces.get_mut(face_idx) {
-                    face.blend_mode = *mode;
+            if let Some(mesh) = state.mesh_mut() {
+                for &face_idx in &face_indices {
+                    if let Some(face) = mesh.faces.get_mut(face_idx) {
+                        face.blend_mode = *mode;
+                    }
                 }
             }
-            state.sync_mesh_to_project();
             state.dirty = true;
         }
 
@@ -1715,8 +1716,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                     }
                 }
             }
-            // Live sync so viewport shows UV changes in real-time
-            state.sync_mesh_from_project();
+            // Project is single source of truth - changes are visible immediately
             state.dirty = true;
         }
 
@@ -1724,8 +1724,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         if !is_mouse_button_down(MouseButton::Left) && state.uv_drag_active {
             state.uv_drag_active = false;
             state.uv_drag_start_uvs.clear();
-            // Sync UV changes to state.mesh so viewport renders them
-            state.sync_mesh_from_project();
+            // Project is single source of truth - viewport reads from it directly
             state.set_status("UV moved", 0.5);
         }
 
@@ -1857,7 +1856,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                     super::state::UvModalTransform::None => {}
                 }
 
-                state.sync_mesh_from_project();
+                // Project is single source of truth
                 state.dirty = true;
 
                 // Confirm with click or Enter
@@ -1879,7 +1878,6 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                     }
                     state.uv_modal_transform = super::state::UvModalTransform::None;
                     state.uv_modal_start_uvs.clear();
-                    state.sync_mesh_from_project();
                     // Remove the undo state we pushed (discard the operation)
                     state.undo_stack.pop();
                     state.set_status("UV transform cancelled", 0.5);
@@ -2787,83 +2785,92 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         }
     };
 
-    let mesh = &state.mesh;
     let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let inside_viewport = ctx.mouse.inside(&rect);
 
     // =========================================================================
     // Hover detection for ortho views (same priority as world editor: vertex > edge > face)
     // =========================================================================
-    let mut ortho_hovered_vertex: Option<usize> = None;
-    let mut ortho_hovered_edge: Option<(usize, usize)> = None;
-    let mut ortho_hovered_face: Option<usize> = None;
+    // Use a scope to end the mesh borrow before we mutate state.hovered_*
+    let (ortho_hovered_vertex, ortho_hovered_edge, ortho_hovered_face) = {
+        let mesh = state.mesh();
+        let mut hovered_vertex: Option<usize> = None;
+        let mut hovered_edge: Option<(usize, usize)> = None;
+        let mut hovered_face: Option<usize> = None;
 
-    if inside_viewport && state.active_viewport == viewport_id && !state.drag_manager.is_dragging() && state.modal_transform == ModalTransform::None {
-        const VERTEX_THRESHOLD: f32 = 10.0;
-        const EDGE_THRESHOLD: f32 = 6.0;
-        const FACE_THRESHOLD: f32 = 20.0;
+        if inside_viewport && state.active_viewport == viewport_id && !state.drag_manager.is_dragging() && state.modal_transform == ModalTransform::None {
+            const VERTEX_THRESHOLD: f32 = 10.0;
+            const EDGE_THRESHOLD: f32 = 6.0;
+            const FACE_THRESHOLD: f32 = 20.0;
 
-        // Check vertices
-        let mut best_vert_dist = VERTEX_THRESHOLD;
-        for (idx, vert) in mesh.vertices.iter().enumerate() {
-            let (sx, sy) = project_vertex(vert);
-            if sx >= rect.x && sx <= rect.right() && sy >= rect.y && sy <= rect.bottom() {
-                let dist = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
-                if dist < best_vert_dist {
-                    best_vert_dist = dist;
-                    ortho_hovered_vertex = Some(idx);
+            // Check vertices
+            let mut best_vert_dist = VERTEX_THRESHOLD;
+            for (idx, vert) in mesh.vertices.iter().enumerate() {
+                let (sx, sy) = project_vertex(vert);
+                if sx >= rect.x && sx <= rect.right() && sy >= rect.y && sy <= rect.bottom() {
+                    let dist = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
+                    if dist < best_vert_dist {
+                        best_vert_dist = dist;
+                        hovered_vertex = Some(idx);
+                    }
                 }
             }
-        }
 
-        // Check edges if no vertex hovered
-        if ortho_hovered_vertex.is_none() {
-            let mut best_edge_dist = EDGE_THRESHOLD;
-            for face in &mesh.faces {
-                let edges = [(face.v0, face.v1), (face.v1, face.v2), (face.v2, face.v0)];
-                for (v0_idx, v1_idx) in edges {
-                    if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
-                        let (sx0, sy0) = project_vertex(v0);
-                        let (sx1, sy1) = project_vertex(v1);
-                        let dist = point_to_line_dist(mouse_pos.0, mouse_pos.1, sx0, sy0, sx1, sy1);
-                        if dist < best_edge_dist {
-                            best_edge_dist = dist;
-                            ortho_hovered_edge = Some(if v0_idx < v1_idx { (v0_idx, v1_idx) } else { (v1_idx, v0_idx) });
+            // Check edges if no vertex hovered
+            if hovered_vertex.is_none() {
+                let mut best_edge_dist = EDGE_THRESHOLD;
+                for face in &mesh.faces {
+                    let edges = [(face.v0, face.v1), (face.v1, face.v2), (face.v2, face.v0)];
+                    for (v0_idx, v1_idx) in edges {
+                        if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                            let (sx0, sy0) = project_vertex(v0);
+                            let (sx1, sy1) = project_vertex(v1);
+                            let dist = point_to_line_dist(mouse_pos.0, mouse_pos.1, sx0, sy0, sx1, sy1);
+                            if dist < best_edge_dist {
+                                best_edge_dist = dist;
+                                hovered_edge = Some(if v0_idx < v1_idx { (v0_idx, v1_idx) } else { (v1_idx, v0_idx) });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check faces if no vertex or edge hovered
+            if hovered_vertex.is_none() && hovered_edge.is_none() {
+                let mut best_face_dist = FACE_THRESHOLD;
+                for (idx, face) in mesh.faces.iter().enumerate() {
+                    if let (Some(v0), Some(v1), Some(v2)) = (
+                        mesh.vertices.get(face.v0),
+                        mesh.vertices.get(face.v1),
+                        mesh.vertices.get(face.v2),
+                    ) {
+                        // Face center
+                        let center_pos = crate::rasterizer::Vertex {
+                            pos: (v0.pos + v1.pos + v2.pos) * (1.0 / 3.0),
+                            ..v0.clone()
+                        };
+                        let (sx, sy) = project_vertex(&center_pos);
+                        let dist = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
+                        if dist < best_face_dist {
+                            best_face_dist = dist;
+                            hovered_face = Some(idx);
                         }
                     }
                 }
             }
         }
+        (hovered_vertex, hovered_edge, hovered_face)
+    };
 
-        // Check faces if no vertex or edge hovered
-        if ortho_hovered_vertex.is_none() && ortho_hovered_edge.is_none() {
-            let mut best_face_dist = FACE_THRESHOLD;
-            for (idx, face) in mesh.faces.iter().enumerate() {
-                if let (Some(v0), Some(v1), Some(v2)) = (
-                    mesh.vertices.get(face.v0),
-                    mesh.vertices.get(face.v1),
-                    mesh.vertices.get(face.v2),
-                ) {
-                    // Face center
-                    let center_pos = crate::rasterizer::Vertex {
-                        pos: (v0.pos + v1.pos + v2.pos) * (1.0 / 3.0),
-                        ..v0.clone()
-                    };
-                    let (sx, sy) = project_vertex(&center_pos);
-                    let dist = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
-                    if dist < best_face_dist {
-                        best_face_dist = dist;
-                        ortho_hovered_face = Some(idx);
-                    }
-                }
-            }
-        }
-
-        // Update global hover state if this is the active viewport
+    // Update global hover state if this is the active viewport (borrow has ended)
+    if inside_viewport && state.active_viewport == viewport_id && !state.drag_manager.is_dragging() && state.modal_transform == ModalTransform::None {
         state.hovered_vertex = ortho_hovered_vertex;
         state.hovered_edge = ortho_hovered_edge;
         state.hovered_face = ortho_hovered_face;
     }
+
+    // Get a fresh mesh reference for the rendering section
+    let mesh = state.mesh();
 
     // =========================================================================
     // Draw mesh in ortho view using rasterizer with proper ortho camera
@@ -2915,21 +2922,14 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         };
 
         // Render all visible objects
-        // NOTE: Always use state.mesh for obj_idx=0 since that's typically the only object
-        // and state.mesh contains live edits during drag operations
         for (obj_idx, obj) in state.project.objects.iter().enumerate() {
             // Skip hidden objects
             if !obj.visible {
                 continue;
             }
 
-            // Use state.mesh for selected object (has edits), project mesh for others
-            // Also use state.mesh for obj 0 as fallback (in case selected_object is None)
-            let obj_mesh = if state.project.selected_object == Some(obj_idx) || (obj_idx == 0 && state.project.selected_object.is_none()) {
-                &state.mesh
-            } else {
-                &obj.mesh
-            };
+            // Use project mesh directly (mesh() accessor returns selected object's mesh)
+            let obj_mesh = &obj.mesh;
 
             // Dim non-selected objects slightly
             let base_color = if state.project.selected_object == Some(obj_idx) {
@@ -3079,7 +3079,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // Draw transform gizmo in ortho views (2-axis version)
     // =========================================================================
     if !state.selection.is_empty() && state.tool_box.active_transform_tool().is_some() {
-        if let Some(center) = state.selection.compute_center(&state.mesh) {
+        if let Some(center) = state.selection.compute_center(state.mesh()) {
             // Project center to screen using world_to_ortho directly
             let (cx, cy) = match viewport_id {
                 ViewportId::Top => world_to_ortho(center.x, center.z),
@@ -3258,12 +3258,13 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 // Only become ortho move if moved at least 3 pixels
                 if dx > 3.0 || dy > 3.0 {
                     // Collect starting positions
-                    let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+                    let mesh = state.mesh();
+                    let mut indices = state.selection.get_affected_vertex_indices(mesh);
                     if state.vertex_linking {
-                        indices = state.mesh.expand_to_coincident(&indices, 0.001);
+                        indices = mesh.expand_to_coincident(&indices, 0.001);
                     }
                     let initial_positions: Vec<(usize, crate::rasterizer::Vec3)> = indices.iter()
-                        .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+                        .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
                         .collect();
 
                     if !initial_positions.is_empty() {
@@ -3331,17 +3332,24 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
                 // Apply delta to initial positions
                 if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
-                    for (idx, start_pos) in tracker.initial_positions.iter() {
-                        if let Some(vert) = state.mesh.vertices.get_mut(*idx) {
-                            let new_pos = *start_pos + delta;
-                            vert.pos = new_pos;
+                    // Collect updates first, then apply (borrow checker)
+                    let updates: Vec<_> = tracker.initial_positions.iter()
+                        .map(|(idx, start_pos)| (*idx, *start_pos + delta))
+                        .collect();
+                    // Capture snap settings before borrowing mesh
+                    let snap_enabled = state.snap_settings.enabled && !is_key_down(KeyCode::Z);
+                    let snap_size = state.snap_settings.grid_size;
+                    if let Some(mesh) = state.mesh_mut() {
+                        for (idx, new_pos) in updates {
+                            if let Some(vert) = mesh.vertices.get_mut(idx) {
+                                vert.pos = new_pos;
 
-                            // Apply grid snapping if enabled
-                            if state.snap_settings.enabled && !is_key_down(KeyCode::Z) {
-                                let snap = state.snap_settings.grid_size;
-                                vert.pos.x = (vert.pos.x / snap).round() * snap;
-                                vert.pos.y = (vert.pos.y / snap).round() * snap;
-                                vert.pos.z = (vert.pos.z / snap).round() * snap;
+                                // Apply grid snapping if enabled
+                                if snap_enabled {
+                                    vert.pos.x = (vert.pos.x / snap_size).round() * snap_size;
+                                    vert.pos.y = (vert.pos.y / snap_size).round() * snap_size;
+                                    vert.pos.z = (vert.pos.z / snap_size).round() * snap_size;
+                                }
                             }
                         }
                     }
@@ -3352,7 +3360,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             // End drag
             state.drag_manager.end();
             state.ortho_drag_viewport = None;
-            state.sync_mesh_to_project();
         }
     }
 
@@ -3797,7 +3804,7 @@ fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
         }
     }
 
-    state.sync_mesh_from_project();
+    // Project is single source of truth
     state.dirty = true;
     state.set_status(if flip_h { "Flipped UV horizontal" } else { "Flipped UV vertical" }, 1.0);
 }
@@ -3842,7 +3849,7 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
         }
     }
 
-    state.sync_mesh_from_project();
+    // Project is single source of truth
     state.dirty = true;
     state.set_status(if clockwise { "Rotated UV 90° CW" } else { "Rotated UV 90° CCW" }, 1.0);
 }
@@ -3920,7 +3927,7 @@ fn reset_selected_uvs(state: &mut ModelerState) {
             }
         }
 
-        state.sync_mesh_from_project();
+        // Project is single source of truth
         state.dirty = true;
         state.set_status("Reset UVs to planar projection", 1.0);
     } else {
@@ -4034,9 +4041,12 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
                 let indices = face_indices.clone();
                 state.push_undo("Extrude");
                 let extrude_amount = state.snap_settings.grid_size;
-                let new_faces = state.mesh.extrude_faces(&indices, extrude_amount);
+                let new_faces = if let Some(mesh) = state.mesh_mut() {
+                    mesh.extrude_faces(&indices, extrude_amount)
+                } else {
+                    vec![]
+                };
                 state.selection = super::state::ModelerSelection::Faces(new_faces);
-                state.sync_mesh_to_project();
                 state.dirty = true;
                 state.set_status(&format!("Extruded {} face(s)", indices.len()), 1.0);
             } else {
@@ -4161,20 +4171,23 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
             }
             // Cancel active drag and restore original positions
             if let Some(original_positions) = state.drag_manager.cancel() {
-                for (idx, pos) in original_positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(idx) {
-                        vert.pos = pos;
+                if let Some(mesh) = state.mesh_mut() {
+                    for (idx, pos) in original_positions {
+                        if let Some(vert) = mesh.vertices.get_mut(idx) {
+                            vert.pos = pos;
+                        }
                     }
                 }
-                state.sync_mesh_to_project();
             }
             state.modal_transform = ModalTransform::None;
         } else if state.drag_manager.active.is_free_move() {
             // Cancel free move (perspective or ortho drag)
             if let Some(original_positions) = state.drag_manager.cancel() {
-                for (vert_idx, original_pos) in original_positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = original_pos;
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, original_pos) in original_positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = original_pos;
+                        }
                     }
                 }
             }
@@ -4271,22 +4284,23 @@ fn handle_arrow_key_movement(state: &mut ModelerState, shift: bool, snap_disable
 
     // If vertex linking is enabled, expand to include coincident vertices
     if state.vertex_linking {
-        vertex_indices = state.mesh.expand_to_coincident(&vertex_indices, 0.001);
+        vertex_indices = state.mesh().expand_to_coincident(&vertex_indices, 0.001);
     }
 
     // Save undo state before moving
     state.push_undo("Move");
 
     // Move selected vertices
-    for &vi in &vertex_indices {
-        if let Some(vert) = state.mesh.vertices.get_mut(vi) {
-            vert.pos.x += delta.x;
-            vert.pos.y += delta.y;
-            vert.pos.z += delta.z;
+    if let Some(mesh) = state.mesh_mut() {
+        for &vi in &vertex_indices {
+            if let Some(vert) = mesh.vertices.get_mut(vi) {
+                vert.pos.x += delta.x;
+                vert.pos.y += delta.y;
+                vert.pos.z += delta.z;
+            }
         }
     }
 
-    state.sync_mesh_to_project(); // Keep project in sync
     state.dirty = true;
 
     // Show status
@@ -4312,9 +4326,11 @@ fn delete_selection(state: &mut ModelerState) {
             indices.sort();
             indices.reverse();
 
-            for fi in indices {
-                if fi < state.mesh.faces.len() {
-                    state.mesh.faces.remove(fi);
+            if let Some(mesh) = state.mesh_mut() {
+                for fi in indices {
+                    if fi < mesh.faces.len() {
+                        mesh.faces.remove(fi);
+                    }
                 }
             }
 
@@ -4332,24 +4348,27 @@ fn delete_selection(state: &mut ModelerState) {
 
             // First, remove all faces that reference these vertices
             let vert_set: std::collections::HashSet<usize> = vert_indices.iter().copied().collect();
-            state.mesh.faces.retain(|f| {
-                !vert_set.contains(&f.v0) && !vert_set.contains(&f.v1) && !vert_set.contains(&f.v2)
-            });
 
             // Then remove vertices (in reverse order to avoid index shifting)
             let mut indices = vert_indices.clone();
             indices.sort();
             indices.reverse();
 
-            for vi in &indices {
-                if *vi < state.mesh.vertices.len() {
-                    state.mesh.vertices.remove(*vi);
+            if let Some(mesh) = state.mesh_mut() {
+                mesh.faces.retain(|f| {
+                    !vert_set.contains(&f.v0) && !vert_set.contains(&f.v1) && !vert_set.contains(&f.v2)
+                });
 
-                    // Update face indices that are higher than the removed vertex
-                    for face in &mut state.mesh.faces {
-                        if face.v0 > *vi { face.v0 -= 1; }
-                        if face.v1 > *vi { face.v1 -= 1; }
-                        if face.v2 > *vi { face.v2 -= 1; }
+                for vi in &indices {
+                    if *vi < mesh.vertices.len() {
+                        mesh.vertices.remove(*vi);
+
+                        // Update face indices that are higher than the removed vertex
+                        for face in &mut mesh.faces {
+                            if face.v0 > *vi { face.v0 -= 1; }
+                            if face.v1 > *vi { face.v1 -= 1; }
+                            if face.v2 > *vi { face.v2 -= 1; }
+                        }
                     }
                 }
             }
@@ -4371,27 +4390,27 @@ fn delete_selection(state: &mut ModelerState) {
                 .map(|&(a, b)| (a.min(b), a.max(b)))
                 .collect();
 
-            let faces_before = state.mesh.faces.len();
-            state.mesh.faces.retain(|f| {
-                let e1 = (f.v0.min(f.v1), f.v0.max(f.v1));
-                let e2 = (f.v1.min(f.v2), f.v1.max(f.v2));
-                let e3 = (f.v2.min(f.v0), f.v2.max(f.v0));
-                !edge_set.contains(&e1) && !edge_set.contains(&e2) && !edge_set.contains(&e3)
-            });
-
-            let deleted = faces_before - state.mesh.faces.len();
+            let deleted = if let Some(mesh) = state.mesh_mut() {
+                let faces_before = mesh.faces.len();
+                mesh.faces.retain(|f| {
+                    let e1 = (f.v0.min(f.v1), f.v0.max(f.v1));
+                    let e2 = (f.v1.min(f.v2), f.v1.max(f.v2));
+                    let e3 = (f.v2.min(f.v0), f.v2.max(f.v0));
+                    !edge_set.contains(&e1) && !edge_set.contains(&e2) && !edge_set.contains(&e3)
+                });
+                faces_before - mesh.faces.len()
+            } else {
+                0
+            };
             state.selection = super::state::ModelerSelection::None;
             state.dirty = true;
             state.set_status(&format!("Deleted {} face(s) with edges", deleted), 1.0);
         }
         _ => {
             state.set_status("Nothing selected to delete", 1.0);
-            return; // Early return - no sync needed
+            return;
         }
     }
-
-    // Sync geometry changes to project
-    state.sync_mesh_to_project();
 }
 
 /// Get all vertex indices affected by current selection
@@ -4409,8 +4428,9 @@ fn get_selected_vertex_indices(state: &ModelerState) -> Vec<usize> {
         }
         super::state::ModelerSelection::Faces(face_indices) => {
             // Collect unique vertices from faces
+            let mesh = state.mesh();
             let mut verts: Vec<usize> = face_indices.iter()
-                .filter_map(|&fi| state.mesh.face_vertices(fi))
+                .filter_map(|&fi| mesh.face_vertices(fi))
                 .flat_map(|[v0, v1, v2]| vec![v0, v1, v2])
                 .collect();
             verts.sort();
@@ -4558,8 +4578,9 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
         state.push_undo(&format!("Add {}", prim.label()));
         let size = state.snap_settings.grid_size * 2.0; // 2 grid units
         let new_mesh = prim.create(size);
-        state.mesh.merge(&new_mesh, menu.world_pos);
-        state.sync_mesh_to_project(); // Keep project in sync
+        if let Some(mesh) = state.mesh_mut() {
+            mesh.merge(&new_mesh, menu.world_pos);
+        }
         state.dirty = true;
         state.set_status(&format!("Added {}", prim.label()), 1.0);
         state.context_menu = None;
@@ -4573,9 +4594,10 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
             0.0,
             state.snap_settings.grid_size * 2.0,
         );
-        let clone = state.mesh.clone();
-        state.mesh.merge(&clone, offset);
-        state.sync_mesh_to_project(); // Keep project in sync
+        let clone = state.mesh().clone();
+        if let Some(mesh) = state.mesh_mut() {
+            mesh.merge(&clone, offset);
+        }
         state.dirty = true;
         state.set_status("Cloned mesh", 1.0);
         state.context_menu = None;
@@ -4583,8 +4605,9 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
 
     if clear_clicked {
         state.push_undo("Clear mesh");
-        state.mesh = EditableMesh::new();
-        state.sync_mesh_to_project(); // Keep project in sync
+        if let Some(mesh) = state.mesh_mut() {
+            *mesh = EditableMesh::new();
+        }
         state.selection.clear();
         state.dirty = true;
         state.set_status("Cleared mesh", 1.0);

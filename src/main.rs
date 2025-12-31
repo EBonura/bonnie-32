@@ -480,7 +480,7 @@ async fn main() {
                                     .map(|m| m.path.clone())
                                     .unwrap_or_else(|| PathBuf::from("assets/models/untitled.ron"));
                                 ms.modeler_state.project = project;
-                                ms.modeler_state.sync_mesh_from_project();
+                                // Project is single source of truth - mesh() reads from it directly
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = false;
                                 ms.modeler_state.selection = modeler::ModelerSelection::None;
@@ -673,10 +673,10 @@ async fn main() {
                                             modeler::apply_mesh_flip_vertical(&mut result.mesh);
                                         }
 
-                                        // Set the editable mesh
-                                        ms.modeler_state.mesh = result.mesh;
-                                        // Sync to project so UV highlighting and other project-based features work
-                                        ms.modeler_state.sync_mesh_to_project();
+                                        // Set the editable mesh directly in project (single source of truth)
+                                        if let Some(mesh) = ms.modeler_state.mesh_mut() {
+                                            *mesh = result.mesh;
+                                        }
                                         // Don't set current_file to OBJ path - this is an IMPORT, not opening a project
                                         // User must "Save As" to create a .ron project file
                                         ms.modeler_state.current_file = None;
@@ -736,10 +736,11 @@ async fn main() {
                             #[cfg(target_arch = "wasm32")]
                             {
                                 // WASM fallback - just use preview mesh (already has scale/flip applied from preview)
-                                if let Some(mesh) = ms.mesh_browser.preview_mesh.take() {
-                                    ms.modeler_state.mesh = mesh;
-                                    // Sync to project so UV highlighting and other project-based features work
-                                    ms.modeler_state.sync_mesh_to_project();
+                                if let Some(imported_mesh) = ms.mesh_browser.preview_mesh.take() {
+                                    // Set mesh directly in project (single source of truth)
+                                    if let Some(mesh) = ms.modeler_state.mesh_mut() {
+                                        *mesh = imported_mesh;
+                                    }
                                     // Don't set current_file to OBJ path - this is an IMPORT
                                     ms.modeler_state.current_file = None;
                                     ms.modeler_state.dirty = true;  // Needs saving
@@ -1266,7 +1267,7 @@ fn handle_modeler_action(
         }
         #[cfg(target_arch = "wasm32")]
         ModelerAction::Export => {
-            match ron::ser::to_string_pretty(&state.mesh, ron::ser::PrettyConfig::default()) {
+            match ron::ser::to_string_pretty(state.mesh(), ron::ser::PrettyConfig::default()) {
                 Ok(ron_str) => {
                     let filename = state.current_file
                         .as_ref()

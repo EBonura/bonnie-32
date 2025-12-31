@@ -34,7 +34,7 @@ fn from_ui_axis(axis: UiAxis) -> Axis {
 /// Get all selected element positions for modal transforms
 fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
     let mut positions = Vec::new();
-    let mesh = &state.mesh;
+    let mesh = state.mesh();
 
     match &state.selection {
         ModelerSelection::Vertices(verts) => {
@@ -86,89 +86,92 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
     let mut pos_idx = 0;
     let selection = state.selection.clone();
 
-    match &selection {
-        ModelerSelection::Vertices(verts) => {
-            for &vert_idx in verts {
-                if let Some(vert) = state.mesh.vertices.get(vert_idx) {
-                    if let Some(&new_pos) = positions.get(pos_idx) {
-                        movements.push((vert_idx, vert.pos, new_pos));
-                    }
-                    pos_idx += 1;
-                }
-            }
-        }
-        ModelerSelection::Edges(edges) => {
-            for (v0, v1) in edges {
-                if let Some(vert) = state.mesh.vertices.get(*v0) {
-                    if let Some(&new_pos) = positions.get(pos_idx) {
-                        movements.push((*v0, vert.pos, new_pos));
-                    }
-                    pos_idx += 1;
-                }
-                if let Some(vert) = state.mesh.vertices.get(*v1) {
-                    if let Some(&new_pos) = positions.get(pos_idx) {
-                        movements.push((*v1, vert.pos, new_pos));
-                    }
-                    pos_idx += 1;
-                }
-            }
-        }
-        ModelerSelection::Faces(faces) => {
-            for &face_idx in faces {
-                if let Some(face) = state.mesh.faces.get(face_idx).cloned() {
-                    if let Some(vert) = state.mesh.vertices.get(face.v0) {
+    // First pass: collect movements (read-only)
+    {
+        let mesh = state.mesh();
+        match &selection {
+            ModelerSelection::Vertices(verts) => {
+                for &vert_idx in verts {
+                    if let Some(vert) = mesh.vertices.get(vert_idx) {
                         if let Some(&new_pos) = positions.get(pos_idx) {
-                            movements.push((face.v0, vert.pos, new_pos));
-                        }
-                        pos_idx += 1;
-                    }
-                    if let Some(vert) = state.mesh.vertices.get(face.v1) {
-                        if let Some(&new_pos) = positions.get(pos_idx) {
-                            movements.push((face.v1, vert.pos, new_pos));
-                        }
-                        pos_idx += 1;
-                    }
-                    if let Some(vert) = state.mesh.vertices.get(face.v2) {
-                        if let Some(&new_pos) = positions.get(pos_idx) {
-                            movements.push((face.v2, vert.pos, new_pos));
+                            movements.push((vert_idx, vert.pos, new_pos));
                         }
                         pos_idx += 1;
                     }
                 }
             }
-        }
-        _ => {}
-    }
-
-    // Apply movements, expanding to coincident vertices if linking enabled
-    let mut already_moved = std::collections::HashSet::new();
-    for (idx, old_pos, new_pos) in &movements {
-        let delta = *new_pos - *old_pos;
-
-        if linking {
-            // Find all coincident vertices and move them by the same delta
-            let coincident = state.mesh.find_coincident_vertices(*idx, LINK_EPSILON);
-            for ci in coincident {
-                if !already_moved.contains(&ci) {
-                    if let Some(vert) = state.mesh.vertices.get_mut(ci) {
-                        vert.pos = vert.pos + delta;
+            ModelerSelection::Edges(edges) => {
+                for (v0, v1) in edges {
+                    if let Some(vert) = mesh.vertices.get(*v0) {
+                        if let Some(&new_pos) = positions.get(pos_idx) {
+                            movements.push((*v0, vert.pos, new_pos));
+                        }
+                        pos_idx += 1;
                     }
-                    already_moved.insert(ci);
+                    if let Some(vert) = mesh.vertices.get(*v1) {
+                        if let Some(&new_pos) = positions.get(pos_idx) {
+                            movements.push((*v1, vert.pos, new_pos));
+                        }
+                        pos_idx += 1;
+                    }
                 }
             }
-        } else {
-            // Just move the single vertex
-            if !already_moved.contains(idx) {
-                if let Some(vert) = state.mesh.vertices.get_mut(*idx) {
-                    vert.pos = *new_pos;
+            ModelerSelection::Faces(faces) => {
+                for &face_idx in faces {
+                    if let Some(face) = mesh.faces.get(face_idx).cloned() {
+                        if let Some(vert) = mesh.vertices.get(face.v0) {
+                            if let Some(&new_pos) = positions.get(pos_idx) {
+                                movements.push((face.v0, vert.pos, new_pos));
+                            }
+                            pos_idx += 1;
+                        }
+                        if let Some(vert) = mesh.vertices.get(face.v1) {
+                            if let Some(&new_pos) = positions.get(pos_idx) {
+                                movements.push((face.v1, vert.pos, new_pos));
+                            }
+                            pos_idx += 1;
+                        }
+                        if let Some(vert) = mesh.vertices.get(face.v2) {
+                            if let Some(&new_pos) = positions.get(pos_idx) {
+                                movements.push((face.v2, vert.pos, new_pos));
+                            }
+                            pos_idx += 1;
+                        }
+                    }
                 }
-                already_moved.insert(*idx);
             }
+            _ => {}
         }
     }
 
-    // Sync geometry changes to project so UV editor stays in sync
-    state.sync_mesh_to_project();
+    // Second pass: apply movements (mutable)
+    if let Some(mesh) = state.mesh_mut() {
+        let mut already_moved = std::collections::HashSet::new();
+        for (idx, old_pos, new_pos) in &movements {
+            let delta = *new_pos - *old_pos;
+
+            if linking {
+                // Find all coincident vertices and move them by the same delta
+                let coincident = mesh.find_coincident_vertices(*idx, LINK_EPSILON);
+                for ci in coincident {
+                    if !already_moved.contains(&ci) {
+                        if let Some(vert) = mesh.vertices.get_mut(ci) {
+                            vert.pos = vert.pos + delta;
+                        }
+                        already_moved.insert(ci);
+                    }
+                }
+            } else {
+                // Just move the single vertex
+                if !already_moved.contains(idx) {
+                    if let Some(vert) = mesh.vertices.get_mut(*idx) {
+                        vert.pos = *new_pos;
+                    }
+                    already_moved.insert(*idx);
+                }
+            }
+        }
+    }
 }
 
 /// Handle modal transforms (G=Grab, S=Scale, R=Rotate) using DragManager
@@ -195,32 +198,38 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
     );
 
     // Apply the updated positions
-    match result {
-        DragUpdateResult::Move { positions, .. } => {
-            for (vert_idx, new_pos) in positions {
-                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                    vert.pos = new_pos;
+    let mut made_changes = false;
+    if let Some(mesh) = state.mesh_mut() {
+        match result {
+            DragUpdateResult::Move { positions, .. } => {
+                for (vert_idx, new_pos) in positions {
+                    if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = new_pos;
+                    }
                 }
+                made_changes = true;
             }
-            state.dirty = true;
-        }
-        DragUpdateResult::Scale { positions, .. } => {
-            for (vert_idx, new_pos) in positions {
-                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                    vert.pos = new_pos;
+            DragUpdateResult::Scale { positions, .. } => {
+                for (vert_idx, new_pos) in positions {
+                    if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = new_pos;
+                    }
                 }
+                made_changes = true;
             }
-            state.dirty = true;
-        }
-        DragUpdateResult::Rotate { positions, .. } => {
-            for (vert_idx, new_pos) in positions {
-                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                    vert.pos = new_pos;
+            DragUpdateResult::Rotate { positions, .. } => {
+                for (vert_idx, new_pos) in positions {
+                    if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = new_pos;
+                    }
                 }
+                made_changes = true;
             }
-            state.dirty = true;
+            _ => {}
         }
-        _ => {}
+    }
+    if made_changes {
+        state.dirty = true;
     }
 
     // Confirm on left click
@@ -232,9 +241,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
             ModalTransform::Rotate => state.tool_box.tools.rotate.end_drag(),
             ModalTransform::None => {}
         }
-        if let Some(_result) = state.drag_manager.end() {
-            state.sync_mesh_to_project();
-        }
+        state.drag_manager.end();
         state.modal_transform = ModalTransform::None;
         state.dirty = true;
         state.set_status("Transform applied", 1.0);
@@ -250,9 +257,11 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
             ModalTransform::None => {}
         }
         if let Some(original_positions) = state.drag_manager.cancel() {
-            for (vert_idx, original_pos) in original_positions {
-                if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                    vert.pos = original_pos;
+            if let Some(mesh) = state.mesh_mut() {
+                for (vert_idx, original_pos) in original_positions {
+                    if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                        vert.pos = original_pos;
+                    }
                 }
             }
         }
@@ -300,31 +309,36 @@ fn handle_drag_move(
 
             if let DragUpdateResult::Move { positions, .. } = result {
                 let snap_disabled = is_key_down(KeyCode::Z);
-                for (vert_idx, new_pos) in positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = if state.snap_settings.enabled && !snap_disabled {
-                            state.snap_settings.snap_vec3(new_pos)
-                        } else {
-                            new_pos
-                        };
+                // Capture snap settings before borrowing mesh
+                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                let snap_settings = state.snap_settings.clone();
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, new_pos) in positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = if snap_enabled {
+                                snap_settings.snap_vec3(new_pos)
+                            } else {
+                                new_pos
+                            };
+                        }
                     }
                 }
                 state.dirty = true;
             }
         } else {
             // End drag on mouse release
-            if let Some(_result) = state.drag_manager.end() {
-                state.sync_mesh_to_project();
-            }
+            state.drag_manager.end();
             state.set_status("Moved", 0.5);
         }
 
         // Cancel drag on right-click
         if is_mouse_button_pressed(MouseButton::Right) {
             if let Some(original_positions) = state.drag_manager.cancel() {
-                for (vert_idx, original_pos) in original_positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = original_pos;
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, original_pos) in original_positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = original_pos;
+                        }
                     }
                 }
             }
@@ -345,13 +359,14 @@ fn handle_drag_move(
                 // Only become free move if moved at least 3 pixels (distinguish from click)
                 if dx > 3.0 || dy > 3.0 {
                     // Get vertex indices and initial positions
-                    let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+                    let mesh = state.mesh();
+                    let mut indices = state.selection.get_affected_vertex_indices(mesh);
                     if state.vertex_linking {
-                        indices = state.mesh.expand_to_coincident(&indices, 0.001);
+                        indices = mesh.expand_to_coincident(&indices, 0.001);
                     }
 
                     let initial_positions: Vec<(usize, Vec3)> = indices.iter()
-                        .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+                        .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
                         .collect();
 
                     if !initial_positions.is_empty() {
@@ -477,13 +492,14 @@ pub fn draw_modeler_viewport(
         let mode = state.modal_transform;
 
         // Get vertex indices and initial positions (same as gizmo drags)
-        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        let mesh = state.mesh();
+        let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident(&indices, 0.001);
         }
 
         let initial_positions: Vec<(usize, Vec3)> = indices.iter()
-            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
         if !initial_positions.is_empty() {
@@ -592,13 +608,8 @@ pub fn draw_modeler_viewport(
             continue;
         }
 
-        // Use state.mesh for selected object (has edits), project mesh for others
-        // Also use state.mesh for obj 0 as fallback (in case selected_object is None)
-        let mesh = if state.project.selected_object == Some(obj_idx) || (obj_idx == 0 && state.project.selected_object.is_none()) {
-            &state.mesh
-        } else {
-            &obj.mesh
-        };
+        // Use project mesh directly (mesh() accessor returns selected object's mesh)
+        let mesh = &obj.mesh;
 
         // Dim non-selected objects slightly
         let base_color = if state.project.selected_object == Some(obj_idx) {
@@ -811,7 +822,7 @@ fn apply_box_selection(
     fb_height: usize,
 ) {
     let camera = &state.camera;
-    let mesh = &state.mesh;
+    let mesh = state.mesh();
 
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
@@ -898,7 +909,7 @@ fn apply_box_selection(
 
 /// Draw selection and hover overlays for mesh editing (like world editor)
 fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
-    let mesh = &state.mesh;
+    let mesh = state.mesh();
     let camera = &state.camera;
 
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
@@ -1100,7 +1111,7 @@ fn handle_mesh_selection_click(
     let fb_y = (mouse_pos.1 - draw_y) / draw_h * fb_height as f32;
 
     let camera = &state.camera;
-    let mesh = &state.mesh;
+    let mesh = state.mesh();
 
     match state.select_mode {
         SelectMode::Vertex => {
@@ -1219,7 +1230,7 @@ fn find_hovered_element(
 ) -> (Option<usize>, Option<(usize, usize)>, Option<usize>) {
     let (mouse_fb_x, mouse_fb_y) = mouse_fb;
     let camera = &state.camera;
-    let mesh = &state.mesh;
+    let mesh = state.mesh();
 
     const VERTEX_THRESHOLD: f32 = 12.0;
     const EDGE_THRESHOLD: f32 = 8.0;
@@ -1544,7 +1555,7 @@ fn setup_gizmo(
     fb_width: usize,
     fb_height: usize,
 ) -> Option<GizmoSetup> {
-    let center = state.selection.compute_center(&state.mesh)?;
+    let center = state.selection.compute_center(state.mesh())?;
     let camera = &state.camera;
 
     let center_screen = match world_to_screen(center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height) {
@@ -1649,13 +1660,18 @@ fn handle_move_gizmo(
 
             if let DragUpdateResult::Move { positions, .. } = result {
                 let snap_disabled = is_key_down(KeyCode::Z);
-                for (vert_idx, new_pos) in positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = if state.snap_settings.enabled && !snap_disabled {
-                            state.snap_settings.snap_vec3(new_pos)
-                        } else {
-                            new_pos
-                        };
+                // Capture snap settings before borrowing mesh
+                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                let snap_settings = state.snap_settings.clone();
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, new_pos) in positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = if snap_enabled {
+                                snap_settings.snap_vec3(new_pos)
+                            } else {
+                                new_pos
+                            };
+                        }
                     }
                 }
                 state.dirty = true;
@@ -1663,9 +1679,8 @@ fn handle_move_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.move_tool.end_drag();
-            if let Some(_result) = state.drag_manager.end() {
+            if state.drag_manager.end().is_some() {
                 state.push_undo("Gizmo Move");
-                state.sync_mesh_to_project();
             }
         }
     }
@@ -1693,13 +1708,14 @@ fn handle_move_gizmo(
         let axis = state.gizmo_hovered_axis.unwrap();
 
         // Get vertex indices and initial positions
-        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        let mesh = state.mesh();
+        let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident(&indices, 0.001);
         }
 
         let initial_positions: Vec<(usize, Vec3)> = indices.iter()
-            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
         // Convert screen coords to framebuffer coords
@@ -1802,13 +1818,18 @@ fn handle_scale_gizmo(
 
             if let DragUpdateResult::Scale { positions, .. } = result {
                 let snap_disabled = is_key_down(KeyCode::Z);
-                for (vert_idx, new_pos) in positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = if state.snap_settings.enabled && !snap_disabled {
-                            state.snap_settings.snap_vec3(new_pos)
-                        } else {
-                            new_pos
-                        };
+                // Capture snap settings before borrowing mesh
+                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                let snap_settings = state.snap_settings.clone();
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, new_pos) in positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = if snap_enabled {
+                                snap_settings.snap_vec3(new_pos)
+                            } else {
+                                new_pos
+                            };
+                        }
                     }
                 }
                 state.dirty = true;
@@ -1816,9 +1837,8 @@ fn handle_scale_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.scale.end_drag();
-            if let Some(_result) = state.drag_manager.end() {
+            if state.drag_manager.end().is_some() {
                 state.push_undo("Gizmo Scale");
-                state.sync_mesh_to_project();
             }
         }
     }
@@ -1844,13 +1864,14 @@ fn handle_scale_gizmo(
         let axis = state.gizmo_hovered_axis.unwrap();
 
         // Get vertex indices and initial positions
-        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        let mesh = state.mesh();
+        let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident(&indices, 0.001);
         }
 
         let initial_positions: Vec<(usize, Vec3)> = indices.iter()
-            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
         let fb_mouse = (
@@ -1942,13 +1963,18 @@ fn handle_rotate_gizmo(
 
             if let DragUpdateResult::Rotate { positions, .. } = result {
                 let snap_disabled = is_key_down(KeyCode::Z);
-                for (vert_idx, new_pos) in positions {
-                    if let Some(vert) = state.mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = if state.snap_settings.enabled && !snap_disabled {
-                            state.snap_settings.snap_vec3(new_pos)
-                        } else {
-                            new_pos
-                        };
+                // Capture snap settings before borrowing mesh
+                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                let snap_settings = state.snap_settings.clone();
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, new_pos) in positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = if snap_enabled {
+                                snap_settings.snap_vec3(new_pos)
+                            } else {
+                                new_pos
+                            };
+                        }
                     }
                 }
                 state.dirty = true;
@@ -1956,9 +1982,8 @@ fn handle_rotate_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.rotate.end_drag();
-            if let Some(_result) = state.drag_manager.end() {
+            if state.drag_manager.end().is_some() {
                 state.push_undo("Gizmo Rotate");
-                state.sync_mesh_to_project();
             }
         }
     }
@@ -2014,13 +2039,14 @@ fn handle_rotate_gizmo(
         let axis = state.gizmo_hovered_axis.unwrap();
 
         // Get vertex indices and initial positions
-        let mut indices = state.selection.get_affected_vertex_indices(&state.mesh);
+        let mesh = state.mesh();
+        let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = state.mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident(&indices, 0.001);
         }
 
         let initial_positions: Vec<(usize, Vec3)> = indices.iter()
-            .filter_map(|&idx| state.mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+            .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
         // Calculate initial angle (for screen-space rotation)
