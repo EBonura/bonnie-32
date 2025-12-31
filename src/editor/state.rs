@@ -647,4 +647,41 @@ impl EditorState {
     pub fn mark_portals_dirty(&mut self) {
         self.portals_dirty = true;
     }
+
+    /// Scroll texture palette to show a specific texture
+    /// Switches to the correct pack and adjusts scroll position
+    pub fn scroll_to_texture(&mut self, tex_ref: &crate::world::TextureRef) {
+        if !tex_ref.is_valid() {
+            return;
+        }
+
+        // Find the pack index
+        let pack_idx = self.texture_packs.iter().position(|p| p.name == tex_ref.pack);
+        if let Some(idx) = pack_idx {
+            // Switch to that pack
+            self.selected_pack = idx;
+
+            // Find the texture index within the pack
+            if let Some(pack) = self.texture_packs.get(idx) {
+                if let Some(tex_idx) = pack.textures.iter().position(|t| t.name == tex_ref.name) {
+                    // Calculate scroll position to center the texture
+                    // Constants from texture_palette.rs
+                    const THUMB_SIZE: f32 = 48.0;
+                    const THUMB_PADDING: f32 = 4.0;
+                    const HEADER_HEIGHT: f32 = 28.0;
+
+                    // Estimate visible area (typical texture palette width ~200px)
+                    let palette_width = 200.0;
+                    let cols = ((palette_width - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING)).floor() as usize;
+                    let cols = cols.max(1);
+
+                    let row = tex_idx / cols;
+                    let row_y = row as f32 * (THUMB_SIZE + THUMB_PADDING);
+
+                    // Set scroll to show this row (with some margin)
+                    self.texture_scroll = (row_y - THUMB_SIZE).max(0.0);
+                }
+            }
+        }
+    }
 }

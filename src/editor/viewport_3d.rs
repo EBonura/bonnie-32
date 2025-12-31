@@ -444,6 +444,23 @@ pub fn draw_viewport_3d(
                     // Use direct assignment to preserve vertex index selection
                     state.selection = new_selection;
 
+                    // Scroll texture palette to show this face's texture
+                    let tex_to_scroll = state.level.rooms.get(room_idx).and_then(|room| {
+                        room.get_sector(gx, gz).and_then(|sector| {
+                            match &face {
+                                SectorFace::Floor => sector.floor.as_ref().map(|f| f.texture.clone()),
+                                SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.texture.clone()),
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.texture.clone()),
+                            }
+                        })
+                    });
+                    if let Some(tex) = tex_to_scroll {
+                        state.scroll_to_texture(&tex);
+                    }
+
                     // Select this vertex index for color editing (keeps selection, just changes vertex)
                     state.selected_vertex_indices.clear();
                     state.selected_vertex_indices.push(corner_idx);
@@ -529,6 +546,23 @@ pub fn draw_viewport_3d(
                     }
                     // Use direct assignment to preserve vertex selection
                     state.selection = new_selection;
+
+                    // Scroll texture palette to show this face's texture
+                    let tex_to_scroll = state.level.rooms.get(room_idx).and_then(|room| {
+                        room.get_sector(gx, gz).and_then(|sector| {
+                            match &face_for_selection {
+                                SectorFace::Floor => sector.floor.as_ref().map(|f| f.texture.clone()),
+                                SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.texture.clone()),
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.texture.clone()),
+                            }
+                        })
+                    });
+                    if let Some(tex) = tex_to_scroll {
+                        state.scroll_to_texture(&tex);
+                    }
 
                     // Pre-select the two vertices that make up this edge for color editing
                     // For floor/ceiling: edges are [0:NW-NE, 1:NE-SE, 2:SE-SW, 3:SW-NW]
@@ -709,6 +743,23 @@ pub fn draw_viewport_3d(
                             state.clear_multi_selection();
                         }
                         state.set_selection(new_selection.clone());
+                    }
+
+                    // Scroll texture palette to show this face's texture
+                    let tex_to_scroll = state.level.rooms.get(room_idx).and_then(|room| {
+                        room.get_sector(gx, gz).and_then(|sector| {
+                            match &face {
+                                SectorFace::Floor => sector.floor.as_ref().map(|f| f.texture.clone()),
+                                SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.texture.clone()),
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.texture.clone()),
+                            }
+                        })
+                    });
+                    if let Some(tex) = tex_to_scroll {
+                        state.scroll_to_texture(&tex);
                     }
 
                     // Collect all faces to drag: primary selection + multi-selection
