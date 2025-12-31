@@ -93,6 +93,7 @@ pub fn draw_viewport_3d(
 
     // Clear selection with Escape key
     if inside_viewport && is_key_pressed(KeyCode::Escape) && state.selection != Selection::None {
+        state.save_selection_undo();
         state.set_selection(Selection::None);
         state.set_status("Selection cleared", 0.5);
     }
@@ -801,6 +802,7 @@ pub fn draw_viewport_3d(
                         }
                     } else {
                         // Select object
+                        state.save_selection_undo();
                         state.set_selection(Selection::Object { room: obj_room_idx, index: obj_idx });
                         state.set_status("Object selected", 1.0);
                     }
@@ -812,7 +814,10 @@ pub fn draw_viewport_3d(
 
                     // Handle selection first (Shift = toggle multi-select)
                     let new_selection = Selection::SectorFace { room: room_idx, x: gx, z: gz, face };
+
                     if shift_down {
+                        // Shift-click always changes something (toggle)
+                        state.save_selection_undo();
                         state.toggle_multi_selection(new_selection.clone());
                         state.set_selection(new_selection.clone());
                     } else {
@@ -820,9 +825,12 @@ pub fn draw_viewport_3d(
                         let clicking_selected = state.selection == new_selection ||
                             state.multi_selection.contains(&new_selection);
                         if !clicking_selected {
+                            // Selection will change - save undo first
+                            state.save_selection_undo();
                             state.clear_multi_selection();
+                            state.set_selection(new_selection.clone());
                         }
-                        state.set_selection(new_selection.clone());
+                        // If already selected, don't save undo (nothing changes)
                     }
 
                     // Scroll texture palette to show this face's texture
@@ -948,8 +956,12 @@ pub fn draw_viewport_3d(
                 } else {
                     // Clicked on nothing - clear selection (unless Shift is held)
                     if !shift_down {
-                        state.set_selection(Selection::None);
-                        state.clear_multi_selection();
+                        // Only save undo if something will actually change
+                        if state.selection != Selection::None || !state.multi_selection.is_empty() {
+                            state.save_selection_undo();
+                            state.set_selection(Selection::None);
+                            state.clear_multi_selection();
+                        }
                     }
                 }
             }
@@ -1122,6 +1134,7 @@ pub fn draw_viewport_3d(
             // PlaceObject mode - select existing objects in 3D (placement is in 2D grid view)
             else if state.tool == EditorTool::PlaceObject {
                 if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
+                    state.save_selection_undo();
                     state.set_selection(Selection::Object { room: obj_room_idx, index: obj_idx });
                     state.set_status("Object selected", 1.0);
                 } else {
@@ -1134,13 +1147,14 @@ pub fn draw_viewport_3d(
         if ctx.mouse.left_down && !state.dragging_sector_vertices.is_empty() {
             use super::CLICK_HEIGHT;
 
-            if !state.viewport_drag_started {
+            // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
+            let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
+
+            // Only save undo when actual movement happens, not on click
+            if !state.viewport_drag_started && mouse_delta_y.abs() > 0.5 {
                 state.save_undo();
                 state.viewport_drag_started = true;
             }
-
-            // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
-            let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
             let y_sensitivity = 5.0;
             let y_delta = mouse_delta_y * y_sensitivity;
 

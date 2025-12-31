@@ -456,16 +456,9 @@ impl EditorState {
     }
 
     /// Set the current selection and clear vertex color selection
-    /// Also saves to selection history for undo
+    /// Does NOT auto-save undo - caller should call save_selection_undo() BEFORE
+    /// modifying any selection state (including toggle/clear multi_selection)
     pub fn set_selection(&mut self, selection: Selection) {
-        // Save current selection to undo stack before changing
-        self.save_selection_undo();
-        self.selection = selection;
-        self.selected_vertex_indices.clear();
-    }
-
-    /// Set selection without saving to undo (for internal use during undo/redo)
-    fn set_selection_no_undo(&mut self, selection: Selection) {
         self.selection = selection;
         self.selected_vertex_indices.clear();
     }
@@ -535,7 +528,7 @@ impl EditorState {
                         selection: self.selection.clone(),
                         multi_selection: self.multi_selection.clone(),
                     }));
-                    self.set_selection_no_undo(prev_sel.selection);
+                    self.set_selection(prev_sel.selection);
                     self.multi_selection = prev_sel.multi_selection;
                 }
             }
@@ -555,7 +548,7 @@ impl EditorState {
                         selection: self.selection.clone(),
                         multi_selection: self.multi_selection.clone(),
                     }));
-                    self.set_selection_no_undo(next_sel.selection);
+                    self.set_selection(next_sel.selection);
                     self.multi_selection = next_sel.multi_selection;
                 }
             }
@@ -594,27 +587,24 @@ impl EditorState {
     }
 
     /// Add a selection to the multi-selection list (if not already present)
+    /// Note: Caller should call save_selection_undo() before a batch of selection changes
     pub fn add_to_multi_selection(&mut self, selection: Selection) {
         if !matches!(selection, Selection::None) && !self.is_multi_selected(&selection) {
-            self.save_selection_undo();
             self.multi_selection.push(selection);
         }
     }
 
     /// Clear multi-selection
+    /// Note: Caller should call save_selection_undo() before a batch of selection changes
     pub fn clear_multi_selection(&mut self) {
-        if !self.multi_selection.is_empty() {
-            self.save_selection_undo();
-            self.multi_selection.clear();
-        }
+        self.multi_selection.clear();
     }
 
     /// Toggle a selection in the multi-selection list
     /// Also ensures the current primary selection is in multi_selection
     /// (so Shift+click after a regular click keeps the first item selected)
+    /// Note: Does not auto-save undo - caller should use set_selection() after, which will save
     pub fn toggle_multi_selection(&mut self, selection: Selection) {
-        self.save_selection_undo();
-
         // First, ensure the current primary selection is in multi_selection
         // This handles the case where user clicks A, then Shift+clicks B
         if !matches!(self.selection, Selection::None) {

@@ -992,6 +992,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     }
 
                     if !selected_sectors.is_empty() {
+                        // Save selection state BEFORE any modifications
+                        state.save_selection_undo();
+
                         if !shift_down {
                             state.clear_multi_selection();
                         }
@@ -1039,6 +1042,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             state.grid_sector_drag_offset = (0.0, 0.0);
                         } else {
                             // Select the object
+                            state.save_selection_undo();
                             state.clear_multi_selection();
                             state.set_selection(Selection::Object { room: current_room_idx, index: obj_idx });
                         }
@@ -1084,9 +1088,13 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             // Normal selection
                             let new_selection = Selection::Sector { room: current_room_idx, x: gx, z: gz };
                             if shift_down {
+                                // Shift-click always changes something (toggle)
+                                state.save_selection_undo();
                                 state.toggle_multi_selection(new_selection.clone());
                                 state.set_selection(new_selection);
-                            } else {
+                            } else if state.selection != new_selection || !state.multi_selection.is_empty() {
+                                // Only save undo if selection will change
+                                state.save_selection_undo();
                                 state.clear_multi_selection();
                                 state.set_selection(new_selection);
                             }
@@ -1094,8 +1102,12 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     } else {
                         // Clicked on empty space - start selection rectangle
                         if !shift_down {
-                            state.set_selection(Selection::None);
-                            state.clear_multi_selection();
+                            // Only save undo if something will change
+                            if state.selection != Selection::None || !state.multi_selection.is_empty() {
+                                state.save_selection_undo();
+                                state.set_selection(Selection::None);
+                                state.clear_multi_selection();
+                            }
                         }
                         // Start selection rect (in screen coords)
                         state.selection_rect_start = Some((mouse_pos.0, mouse_pos.1));
