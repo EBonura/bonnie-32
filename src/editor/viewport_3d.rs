@@ -689,6 +689,57 @@ pub fn draw_viewport_3d(
                                                 state.dragging_sector_vertices.push(key1);
                                                 state.drag_initial_heights.push(h[corner1]);
                                             }
+
+                                            // If linking, find coincident vertices for wall edges across ALL rooms
+                                            if state.link_coincident_vertices {
+                                                let base_x = room.position.x + (*gx as f32) * SECTOR_SIZE;
+                                                let base_z = room.position.z + (*gz as f32) * SECTOR_SIZE;
+                                                let room_y = room.position.y;
+
+                                                // Wall corner positions depend on wall direction
+                                                // Walls: [0]=bottom-left, [1]=bottom-right, [2]=top-right, [3]=top-left
+                                                let (x0, z0, x1, z1) = match wall_face {
+                                                    SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
+                                                    SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                    SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE),
+                                                    SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE, base_x, base_z),
+                                                    _ => (base_x, base_z, base_x, base_z),
+                                                };
+
+                                                let edge_positions = [
+                                                    match corner0 {
+                                                        0 => Vec3::new(x0, room_y + h[0], z0), // bottom-left
+                                                        1 => Vec3::new(x1, room_y + h[1], z1), // bottom-right
+                                                        2 => Vec3::new(x1, room_y + h[2], z1), // top-right
+                                                        3 => Vec3::new(x0, room_y + h[3], z0), // top-left
+                                                        _ => unreachable!(),
+                                                    },
+                                                    match corner1 {
+                                                        0 => Vec3::new(x0, room_y + h[0], z0),
+                                                        1 => Vec3::new(x1, room_y + h[1], z1),
+                                                        2 => Vec3::new(x1, room_y + h[2], z1),
+                                                        3 => Vec3::new(x0, room_y + h[3], z0),
+                                                        _ => unreachable!(),
+                                                    },
+                                                ];
+
+                                                const EPSILON: f32 = 0.1;
+                                                let all_room_vertices = collect_all_room_vertices(state);
+                                                for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
+                                                    for ep in &edge_positions {
+                                                        if (pos.x - ep.x).abs() < EPSILON &&
+                                                           (pos.y - ep.y).abs() < EPSILON &&
+                                                           (pos.z - ep.z).abs() < EPSILON {
+                                                            let key = (*ri, *vgx, *vgz, *vface, *ci);
+                                                            if !state.dragging_sector_vertices.contains(&key) {
+                                                                state.dragging_sector_vertices.push(key);
+                                                                let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.y).unwrap_or(0.0);
+                                                                state.drag_initial_heights.push(pos.y - linked_room_y);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
