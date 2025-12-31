@@ -3,7 +3,7 @@
 
 use macroquad::prelude::get_time;
 use super::math::{perspective_transform, project, project_ortho, Vec3, NEAR_PLANE};
-use super::types::{BlendMode, Color, Color15, Face, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Texture15, Vertex};
+use super::types::{BlendMode, Color, Color15, Clut, Face, IndexedTexture, Light, LightType, RasterSettings, RasterTimings, ShadingMode, Texture, Texture15, Vertex};
 
 /// Framebuffer for software rendering
 pub struct Framebuffer {
@@ -51,6 +51,249 @@ impl Framebuffer {
             self.pixels[i * 4 + 2] = 0;
             self.pixels[i * 4 + 3] = 0;
             self.zbuffer[i] = f32::MAX;
+        }
+    }
+
+    /// Clear framebuffer with a vertical gradient (skybox effect)
+    /// top_color at y=0, bottom_color at y=height-1
+    pub fn clear_gradient(&mut self, top_color: Color, bottom_color: Color) {
+        let h = self.height;
+        for y in 0..h {
+            // Linear interpolation factor (0.0 at top, 1.0 at bottom)
+            let t = if h > 1 { y as f32 / (h - 1) as f32 } else { 0.0 };
+            let color = top_color.lerp(bottom_color, t);
+            let bytes = color.to_bytes();
+
+            for x in 0..self.width {
+                let idx = (y * self.width + x) * 4;
+                self.pixels[idx] = bytes[0];
+                self.pixels[idx + 1] = bytes[1];
+                self.pixels[idx + 2] = bytes[2];
+                self.pixels[idx + 3] = bytes[3];
+                self.zbuffer[y * self.width + x] = f32::MAX;
+            }
+        }
+    }
+
+    /// Render PS1 Spyro-style skybox with all effects
+    /// Renders: base sphere (gradient + sun glow + clouds), stars, and 3D mountains
+    pub fn render_skybox(
+        &mut self,
+        skybox: &crate::world::Skybox,
+        camera: &super::Camera,
+        time: f32,
+    ) {
+        use super::math::{perspective_transform, project};
+
+        // 1. Render base skybox sphere (gradient + sun glow + clouds baked in vertex colors)
+        let cam_pos = (camera.position.x, camera.position.y, camera.position.z);
+        let (vertices, faces) = skybox.generate_mesh(cam_pos, time);
+
+        // Transform and project all vertices
+        let mut projected: Vec<(f32, f32, f32)> = Vec::with_capacity(vertices.len());
+
+        for v in &vertices {
+            let world_pos = super::math::Vec3::new(v.pos.0, v.pos.1, v.pos.2);
+            let rel_pos = world_pos - camera.position;
+            let cam_space = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+
+            // Skip vertices behind camera
+            if cam_space.z <= 0.1 {
+                projected.push((f32::NAN, f32::NAN, f32::NAN));
+                continue;
+            }
+
+            let screen = project(cam_space, self.width, self.height);
+            projected.push((screen.x, screen.y, cam_space.z));
+        }
+
+        // Render each triangle
+        for face in &faces {
+            let p0 = projected[face[0]];
+            let p1 = projected[face[1]];
+            let p2 = projected[face[2]];
+
+            // Skip if any vertex is behind camera
+            if p0.0.is_nan() || p1.0.is_nan() || p2.0.is_nan() {
+                continue;
+            }
+
+            // Screen-space backface culling (looking from inside the sphere)
+            // We want triangles with NEGATIVE signed area (facing inward toward camera)
+            let signed_area = (p1.0 - p0.0) * (p2.1 - p0.1) - (p2.0 - p0.0) * (p1.1 - p0.1);
+            if signed_area >= 0.0 {
+                continue; // Front-facing (outward) - skip when inside sphere
+            }
+
+            // Get vertex colors
+            let c0 = vertices[face[0]].color;
+            let c1 = vertices[face[1]].color;
+            let c2 = vertices[face[2]].color;
+
+            // Rasterize triangle with Gouraud-shaded vertex colors
+            self.rasterize_skybox_triangle(
+                (p0.0, p0.1), (p1.0, p1.1), (p2.0, p2.1),
+                c0, c1, c2,
+            );
+        }
+
+        // 2. Render stars (screen-space diamond sparkles)
+        // Stars are rendered after the sphere (which now includes 3D mountains)
+        if skybox.stars.enabled {
+            self.render_stars(skybox, camera, time);
+        }
+    }
+
+    /// Render star field as screen-space diamond sparkles
+    fn render_stars(
+        &mut self,
+        skybox: &crate::world::Skybox,
+        camera: &super::Camera,
+        time: f32,
+    ) {
+        use std::f32::consts::PI;
+        use super::math::{perspective_transform, project, Vec3};
+
+        let stars = &skybox.stars;
+        let mut rng_seed = stars.seed as u64;
+
+        // Simple LCG for deterministic pseudo-random
+        let mut next_rand = || -> f32 {
+            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (rng_seed >> 16) as f32 / 65536.0
+        };
+
+        for _ in 0..stars.count {
+            // Deterministic pseudo-random star positions
+            let theta = next_rand() * 2.0 * PI;
+            let phi_max = skybox.horizon * PI; // Only above horizon
+            let phi = next_rand() * phi_max;
+
+            // Convert spherical to world direction
+            let y = phi.cos();
+            let ring_radius = phi.sin();
+            let x = ring_radius * theta.cos();
+            let z = ring_radius * theta.sin();
+
+            let dir = Vec3::new(x, y, z);
+
+            // Transform to camera space
+            let cam_space = perspective_transform(dir * 10000.0, camera.basis_x, camera.basis_y, camera.basis_z);
+
+            if cam_space.z > 0.1 {
+                let screen = project(cam_space, self.width, self.height);
+
+                // Twinkle animation
+                let mut brightness = 1.0f32;
+                if stars.twinkle_speed > 0.0 {
+                    let phase = next_rand() * 2.0 * PI;
+                    brightness = 0.5 + 0.5 * (time * stars.twinkle_speed + phase).sin();
+                }
+
+                // Draw diamond sparkle
+                let color = Color::new(
+                    (stars.color.r as f32 * brightness) as u8,
+                    (stars.color.g as f32 * brightness) as u8,
+                    (stars.color.b as f32 * brightness) as u8,
+                );
+                self.draw_star_diamond(screen.x as i32, screen.y as i32, stars.size, color);
+            }
+        }
+    }
+
+    /// Draw a small diamond/cross star shape
+    fn draw_star_diamond(&mut self, cx: i32, cy: i32, size: f32, color: Color) {
+        let s = size.max(1.0) as i32;
+
+        // Center pixel (always)
+        self.set_pixel_safe(cx, cy, color);
+
+        if s >= 2 {
+            // 4-point diamond
+            let dim_color = Color::new(
+                (color.r as f32 * 0.7) as u8,
+                (color.g as f32 * 0.7) as u8,
+                (color.b as f32 * 0.7) as u8,
+            );
+            self.set_pixel_safe(cx - 1, cy, dim_color);
+            self.set_pixel_safe(cx + 1, cy, dim_color);
+            self.set_pixel_safe(cx, cy - 1, dim_color);
+            self.set_pixel_safe(cx, cy + 1, dim_color);
+        }
+
+        if s >= 3 {
+            // Extended points
+            let faint_color = Color::new(
+                (color.r as f32 * 0.4) as u8,
+                (color.g as f32 * 0.4) as u8,
+                (color.b as f32 * 0.4) as u8,
+            );
+            self.set_pixel_safe(cx - 2, cy, faint_color);
+            self.set_pixel_safe(cx + 2, cy, faint_color);
+            self.set_pixel_safe(cx, cy - 2, faint_color);
+            self.set_pixel_safe(cx, cy + 2, faint_color);
+        }
+    }
+
+    fn set_pixel_safe(&mut self, x: i32, y: i32, color: Color) {
+        if x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32 {
+            self.set_pixel(x as usize, y as usize, color);
+        }
+    }
+
+    /// Rasterize a single skybox triangle with Gouraud vertex color interpolation
+    /// No depth testing, no textures - just pure vertex colors
+    #[allow(dead_code)]
+    fn rasterize_skybox_triangle(
+        &mut self,
+        p0: (f32, f32),
+        p1: (f32, f32),
+        p2: (f32, f32),
+        c0: Color,
+        c1: Color,
+        c2: Color,
+    ) {
+        // Calculate bounding box
+        let min_x = p0.0.min(p1.0).min(p2.0).max(0.0) as usize;
+        let max_x = p0.0.max(p1.0).max(p2.0).min(self.width as f32 - 1.0) as usize;
+        let min_y = p0.1.min(p1.1).min(p2.1).max(0.0) as usize;
+        let max_y = p0.1.max(p1.1).max(p2.1).min(self.height as f32 - 1.0) as usize;
+
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
+
+        // Edge equations for barycentric coords
+        let denom = (p1.1 - p2.1) * (p0.0 - p2.0) + (p2.0 - p1.0) * (p0.1 - p2.1);
+        if denom.abs() < 0.0001 {
+            return; // Degenerate triangle
+        }
+        let inv_denom = 1.0 / denom;
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+
+                // Barycentric coordinates
+                let w0 = ((p1.1 - p2.1) * (px - p2.0) + (p2.0 - p1.0) * (py - p2.1)) * inv_denom;
+                let w1 = ((p2.1 - p0.1) * (px - p2.0) + (p0.0 - p2.0) * (py - p2.1)) * inv_denom;
+                let w2 = 1.0 - w0 - w1;
+
+                // Check if inside triangle
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    // Interpolate vertex colors
+                    let r = (c0.r as f32 * w0 + c1.r as f32 * w1 + c2.r as f32 * w2) as u8;
+                    let g = (c0.g as f32 * w0 + c1.g as f32 * w1 + c2.g as f32 * w2) as u8;
+                    let b = (c0.b as f32 * w0 + c1.b as f32 * w1 + c2.b as f32 * w2) as u8;
+
+                    let idx = (y * self.width + x) * 4;
+                    self.pixels[idx] = r;
+                    self.pixels[idx + 1] = g;
+                    self.pixels[idx + 2] = b;
+                    self.pixels[idx + 3] = 255;
+                }
+            }
         }
     }
 
@@ -1170,6 +1413,233 @@ fn rasterize_triangle_15(
     }
 }
 
+/// Rasterize a triangle with indexed texture + CLUT lookup
+///
+/// This is the PS1-authentic rendering path:
+/// 1. Sample palette INDEX from indexed texture
+/// 2. Look up actual COLOR in CLUT
+/// 3. Continue with standard PS1 pipeline (modulation, shading, dithering)
+fn rasterize_triangle_indexed(
+    fb: &mut Framebuffer,
+    surface: &Surface,
+    indexed_texture: Option<&IndexedTexture>,
+    clut: Option<&Clut>,
+    face_blend_mode: BlendMode,
+    black_transparent: bool,
+    settings: &RasterSettings,
+) {
+    // Bounding box
+    let min_x = surface.v1.x.min(surface.v2.x).min(surface.v3.x).max(0.0) as usize;
+    let max_x = (surface.v1.x.max(surface.v2.x).max(surface.v3.x) + 1.0).min(fb.width as f32) as usize;
+    let min_y = surface.v1.y.min(surface.v2.y).min(surface.v3.y).max(0.0) as usize;
+    let max_y = (surface.v1.y.max(surface.v2.y).max(surface.v3.y) + 1.0).min(fb.height as f32) as usize;
+
+    // Early exit for degenerate/off-screen triangles
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    // Pre-calculate flat shading if needed
+    let flat_shade = if settings.shading == ShadingMode::Flat {
+        let center_pos = (surface.w1 + surface.w2 + surface.w3).scale(1.0 / 3.0);
+        let world_normal = (surface.wn1 + surface.wn2 + surface.wn3).scale(1.0 / 3.0).normalize();
+        shade_multi_light_color(world_normal, center_pos, &settings.lights, settings.ambient)
+    } else {
+        (1.0, 1.0, 1.0)
+    };
+
+    // Pre-compute Gouraud vertex shading if needed
+    let gouraud_shades = if settings.shading == ShadingMode::Gouraud {
+        Some((
+            shade_multi_light_color(surface.wn1, surface.w1, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn2, surface.w2, &settings.lights, settings.ambient),
+            shade_multi_light_color(surface.wn3, surface.w3, &settings.lights, settings.ambient),
+        ))
+    } else {
+        None
+    };
+
+    // === EDGE FUNCTION SETUP ===
+    let v1 = surface.v1;
+    let v2 = surface.v2;
+    let v3 = surface.v3;
+
+    // Triangle area * 2 (used for normalization)
+    let area = (v2.y - v3.y) * (v1.x - v3.x) + (v3.x - v2.x) * (v1.y - v3.y);
+    if area.abs() < 0.00001 {
+        return; // Degenerate triangle
+    }
+    let inv_area = 1.0 / area;
+
+    // Edge function coefficients
+    let a0 = v2.y - v3.y;
+    let b0 = v3.x - v2.x;
+    let a1 = v3.y - v1.y;
+    let b1 = v1.x - v3.x;
+
+    // Starting point
+    let start_x = min_x as f32;
+    let start_y = min_y as f32;
+
+    // Initial edge function values at (start_x, start_y)
+    let w0_row_start = a0 * (start_x - v3.x) + b0 * (start_y - v3.y);
+    let w1_row_start = a1 * (start_x - v3.x) + b1 * (start_y - v3.y);
+
+    // Step increments
+    let a0_step = a0;
+    let b0_step = b0;
+    let a1_step = a1;
+    let b1_step = b1;
+
+    let mut w0_row = w0_row_start;
+    let mut w1_row = w1_row_start;
+
+    // Rasterize using incremental edge functions
+    for y in min_y..max_y {
+        let mut w0 = w0_row;
+        let mut w1 = w1_row;
+
+        for x in min_x..max_x {
+            // Convert to barycentric coordinates
+            let bc_x = w0 * inv_area;
+            let bc_y = w1 * inv_area;
+            let bc_z = 1.0 - bc_x - bc_y;
+
+            // Check if inside triangle
+            const ERR: f32 = -0.0001;
+            if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
+                // Interpolate depth
+                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+
+                // Z-buffer test
+                if settings.use_zbuffer {
+                    let idx = y * fb.width + x;
+                    if z >= fb.zbuffer[idx] {
+                        w0 += a0_step;
+                        w1 += a1_step;
+                        continue;
+                    }
+                }
+
+                // Interpolate UV coordinates
+                let (u, v) = if settings.affine_textures {
+                    // Affine (PS1 style) - linear interpolation
+                    let u = bc_x * surface.uv1.x + bc_y * surface.uv2.x + bc_z * surface.uv3.x;
+                    let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
+                    (u, v)
+                } else {
+                    // Perspective-correct interpolation
+                    let bcc_x = bc_x / v1.z;
+                    let bcc_y = bc_y / v2.z;
+                    let bcc_z = bc_z / v3.z;
+                    let bd = bcc_x + bcc_y + bcc_z;
+                    let bcc_x = bcc_x / bd;
+                    let bcc_y = bcc_y / bd;
+                    let bcc_z = bcc_z / bd;
+
+                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
+                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    (u, v)
+                };
+
+                // === CLUT LOOKUP: Sample index from texture, then look up in CLUT ===
+                let mut color = match (indexed_texture, clut) {
+                    (Some(tex), Some(clut)) => {
+                        let index = tex.sample_index(u, 1.0 - v);
+                        clut.lookup(index)
+                    }
+                    (Some(tex), None) => {
+                        // No CLUT: use index as grayscale (for debugging)
+                        let index = tex.sample_index(u, 1.0 - v);
+                        let v = (index as u16 * 31 / 255) as u8;
+                        Color15::new(v, v, v)
+                    }
+                    _ => Color15::WHITE,
+                };
+
+                // Handle transparency based on black_transparent setting
+                let is_black = color.r5() == 0 && color.g5() == 0 && color.b5() == 0;
+                if color.is_transparent() {
+                    if is_black && !black_transparent {
+                        color = Color15::BLACK_DRAWABLE;
+                    } else {
+                        w0 += a0_step;
+                        w1 += a1_step;
+                        continue;
+                    }
+                } else if black_transparent && is_black {
+                    w0 += a0_step;
+                    w1 += a1_step;
+                    continue;
+                }
+
+                // === PS1-AUTHENTIC COLOR PIPELINE ===
+                // Expand texture from 5-bit to 8-bit
+                let tex_r8 = expand_5_to_8(color.r5());
+                let tex_g8 = expand_5_to_8(color.g5());
+                let tex_b8 = expand_5_to_8(color.b5());
+
+                // Interpolate vertex colors
+                let vertex_r = (bc_x * surface.vc1.r as f32 + bc_y * surface.vc2.r as f32 + bc_z * surface.vc3.r as f32) as u8;
+                let vertex_g = (bc_x * surface.vc1.g as f32 + bc_y * surface.vc2.g as f32 + bc_z * surface.vc3.g as f32) as u8;
+                let vertex_b = (bc_x * surface.vc1.b as f32 + bc_y * surface.vc2.b as f32 + bc_z * surface.vc3.b as f32) as u8;
+
+                // Apply PS1-style texture modulation
+                let mod_r8 = ((tex_r8 as u32 * vertex_r as u32) / 128).min(255) as u8;
+                let mod_g8 = ((tex_g8 as u32 * vertex_g as u32) / 128).min(255) as u8;
+                let mod_b8 = ((tex_b8 as u32 * vertex_b as u32) / 128).min(255) as u8;
+
+                // Apply shading
+                let (shade_r, shade_g, shade_b) = match settings.shading {
+                    ShadingMode::None => (1.0, 1.0, 1.0),
+                    ShadingMode::Flat => flat_shade,
+                    ShadingMode::Gouraud => {
+                        let ((r1, g1, b1), (r2, g2, b2), (r3, g3, b3)) = gouraud_shades.unwrap();
+                        (
+                            bc_x * r1 + bc_y * r2 + bc_z * r3,
+                            bc_x * g1 + bc_y * g2 + bc_z * g3,
+                            bc_x * b1 + bc_y * b2 + bc_z * b3,
+                        )
+                    }
+                };
+
+                let shaded_r8 = (mod_r8 as f32 * shade_r.clamp(0.0, 2.0)).min(255.0) as u8;
+                let shaded_g8 = (mod_g8 as f32 * shade_g.clamp(0.0, 2.0)).min(255.0) as u8;
+                let shaded_b8 = (mod_b8 as f32 * shade_b.clamp(0.0, 2.0)).min(255.0) as u8;
+
+                // Final quantization with dithering
+                let (r5, g5, b5) = if settings.dithering {
+                    dither_and_quantize(shaded_r8, shaded_g8, shaded_b8, x, y)
+                } else {
+                    (shaded_r8 >> 3, shaded_g8 >> 3, shaded_b8 >> 3)
+                };
+
+                // Create final color, preserving semi-transparency
+                let is_all_black = r5 == 0 && g5 == 0 && b5 == 0;
+                let semi = color.is_semi_transparent() || is_all_black;
+                let color = Color15::new_semi(r5, g5, b5, semi);
+
+                // Write pixel
+                let idx = y * fb.width + x;
+                if z < fb.zbuffer[idx] {
+                    fb.zbuffer[idx] = z;
+                    if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, face_blend_mode);
+                    } else {
+                        fb.set_pixel_15(x, y, color);
+                    }
+                }
+            }
+
+            w0 += a0_step;
+            w1 += a1_step;
+        }
+
+        w0_row += b0_step;
+        w1_row += b1_step;
+    }
+}
+
 /// Render a mesh to the framebuffer
 /// Returns timing breakdown for profiling
 pub fn render_mesh(
@@ -1248,8 +1718,11 @@ pub fn render_mesh(
         // PS1-style: Skip triangles that have ANY vertex behind the near plane
         // This is conservative but simple and matches PS1 behavior
         // (Games were designed to not let geometry get too close to camera)
-        if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
-            continue;
+        // NOTE: Skip near-plane culling for orthographic projection (camera Z is meaningless)
+        if settings.ortho_projection.is_none() {
+            if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
+                continue;
+            }
         }
 
         // Use pre-projected screen positions
@@ -1516,8 +1989,11 @@ pub fn render_mesh_15(
         let cv3 = cam_space_positions[face.v2];
 
         // PS1-style: Skip triangles that have ANY vertex behind the near plane
-        if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
-            continue;
+        // NOTE: Skip near-plane culling for orthographic projection (camera Z is meaningless)
+        if settings.ortho_projection.is_none() {
+            if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
+                continue;
+            }
         }
 
         // Use pre-projected screen positions
@@ -1774,4 +2250,137 @@ pub fn create_test_cube() -> (Vec<Vertex>, Vec<Face>) {
     }
 
     (vertices, faces)
+}
+
+// =============================================================================
+// Shared 3D line drawing with near-plane clipping
+// =============================================================================
+
+/// Draw a 3D line with proper near-plane clipping.
+/// Used by both world editor and modeler for grid/wireframe rendering.
+pub fn draw_3d_line_clipped(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    p0: Vec3,
+    p1: Vec3,
+    color: Color,
+) {
+    use super::math::{world_to_screen, NEAR_PLANE};
+
+    // Transform to camera space
+    let rel0 = p0 - camera.position;
+    let rel1 = p1 - camera.position;
+
+    let z0 = rel0.dot(camera.basis_z);
+    let z1 = rel1.dot(camera.basis_z);
+
+    // Both behind camera - skip entirely
+    if z0 <= NEAR_PLANE && z1 <= NEAR_PLANE {
+        return;
+    }
+
+    // Clip line to near plane if needed
+    let (clipped_p0, clipped_p1) = if z0 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p0 = p0 + (p1 - p0) * t;
+        (new_p0, p1)
+    } else if z1 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p1 = p0 + (p1 - p0) * t;
+        (p0, new_p1)
+    } else {
+        (p0, p1)
+    };
+
+    // Project clipped endpoints to screen space
+    let s0 = world_to_screen(
+        clipped_p0,
+        camera.position,
+        camera.basis_x,
+        camera.basis_y,
+        camera.basis_z,
+        fb.width,
+        fb.height,
+    );
+    let s1 = world_to_screen(
+        clipped_p1,
+        camera.position,
+        camera.basis_x,
+        camera.basis_y,
+        camera.basis_z,
+        fb.width,
+        fb.height,
+    );
+
+    if let (Some((x0, y0)), Some((x1, y1))) = (s0, s1) {
+        fb.draw_line(x0 as i32, y0 as i32, x1 as i32, y1 as i32, color);
+    }
+}
+
+/// Draw a floor grid on a horizontal plane.
+/// Uses short segments for better near-plane clipping behavior.
+///
+/// # Arguments
+/// * `fb` - Framebuffer to draw to
+/// * `camera` - Camera for projection
+/// * `y` - Y height of the grid plane
+/// * `spacing` - Distance between grid lines
+/// * `extent` - Half-size of the grid (grid goes from -extent to +extent)
+/// * `grid_color` - Color for regular grid lines
+/// * `x_axis_color` - Color for the X axis (line at Z=0)
+/// * `z_axis_color` - Color for the Z axis (line at X=0)
+pub fn draw_floor_grid(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    y: f32,
+    spacing: f32,
+    extent: f32,
+    grid_color: Color,
+    x_axis_color: Color,
+    z_axis_color: Color,
+) {
+    // Use shorter segments for better clipping behavior
+    let segment_length = spacing;
+
+    // X-parallel lines (varying X, fixed Z)
+    let mut z = -extent;
+    while z <= extent {
+        let is_z_axis = z.abs() < 0.001;
+        let color = if is_z_axis { z_axis_color } else { grid_color };
+
+        let mut x = -extent;
+        while x < extent {
+            let x_end = (x + segment_length).min(extent);
+            draw_3d_line_clipped(
+                fb,
+                camera,
+                Vec3::new(x, y, z),
+                Vec3::new(x_end, y, z),
+                color,
+            );
+            x += segment_length;
+        }
+        z += spacing;
+    }
+
+    // Z-parallel lines (fixed X, varying Z)
+    let mut x = -extent;
+    while x <= extent {
+        let is_x_axis = x.abs() < 0.001;
+        let color = if is_x_axis { x_axis_color } else { grid_color };
+
+        let mut z = -extent;
+        while z < extent {
+            let z_end = (z + segment_length).min(extent);
+            draw_3d_line_clipped(
+                fb,
+                camera,
+                Vec3::new(x, y, z),
+                Vec3::new(x, y, z_end),
+                color,
+            );
+            z += segment_length;
+        }
+        x += spacing;
+    }
 }

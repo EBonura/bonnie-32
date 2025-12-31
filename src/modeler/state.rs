@@ -65,8 +65,9 @@ pub struct OrthoCamera {
 impl Default for OrthoCamera {
     fn default() -> Self {
         Self {
-            zoom: 2.0,
-            center: Vec2::new(0.0, 50.0), // Centered, slightly elevated
+            // Scale: 1024 units = 1 meter
+            zoom: 0.1, // Zoomed out more for larger scale
+            center: Vec2::new(0.0, 1024.0), // Centered at 1 meter height
         }
     }
 }
@@ -462,13 +463,13 @@ pub enum BrushType {
     Fill,
 }
 
-/// Atlas editing mode - UV vertex editing vs painting
+/// Atlas editing mode - UV vertex editing or painting (with integrated CLUT)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AtlasEditMode {
     /// Move UV vertices
     #[default]
     Uv,
-    /// Paint on the texture atlas
+    /// Paint on the texture atlas (CLUT palette integrated here)
     Paint,
 }
 
@@ -485,6 +486,11 @@ impl AtlasEditMode {
             AtlasEditMode::Uv => "UV",
             AtlasEditMode::Paint => "Paint",
         }
+    }
+
+    /// All available modes for tab bar
+    pub fn all() -> [AtlasEditMode; 2] {
+        [AtlasEditMode::Uv, AtlasEditMode::Paint]
     }
 }
 
@@ -592,10 +598,8 @@ pub struct ModelerState {
     // Edit mode
     pub interaction_mode: InteractionMode,
 
-    // The mesh being edited (legacy single mesh mode)
-    pub mesh: EditableMesh,
-
     // PicoCAD-style project with multiple objects and texture atlas
+    // This is the single source of truth for mesh data - access via mesh() and mesh_mut()
     pub project: MeshProject,
 
     // File state
@@ -644,10 +648,17 @@ pub struct ModelerState {
     pub brush_size: f32,
     pub brush_type: BrushType,
     pub paint_mode: PaintMode,
-    pub atlas_edit_mode: AtlasEditMode, // UV editing vs painting (V to toggle)
+    pub atlas_edit_mode: AtlasEditMode, // UV editing vs painting vs CLUT (V to toggle)
     pub color_picker_slider: Option<usize>, // Active slider in color picker (0=R, 1=G, 2=B)
     pub brush_size_slider_active: bool, // True while dragging brush size slider
     pub paint_stroke_active: bool, // True while painting (for undo grouping)
+
+    // CLUT editing state
+    pub selected_clut: Option<crate::rasterizer::ClutId>, // Currently selected CLUT in pool
+    pub selected_clut_entry: usize,                       // Selected palette index (0-15 or 0-255)
+    pub active_palette_index: u8,                         // Palette index for indexed painting
+    pub clut_preview_active: bool,                        // Live palette swap preview in viewport
+    pub clut_color_slider: Option<usize>,                 // Active slider in CLUT color editor
 
     // Vertex linking: when true, move coincident vertices together
     pub vertex_linking: bool,
@@ -701,8 +712,10 @@ pub struct ModelerState {
     pub hovered_face: Option<usize>,
 
     // Gizmo hover state
-    /// Which gizmo axis is being hovered (for highlighting)
+    /// Which gizmo axis is being hovered (for highlighting) - perspective view
     pub gizmo_hovered_axis: Option<Axis>,
+    /// Which gizmo axis is being hovered in ortho views
+    pub ortho_gizmo_hovered_axis: Option<Axis>,
 
     // Modal transform state (G/S/R keys) - now uses DragManager for actual transform
     pub modal_transform: ModalTransform,
@@ -747,23 +760,20 @@ pub struct UndoState {
 impl ModelerState {
     pub fn new() -> Self {
         // Orbit camera setup
-        let orbit_target = Vec3::new(0.0, 50.0, 0.0); // Center of scene, slightly elevated
-        let orbit_distance = 400.0;
+        // Scale: 1024 units = 1 meter (SECTOR_SIZE)
+        let orbit_target = Vec3::new(0.0, 1024.0, 0.0); // Center at 1 meter height
+        let orbit_distance = 4096.0; // 4 meters back
         let orbit_azimuth = 0.8;      // ~45 degrees
         let orbit_elevation = 0.3;    // ~17 degrees up
 
         let mut camera = Camera::new();
         Self::update_camera_from_orbit(&mut camera, orbit_target, orbit_distance, orbit_azimuth, orbit_elevation);
 
-        // Create project first, then derive mesh from it (single source of truth)
+        // Project is the single source of truth for mesh data
         let project = MeshProject::default();
-        let mesh = project.selected().map(|o| o.mesh.clone()).unwrap_or_else(EditableMesh::new);
 
         Self {
             interaction_mode: InteractionMode::Edit,
-
-            // Mesh derived from project's selected object
-            mesh,
 
             // PicoCAD-style project (single source of truth for geometry)
             project,
@@ -814,6 +824,13 @@ impl ModelerState {
             brush_size_slider_active: false,
             paint_stroke_active: false,
 
+            // CLUT editing defaults
+            selected_clut: None,
+            selected_clut_entry: 1, // Default to index 1 (index 0 is transparent)
+            active_palette_index: 1,
+            clut_preview_active: false,
+            clut_color_slider: None,
+
             vertex_linking: true, // Default on: move coincident vertices together
 
             hierarchy_expanded: Vec::new(),
@@ -850,6 +867,7 @@ impl ModelerState {
             hovered_face: None,
 
             gizmo_hovered_axis: None,
+            ortho_gizmo_hovered_axis: None,
 
             modal_transform: ModalTransform::None,
 
@@ -957,23 +975,21 @@ impl ModelerState {
     }
 
     // ========================================================================
-    // Mesh/Project Sync (to keep state.mesh and state.project in sync)
+    // Mesh Access (project is single source of truth)
     // ========================================================================
 
-    /// Sync state.mesh FROM the currently selected project object.
-    /// Call after UV edits or when switching objects.
-    pub fn sync_mesh_from_project(&mut self) {
-        if let Some(obj) = self.project.selected() {
-            self.mesh = obj.mesh.clone();
-        }
+    /// Get a reference to the currently selected mesh (single source of truth)
+    pub fn mesh(&self) -> &EditableMesh {
+        static EMPTY: std::sync::OnceLock<EditableMesh> = std::sync::OnceLock::new();
+        self.project.selected()
+            .map(|obj| &obj.mesh)
+            .unwrap_or_else(|| EMPTY.get_or_init(EditableMesh::new))
     }
 
-    /// Sync state.mesh TO the currently selected project object.
-    /// Call after geometry edits (extrude, move vertices, etc).
-    pub fn sync_mesh_to_project(&mut self) {
-        if let Some(obj) = self.project.selected_mut() {
-            obj.mesh = self.mesh.clone();
-        }
+    /// Get a mutable reference to the currently selected mesh (single source of truth)
+    /// Returns None if no object is selected
+    pub fn mesh_mut(&mut self) -> Option<&mut EditableMesh> {
+        self.project.selected_mut().map(|obj| &mut obj.mesh)
     }
 
     /// Toggle interaction mode (Object <-> Edit)
@@ -986,7 +1002,7 @@ impl ModelerState {
     /// Create a new mesh (replaces current)
     pub fn new_mesh(&mut self) {
         self.project = MeshProject::default();
-        self.sync_mesh_from_project(); // Derive mesh from project
+        // Project is single source of truth - mesh() will read from it
         self.current_file = None;
         self.selection.clear();
         self.dirty = false;
@@ -996,9 +1012,7 @@ impl ModelerState {
     /// Save project to file (includes mesh + texture atlas)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_project(&mut self, path: &std::path::Path) -> Result<(), String> {
-        // Sync current mesh to project before saving
-        self.sync_mesh_to_project();
-
+        // Project is single source of truth - mesh is already in project
         self.project.save_to_file(path)
             .map_err(|e| format!("{}", e))?;
         self.current_file = Some(path.to_path_buf());
@@ -1013,7 +1027,7 @@ impl ModelerState {
         let project = MeshProject::load_from_file(path)
             .map_err(|e| format!("{}", e))?;
         self.project = project;
-        self.sync_mesh_from_project();
+        // Project is single source of truth - mesh() will read from it
         self.current_file = Some(path.to_path_buf());
         self.selection.clear();
         self.dirty = false;
@@ -1077,7 +1091,11 @@ impl ModelerState {
     /// Create a new project (replaces current)
     pub fn new_project(&mut self) {
         self.project = MeshProject::default();
-        self.mesh = EditableMesh::cube(50.0);
+        // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
+        // Set directly in project (single source of truth)
+        if let Some(mesh) = self.mesh_mut() {
+            *mesh = EditableMesh::cube(1024.0);
+        }
         self.current_file = None;
         self.selection.clear();
         self.dirty = false;
@@ -1091,7 +1109,7 @@ impl ModelerState {
     /// Save current state to undo stack before making a change
     pub fn push_undo(&mut self, description: &str) {
         let state = UndoState {
-            mesh: self.mesh.clone(),
+            mesh: self.mesh().clone(),
             selection: self.selection.clone(),
             atlas: None, // Don't save atlas for mesh-only changes
             description: description.to_string(),
@@ -1110,7 +1128,7 @@ impl ModelerState {
     /// Save current state including texture atlas to undo stack (for paint operations)
     pub fn push_undo_with_atlas(&mut self, description: &str) {
         let state = UndoState {
-            mesh: self.mesh.clone(),
+            mesh: self.mesh().clone(),
             selection: self.selection.clone(),
             atlas: Some(self.project.atlas.clone()),
             description: description.to_string(),
@@ -1131,20 +1149,21 @@ impl ModelerState {
         if let Some(undo_state) = self.undo_stack.pop() {
             // Save current state to redo stack (include atlas if the undo state had one)
             let redo_state = UndoState {
-                mesh: self.mesh.clone(),
+                mesh: self.mesh().clone(),
                 selection: self.selection.clone(),
                 atlas: if undo_state.atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
                 description: undo_state.description.clone(),
             };
             self.redo_stack.push(redo_state);
 
-            // Restore the undo state
-            self.mesh = undo_state.mesh;
+            // Restore the undo state - directly to project (single source of truth)
+            if let Some(mesh) = self.mesh_mut() {
+                *mesh = undo_state.mesh;
+            }
             self.selection = undo_state.selection;
             if let Some(atlas) = undo_state.atlas {
                 self.project.atlas = atlas;
             }
-            self.sync_mesh_to_project(); // Keep project in sync
             self.dirty = true;
             self.set_status(&format!("Undo: {}", undo_state.description), 1.0);
             true
@@ -1159,20 +1178,21 @@ impl ModelerState {
         if let Some(redo_state) = self.redo_stack.pop() {
             // Save current state to undo stack (include atlas if the redo state had one)
             let undo_state = UndoState {
-                mesh: self.mesh.clone(),
+                mesh: self.mesh().clone(),
                 selection: self.selection.clone(),
                 atlas: if redo_state.atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
                 description: redo_state.description.clone(),
             };
             self.undo_stack.push(undo_state);
 
-            // Restore the redo state
-            self.mesh = redo_state.mesh;
+            // Restore the redo state - directly to project (single source of truth)
+            if let Some(mesh) = self.mesh_mut() {
+                *mesh = redo_state.mesh;
+            }
             self.selection = redo_state.selection;
             if let Some(atlas) = redo_state.atlas {
                 self.project.atlas = atlas;
             }
-            self.sync_mesh_to_project(); // Keep project in sync
             self.dirty = true;
             self.set_status(&format!("Redo: {}", redo_state.description), 1.0);
             true

@@ -254,6 +254,29 @@ pub struct EditorState {
     /// Color picker active slider for vertex color editing
     pub vertex_color_slider: Option<usize>,
 
+    /// Skybox panel: active slider ID
+    pub skybox_active_slider: Option<usize>,
+
+    /// Skybox panel: selected color target (for RGB sliders)
+    /// 0-3 = gradient colors (zenith, horizon_sky, horizon_ground, nadir)
+    /// 10 = horizontal tint, 20 = sun core, 21 = sun glow, 22 = moon core, 23 = moon glow
+    /// 30 = cloud layer 1, 31 = cloud layer 2, 40 = mtn range 1 lit, 41 = mtn range 1 shadow
+    /// 42 = mtn range 1 highlight, 50 = mtn range 2 lit, etc., 60 = stars, 70 = haze
+    pub skybox_selected_color: Option<usize>,
+
+    /// Skybox panel: section expansion states
+    pub skybox_gradient_expanded: bool,
+    pub skybox_celestial_expanded: bool,
+    pub skybox_clouds_expanded: bool,
+    pub skybox_mountains_expanded: bool,
+    pub skybox_stars_expanded: bool,
+    pub skybox_atmo_expanded: bool,
+
+    /// Skybox panel: selected cloud layer (0 or 1)
+    pub skybox_selected_cloud_layer: usize,
+    /// Skybox panel: selected mountain range (0 or 1)
+    pub skybox_selected_mountain_range: usize,
+
     /// Hidden rooms (room indices that should not be rendered in 2D/3D views)
     pub hidden_rooms: std::collections::HashSet<usize>,
 
@@ -373,6 +396,16 @@ impl EditorState {
             selected_vertex_indices: Vec::new(),
             light_color_slider: None,
             vertex_color_slider: None,
+            skybox_active_slider: None,
+            skybox_selected_color: None,
+            skybox_gradient_expanded: true,  // Start expanded
+            skybox_celestial_expanded: false,
+            skybox_clouds_expanded: false,
+            skybox_mountains_expanded: false,
+            skybox_stars_expanded: false,
+            skybox_atmo_expanded: false,
+            skybox_selected_cloud_layer: 0,
+            skybox_selected_mountain_range: 0,
             hidden_rooms: std::collections::HashSet::new(),
             portals_dirty: true, // Recalculate on first frame
             selected_object_type: ObjectType::Spawn(SpawnPointType::PlayerStart), // Default to player start

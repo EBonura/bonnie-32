@@ -159,9 +159,15 @@ impl ModelerToolBox {
         // Extrude suppresses transform tools while active
         tool_box.suppress_while_active("extrude", &["move", "rotate", "scale"]);
 
+        let mut tools = ModelerTools::new();
+
+        // Activate Move by default - there should always be a transform tool active
+        tools.move_tool.do_activate();
+        tool_box.modal_tool_stack.push("move");
+
         Self {
             tool_box,
-            tools: ModelerTools::new(),
+            tools,
         }
     }
 
@@ -181,7 +187,16 @@ impl ModelerToolBox {
     }
 
     /// Toggle a tool by ID
+    /// For transform tools (Move/Rotate/Scale), toggling a different tool activates it,
+    /// but toggling the already-active transform tool does nothing (can't have no transform tool)
     pub fn toggle(&mut self, tool_id: ModelerToolId) {
+        // For transform tools, don't allow deactivating if already active
+        // (must always have one transform tool active)
+        let is_transform = matches!(tool_id, ModelerToolId::Move | ModelerToolId::Rotate | ModelerToolId::Scale);
+        if is_transform && self.is_active(tool_id) {
+            // Already active transform tool - don't toggle off
+            return;
+        }
         self.tool_box.toggle_tool(tool_id.as_str(), &mut self.tools);
     }
 
@@ -207,11 +222,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_move_active_by_default() {
+        let mtb = ModelerToolBox::new();
+
+        // Move should be active by default
+        assert!(mtb.tools.move_tool.active());
+        assert!(!mtb.tools.rotate.active());
+        assert!(!mtb.tools.scale.active());
+        assert_eq!(mtb.active_transform_tool(), Some(ModelerToolId::Move));
+    }
+
+    #[test]
     fn test_exclusive_groups() {
         let mut mtb = ModelerToolBox::new();
 
-        // Activate move
-        mtb.activate(ModelerToolId::Move);
+        // Move is already active by default
         assert!(mtb.tools.move_tool.active());
         assert!(!mtb.tools.rotate.active());
         assert!(!mtb.tools.scale.active());
@@ -230,11 +255,31 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_does_not_deactivate_transform() {
+        let mut mtb = ModelerToolBox::new();
+
+        // Move is active by default
+        assert!(mtb.tools.move_tool.active());
+
+        // Toggle Move - should NOT deactivate (always need a transform tool)
+        mtb.toggle(ModelerToolId::Move);
+        assert!(mtb.tools.move_tool.active());
+
+        // Toggle Rotate - should switch to rotate
+        mtb.toggle(ModelerToolId::Rotate);
+        assert!(!mtb.tools.move_tool.active());
+        assert!(mtb.tools.rotate.active());
+
+        // Toggle Rotate again - should NOT deactivate
+        mtb.toggle(ModelerToolId::Rotate);
+        assert!(mtb.tools.rotate.active());
+    }
+
+    #[test]
     fn test_extrude_suppression() {
         let mut mtb = ModelerToolBox::new();
 
-        // Activate move first
-        mtb.activate(ModelerToolId::Move);
+        // Move is already active by default
         assert!(mtb.tools.move_tool.active());
 
         // Activate extrude - should suppress move
@@ -252,9 +297,7 @@ mod tests {
     fn test_active_transform_tool() {
         let mut mtb = ModelerToolBox::new();
 
-        assert_eq!(mtb.active_transform_tool(), None);
-
-        mtb.activate(ModelerToolId::Move);
+        // Move is active by default
         assert_eq!(mtb.active_transform_tool(), Some(ModelerToolId::Move));
 
         mtb.activate(ModelerToolId::Rotate);
@@ -268,11 +311,11 @@ mod tests {
     fn test_deactivate_all() {
         let mut mtb = ModelerToolBox::new();
 
-        mtb.activate(ModelerToolId::Move);
         mtb.activate(ModelerToolId::Select);
 
         mtb.deactivate_all();
 
+        // deactivate_all clears everything including move
         assert!(!mtb.tools.move_tool.active());
         assert!(!mtb.tools.select.active());
     }

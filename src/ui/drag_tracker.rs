@@ -320,7 +320,10 @@ pub fn pick_position(
                 (mouse_pos.1 - drag_state.initial_mouse.1) * sensitivity,
             );
             // Move in camera-relative XY plane
-            let world_delta = camera.basis_x * delta.0 - camera.basis_y * delta.1;
+            // delta.1 > 0 when mouse moves down, and we want the selection to move down
+            // basis_y points "up" in camera view, but in the projection positive cam_y = down on screen
+            // So we use + to invert: mouse down → +delta.1 → +basis_y → larger cam_y → down on screen
+            let world_delta = camera.basis_x * delta.0 + camera.basis_y * delta.1;
             Some(drag_state.initial_position + world_delta)
         }
     }

@@ -247,11 +247,20 @@ pub fn draw_editor(
     // Right split: texture palette | face properties
     let (texture_rect, props_rect) = layout.right_panel_split.update(ctx, right_rect);
 
-    // Draw panels
-    draw_panel(grid_rect, Some("2D Grid"), Color::from_rgba(35, 35, 40, 255));
+    // Split grid_rect: Skybox panel (fixed height) | 2D Grid
+    let skybox_panel_height = 195.0;
+    let skybox_rect = Rect::new(grid_rect.x, grid_rect.y, grid_rect.w, skybox_panel_height);
+    let grid_rect_below = Rect::new(grid_rect.x, grid_rect.y + skybox_panel_height, grid_rect.w, grid_rect.h - skybox_panel_height);
+
+    // Draw Skybox panel
+    draw_panel(skybox_rect, Some("Skybox"), Color::from_rgba(35, 35, 40, 255));
+    draw_skybox_panel(ctx, panel_content_rect(skybox_rect, true), state);
+
+    // Draw 2D Grid panel
+    draw_panel(grid_rect_below, Some("2D Grid"), Color::from_rgba(35, 35, 40, 255));
 
     // Add view mode toolbar inside the 2D grid panel
-    let grid_content = panel_content_rect(grid_rect, true);
+    let grid_content = panel_content_rect(grid_rect_below, true);
     let view_toolbar_height = 22.0;
     let view_toolbar_rect = Rect::new(grid_content.x, grid_content.y, grid_content.w, view_toolbar_height);
     let grid_view_rect = Rect::new(grid_content.x, grid_content.y + view_toolbar_height, grid_content.w, grid_content.h - view_toolbar_height);
@@ -677,6 +686,942 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     }
 
     action
+}
+
+/// Draw the skybox configuration panel - PS1 Spyro-style with collapsible sections
+fn draw_skybox_panel(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
+    use crate::world::{Skybox, HorizonDirection, CloudLayer, MountainRange};
+
+    let x = rect.x.floor();
+    let mut y = rect.y.floor();
+    let label_gray = Color::from_rgba(150, 150, 150, 255);
+    let panel_w = rect.w;
+
+    // Enable/disable toggle
+    let has_skybox = state.level.skybox.is_some();
+    let toggle_rect = Rect::new(x, y, 50.0, 16.0);
+    let toggle_hovered = toggle_rect.contains(ctx.mouse.x, ctx.mouse.y);
+
+    let (bg_color, text) = if has_skybox {
+        (Color::from_rgba(60, 120, 80, 255), "ON")
+    } else {
+        (Color::from_rgba(60, 60, 65, 255), "OFF")
+    };
+    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, bg_color);
+    if toggle_hovered {
+        draw_rectangle_lines(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, 1.0, WHITE);
+    }
+    draw_text(text, toggle_rect.x + 16.0, toggle_rect.y + 12.0, 11.0, WHITE);
+
+    if toggle_hovered && ctx.mouse.left_pressed {
+        if has_skybox {
+            state.level.skybox = None;
+        } else {
+            state.level.skybox = Some(Skybox::default());
+        }
+    }
+
+    // Draw gradient preview strip
+    if let Some(skybox) = &state.level.skybox {
+        let preview_x = x + 58.0;
+        let preview_w = panel_w - 66.0;
+        let preview_h = 16.0;
+
+        // Draw vertical gradient preview
+        for py in 0..preview_h as usize {
+            let phi = (py as f32 / (preview_h - 1.0)) * std::f32::consts::PI;
+            let color = skybox.sample_at_direction(0.0, phi, 0.0);
+            draw_line(
+                preview_x,
+                y + py as f32,
+                preview_x + preview_w,
+                y + py as f32,
+                1.0,
+                Color::from_rgba(color.r, color.g, color.b, 255),
+            );
+        }
+        draw_rectangle_lines(preview_x, y, preview_w, preview_h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+        // Draw horizon marker
+        let horizon_y = y + skybox.horizon * preview_h;
+        draw_line(preview_x - 3.0, horizon_y, preview_x + preview_w + 3.0, horizon_y, 1.0, WHITE);
+    }
+
+    y += 22.0;
+
+    // === SKYBOX CONTROLS ===
+    if let Some(skybox) = state.level.skybox.clone() {
+        // Helper to draw a collapsible section header
+        let draw_section = |y: &mut f32, label: &str, expanded: &mut bool, ctx: &UiContext| -> bool {
+            let header_rect = Rect::new(x, *y, panel_w - 8.0, 16.0);
+            let hovered = header_rect.contains(ctx.mouse.x, ctx.mouse.y);
+
+            // Draw background
+            let bg = if hovered { Color::from_rgba(60, 60, 70, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, bg);
+
+            // Draw arrow indicator
+            let arrow = if *expanded { "v" } else { ">" };
+            draw_text(arrow, x + 4.0, *y + 12.0, 12.0, Color::from_rgba(180, 180, 180, 255));
+            draw_text(label, x + 16.0, *y + 12.0, 11.0, WHITE);
+
+            *y += 20.0;
+
+            // Return if clicked
+            hovered && ctx.mouse.left_pressed
+        };
+
+        // === GRADIENT SECTION ===
+        if draw_section(&mut y, "Gradient", &mut state.skybox_gradient_expanded, ctx) {
+            state.skybox_gradient_expanded = !state.skybox_gradient_expanded;
+        }
+
+        if state.skybox_gradient_expanded {
+            // Horizon slider
+            draw_text("Horizon", x + 4.0, y + 10.0, 10.0, label_gray);
+            let horizon_slider = Rect::new(x + 50.0, y, panel_w - 58.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, horizon_slider, skybox.horizon, 0.1, 0.9,
+                Color::from_rgba(100, 140, 180, 255), &mut state.skybox_active_slider, 100) {
+                state.level.skybox.as_mut().unwrap().horizon = new_val;
+            }
+            y += 16.0;
+
+            // 4 gradient color swatches: Z, HS, HG, N
+            draw_text("Colors", x + 4.0, y + 10.0, 10.0, label_gray);
+            let swatch_labels = ["Z", "HS", "HG", "N"];
+            let gradient_colors = [skybox.zenith_color, skybox.horizon_sky_color,
+                                   skybox.horizon_ground_color, skybox.nadir_color];
+
+            for (i, (label, color)) in swatch_labels.iter().zip(gradient_colors.iter()).enumerate() {
+                let sx = x + 50.0 + i as f32 * 36.0;
+                let swatch_rect = Rect::new(sx, y, 14.0, 14.0);
+
+                draw_rectangle(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
+                    Color::from_rgba(color.r, color.g, color.b, 255));
+                draw_text(label, sx + 16.0, y + 10.0, 9.0, label_gray);
+
+                let is_selected = state.skybox_selected_color == Some(i);
+                if is_selected {
+                    draw_rectangle_lines(swatch_rect.x - 1.0, swatch_rect.y - 1.0,
+                        swatch_rect.w + 2.0, swatch_rect.h + 2.0, 2.0, WHITE);
+                } else if swatch_rect.contains(ctx.mouse.x, ctx.mouse.y) {
+                    draw_rectangle_lines(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
+                        1.0, Color::from_rgba(200, 200, 200, 255));
+                }
+
+                if swatch_rect.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                    state.skybox_selected_color = Some(i);
+                }
+            }
+            y += 18.0;
+
+            // RGB sliders for selected gradient color
+            if let Some(idx) = state.skybox_selected_color {
+                if idx < 4 {
+                    let color = gradient_colors[idx];
+                    if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                        color, &mut state.skybox_active_slider) {
+                        let sb = state.level.skybox.as_mut().unwrap();
+                        match idx {
+                            0 => sb.zenith_color = new_color,
+                            1 => sb.horizon_sky_color = new_color,
+                            2 => sb.horizon_ground_color = new_color,
+                            3 => sb.nadir_color = new_color,
+                            _ => {}
+                        }
+                    }
+                    y += 18.0;
+                }
+            }
+
+            // Horizontal tint row
+            let tint_toggle = Rect::new(x + 4.0, y, 28.0, 14.0);
+            let tint_hovered = tint_toggle.contains(ctx.mouse.x, ctx.mouse.y);
+            let (tint_bg, tint_text) = if skybox.horizontal_tint_enabled {
+                (Color::from_rgba(60, 120, 80, 255), "ON")
+            } else {
+                (Color::from_rgba(60, 60, 65, 255), "OFF")
+            };
+            draw_rectangle(tint_toggle.x, tint_toggle.y, tint_toggle.w, tint_toggle.h, tint_bg);
+            if tint_hovered {
+                draw_rectangle_lines(tint_toggle.x, tint_toggle.y, tint_toggle.w, tint_toggle.h, 1.0, WHITE);
+            }
+            draw_text(tint_text, tint_toggle.x + 4.0, tint_toggle.y + 10.0, 9.0, WHITE);
+            if tint_hovered && ctx.mouse.left_pressed {
+                state.level.skybox.as_mut().unwrap().horizontal_tint_enabled = !skybox.horizontal_tint_enabled;
+            }
+
+            draw_text("Tint", x + 36.0, y + 10.0, 10.0, label_gray);
+
+            // Direction dropdown (simple cycle through E/N/W/S)
+            let dir_rect = Rect::new(x + 60.0, y, 20.0, 14.0);
+            let dir_hovered = dir_rect.contains(ctx.mouse.x, ctx.mouse.y);
+            let dir_label = match skybox.horizontal_tint_direction {
+                HorizonDirection::East => "E",
+                HorizonDirection::North => "N",
+                HorizonDirection::West => "W",
+                HorizonDirection::South => "S",
+            };
+            draw_rectangle(dir_rect.x, dir_rect.y, dir_rect.w, dir_rect.h, Color::from_rgba(50, 50, 60, 255));
+            if dir_hovered {
+                draw_rectangle_lines(dir_rect.x, dir_rect.y, dir_rect.w, dir_rect.h, 1.0, WHITE);
+            }
+            draw_text(dir_label, dir_rect.x + 6.0, dir_rect.y + 10.0, 10.0, WHITE);
+            if dir_hovered && ctx.mouse.left_pressed {
+                let sb = state.level.skybox.as_mut().unwrap();
+                sb.horizontal_tint_direction = match sb.horizontal_tint_direction {
+                    HorizonDirection::East => HorizonDirection::North,
+                    HorizonDirection::North => HorizonDirection::West,
+                    HorizonDirection::West => HorizonDirection::South,
+                    HorizonDirection::South => HorizonDirection::East,
+                };
+            }
+
+            // Tint color swatch
+            let tint_swatch = Rect::new(x + 84.0, y, 14.0, 14.0);
+            draw_rectangle(tint_swatch.x, tint_swatch.y, tint_swatch.w, tint_swatch.h,
+                Color::from_rgba(skybox.horizontal_tint_color.r, skybox.horizontal_tint_color.g,
+                    skybox.horizontal_tint_color.b, 255));
+            let tint_selected = state.skybox_selected_color == Some(10);
+            if tint_selected {
+                draw_rectangle_lines(tint_swatch.x - 1.0, tint_swatch.y - 1.0,
+                    tint_swatch.w + 2.0, tint_swatch.h + 2.0, 2.0, WHITE);
+            } else if tint_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                draw_rectangle_lines(tint_swatch.x, tint_swatch.y, tint_swatch.w, tint_swatch.h,
+                    1.0, Color::from_rgba(200, 200, 200, 255));
+            }
+            if tint_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                state.skybox_selected_color = Some(10);
+            }
+
+            // Intensity slider
+            let int_slider = Rect::new(x + 102.0, y, panel_w - 110.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, int_slider, skybox.horizontal_tint_intensity, 0.0, 1.0,
+                Color::from_rgba(180, 140, 100, 255), &mut state.skybox_active_slider, 101) {
+                state.level.skybox.as_mut().unwrap().horizontal_tint_intensity = new_val;
+            }
+            y += 16.0;
+
+            // RGB sliders for tint color if selected
+            if state.skybox_selected_color == Some(10) {
+                if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                    skybox.horizontal_tint_color, &mut state.skybox_active_slider) {
+                    state.level.skybox.as_mut().unwrap().horizontal_tint_color = new_color;
+                }
+                y += 18.0;
+            }
+
+            y += 4.0;
+        }
+
+        // === CELESTIAL SECTION ===
+        if draw_section(&mut y, "Celestial", &mut state.skybox_celestial_expanded, ctx) {
+            state.skybox_celestial_expanded = !state.skybox_celestial_expanded;
+        }
+
+        if state.skybox_celestial_expanded {
+            // Sun controls
+            let sun_toggle = Rect::new(x + 4.0, y, 28.0, 14.0);
+            let sun_hovered = sun_toggle.contains(ctx.mouse.x, ctx.mouse.y);
+            let (sun_bg, sun_text) = if skybox.sun.enabled {
+                (Color::from_rgba(60, 120, 80, 255), "ON")
+            } else {
+                (Color::from_rgba(60, 60, 65, 255), "OFF")
+            };
+            draw_rectangle(sun_toggle.x, sun_toggle.y, sun_toggle.w, sun_toggle.h, sun_bg);
+            if sun_hovered {
+                draw_rectangle_lines(sun_toggle.x, sun_toggle.y, sun_toggle.w, sun_toggle.h, 1.0, WHITE);
+            }
+            draw_text(sun_text, sun_toggle.x + 4.0, sun_toggle.y + 10.0, 9.0, WHITE);
+            if sun_hovered && ctx.mouse.left_pressed {
+                state.level.skybox.as_mut().unwrap().sun.enabled = !skybox.sun.enabled;
+            }
+
+            draw_text("Sun", x + 36.0, y + 10.0, 10.0, label_gray);
+
+            // Sun core color
+            let sun_core_swatch = Rect::new(x + 56.0, y, 14.0, 14.0);
+            draw_rectangle(sun_core_swatch.x, sun_core_swatch.y, sun_core_swatch.w, sun_core_swatch.h,
+                Color::from_rgba(skybox.sun.color.r, skybox.sun.color.g, skybox.sun.color.b, 255));
+            if state.skybox_selected_color == Some(20) {
+                draw_rectangle_lines(sun_core_swatch.x - 1.0, sun_core_swatch.y - 1.0,
+                    sun_core_swatch.w + 2.0, sun_core_swatch.h + 2.0, 2.0, WHITE);
+            } else if sun_core_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                draw_rectangle_lines(sun_core_swatch.x, sun_core_swatch.y, sun_core_swatch.w, sun_core_swatch.h,
+                    1.0, Color::from_rgba(200, 200, 200, 255));
+            }
+            if sun_core_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                state.skybox_selected_color = Some(20);
+            }
+
+            // Sun glow color
+            let sun_glow_swatch = Rect::new(x + 74.0, y, 14.0, 14.0);
+            draw_rectangle(sun_glow_swatch.x, sun_glow_swatch.y, sun_glow_swatch.w, sun_glow_swatch.h,
+                Color::from_rgba(skybox.sun.glow_color.r, skybox.sun.glow_color.g, skybox.sun.glow_color.b, 255));
+            if state.skybox_selected_color == Some(21) {
+                draw_rectangle_lines(sun_glow_swatch.x - 1.0, sun_glow_swatch.y - 1.0,
+                    sun_glow_swatch.w + 2.0, sun_glow_swatch.h + 2.0, 2.0, WHITE);
+            } else if sun_glow_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                draw_rectangle_lines(sun_glow_swatch.x, sun_glow_swatch.y, sun_glow_swatch.w, sun_glow_swatch.h,
+                    1.0, Color::from_rgba(200, 200, 200, 255));
+            }
+            if sun_glow_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                state.skybox_selected_color = Some(21);
+            }
+
+            // Size slider
+            let size_slider = Rect::new(x + 92.0, y, panel_w - 100.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, size_slider, skybox.sun.size, 0.02, 0.3,
+                Color::from_rgba(200, 180, 100, 255), &mut state.skybox_active_slider, 102) {
+                state.level.skybox.as_mut().unwrap().sun.size = new_val;
+            }
+            y += 16.0;
+
+            // Sun azimuth/elevation sliders
+            draw_text("Az", x + 4.0, y + 10.0, 10.0, label_gray);
+            let az_slider = Rect::new(x + 20.0, y, 70.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, az_slider, skybox.sun.azimuth / (2.0 * std::f32::consts::PI), 0.0, 1.0,
+                Color::from_rgba(120, 120, 180, 255), &mut state.skybox_active_slider, 103) {
+                state.level.skybox.as_mut().unwrap().sun.azimuth = new_val * 2.0 * std::f32::consts::PI;
+            }
+
+            draw_text("El", x + 96.0, y + 10.0, 10.0, label_gray);
+            let el_slider = Rect::new(x + 112.0, y, panel_w - 120.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, el_slider, skybox.sun.elevation / (std::f32::consts::PI / 2.0), 0.0, 1.0,
+                Color::from_rgba(120, 180, 120, 255), &mut state.skybox_active_slider, 104) {
+                state.level.skybox.as_mut().unwrap().sun.elevation = new_val * std::f32::consts::PI / 2.0;
+            }
+            y += 16.0;
+
+            // RGB sliders for selected sun color
+            if state.skybox_selected_color == Some(20) {
+                if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                    skybox.sun.color, &mut state.skybox_active_slider) {
+                    state.level.skybox.as_mut().unwrap().sun.color = new_color;
+                }
+                y += 18.0;
+            } else if state.skybox_selected_color == Some(21) {
+                if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                    skybox.sun.glow_color, &mut state.skybox_active_slider) {
+                    state.level.skybox.as_mut().unwrap().sun.glow_color = new_color;
+                }
+                y += 18.0;
+            }
+
+            // Moon controls (similar to sun)
+            let moon_toggle = Rect::new(x + 4.0, y, 28.0, 14.0);
+            let moon_hovered = moon_toggle.contains(ctx.mouse.x, ctx.mouse.y);
+            let (moon_bg, moon_text) = if skybox.moon.enabled {
+                (Color::from_rgba(60, 120, 80, 255), "ON")
+            } else {
+                (Color::from_rgba(60, 60, 65, 255), "OFF")
+            };
+            draw_rectangle(moon_toggle.x, moon_toggle.y, moon_toggle.w, moon_toggle.h, moon_bg);
+            if moon_hovered {
+                draw_rectangle_lines(moon_toggle.x, moon_toggle.y, moon_toggle.w, moon_toggle.h, 1.0, WHITE);
+            }
+            draw_text(moon_text, moon_toggle.x + 4.0, moon_toggle.y + 10.0, 9.0, WHITE);
+            if moon_hovered && ctx.mouse.left_pressed {
+                state.level.skybox.as_mut().unwrap().moon.enabled = !skybox.moon.enabled;
+            }
+
+            draw_text("Moon", x + 36.0, y + 10.0, 10.0, label_gray);
+            y += 18.0;
+
+            y += 4.0;
+        }
+
+        // === CLOUDS SECTION ===
+        if draw_section(&mut y, "Clouds", &mut state.skybox_clouds_expanded, ctx) {
+            state.skybox_clouds_expanded = !state.skybox_clouds_expanded;
+        }
+
+        if state.skybox_clouds_expanded {
+            // Layer tabs
+            draw_text("Layer", x + 4.0, y + 10.0, 10.0, label_gray);
+            for i in 0..2 {
+                let tab_rect = Rect::new(x + 40.0 + i as f32 * 24.0, y, 20.0, 14.0);
+                let tab_hovered = tab_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                let is_active = state.skybox_selected_cloud_layer == i;
+                let has_layer = skybox.cloud_layers[i].is_some();
+
+                let tab_bg = if is_active {
+                    Color::from_rgba(80, 80, 100, 255)
+                } else if has_layer {
+                    Color::from_rgba(50, 60, 70, 255)
+                } else {
+                    Color::from_rgba(40, 40, 50, 255)
+                };
+                draw_rectangle(tab_rect.x, tab_rect.y, tab_rect.w, tab_rect.h, tab_bg);
+                if tab_hovered {
+                    draw_rectangle_lines(tab_rect.x, tab_rect.y, tab_rect.w, tab_rect.h, 1.0, WHITE);
+                }
+                draw_text(&format!("{}", i + 1), tab_rect.x + 7.0, tab_rect.y + 10.0, 10.0, WHITE);
+
+                if tab_hovered && ctx.mouse.left_pressed {
+                    state.skybox_selected_cloud_layer = i;
+                }
+            }
+
+            // Enable toggle for current layer
+            let layer_idx = state.skybox_selected_cloud_layer;
+            let layer_enabled = skybox.cloud_layers[layer_idx].is_some();
+
+            let enable_toggle = Rect::new(x + 92.0, y, 28.0, 14.0);
+            let enable_hovered = enable_toggle.contains(ctx.mouse.x, ctx.mouse.y);
+            let (en_bg, en_text) = if layer_enabled {
+                (Color::from_rgba(60, 120, 80, 255), "ON")
+            } else {
+                (Color::from_rgba(60, 60, 65, 255), "OFF")
+            };
+            draw_rectangle(enable_toggle.x, enable_toggle.y, enable_toggle.w, enable_toggle.h, en_bg);
+            if enable_hovered {
+                draw_rectangle_lines(enable_toggle.x, enable_toggle.y, enable_toggle.w, enable_toggle.h, 1.0, WHITE);
+            }
+            draw_text(en_text, enable_toggle.x + 4.0, enable_toggle.y + 10.0, 9.0, WHITE);
+            if enable_hovered && ctx.mouse.left_pressed {
+                let sb = state.level.skybox.as_mut().unwrap();
+                if layer_enabled {
+                    sb.cloud_layers[layer_idx] = None;
+                } else {
+                    sb.cloud_layers[layer_idx] = Some(CloudLayer::default());
+                }
+            }
+            y += 18.0;
+
+            // Layer controls if enabled
+            if let Some(layer) = &skybox.cloud_layers[layer_idx] {
+                // Height and thickness
+                draw_text("Ht", x + 4.0, y + 10.0, 10.0, label_gray);
+                let ht_slider = Rect::new(x + 20.0, y, 60.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, ht_slider, layer.height, 0.0, 1.0,
+                    Color::from_rgba(140, 140, 180, 255), &mut state.skybox_active_slider, 200 + layer_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().cloud_layers[layer_idx].as_mut().unwrap().height = new_val;
+                }
+
+                draw_text("Th", x + 86.0, y + 10.0, 10.0, label_gray);
+                let th_slider = Rect::new(x + 102.0, y, panel_w - 110.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, th_slider, layer.thickness, 0.01, 0.2,
+                    Color::from_rgba(140, 180, 140, 255), &mut state.skybox_active_slider, 201 + layer_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().cloud_layers[layer_idx].as_mut().unwrap().thickness = new_val;
+                }
+                y += 16.0;
+
+                // Color swatch + opacity
+                let cloud_swatch = Rect::new(x + 4.0, y, 14.0, 14.0);
+                draw_rectangle(cloud_swatch.x, cloud_swatch.y, cloud_swatch.w, cloud_swatch.h,
+                    Color::from_rgba(layer.color.r, layer.color.g, layer.color.b, 255));
+                let cloud_selected = state.skybox_selected_color == Some(30 + layer_idx);
+                if cloud_selected {
+                    draw_rectangle_lines(cloud_swatch.x - 1.0, cloud_swatch.y - 1.0,
+                        cloud_swatch.w + 2.0, cloud_swatch.h + 2.0, 2.0, WHITE);
+                } else if cloud_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                    draw_rectangle_lines(cloud_swatch.x, cloud_swatch.y, cloud_swatch.w, cloud_swatch.h,
+                        1.0, Color::from_rgba(200, 200, 200, 255));
+                }
+                if cloud_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                    state.skybox_selected_color = Some(30 + layer_idx);
+                }
+
+                draw_text("Op", x + 22.0, y + 10.0, 10.0, label_gray);
+                let op_slider = Rect::new(x + 38.0, y, 50.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, op_slider, layer.opacity, 0.0, 1.0,
+                    Color::from_rgba(160, 160, 180, 255), &mut state.skybox_active_slider, 202 + layer_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().cloud_layers[layer_idx].as_mut().unwrap().opacity = new_val;
+                }
+
+                draw_text("Spd", x + 94.0, y + 10.0, 10.0, label_gray);
+                let spd_slider = Rect::new(x + 116.0, y, panel_w - 124.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, spd_slider, (layer.scroll_speed + 0.1) / 0.2, 0.0, 1.0,
+                    Color::from_rgba(120, 100, 160, 255), &mut state.skybox_active_slider, 203 + layer_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().cloud_layers[layer_idx].as_mut().unwrap().scroll_speed = new_val * 0.2 - 0.1;
+                }
+                y += 16.0;
+
+                // Wispiness and density
+                draw_text("Wispy", x + 4.0, y + 10.0, 10.0, label_gray);
+                let wispy_slider = Rect::new(x + 38.0, y, 50.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, wispy_slider, layer.wispiness, 0.0, 1.0,
+                    Color::from_rgba(180, 160, 140, 255), &mut state.skybox_active_slider, 204 + layer_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().cloud_layers[layer_idx].as_mut().unwrap().wispiness = new_val;
+                }
+
+                draw_text("Dens", x + 94.0, y + 10.0, 10.0, label_gray);
+                let dens_slider = Rect::new(x + 124.0, y, panel_w - 132.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, dens_slider, layer.density / 2.0, 0.0, 1.0,
+                    Color::from_rgba(140, 140, 180, 255), &mut state.skybox_active_slider, 205 + layer_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().cloud_layers[layer_idx].as_mut().unwrap().density = new_val * 2.0;
+                }
+                y += 16.0;
+
+                // RGB sliders for cloud color if selected
+                if cloud_selected {
+                    if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                        layer.color, &mut state.skybox_active_slider) {
+                        state.level.skybox.as_mut().unwrap().cloud_layers[layer_idx].as_mut().unwrap().color = new_color;
+                    }
+                    y += 18.0;
+                }
+            }
+
+            y += 4.0;
+        }
+
+        // === MOUNTAINS SECTION ===
+        if draw_section(&mut y, "Mountains", &mut state.skybox_mountains_expanded, ctx) {
+            state.skybox_mountains_expanded = !state.skybox_mountains_expanded;
+        }
+
+        if state.skybox_mountains_expanded {
+            // Light direction
+            draw_text("Light", x + 4.0, y + 10.0, 10.0, label_gray);
+            let light_dir_rect = Rect::new(x + 36.0, y, 20.0, 14.0);
+            let light_hovered = light_dir_rect.contains(ctx.mouse.x, ctx.mouse.y);
+            let light_label = match skybox.mountain_light_direction {
+                HorizonDirection::East => "E",
+                HorizonDirection::North => "N",
+                HorizonDirection::West => "W",
+                HorizonDirection::South => "S",
+            };
+            draw_rectangle(light_dir_rect.x, light_dir_rect.y, light_dir_rect.w, light_dir_rect.h, Color::from_rgba(50, 50, 60, 255));
+            if light_hovered {
+                draw_rectangle_lines(light_dir_rect.x, light_dir_rect.y, light_dir_rect.w, light_dir_rect.h, 1.0, WHITE);
+            }
+            draw_text(light_label, light_dir_rect.x + 6.0, light_dir_rect.y + 10.0, 10.0, WHITE);
+            if light_hovered && ctx.mouse.left_pressed {
+                let sb = state.level.skybox.as_mut().unwrap();
+                sb.mountain_light_direction = match sb.mountain_light_direction {
+                    HorizonDirection::East => HorizonDirection::North,
+                    HorizonDirection::North => HorizonDirection::West,
+                    HorizonDirection::West => HorizonDirection::South,
+                    HorizonDirection::South => HorizonDirection::East,
+                };
+            }
+
+            // Range tabs
+            draw_text("Range", x + 64.0, y + 10.0, 10.0, label_gray);
+            for i in 0..2 {
+                let tab_rect = Rect::new(x + 100.0 + i as f32 * 24.0, y, 20.0, 14.0);
+                let tab_hovered = tab_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                let is_active = state.skybox_selected_mountain_range == i;
+                let has_range = skybox.mountain_ranges[i].is_some();
+
+                let tab_bg = if is_active {
+                    Color::from_rgba(80, 80, 100, 255)
+                } else if has_range {
+                    Color::from_rgba(50, 60, 70, 255)
+                } else {
+                    Color::from_rgba(40, 40, 50, 255)
+                };
+                draw_rectangle(tab_rect.x, tab_rect.y, tab_rect.w, tab_rect.h, tab_bg);
+                if tab_hovered {
+                    draw_rectangle_lines(tab_rect.x, tab_rect.y, tab_rect.w, tab_rect.h, 1.0, WHITE);
+                }
+                draw_text(&format!("{}", i + 1), tab_rect.x + 7.0, tab_rect.y + 10.0, 10.0, WHITE);
+
+                if tab_hovered && ctx.mouse.left_pressed {
+                    state.skybox_selected_mountain_range = i;
+                }
+            }
+            y += 18.0;
+
+            // Enable toggle for current range
+            let range_idx = state.skybox_selected_mountain_range;
+            let range_enabled = skybox.mountain_ranges[range_idx].is_some();
+
+            let enable_toggle = Rect::new(x + 4.0, y, 28.0, 14.0);
+            let enable_hovered = enable_toggle.contains(ctx.mouse.x, ctx.mouse.y);
+            let (en_bg, en_text) = if range_enabled {
+                (Color::from_rgba(60, 120, 80, 255), "ON")
+            } else {
+                (Color::from_rgba(60, 60, 65, 255), "OFF")
+            };
+            draw_rectangle(enable_toggle.x, enable_toggle.y, enable_toggle.w, enable_toggle.h, en_bg);
+            if enable_hovered {
+                draw_rectangle_lines(enable_toggle.x, enable_toggle.y, enable_toggle.w, enable_toggle.h, 1.0, WHITE);
+            }
+            draw_text(en_text, enable_toggle.x + 4.0, enable_toggle.y + 10.0, 9.0, WHITE);
+            if enable_hovered && ctx.mouse.left_pressed {
+                let sb = state.level.skybox.as_mut().unwrap();
+                if range_enabled {
+                    sb.mountain_ranges[range_idx] = None;
+                } else {
+                    sb.mountain_ranges[range_idx] = Some(MountainRange::default());
+                }
+            }
+
+            // Range controls if enabled
+            if let Some(range) = &skybox.mountain_ranges[range_idx] {
+                // Color swatches: Lit, Shadow, Highlight
+                let lit_swatch = Rect::new(x + 36.0, y, 14.0, 14.0);
+                draw_rectangle(lit_swatch.x, lit_swatch.y, lit_swatch.w, lit_swatch.h,
+                    Color::from_rgba(range.lit_color.r, range.lit_color.g, range.lit_color.b, 255));
+                let lit_selected = state.skybox_selected_color == Some(40 + range_idx * 10);
+                if lit_selected {
+                    draw_rectangle_lines(lit_swatch.x - 1.0, lit_swatch.y - 1.0,
+                        lit_swatch.w + 2.0, lit_swatch.h + 2.0, 2.0, WHITE);
+                } else if lit_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                    draw_rectangle_lines(lit_swatch.x, lit_swatch.y, lit_swatch.w, lit_swatch.h,
+                        1.0, Color::from_rgba(200, 200, 200, 255));
+                }
+                if lit_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                    state.skybox_selected_color = Some(40 + range_idx * 10);
+                }
+
+                let shd_swatch = Rect::new(x + 54.0, y, 14.0, 14.0);
+                draw_rectangle(shd_swatch.x, shd_swatch.y, shd_swatch.w, shd_swatch.h,
+                    Color::from_rgba(range.shadow_color.r, range.shadow_color.g, range.shadow_color.b, 255));
+                let shd_selected = state.skybox_selected_color == Some(41 + range_idx * 10);
+                if shd_selected {
+                    draw_rectangle_lines(shd_swatch.x - 1.0, shd_swatch.y - 1.0,
+                        shd_swatch.w + 2.0, shd_swatch.h + 2.0, 2.0, WHITE);
+                } else if shd_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                    draw_rectangle_lines(shd_swatch.x, shd_swatch.y, shd_swatch.w, shd_swatch.h,
+                        1.0, Color::from_rgba(200, 200, 200, 255));
+                }
+                if shd_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                    state.skybox_selected_color = Some(41 + range_idx * 10);
+                }
+
+                let hi_swatch = Rect::new(x + 72.0, y, 14.0, 14.0);
+                draw_rectangle(hi_swatch.x, hi_swatch.y, hi_swatch.w, hi_swatch.h,
+                    Color::from_rgba(range.highlight_color.r, range.highlight_color.g, range.highlight_color.b, 255));
+                let hi_selected = state.skybox_selected_color == Some(42 + range_idx * 10);
+                if hi_selected {
+                    draw_rectangle_lines(hi_swatch.x - 1.0, hi_swatch.y - 1.0,
+                        hi_swatch.w + 2.0, hi_swatch.h + 2.0, 2.0, WHITE);
+                } else if hi_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                    draw_rectangle_lines(hi_swatch.x, hi_swatch.y, hi_swatch.w, hi_swatch.h,
+                        1.0, Color::from_rgba(200, 200, 200, 255));
+                }
+                if hi_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                    state.skybox_selected_color = Some(42 + range_idx * 10);
+                }
+
+                // Height slider
+                draw_text("Ht", x + 90.0, y + 10.0, 10.0, label_gray);
+                let ht_slider = Rect::new(x + 106.0, y, panel_w - 114.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, ht_slider, range.height, 0.0, 0.4,
+                    Color::from_rgba(100, 80, 60, 255), &mut state.skybox_active_slider, 300 + range_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().mountain_ranges[range_idx].as_mut().unwrap().height = new_val;
+                }
+                y += 16.0;
+
+                // Depth and jaggedness
+                draw_text("Depth", x + 4.0, y + 10.0, 10.0, label_gray);
+                let depth_slider = Rect::new(x + 38.0, y, 50.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, depth_slider, range.depth, 0.0, 1.0,
+                    Color::from_rgba(80, 80, 120, 255), &mut state.skybox_active_slider, 301 + range_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().mountain_ranges[range_idx].as_mut().unwrap().depth = new_val;
+                }
+
+                draw_text("Jagged", x + 94.0, y + 10.0, 10.0, label_gray);
+                let jag_slider = Rect::new(x + 132.0, y, panel_w - 140.0, 12.0);
+                if let Some(new_val) = draw_slider(ctx, jag_slider, range.jaggedness, 0.0, 1.0,
+                    Color::from_rgba(100, 100, 80, 255), &mut state.skybox_active_slider, 302 + range_idx * 10) {
+                    state.level.skybox.as_mut().unwrap().mountain_ranges[range_idx].as_mut().unwrap().jaggedness = new_val;
+                }
+                y += 16.0;
+
+                // RGB sliders for selected mountain color
+                if lit_selected {
+                    if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                        range.lit_color, &mut state.skybox_active_slider) {
+                        state.level.skybox.as_mut().unwrap().mountain_ranges[range_idx].as_mut().unwrap().lit_color = new_color;
+                    }
+                    y += 18.0;
+                } else if shd_selected {
+                    if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                        range.shadow_color, &mut state.skybox_active_slider) {
+                        state.level.skybox.as_mut().unwrap().mountain_ranges[range_idx].as_mut().unwrap().shadow_color = new_color;
+                    }
+                    y += 18.0;
+                } else if hi_selected {
+                    if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                        range.highlight_color, &mut state.skybox_active_slider) {
+                        state.level.skybox.as_mut().unwrap().mountain_ranges[range_idx].as_mut().unwrap().highlight_color = new_color;
+                    }
+                    y += 18.0;
+                }
+            }
+
+            y += 4.0;
+        }
+
+        // === STARS SECTION ===
+        if draw_section(&mut y, "Stars", &mut state.skybox_stars_expanded, ctx) {
+            state.skybox_stars_expanded = !state.skybox_stars_expanded;
+        }
+
+        if state.skybox_stars_expanded {
+            let stars_toggle = Rect::new(x + 4.0, y, 28.0, 14.0);
+            let stars_hovered = stars_toggle.contains(ctx.mouse.x, ctx.mouse.y);
+            let (stars_bg, stars_text) = if skybox.stars.enabled {
+                (Color::from_rgba(60, 120, 80, 255), "ON")
+            } else {
+                (Color::from_rgba(60, 60, 65, 255), "OFF")
+            };
+            draw_rectangle(stars_toggle.x, stars_toggle.y, stars_toggle.w, stars_toggle.h, stars_bg);
+            if stars_hovered {
+                draw_rectangle_lines(stars_toggle.x, stars_toggle.y, stars_toggle.w, stars_toggle.h, 1.0, WHITE);
+            }
+            draw_text(stars_text, stars_toggle.x + 4.0, stars_toggle.y + 10.0, 9.0, WHITE);
+            if stars_hovered && ctx.mouse.left_pressed {
+                state.level.skybox.as_mut().unwrap().stars.enabled = !skybox.stars.enabled;
+            }
+
+            // Star color swatch
+            let star_swatch = Rect::new(x + 36.0, y, 14.0, 14.0);
+            draw_rectangle(star_swatch.x, star_swatch.y, star_swatch.w, star_swatch.h,
+                Color::from_rgba(skybox.stars.color.r, skybox.stars.color.g, skybox.stars.color.b, 255));
+            let star_selected = state.skybox_selected_color == Some(60);
+            if star_selected {
+                draw_rectangle_lines(star_swatch.x - 1.0, star_swatch.y - 1.0,
+                    star_swatch.w + 2.0, star_swatch.h + 2.0, 2.0, WHITE);
+            } else if star_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                draw_rectangle_lines(star_swatch.x, star_swatch.y, star_swatch.w, star_swatch.h,
+                    1.0, Color::from_rgba(200, 200, 200, 255));
+            }
+            if star_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                state.skybox_selected_color = Some(60);
+            }
+
+            // Count slider
+            draw_text("Cnt", x + 54.0, y + 10.0, 10.0, label_gray);
+            let cnt_slider = Rect::new(x + 76.0, y, panel_w - 84.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, cnt_slider, skybox.stars.count as f32 / 200.0, 0.0, 1.0,
+                Color::from_rgba(180, 180, 200, 255), &mut state.skybox_active_slider, 400) {
+                state.level.skybox.as_mut().unwrap().stars.count = (new_val * 200.0) as u16;
+            }
+            y += 16.0;
+
+            // Size and twinkle
+            draw_text("Size", x + 4.0, y + 10.0, 10.0, label_gray);
+            let size_slider = Rect::new(x + 32.0, y, 50.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, size_slider, skybox.stars.size / 4.0, 0.0, 1.0,
+                Color::from_rgba(160, 160, 180, 255), &mut state.skybox_active_slider, 401) {
+                state.level.skybox.as_mut().unwrap().stars.size = new_val * 4.0;
+            }
+
+            draw_text("Twinkle", x + 88.0, y + 10.0, 10.0, label_gray);
+            let twinkle_slider = Rect::new(x + 132.0, y, panel_w - 140.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, twinkle_slider, skybox.stars.twinkle_speed / 2.0, 0.0, 1.0,
+                Color::from_rgba(140, 140, 180, 255), &mut state.skybox_active_slider, 402) {
+                state.level.skybox.as_mut().unwrap().stars.twinkle_speed = new_val * 2.0;
+            }
+            y += 16.0;
+
+            // RGB sliders for star color if selected
+            if star_selected {
+                if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                    skybox.stars.color, &mut state.skybox_active_slider) {
+                    state.level.skybox.as_mut().unwrap().stars.color = new_color;
+                }
+                y += 18.0;
+            }
+
+            y += 4.0;
+        }
+
+        // === ATMOSPHERE SECTION ===
+        if draw_section(&mut y, "Atmosphere", &mut state.skybox_atmo_expanded, ctx) {
+            state.skybox_atmo_expanded = !state.skybox_atmo_expanded;
+        }
+
+        if state.skybox_atmo_expanded {
+            let haze_toggle = Rect::new(x + 4.0, y, 28.0, 14.0);
+            let haze_hovered = haze_toggle.contains(ctx.mouse.x, ctx.mouse.y);
+            let (haze_bg, haze_text) = if skybox.horizon_haze.enabled {
+                (Color::from_rgba(60, 120, 80, 255), "ON")
+            } else {
+                (Color::from_rgba(60, 60, 65, 255), "OFF")
+            };
+            draw_rectangle(haze_toggle.x, haze_toggle.y, haze_toggle.w, haze_toggle.h, haze_bg);
+            if haze_hovered {
+                draw_rectangle_lines(haze_toggle.x, haze_toggle.y, haze_toggle.w, haze_toggle.h, 1.0, WHITE);
+            }
+            draw_text(haze_text, haze_toggle.x + 4.0, haze_toggle.y + 10.0, 9.0, WHITE);
+            if haze_hovered && ctx.mouse.left_pressed {
+                state.level.skybox.as_mut().unwrap().horizon_haze.enabled = !skybox.horizon_haze.enabled;
+            }
+
+            draw_text("Haze", x + 36.0, y + 10.0, 10.0, label_gray);
+
+            // Haze color swatch
+            let haze_swatch = Rect::new(x + 64.0, y, 14.0, 14.0);
+            draw_rectangle(haze_swatch.x, haze_swatch.y, haze_swatch.w, haze_swatch.h,
+                Color::from_rgba(skybox.horizon_haze.color.r, skybox.horizon_haze.color.g, skybox.horizon_haze.color.b, 255));
+            let haze_selected = state.skybox_selected_color == Some(70);
+            if haze_selected {
+                draw_rectangle_lines(haze_swatch.x - 1.0, haze_swatch.y - 1.0,
+                    haze_swatch.w + 2.0, haze_swatch.h + 2.0, 2.0, WHITE);
+            } else if haze_swatch.contains(ctx.mouse.x, ctx.mouse.y) {
+                draw_rectangle_lines(haze_swatch.x, haze_swatch.y, haze_swatch.w, haze_swatch.h,
+                    1.0, Color::from_rgba(200, 200, 200, 255));
+            }
+            if haze_swatch.contains(ctx.mouse.x, ctx.mouse.y) && ctx.mouse.left_pressed {
+                state.skybox_selected_color = Some(70);
+            }
+
+            // Intensity slider
+            let int_slider = Rect::new(x + 82.0, y, panel_w - 90.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, int_slider, skybox.horizon_haze.intensity, 0.0, 1.0,
+                Color::from_rgba(160, 140, 120, 255), &mut state.skybox_active_slider, 500) {
+                state.level.skybox.as_mut().unwrap().horizon_haze.intensity = new_val;
+            }
+            y += 16.0;
+
+            // Extent slider
+            draw_text("Extent", x + 4.0, y + 10.0, 10.0, label_gray);
+            let ext_slider = Rect::new(x + 44.0, y, panel_w - 52.0, 12.0);
+            if let Some(new_val) = draw_slider(ctx, ext_slider, skybox.horizon_haze.extent / 0.3, 0.0, 1.0,
+                Color::from_rgba(140, 140, 160, 255), &mut state.skybox_active_slider, 501) {
+                state.level.skybox.as_mut().unwrap().horizon_haze.extent = new_val * 0.3;
+            }
+            y += 16.0;
+
+            // RGB sliders for haze color if selected
+            if haze_selected {
+                if let Some(new_color) = draw_compact_rgb_sliders(ctx, x + 4.0, y, panel_w - 12.0,
+                    skybox.horizon_haze.color, &mut state.skybox_active_slider) {
+                    state.level.skybox.as_mut().unwrap().horizon_haze.color = new_color;
+                }
+                y += 18.0;
+            }
+
+            y += 4.0;
+        }
+
+        // === PRESETS ===
+        y += 4.0;
+        draw_text("Presets", x, y + 10.0, 10.0, label_gray);
+
+        let preset_names = ["Sunset", "Twilight", "Night", "Arctic"];
+        let preset_w = (panel_w - 8.0 - 45.0 - 3.0 * 4.0) / 4.0;
+
+        for (i, name) in preset_names.iter().enumerate() {
+            let btn_rect = Rect::new(x + 45.0 + i as f32 * (preset_w + 4.0), y, preset_w, 14.0);
+            let btn_hovered = btn_rect.contains(ctx.mouse.x, ctx.mouse.y);
+
+            let btn_bg = if btn_hovered { Color::from_rgba(70, 70, 90, 255) } else { Color::from_rgba(50, 50, 65, 255) };
+            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, btn_bg);
+            if btn_hovered {
+                draw_rectangle_lines(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, 1.0, WHITE);
+            }
+
+            // Center text
+            let text_w = name.len() as f32 * 5.0;
+            draw_text(name, btn_rect.x + (btn_rect.w - text_w) / 2.0, btn_rect.y + 10.0, 9.0, WHITE);
+
+            if btn_hovered && ctx.mouse.left_pressed {
+                let sb = state.level.skybox.as_mut().unwrap();
+                match i {
+                    0 => *sb = Skybox::preset_sunset(),
+                    1 => *sb = Skybox::preset_twilight(),
+                    2 => *sb = Skybox::preset_night(),
+                    3 => *sb = Skybox::preset_arctic(),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Helper to draw a slider and return new value if changed
+fn draw_slider(
+    ctx: &UiContext,
+    rect: Rect,
+    value: f32,
+    min: f32,
+    max: f32,
+    fill_color: Color,
+    active_slider: &mut Option<usize>,
+    slider_id: usize,
+) -> Option<f32> {
+    let hovered = rect.contains(ctx.mouse.x, ctx.mouse.y);
+
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
+    let normalized = (value - min) / (max - min);
+    let fill_w = normalized * rect.w;
+    draw_rectangle(rect.x, rect.y, fill_w, rect.h, fill_color);
+
+    if hovered {
+        draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, WHITE);
+    }
+
+    if hovered && ctx.mouse.left_pressed {
+        *active_slider = Some(slider_id);
+    }
+
+    if *active_slider == Some(slider_id) {
+        if ctx.mouse.left_down {
+            let t = ((ctx.mouse.x - rect.x) / rect.w).clamp(0.0, 1.0);
+            return Some(min + t * (max - min));
+        } else {
+            *active_slider = None;
+        }
+    }
+
+    None
+}
+
+/// Compact RGB sliders (single row with R/G/B)
+fn draw_compact_rgb_sliders(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    width: f32,
+    color: crate::rasterizer::Color,
+    active_slider: &mut Option<usize>,
+) -> Option<crate::rasterizer::Color> {
+    let slider_w = (width - 6.0) / 3.0;
+    let mut new_color = None;
+
+    for (i, (val, label, c)) in [(color.r, "R", Color::from_rgba(200, 80, 80, 255)),
+                                   (color.g, "G", Color::from_rgba(80, 200, 80, 255)),
+                                   (color.b, "B", Color::from_rgba(80, 80, 200, 255))].iter().enumerate() {
+        let sx = x + i as f32 * (slider_w + 3.0);
+        let slider_rect = Rect::new(sx, y, slider_w, 14.0);
+        let hovered = slider_rect.contains(ctx.mouse.x, ctx.mouse.y);
+
+        // Background
+        draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+        // Fill bar
+        let fill_w = (*val as f32 / 255.0) * slider_rect.w;
+        draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, *c);
+
+        // Label
+        draw_text(label, slider_rect.x + 2.0, slider_rect.y + 10.0, 10.0, WHITE);
+
+        // Handle interaction
+        if hovered && ctx.mouse.left_pressed {
+            *active_slider = Some(i);
+        }
+
+        if *active_slider == Some(i) {
+            if ctx.mouse.left_down {
+                let t = ((ctx.mouse.x - slider_rect.x) / slider_rect.w).clamp(0.0, 1.0);
+                let new_val = (t * 255.0) as u8;
+                let mut c = color;
+                match i {
+                    0 => c.r = new_val,
+                    1 => c.g = new_val,
+                    2 => c.b = new_val,
+                    _ => {}
+                }
+                new_color = Some(c);
+            } else {
+                *active_slider = None;
+            }
+        }
+
+        if hovered {
+            draw_rectangle_lines(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, 1.0, WHITE);
+        }
+    }
+
+    new_color
 }
 
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {

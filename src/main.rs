@@ -27,7 +27,7 @@ use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level, save_level};
 use ui::{UiContext, MouseState, Rect, draw_fixed_tabs, TabEntry, layout as tab_layout, icon};
 use editor::{EditorAction, draw_editor, draw_example_browser, BrowserAction, discover_examples};
-use modeler::{ModelerAction, ModelBrowserAction, MeshBrowserAction, draw_model_browser, draw_mesh_browser, discover_models, discover_meshes, ObjImporter};
+use modeler::{ModelerAction, ModelBrowserAction, MeshBrowserAction, draw_model_browser, draw_mesh_browser, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
 use std::path::PathBuf;
 
@@ -480,7 +480,7 @@ async fn main() {
                                     .map(|m| m.path.clone())
                                     .unwrap_or_else(|| PathBuf::from("assets/models/untitled.ron"));
                                 ms.modeler_state.project = project;
-                                ms.modeler_state.sync_mesh_from_project();
+                                // Project is single source of truth - mesh() reads from it directly
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = false;
                                 ms.modeler_state.selection = modeler::ModelerSelection::None;
@@ -511,16 +511,63 @@ async fn main() {
                     );
 
                     match browser_action {
-                        MeshBrowserAction::SelectPreview(index) => {
+                        MeshBrowserAction::SelectPreview(idx) => {
+                            // Load preview for selected mesh
+                            let index = idx;
+
                             if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
                                 let path = mesh_info.path.clone();
+                                let texture_path = mesh_info.texture_path.clone();
+                                let additional_textures = mesh_info.additional_textures.clone();
+                                let scale = ms.mesh_browser.import_scale;
+                                let flip = ms.mesh_browser.flip_normals;
+
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
                                     match ObjImporter::load_from_file(&path) {
                                         Ok(mut mesh) => {
+                                            // Apply scale to preview
+                                            for vertex in &mut mesh.vertices {
+                                                vertex.pos = vertex.pos * scale;
+                                            }
+
                                             // Compute normals for shading in preview
                                             ObjImporter::compute_face_normals(&mut mesh);
+
+                                            // Flip normals if requested
+                                            if flip {
+                                                // Flip vertex normals
+                                                for vertex in &mut mesh.vertices {
+                                                    vertex.normal = vertex.normal * -1.0;
+                                                }
+                                                // Swap v1 and v2 to flip winding order
+                                                for face in &mut mesh.faces {
+                                                    std::mem::swap(&mut face.v1, &mut face.v2);
+                                                }
+                                            }
+
                                             ms.mesh_browser.set_preview(mesh);
+
+                                            // Load all textures (primary + additional)
+                                            let mut atlases = Vec::new();
+
+                                            // Load primary texture first
+                                            if let Some(tex_path) = texture_path {
+                                                match ObjImporter::load_png_to_atlas(&tex_path) {
+                                                    Ok(atlas) => atlases.push(atlas),
+                                                    Err(e) => eprintln!("Failed to load primary texture: {}", e),
+                                                }
+                                            }
+
+                                            // Load additional textures (_tex0.png, _tex1.png, etc.)
+                                            for tex_path in additional_textures {
+                                                match ObjImporter::load_png_to_atlas(&tex_path) {
+                                                    Ok(atlas) => atlases.push(atlas),
+                                                    Err(e) => eprintln!("Failed to load texture {:?}: {}", tex_path, e),
+                                                }
+                                            }
+
+                                            ms.mesh_browser.set_preview_atlases(atlases);
                                         }
                                         Err(e) => {
                                             eprintln!("Failed to load mesh: {}", e);
@@ -534,37 +581,178 @@ async fn main() {
                                 }
                             }
                         }
-                        MeshBrowserAction::OpenMesh => {
-                            if let Some(mut mesh) = ms.mesh_browser.preview_mesh.take() {
-                                let path = ms.mesh_browser.selected_mesh()
-                                    .map(|m| m.path.clone())
-                                    .unwrap_or_else(|| PathBuf::from("assets/meshes/untitled.obj"));
+                        MeshBrowserAction::ReloadPreview => {
+                            // Reload with current scale/flip settings
+                            if let Some(index) = ms.mesh_browser.selected_index {
+                                if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
+                                    let path = mesh_info.path.clone();
+                                    let scale = ms.mesh_browser.import_scale;
+                                    let flip_normals = ms.mesh_browser.flip_normals;
+                                    let flip_h = ms.mesh_browser.flip_horizontal;
+                                    let flip_v = ms.mesh_browser.flip_vertical;
 
-                                // Compute normals if the OBJ didn't have them (required for shading)
-                                ObjImporter::compute_face_normals(&mut mesh);
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        if let Ok(mut mesh) = ObjImporter::load_from_file(&path) {
+                                            // Apply scale to preview
+                                            for vertex in &mut mesh.vertices {
+                                                vertex.pos = vertex.pos * scale;
+                                            }
 
-                                // Apply scale to mesh vertices
-                                let scale = ms.mesh_browser.import_scale;
-                                for vertex in &mut mesh.vertices {
-                                    vertex.pos.x *= scale;
-                                    vertex.pos.y *= scale;
-                                    vertex.pos.z *= scale;
+                                            // Compute normals for shading in preview
+                                            ObjImporter::compute_face_normals(&mut mesh);
+
+                                            // Flip normals if requested
+                                            if flip_normals {
+                                                for vertex in &mut mesh.vertices {
+                                                    vertex.normal = vertex.normal * -1.0;
+                                                }
+                                                for face in &mut mesh.faces {
+                                                    std::mem::swap(&mut face.v1, &mut face.v2);
+                                                }
+                                            }
+
+                                            // Flip horizontal (mirror X)
+                                            if flip_h {
+                                                modeler::apply_mesh_flip_horizontal(&mut mesh);
+                                            }
+
+                                            // Flip vertical (mirror Y)
+                                            if flip_v {
+                                                modeler::apply_mesh_flip_vertical(&mut mesh);
+                                            }
+
+                                            // Use update_preview to preserve camera angles
+                                            ms.mesh_browser.update_preview(mesh);
+                                        }
+                                    }
                                 }
-
-                                // Set the editable mesh
-                                ms.modeler_state.mesh = mesh;
-                                ms.modeler_state.current_file = Some(path.clone());
-                                ms.modeler_state.dirty = false;
-                                ms.modeler_state.selection = modeler::ModelerSelection::None;
-
-                                // Reset camera to fit the scaled mesh
-                                ms.modeler_state.orbit_target = crate::rasterizer::Vec3::new(0.0, 50.0, 0.0);
-                                ms.modeler_state.orbit_distance = scale * 3.0;
-                                ms.modeler_state.sync_camera_from_orbit();
-
-                                ms.modeler_state.set_status(&format!("Opened mesh: {} (scale {}x)", path.display(), scale), 3.0);
-                                ms.mesh_browser.close();
                             }
+                        }
+                        MeshBrowserAction::OpenMesh => {
+                            let path = ms.mesh_browser.selected_mesh()
+                                .map(|m| m.path.clone())
+                                .unwrap_or_else(|| PathBuf::from("assets/meshes/untitled.obj"));
+                            let scale = ms.mesh_browser.import_scale;
+                            let flip_normals = ms.mesh_browser.flip_normals;
+                            let flip_h = ms.mesh_browser.flip_horizontal;
+                            let flip_v = ms.mesh_browser.flip_vertical;
+                            let clut_depth_override = ms.mesh_browser.clut_depth_override;
+
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                // Import with texture - either auto-detect or forced CLUT depth
+                                let import_result = if let Some(depth) = clut_depth_override {
+                                    // Force specific CLUT depth
+                                    ObjImporter::import_with_texture(&path, scale, Some(depth))
+                                } else {
+                                    // Auto-detect optimal CLUT depth
+                                    ObjImporter::import_with_auto_quantize(&path, scale)
+                                };
+                                match import_result {
+                                    Ok(mut result) => {
+                                        // Flip normals if requested
+                                        if flip_normals {
+                                            // Flip vertex normals
+                                            for vertex in &mut result.mesh.vertices {
+                                                vertex.normal = vertex.normal * -1.0;
+                                            }
+                                            // Swap v1 and v2 to flip winding order
+                                            for face in &mut result.mesh.faces {
+                                                std::mem::swap(&mut face.v1, &mut face.v2);
+                                            }
+                                        }
+
+                                        // Flip horizontal (mirror X)
+                                        if flip_h {
+                                            modeler::apply_mesh_flip_horizontal(&mut result.mesh);
+                                        }
+
+                                        // Flip vertical (mirror Y)
+                                        if flip_v {
+                                            modeler::apply_mesh_flip_vertical(&mut result.mesh);
+                                        }
+
+                                        // Set the editable mesh directly in project (single source of truth)
+                                        if let Some(mesh) = ms.modeler_state.mesh_mut() {
+                                            *mesh = result.mesh;
+                                        }
+                                        // Don't set current_file to OBJ path - this is an IMPORT, not opening a project
+                                        // User must "Save As" to create a .ron project file
+                                        ms.modeler_state.current_file = None;
+                                        ms.modeler_state.dirty = true;  // Needs saving
+                                        ms.modeler_state.selection = modeler::ModelerSelection::None;
+
+                                        // Handle texture import
+                                        let mut texture_status = String::new();
+                                        if let Some(tex_result) = result.texture {
+                                            match tex_result {
+                                                TextureImportResult::Atlas(atlas) => {
+                                                    ms.modeler_state.project.atlas = atlas;
+                                                    texture_status = " + texture".to_string();
+                                                }
+                                                TextureImportResult::Quantized { atlas, mut indexed, clut, color_count } => {
+                                                    ms.modeler_state.project.atlas = atlas;
+                                                    // Clear existing CLUTs and add only the imported one
+                                                    ms.modeler_state.project.clut_pool.clear();
+                                                    let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
+                                                    indexed.default_clut = clut_id;
+                                                    let depth_label = indexed.depth.short_label();
+                                                    ms.modeler_state.project.indexed_atlas = Some(indexed);
+                                                    ms.modeler_state.selected_clut = Some(clut_id);
+                                                    // Show "(forced)" if user manually selected the depth
+                                                    let forced = if clut_depth_override.is_some() { " forced" } else { "" };
+                                                    texture_status = format!(" + CLUT {}{} ({} colors)", depth_label, forced, color_count);
+                                                }
+                                            }
+                                        }
+
+                                        // Reset camera to fit the scaled mesh
+                                        ms.modeler_state.orbit_target = crate::rasterizer::Vec3::new(0.0, 50.0, 0.0);
+                                        ms.modeler_state.orbit_distance = scale * 3.0;
+                                        ms.modeler_state.sync_camera_from_orbit();
+
+                                        // Build flip status string
+                                        let mut flips = Vec::new();
+                                        if flip_normals { flips.push("N"); }
+                                        if flip_h { flips.push("H"); }
+                                        if flip_v { flips.push("V"); }
+                                        let flip_status = if flips.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(" (flip: {})", flips.join("+"))
+                                        };
+                                        ms.modeler_state.set_status(
+                                            &format!("Imported: {} ({}x){}{}", path.display(), scale, texture_status, flip_status),
+                                            3.0
+                                        );
+                                    }
+                                    Err(e) => {
+                                        ms.modeler_state.set_status(&format!("Import failed: {}", e), 3.0);
+                                    }
+                                }
+                            }
+
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                // WASM fallback - just use preview mesh (already has scale/flip applied from preview)
+                                if let Some(imported_mesh) = ms.mesh_browser.preview_mesh.take() {
+                                    // Set mesh directly in project (single source of truth)
+                                    if let Some(mesh) = ms.modeler_state.mesh_mut() {
+                                        *mesh = imported_mesh;
+                                    }
+                                    // Don't set current_file to OBJ path - this is an IMPORT
+                                    ms.modeler_state.current_file = None;
+                                    ms.modeler_state.dirty = true;  // Needs saving
+                                    ms.modeler_state.selection = modeler::ModelerSelection::None;
+                                    ms.modeler_state.orbit_target = crate::rasterizer::Vec3::new(0.0, 50.0, 0.0);
+                                    ms.modeler_state.orbit_distance = scale * 3.0;
+                                    ms.modeler_state.sync_camera_from_orbit();
+                                    ms.modeler_state.set_status(&format!("Imported mesh: {} ({}x)", path.display(), scale), 3.0);
+                                }
+                            }
+
+                            ms.mesh_browser.close();
                         }
                         MeshBrowserAction::Cancel => {
                             ms.mesh_browser.close();
@@ -1079,7 +1267,7 @@ fn handle_modeler_action(
         }
         #[cfg(target_arch = "wasm32")]
         ModelerAction::Export => {
-            match ron::ser::to_string_pretty(&state.mesh, ron::ser::PrettyConfig::default()) {
+            match ron::ser::to_string_pretty(state.mesh(), ron::ser::PrettyConfig::default()) {
                 Ok(ron_str) => {
                     let filename = state.current_file
                         .as_ref()

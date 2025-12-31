@@ -50,6 +50,970 @@ fn default_true() -> bool { true }
 fn default_neutral_color() -> Color { Color::NEUTRAL }
 fn default_neutral_colors_4() -> [Color; 4] { [Color::NEUTRAL; 4] }
 
+/// Direction for horizontal gradient tint (sun/moon position)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HorizonDirection {
+    #[default]
+    East,   // 0 degrees
+    North,  // 90 degrees
+    West,   // 180 degrees (sunset)
+    South,  // 270 degrees
+}
+
+impl HorizonDirection {
+    /// Convert to radians (angle from +X axis)
+    pub fn to_radians(self) -> f32 {
+        match self {
+            HorizonDirection::East => 0.0,
+            HorizonDirection::North => std::f32::consts::FRAC_PI_2,
+            HorizonDirection::West => std::f32::consts::PI,
+            HorizonDirection::South => 3.0 * std::f32::consts::FRAC_PI_2,
+        }
+    }
+}
+
+/// Sun/Moon celestial body configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CelestialBody {
+    /// Enable this celestial body
+    #[serde(default)]
+    pub enabled: bool,
+    /// Horizontal angle (0 = East, PI/2 = North, PI = West, 3PI/2 = South)
+    #[serde(default = "default_celestial_azimuth")]
+    pub azimuth: f32,
+    /// Vertical angle from horizon (0 = horizon, PI/2 = zenith)
+    #[serde(default = "default_celestial_elevation")]
+    pub elevation: f32,
+    /// Angular size (radians, typical sun ~0.1)
+    #[serde(default = "default_celestial_size")]
+    pub size: f32,
+    /// Core color (center of the orb)
+    #[serde(default = "default_sun_color")]
+    pub color: Color,
+    /// Glow color (radiating outward)
+    #[serde(default = "default_sun_glow_color")]
+    pub glow_color: Color,
+    /// Glow falloff (higher = tighter glow, 1.0-10.0 typical)
+    #[serde(default = "default_glow_falloff")]
+    pub glow_falloff: f32,
+}
+
+fn default_celestial_azimuth() -> f32 { std::f32::consts::PI } // West
+fn default_celestial_elevation() -> f32 { 0.2 }
+fn default_celestial_size() -> f32 { 0.1 }
+fn default_sun_color() -> Color { Color::new(255, 250, 220) }
+fn default_sun_glow_color() -> Color { Color::new(255, 200, 100) }
+fn default_glow_falloff() -> f32 { 2.5 }
+
+impl Default for CelestialBody {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            azimuth: default_celestial_azimuth(),
+            elevation: default_celestial_elevation(),
+            size: default_celestial_size(),
+            color: default_sun_color(),
+            glow_color: default_sun_glow_color(),
+            glow_falloff: default_glow_falloff(),
+        }
+    }
+}
+
+/// Cloud layer configuration (Spyro-style wispy horizontal streaks)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudLayer {
+    /// Vertical position (0.0 = zenith, 1.0 = below horizon)
+    #[serde(default = "default_cloud_height")]
+    pub height: f32,
+    /// Vertical thickness of the cloud band
+    #[serde(default = "default_cloud_thickness")]
+    pub thickness: f32,
+    /// Cloud color
+    #[serde(default = "default_cloud_color")]
+    pub color: Color,
+    /// Opacity (0.0-1.0)
+    #[serde(default = "default_cloud_opacity")]
+    pub opacity: f32,
+    /// Horizontal scroll speed (negative = opposite direction)
+    #[serde(default = "default_cloud_speed")]
+    pub scroll_speed: f32,
+    /// "Wispiness" - how stretched/wispy the clouds are (0=solid, 1=very wispy)
+    #[serde(default = "default_cloud_wispiness")]
+    pub wispiness: f32,
+    /// Density/frequency of cloud patterns
+    #[serde(default = "default_cloud_density")]
+    pub density: f32,
+    /// Phase offset for variety between layers
+    #[serde(default)]
+    pub phase: f32,
+}
+
+fn default_cloud_height() -> f32 { 0.42 }
+fn default_cloud_thickness() -> f32 { 0.06 }
+fn default_cloud_color() -> Color { Color::new(255, 230, 200) }
+fn default_cloud_opacity() -> f32 { 0.4 }
+fn default_cloud_speed() -> f32 { 0.02 }
+fn default_cloud_wispiness() -> f32 { 0.7 }
+fn default_cloud_density() -> f32 { 1.0 }
+
+impl Default for CloudLayer {
+    fn default() -> Self {
+        Self {
+            height: default_cloud_height(),
+            thickness: default_cloud_thickness(),
+            color: default_cloud_color(),
+            opacity: default_cloud_opacity(),
+            scroll_speed: default_cloud_speed(),
+            wispiness: default_cloud_wispiness(),
+            density: default_cloud_density(),
+            phase: 0.0,
+        }
+    }
+}
+
+/// 3D Mountain range configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountainRange {
+    /// Base color (used for lit faces)
+    #[serde(default = "default_mountain_lit_color")]
+    pub lit_color: Color,
+    /// Shadow color (used for shaded faces)
+    #[serde(default = "default_mountain_shadow_color")]
+    pub shadow_color: Color,
+    /// Highlight color (for peaks catching direct light)
+    #[serde(default = "default_mountain_highlight_color")]
+    pub highlight_color: Color,
+    /// Height scale (0.0-1.0)
+    #[serde(default = "default_mountain_height")]
+    pub height: f32,
+    /// Distance/depth factor (affects atmospheric fade, 0=near, 1=far)
+    #[serde(default = "default_mountain_depth")]
+    pub depth: f32,
+    /// Jaggedness (0=smooth rolling hills, 1=sharp peaks)
+    #[serde(default = "default_mountain_jaggedness")]
+    pub jaggedness: f32,
+    /// Seed for procedural variation
+    #[serde(default = "default_mountain_seed")]
+    pub seed: u32,
+}
+
+fn default_mountain_lit_color() -> Color { Color::new(140, 120, 160) }
+fn default_mountain_shadow_color() -> Color { Color::new(60, 50, 80) }
+fn default_mountain_highlight_color() -> Color { Color::new(200, 180, 220) }
+fn default_mountain_height() -> f32 { 0.15 }
+fn default_mountain_depth() -> f32 { 0.5 }
+fn default_mountain_jaggedness() -> f32 { 0.5 }
+fn default_mountain_seed() -> u32 { 12345 }
+
+impl Default for MountainRange {
+    fn default() -> Self {
+        Self {
+            lit_color: default_mountain_lit_color(),
+            shadow_color: default_mountain_shadow_color(),
+            highlight_color: default_mountain_highlight_color(),
+            height: default_mountain_height(),
+            depth: default_mountain_depth(),
+            jaggedness: default_mountain_jaggedness(),
+            seed: default_mountain_seed(),
+        }
+    }
+}
+
+/// Star field configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StarField {
+    /// Enable stars
+    #[serde(default)]
+    pub enabled: bool,
+    /// Star color
+    #[serde(default = "default_star_color")]
+    pub color: Color,
+    /// Number of stars
+    #[serde(default = "default_star_count")]
+    pub count: u16,
+    /// Star size (pixels, 1-3 typical)
+    #[serde(default = "default_star_size")]
+    pub size: f32,
+    /// Twinkle animation speed (0 = static)
+    #[serde(default)]
+    pub twinkle_speed: f32,
+    /// Seed for star positions
+    #[serde(default = "default_star_seed")]
+    pub seed: u32,
+}
+
+fn default_star_color() -> Color { Color::new(255, 255, 240) }
+fn default_star_count() -> u16 { 80 }
+fn default_star_size() -> f32 { 1.5 }
+fn default_star_seed() -> u32 { 42 }
+
+impl Default for StarField {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: default_star_color(),
+            count: default_star_count(),
+            size: default_star_size(),
+            twinkle_speed: 0.0,
+            seed: default_star_seed(),
+        }
+    }
+}
+
+/// Horizon haze configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HorizonHaze {
+    /// Enable horizon haze
+    #[serde(default = "default_haze_enabled")]
+    pub enabled: bool,
+    /// Haze color
+    #[serde(default = "default_haze_color")]
+    pub color: Color,
+    /// Haze intensity (0.0-1.0)
+    #[serde(default = "default_haze_intensity")]
+    pub intensity: f32,
+    /// Vertical extent (how far up/down from horizon)
+    #[serde(default = "default_haze_extent")]
+    pub extent: f32,
+}
+
+fn default_haze_enabled() -> bool { true }
+fn default_haze_color() -> Color { Color::new(200, 180, 160) }
+fn default_haze_intensity() -> f32 { 0.25 }
+fn default_haze_extent() -> f32 { 0.12 }
+
+impl Default for HorizonHaze {
+    fn default() -> Self {
+        Self {
+            enabled: default_haze_enabled(),
+            color: default_haze_color(),
+            intensity: default_haze_intensity(),
+            extent: default_haze_extent(),
+        }
+    }
+}
+
+fn default_horizon() -> f32 { 0.5 }
+
+/// Skybox configuration - PS1 Spyro-style vertex-colored sky
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skybox {
+    // === GRADIENT SYSTEM ===
+    /// Top of sky color (zenith)
+    #[serde(default = "default_zenith_color")]
+    pub zenith_color: Color,
+    /// Just above horizon color
+    #[serde(default = "default_horizon_sky_color")]
+    pub horizon_sky_color: Color,
+    /// Just below horizon color
+    #[serde(default = "default_horizon_ground_color")]
+    pub horizon_ground_color: Color,
+    /// Bottom color (nadir/ground)
+    #[serde(default = "default_nadir_color")]
+    pub nadir_color: Color,
+
+    /// Enable horizontal tint (for sunrise/sunset side lighting)
+    #[serde(default)]
+    pub horizontal_tint_enabled: bool,
+    /// Horizontal tint color
+    #[serde(default = "default_horizontal_tint_color")]
+    pub horizontal_tint_color: Color,
+    /// Direction of the horizontal tint
+    #[serde(default)]
+    pub horizontal_tint_direction: HorizonDirection,
+    /// Horizontal tint intensity (0.0-1.0)
+    #[serde(default = "default_horizontal_tint_intensity")]
+    pub horizontal_tint_intensity: f32,
+    /// How wide the tint spreads (radians)
+    #[serde(default = "default_horizontal_tint_spread")]
+    pub horizontal_tint_spread: f32,
+
+    /// Horizon line position (0.0 = top, 1.0 = bottom)
+    #[serde(default = "default_horizon")]
+    pub horizon: f32,
+
+    // === CELESTIAL BODIES ===
+    /// Sun configuration
+    #[serde(default)]
+    pub sun: CelestialBody,
+    /// Moon configuration
+    #[serde(default)]
+    pub moon: CelestialBody,
+
+    // === CLOUD LAYERS ===
+    /// Two cloud layers for depth
+    #[serde(default)]
+    pub cloud_layers: [Option<CloudLayer>; 2],
+
+    // === MOUNTAINS ===
+    /// Two mountain ranges at different depths
+    #[serde(default)]
+    pub mountain_ranges: [Option<MountainRange>; 2],
+    /// Direction the "sun" is for mountain lighting
+    #[serde(default)]
+    pub mountain_light_direction: HorizonDirection,
+
+    // === STARS ===
+    /// Star field configuration
+    #[serde(default)]
+    pub stars: StarField,
+
+    // === ATMOSPHERE ===
+    /// Horizon haze configuration
+    #[serde(default)]
+    pub horizon_haze: HorizonHaze,
+}
+
+fn default_zenith_color() -> Color { Color::new(40, 60, 120) }
+fn default_horizon_sky_color() -> Color { Color::new(180, 140, 120) }
+fn default_horizon_ground_color() -> Color { Color::new(160, 120, 100) }
+fn default_nadir_color() -> Color { Color::new(80, 70, 90) }
+fn default_horizontal_tint_color() -> Color { Color::new(255, 180, 120) }
+fn default_horizontal_tint_intensity() -> f32 { 0.4 }
+fn default_horizontal_tint_spread() -> f32 { 1.05 } // ~60 degrees
+
+impl Skybox {
+    /// Sample the sky color at a given direction
+    /// theta: horizontal angle (0 = +X/East, increases counter-clockwise)
+    /// phi: vertical angle (0 = zenith, PI = nadir)
+    pub fn sample_at_direction(&self, theta: f32, phi: f32, time: f32) -> Color {
+        use std::f32::consts::PI;
+
+        // Convert phi to vertical gradient position (0 = top, 1 = bottom)
+        let v = phi / PI;
+
+        // === BASE VERTICAL GRADIENT ===
+        let base_color = if v < self.horizon {
+            // Above horizon: zenith to horizon_sky
+            let t = if self.horizon > 0.0 { v / self.horizon } else { 0.0 };
+            self.zenith_color.lerp(self.horizon_sky_color, t)
+        } else {
+            // Below horizon: horizon_ground to nadir
+            let t = if self.horizon < 1.0 { (v - self.horizon) / (1.0 - self.horizon) } else { 1.0 };
+            self.horizon_ground_color.lerp(self.nadir_color, t)
+        };
+
+        let mut color = base_color;
+
+        // === HORIZONTAL TINT ===
+        if self.horizontal_tint_enabled && self.horizontal_tint_intensity > 0.0 {
+            let tint_angle = self.horizontal_tint_direction.to_radians();
+            let mut angle_diff = (theta - tint_angle).abs();
+            if angle_diff > PI {
+                angle_diff = 2.0 * PI - angle_diff;
+            }
+
+            if angle_diff < self.horizontal_tint_spread {
+                let tint_strength = (1.0 - angle_diff / self.horizontal_tint_spread).powi(2);
+                let tint_strength = tint_strength * self.horizontal_tint_intensity;
+
+                // Tint is strongest near horizon
+                let horizon_factor = 1.0 - ((v - self.horizon).abs() / 0.3).min(1.0);
+                let final_strength = tint_strength * horizon_factor;
+
+                color = color.lerp(self.horizontal_tint_color, final_strength);
+            }
+        }
+
+        // === HORIZON HAZE ===
+        if self.horizon_haze.enabled && self.horizon_haze.intensity > 0.0 {
+            let dist_from_horizon = (v - self.horizon).abs();
+            if dist_from_horizon < self.horizon_haze.extent {
+                let haze_strength = (1.0 - dist_from_horizon / self.horizon_haze.extent).powi(2);
+                let haze_strength = haze_strength * self.horizon_haze.intensity;
+                color = color.lerp(self.horizon_haze.color, haze_strength);
+            }
+        }
+
+        // === SUN/MOON GLOW ===
+        for celestial in [&self.sun, &self.moon] {
+            if celestial.enabled {
+                let body_phi = PI / 2.0 - celestial.elevation; // Convert elevation to phi
+                let body_theta = celestial.azimuth;
+
+                // Calculate angular distance from celestial body using spherical law of cosines
+                let cos_dist = phi.sin() * body_phi.sin() * (theta - body_theta).cos()
+                             + phi.cos() * body_phi.cos();
+                let angular_dist = cos_dist.clamp(-1.0, 1.0).acos();
+
+                // Core of sun/moon
+                if angular_dist < celestial.size {
+                    let core_strength = 1.0 - (angular_dist / celestial.size);
+                    color = color.lerp(celestial.color, core_strength);
+                }
+                // Glow around sun/moon
+                else {
+                    let glow_radius = celestial.size * 4.0;
+                    if angular_dist < glow_radius {
+                        let glow_t = (angular_dist - celestial.size) / (glow_radius - celestial.size);
+                        let glow_strength = (1.0 - glow_t).powf(celestial.glow_falloff);
+                        color = color.lerp(celestial.glow_color, glow_strength * 0.6);
+                    }
+                }
+            }
+        }
+
+        // === CLOUD LAYERS ===
+        for layer_opt in &self.cloud_layers {
+            if let Some(layer) = layer_opt {
+                let layer_v_min = layer.height - layer.thickness / 2.0;
+                let layer_v_max = layer.height + layer.thickness / 2.0;
+
+                if v >= layer_v_min && v <= layer_v_max && layer.opacity > 0.0 {
+                    let scroll = time * layer.scroll_speed;
+                    let cloud_val = self.sample_wispy_cloud(
+                        theta + scroll,
+                        v,
+                        layer.wispiness,
+                        layer.density,
+                        layer.phase
+                    );
+
+                    // Edge falloff within the band
+                    let dist_from_center = (v - layer.height).abs() / (layer.thickness / 2.0);
+                    let edge_falloff = (1.0 - dist_from_center).clamp(0.0, 1.0);
+
+                    let cloud_strength = cloud_val * layer.opacity * edge_falloff;
+                    color = color.lerp(layer.color, cloud_strength);
+                }
+            }
+        }
+
+        color
+    }
+
+    /// Sample wispy cloud pattern (Spyro-style stretched horizontal clouds)
+    fn sample_wispy_cloud(&self, theta: f32, v: f32, wispiness: f32, density: f32, phase: f32) -> f32 {
+        // Multiple octaves of horizontally-stretched noise
+        let stretch = 8.0 + wispiness * 16.0; // More wispy = more horizontal stretch
+
+        let n1 = ((theta * density * 3.0 + phase).sin() * stretch + v * 50.0).sin();
+        let n2 = ((theta * density * 7.0 + phase * 2.0).sin() * stretch * 0.5 + v * 120.0).sin();
+        let n3 = ((theta * density * 13.0 + phase * 0.7).sin() * stretch * 0.3 + v * 200.0).sin();
+
+        let raw = (n1 * 0.5 + n2 * 0.3 + n3 * 0.2 + 0.5).clamp(0.0, 1.0);
+
+        // Apply wispiness threshold - more wispy = more gaps
+        let threshold = wispiness * 0.5;
+        if raw < threshold {
+            0.0
+        } else {
+            ((raw - threshold) / (1.0 - threshold)).powf(0.7)
+        }
+    }
+
+    /// Generate skybox mesh geometry (vertices and face indices)
+    /// Returns (vertices, faces) for a vertex-colored sphere centered at camera_pos
+    /// Includes 3D mountain geometry as part of the sphere
+    pub fn generate_mesh(&self, camera_pos: (f32, f32, f32), time: f32) -> (Vec<SkyboxVertex>, Vec<[usize; 3]>) {
+        use std::f32::consts::PI;
+
+        let radius = 10000.0; // Large radius so it's always "far away"
+        let h_segments = 48; // More horizontal segments for color variation
+        let v_segments = 32; // More vertical for smoother gradients
+
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+
+        // Generate sphere vertices with vertex colors
+        for v in 0..=v_segments {
+            let phi = PI * v as f32 / v_segments as f32; // 0 at top, PI at bottom
+            let y = phi.cos();      // 1 at top, -1 at bottom
+            let ring_radius = phi.sin();
+
+            for h in 0..=h_segments {
+                let theta = 2.0 * PI * h as f32 / h_segments as f32;
+
+                let x = ring_radius * theta.cos();
+                let z = ring_radius * theta.sin();
+
+                // Sample color at this direction
+                let color = self.sample_at_direction(theta, phi, time);
+
+                vertices.push(SkyboxVertex {
+                    pos: (
+                        camera_pos.0 + x * radius,
+                        camera_pos.1 + y * radius,
+                        camera_pos.2 + z * radius,
+                    ),
+                    color,
+                });
+            }
+        }
+
+        // Generate faces (triangles) - winding for inside-facing normals
+        for v in 0..v_segments {
+            for h in 0..h_segments {
+                let row_width = h_segments + 1;
+                let i0 = v * row_width + h;
+                let i1 = v * row_width + h + 1;
+                let i2 = (v + 1) * row_width + h;
+                let i3 = (v + 1) * row_width + h + 1;
+
+                // Two triangles per quad, wound for inward-facing view
+                faces.push([i0, i2, i1]);
+                faces.push([i1, i2, i3]);
+            }
+        }
+
+        // Generate 3D mountain geometry - individual peaked mountains like Spyro
+        let light_angle = self.mountain_light_direction.to_radians();
+
+        // Process mountain ranges from back to front (higher depth = further back = draw first)
+        let mut ranges_with_depth: Vec<(usize, &MountainRange)> = self.mountain_ranges.iter()
+            .enumerate()
+            .filter_map(|(i, opt)| opt.as_ref().map(|r| (i, r)))
+            .collect();
+        ranges_with_depth.sort_by(|a, b| b.1.depth.partial_cmp(&a.1.depth).unwrap());
+
+        for (_range_idx, range) in ranges_with_depth {
+            // Mountain radius slightly inside the sky sphere (so it renders in front)
+            let mtn_radius = radius * (0.99 - range.depth * 0.02);
+
+            // Horizon phi angle - where mountains sit
+            let horizon_phi = self.horizon * PI;
+            let base_phi = horizon_phi + 0.08; // Base below horizon
+            let max_mtn_height = range.height * 1.2; // Much taller mountains
+
+            // Generate individual peaked mountains
+            // Use procedural placement based on seed
+            let num_peaks = 12 + (range.jaggedness * 8.0) as usize;
+            let mut peak_angles: Vec<f32> = Vec::new();
+            let mut peak_heights: Vec<f32> = Vec::new();
+
+            // Generate peak positions using LCG
+            let mut rng = range.seed as u64;
+            let mut next_rand = || -> f32 {
+                rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+                ((rng >> 16) & 0xFFFF) as f32 / 65536.0
+            };
+
+            for _ in 0..num_peaks {
+                let angle = next_rand() * 2.0 * PI;
+                let height = 0.3 + next_rand() * 0.7; // Height variation
+                peak_angles.push(angle);
+                peak_heights.push(height);
+            }
+
+            // Sort peaks by angle for consistent rendering
+            let mut peaks: Vec<(f32, f32)> = peak_angles.iter().zip(peak_heights.iter())
+                .map(|(&a, &h)| (a, h))
+                .collect();
+            peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+            // Generate each mountain as a triangular peak with left and right faces
+            for (peak_theta, peak_height) in &peaks {
+                let base_vertex_idx = vertices.len();
+
+                // Peak width varies with height (taller = wider base)
+                let half_width = 0.12 + peak_height * 0.15 * (1.0 - range.jaggedness * 0.5);
+
+                let left_theta = peak_theta - half_width;
+                let right_theta = peak_theta + half_width;
+                let peak_phi = horizon_phi - peak_height * max_mtn_height;
+
+                // Calculate face normals for lighting
+                // Left face points toward (peak_theta - PI/2)
+                // Right face points toward (peak_theta + PI/2)
+                let left_face_angle = peak_theta - half_width / 2.0;
+                let right_face_angle = peak_theta + half_width / 2.0;
+
+                // Light factor for left face
+                let mut left_to_light = (left_face_angle - light_angle).abs();
+                if left_to_light > PI { left_to_light = 2.0 * PI - left_to_light; }
+                let left_lit = left_to_light < PI / 2.0;
+                let left_light = if left_lit {
+                    ((PI / 2.0 - left_to_light) / (PI / 2.0)).clamp(0.0, 1.0)
+                } else { 0.0 };
+
+                // Light factor for right face
+                let mut right_to_light = (right_face_angle - light_angle).abs();
+                if right_to_light > PI { right_to_light = 2.0 * PI - right_to_light; }
+                let right_lit = right_to_light < PI / 2.0;
+                let right_light = if right_lit {
+                    ((PI / 2.0 - right_to_light) / (PI / 2.0)).clamp(0.0, 1.0)
+                } else { 0.0 };
+
+                // Colors for each face
+                let left_color = range.shadow_color.lerp(range.lit_color, left_light);
+                let right_color = range.shadow_color.lerp(range.lit_color, right_light);
+
+                // Peak highlight
+                let peak_light = (left_light + right_light) / 2.0;
+                let peak_color = if *peak_height > 0.5 {
+                    let highlight_t = ((*peak_height - 0.5) / 0.5 * peak_light).min(0.5);
+                    range.shadow_color.lerp(range.highlight_color, highlight_t)
+                } else {
+                    range.shadow_color.lerp(range.lit_color, peak_light)
+                };
+
+                // Apply atmospheric fade
+                let depth_fade = range.depth * 0.5;
+                let left_final = left_color.lerp(self.horizon_haze.color, depth_fade);
+                let right_final = right_color.lerp(self.horizon_haze.color, depth_fade);
+                let peak_final = peak_color.lerp(self.horizon_haze.color, depth_fade * 0.8);
+                let base_color = range.shadow_color.lerp(self.horizon_haze.color, depth_fade);
+
+                // Vertex positions
+                let peak_y = peak_phi.cos();
+                let peak_ring = peak_phi.sin();
+                let base_y = base_phi.cos();
+                let base_ring = base_phi.sin();
+
+                // Peak vertex (index 0)
+                vertices.push(SkyboxVertex {
+                    pos: (
+                        camera_pos.0 + peak_ring * peak_theta.cos() * mtn_radius,
+                        camera_pos.1 + peak_y * mtn_radius,
+                        camera_pos.2 + peak_ring * peak_theta.sin() * mtn_radius,
+                    ),
+                    color: peak_final,
+                });
+
+                // Left base vertex (index 1)
+                vertices.push(SkyboxVertex {
+                    pos: (
+                        camera_pos.0 + base_ring * left_theta.cos() * mtn_radius,
+                        camera_pos.1 + base_y * mtn_radius,
+                        camera_pos.2 + base_ring * left_theta.sin() * mtn_radius,
+                    ),
+                    color: left_final,
+                });
+
+                // Right base vertex (index 2)
+                vertices.push(SkyboxVertex {
+                    pos: (
+                        camera_pos.0 + base_ring * right_theta.cos() * mtn_radius,
+                        camera_pos.1 + base_y * mtn_radius,
+                        camera_pos.2 + base_ring * right_theta.sin() * mtn_radius,
+                    ),
+                    color: right_final,
+                });
+
+                // Center base vertex for filling (index 3)
+                vertices.push(SkyboxVertex {
+                    pos: (
+                        camera_pos.0 + base_ring * peak_theta.cos() * mtn_radius,
+                        camera_pos.1 + base_y * mtn_radius,
+                        camera_pos.2 + base_ring * peak_theta.sin() * mtn_radius,
+                    ),
+                    color: base_color,
+                });
+
+                // Left face: peak -> left_base -> center_base
+                faces.push([base_vertex_idx, base_vertex_idx + 1, base_vertex_idx + 3]);
+                // Right face: peak -> center_base -> right_base
+                faces.push([base_vertex_idx, base_vertex_idx + 3, base_vertex_idx + 2]);
+            }
+        }
+
+        (vertices, faces)
+    }
+
+    /// Sample mountain height at a given angle
+    pub fn sample_mountain_height(&self, theta: f32, range: &MountainRange) -> f32 {
+        let seed = range.seed as f32 * 0.001;
+        let j = range.jaggedness;
+
+        // Multiple octaves for natural peaks
+        let m1 = ((theta * 3.0 + seed).sin() * 0.5 + 0.5) * 0.4;
+        let m2 = ((theta * 7.0 + seed * 2.0).sin() * 0.5 + 0.5) * 0.3 * (0.5 + j * 0.5);
+        let m3 = ((theta * 13.0 + seed * 0.5).sin() * 0.5 + 0.5) * 0.2 * j;
+        let m4 = ((theta * 23.0 + seed * 1.5).sin() * 0.5 + 0.5) * 0.1 * j;
+
+        (m1 + m2 + m3 + m4).min(1.0)
+    }
+
+    /// Create a sunset preset
+    pub fn preset_sunset() -> Self {
+        Self {
+            zenith_color: Color::new(60, 40, 100),
+            horizon_sky_color: Color::new(255, 160, 100),
+            horizon_ground_color: Color::new(200, 140, 160),
+            nadir_color: Color::new(120, 100, 140),
+
+            horizontal_tint_enabled: true,
+            horizontal_tint_color: Color::new(255, 200, 120),
+            horizontal_tint_direction: HorizonDirection::West,
+            horizontal_tint_intensity: 0.5,
+            horizontal_tint_spread: 1.2,
+
+            horizon: 0.52,
+
+            sun: CelestialBody {
+                enabled: true,
+                azimuth: std::f32::consts::PI,
+                elevation: 0.15,
+                size: 0.12,
+                color: Color::new(255, 250, 200),
+                glow_color: Color::new(255, 180, 80),
+                glow_falloff: 2.0,
+            },
+            moon: CelestialBody::default(),
+
+            cloud_layers: [
+                Some(CloudLayer {
+                    height: 0.35,
+                    thickness: 0.05,
+                    color: Color::new(255, 200, 160),
+                    opacity: 0.4,
+                    scroll_speed: 0.01,
+                    wispiness: 0.85,
+                    density: 0.8,
+                    phase: 0.0,
+                }),
+                Some(CloudLayer {
+                    height: 0.45,
+                    thickness: 0.08,
+                    color: Color::new(255, 180, 140),
+                    opacity: 0.5,
+                    scroll_speed: 0.02,
+                    wispiness: 0.7,
+                    density: 1.0,
+                    phase: 2.5,
+                }),
+            ],
+
+            mountain_ranges: [
+                Some(MountainRange {
+                    lit_color: Color::new(180, 140, 180),
+                    shadow_color: Color::new(80, 60, 100),
+                    highlight_color: Color::new(255, 200, 200),
+                    height: 0.15,
+                    depth: 0.6,
+                    jaggedness: 0.4,
+                    seed: 11111,
+                }),
+                None,
+            ],
+            mountain_light_direction: HorizonDirection::West,
+
+            stars: StarField { enabled: false, ..Default::default() },
+
+            horizon_haze: HorizonHaze {
+                enabled: true,
+                color: Color::new(255, 200, 160),
+                intensity: 0.35,
+                extent: 0.15,
+            },
+        }
+    }
+
+    /// Create a twilight preset
+    pub fn preset_twilight() -> Self {
+        Self {
+            zenith_color: Color::new(30, 40, 80),
+            horizon_sky_color: Color::new(100, 80, 140),
+            horizon_ground_color: Color::new(60, 80, 100),
+            nadir_color: Color::new(40, 60, 80),
+
+            horizontal_tint_enabled: true,
+            horizontal_tint_color: Color::new(200, 140, 180),
+            horizontal_tint_direction: HorizonDirection::West,
+            horizontal_tint_intensity: 0.35,
+            horizontal_tint_spread: 1.0,
+
+            horizon: 0.55,
+
+            sun: CelestialBody::default(),
+            moon: CelestialBody::default(),
+
+            cloud_layers: [
+                Some(CloudLayer {
+                    height: 0.42,
+                    thickness: 0.06,
+                    color: Color::new(220, 200, 180),
+                    opacity: 0.35,
+                    scroll_speed: 0.008,
+                    wispiness: 0.9,
+                    density: 0.7,
+                    phase: 0.0,
+                }),
+                None,
+            ],
+
+            mountain_ranges: [
+                Some(MountainRange {
+                    lit_color: Color::new(80, 90, 140),
+                    shadow_color: Color::new(40, 50, 80),
+                    highlight_color: Color::new(120, 130, 180),
+                    height: 0.12,
+                    depth: 0.7,
+                    jaggedness: 0.3,
+                    seed: 22222,
+                }),
+                None,
+            ],
+            mountain_light_direction: HorizonDirection::West,
+
+            stars: StarField {
+                enabled: true,
+                color: Color::new(255, 255, 220),
+                count: 60,
+                size: 1.5,
+                twinkle_speed: 0.5,
+                seed: 42,
+            },
+
+            horizon_haze: HorizonHaze {
+                enabled: true,
+                color: Color::new(140, 120, 160),
+                intensity: 0.25,
+                extent: 0.12,
+            },
+        }
+    }
+
+    /// Create an arctic/ice preset
+    pub fn preset_arctic() -> Self {
+        Self {
+            zenith_color: Color::new(60, 100, 140),
+            horizon_sky_color: Color::new(140, 180, 200),
+            horizon_ground_color: Color::new(180, 200, 220),
+            nadir_color: Color::new(100, 140, 180),
+
+            horizontal_tint_enabled: true,
+            horizontal_tint_color: Color::new(200, 150, 180),
+            horizontal_tint_direction: HorizonDirection::East,
+            horizontal_tint_intensity: 0.25,
+            horizontal_tint_spread: 1.5,
+
+            horizon: 0.5,
+
+            sun: CelestialBody::default(),
+            moon: CelestialBody::default(),
+
+            cloud_layers: [
+                Some(CloudLayer {
+                    height: 0.35,
+                    thickness: 0.04,
+                    color: Color::new(220, 200, 240),
+                    opacity: 0.3,
+                    scroll_speed: 0.005,
+                    wispiness: 0.6,
+                    density: 0.5,
+                    phase: 0.0,
+                }),
+                Some(CloudLayer {
+                    height: 0.48,
+                    thickness: 0.03,
+                    color: Color::new(200, 220, 240),
+                    opacity: 0.4,
+                    scroll_speed: 0.003,
+                    wispiness: 0.4,
+                    density: 0.6,
+                    phase: 1.5,
+                }),
+            ],
+
+            mountain_ranges: [
+                Some(MountainRange {
+                    lit_color: Color::new(200, 210, 230),
+                    shadow_color: Color::new(100, 120, 160),
+                    highlight_color: Color::new(255, 255, 255),
+                    height: 0.2,
+                    depth: 0.3,
+                    jaggedness: 0.7,
+                    seed: 33333,
+                }),
+                Some(MountainRange {
+                    lit_color: Color::new(160, 180, 210),
+                    shadow_color: Color::new(80, 100, 140),
+                    highlight_color: Color::new(220, 230, 250),
+                    height: 0.25,
+                    depth: 0.5,
+                    jaggedness: 0.5,
+                    seed: 44444,
+                }),
+            ],
+            mountain_light_direction: HorizonDirection::East,
+
+            stars: StarField::default(),
+
+            horizon_haze: HorizonHaze {
+                enabled: true,
+                color: Color::new(180, 200, 220),
+                intensity: 0.4,
+                extent: 0.1,
+            },
+        }
+    }
+
+    /// Create a night preset with stars and moon
+    pub fn preset_night() -> Self {
+        Self {
+            zenith_color: Color::new(10, 15, 40),
+            horizon_sky_color: Color::new(20, 35, 70),
+            horizon_ground_color: Color::new(15, 25, 50),
+            nadir_color: Color::new(5, 10, 25),
+
+            horizontal_tint_enabled: false,
+            horizontal_tint_color: Color::new(100, 100, 150),
+            horizontal_tint_direction: HorizonDirection::East,
+            horizontal_tint_intensity: 0.0,
+            horizontal_tint_spread: 1.0,
+
+            horizon: 0.5,
+
+            sun: CelestialBody::default(),
+            moon: CelestialBody {
+                enabled: true,
+                azimuth: std::f32::consts::FRAC_PI_4, // Northeast
+                elevation: 0.6,
+                size: 0.08,
+                color: Color::new(240, 240, 255),
+                glow_color: Color::new(180, 180, 220),
+                glow_falloff: 4.0,
+            },
+
+            cloud_layers: [None, None],
+
+            mountain_ranges: [
+                Some(MountainRange {
+                    lit_color: Color::new(30, 35, 50),
+                    shadow_color: Color::new(15, 20, 35),
+                    highlight_color: Color::new(50, 55, 75),
+                    height: 0.12,
+                    depth: 0.6,
+                    jaggedness: 0.4,
+                    seed: 55555,
+                }),
+                None,
+            ],
+            mountain_light_direction: HorizonDirection::East,
+
+            stars: StarField {
+                enabled: true,
+                color: Color::new(255, 255, 245),
+                count: 150,
+                size: 1.8,
+                twinkle_speed: 1.0,
+                seed: 12345,
+            },
+
+            horizon_haze: HorizonHaze {
+                enabled: true,
+                color: Color::new(30, 40, 70),
+                intensity: 0.2,
+                extent: 0.08,
+            },
+        }
+    }
+}
+
+/// Vertex for skybox mesh (simplified, no UV/normal needed)
+#[derive(Debug, Clone)]
+pub struct SkyboxVertex {
+    pub pos: (f32, f32, f32),
+    pub color: Color,
+}
+
+impl Default for Skybox {
+    fn default() -> Self {
+        Self::preset_sunset()
+    }
+}
+
 /// Face normal rendering mode
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FaceNormalMode {
@@ -1616,6 +2580,9 @@ pub struct Level {
     /// Player character settings (collision, movement, camera)
     #[serde(default)]
     pub player_settings: PlayerSettings,
+    /// Skybox configuration (gradient sky)
+    #[serde(default)]
+    pub skybox: Option<Skybox>,
 }
 
 impl Level {
@@ -1624,6 +2591,7 @@ impl Level {
             rooms: Vec::new(),
             editor_layout: EditorLayoutConfig::default(),
             player_settings: PlayerSettings::default(),
+            skybox: None,
         }
     }
 
