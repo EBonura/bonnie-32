@@ -1802,14 +1802,16 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floo
     let uv_controls_height = 54.0; // offset row + scale row + angle row
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
+    let split_diagram_height = 50.0; // Mini split diagram with toggle
+    let triangle_textures_height = 40.0; // Dual texture slots with link toggle
     let extrude_button_height = if is_floor { 56.0 } else { 0.0 }; // Extrude button only for floors
-    let mut lines = 3; // texture, height, walkable
+    let mut lines = 2; // height, walkable (texture moved to triangle slots)
     if !face.is_flat() {
         lines += 1; // extra line for individual heights
     }
-    // Add space for UV coordinates, controls, buttons, color, color picker, normal mode, and extrude
+    // Add space for UV coordinates, controls, buttons, color, color picker, normal mode, split diagram, triangle textures, and extrude
     let uv_lines = 1; // Just coordinates
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + extrude_button_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + split_diagram_height + triangle_textures_height + extrude_button_height
 }
 
 /// Calculate height needed for a wall face container
@@ -1854,14 +1856,220 @@ fn draw_horizontal_face_container(
     let content_x = x + CONTAINER_PADDING;
     let mut content_y = y + header_height + CONTAINER_PADDING;
 
-    // Texture
-    let tex_display = if face.texture.is_valid() {
-        format!("Texture: {}/{}", face.texture.pack, face.texture.name)
+    // === Split Direction with Mini Diagram ===
+    let diagram_size = 36.0;
+    let diagram_x = content_x;
+    let diagram_y = content_y;
+
+    // Draw mini quad diagram showing split direction
+    let quad_color = Color::from_rgba(60, 70, 80, 255);
+    let line_color = Color::from_rgba(255, 180, 100, 255);
+    let label_color_dim = Color::from_rgba(120, 120, 120, 255);
+
+    draw_rectangle(diagram_x, diagram_y, diagram_size, diagram_size, quad_color);
+    draw_rectangle_lines(diagram_x, diagram_y, diagram_size, diagram_size, 1.0, Color::from_rgba(80, 90, 100, 255));
+
+    // Draw diagonal based on split direction
+    use crate::world::SplitDirection;
+    match face.split_direction {
+        SplitDirection::NwSe => {
+            // NW to SE diagonal
+            draw_line(diagram_x, diagram_y, diagram_x + diagram_size, diagram_y + diagram_size, 2.0, line_color);
+        }
+        SplitDirection::NeSw => {
+            // NE to SW diagonal
+            draw_line(diagram_x + diagram_size, diagram_y, diagram_x, diagram_y + diagram_size, 2.0, line_color);
+        }
+    }
+
+    // Triangle labels inside the diagram
+    let tri1_label_x;
+    let tri1_label_y;
+    let tri2_label_x;
+    let tri2_label_y;
+    match face.split_direction {
+        SplitDirection::NwSe => {
+            // Tri1 is top-right (NW,NE,SE), Tri2 is bottom-left (NW,SE,SW)
+            tri1_label_x = diagram_x + diagram_size * 0.65;
+            tri1_label_y = diagram_y + diagram_size * 0.35;
+            tri2_label_x = diagram_x + diagram_size * 0.25;
+            tri2_label_y = diagram_y + diagram_size * 0.7;
+        }
+        SplitDirection::NeSw => {
+            // Tri1 is top-left (NW,NE,SW), Tri2 is bottom-right (NE,SE,SW)
+            tri1_label_x = diagram_x + diagram_size * 0.25;
+            tri1_label_y = diagram_y + diagram_size * 0.35;
+            tri2_label_x = diagram_x + diagram_size * 0.65;
+            tri2_label_y = diagram_y + diagram_size * 0.7;
+        }
+    }
+    draw_text("1", tri1_label_x.floor(), tri1_label_y.floor(), 10.0, WHITE);
+    draw_text("2", tri2_label_x.floor(), tri2_label_y.floor(), 10.0, WHITE);
+
+    // Split direction toggle button next to diagram
+    let toggle_x = diagram_x + diagram_size + 8.0;
+    let toggle_btn_rect = Rect::new(toggle_x, diagram_y + 8.0, 50.0, 20.0);
+    let toggle_hovered = ctx.mouse.inside(&toggle_btn_rect);
+    let toggle_bg = if toggle_hovered {
+        Color::from_rgba(60, 80, 100, 255)
     } else {
-        String::from("Texture: (fallback)")
+        Color::from_rgba(45, 50, 60, 255)
     };
-    draw_text(&tex_display, content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
-    content_y += line_height;
+    draw_rectangle(toggle_btn_rect.x, toggle_btn_rect.y, toggle_btn_rect.w, toggle_btn_rect.h, toggle_bg);
+    draw_rectangle_lines(toggle_btn_rect.x, toggle_btn_rect.y, toggle_btn_rect.w, toggle_btn_rect.h, 1.0, Color::from_rgba(80, 90, 100, 255));
+    draw_text(face.split_direction.label(), (toggle_btn_rect.x + 6.0).floor(), (toggle_btn_rect.y + 14.0).floor(), 11.0, WHITE);
+
+    if toggle_hovered && ctx.mouse.left_pressed {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    f.split_direction = f.split_direction.next();
+                }
+            }
+        }
+    }
+
+    if toggle_hovered {
+        ctx.tooltip = Some(crate::ui::PendingTooltip {
+            text: String::from("Toggle split direction"),
+            x: ctx.mouse.x,
+            y: ctx.mouse.y,
+        });
+    }
+    content_y += diagram_size + 8.0;
+
+    // === Dual Triangle Texture Slots with Link Toggle ===
+    use super::TriangleSelection;
+
+    let slot_width = 70.0;
+    let slot_height = 32.0;
+    let link_btn_size = 18.0;
+    let spacing = 4.0;
+
+    // Determine if textures are linked (texture_2 is None means linked)
+    let textures_linked = face.texture_2.is_none();
+    let tex1 = &face.texture;
+    let tex2 = face.texture_2.as_ref().unwrap_or(&face.texture);
+
+    // Determine which slot is selected based on state
+    let slot1_selected = matches!(state.selected_triangle, TriangleSelection::Tri1 | TriangleSelection::Both);
+    let slot2_selected = matches!(state.selected_triangle, TriangleSelection::Tri2 | TriangleSelection::Both);
+
+    // Triangle 1 texture slot
+    let slot1_x = content_x;
+    let slot1_rect = Rect::new(slot1_x, content_y, slot_width, slot_height);
+    let slot1_hovered = ctx.mouse.inside(&slot1_rect);
+    let slot1_bg = if slot1_hovered {
+        Color::from_rgba(50, 60, 70, 255)
+    } else if slot1_selected {
+        Color::from_rgba(40, 50, 65, 255)
+    } else {
+        Color::from_rgba(35, 40, 50, 255)
+    };
+    let slot1_border = if slot1_selected {
+        Color::from_rgba(100, 150, 200, 255)
+    } else {
+        Color::from_rgba(80, 90, 100, 255)
+    };
+    draw_rectangle(slot1_rect.x, slot1_rect.y, slot1_rect.w, slot1_rect.h, slot1_bg);
+    draw_rectangle_lines(slot1_rect.x, slot1_rect.y, slot1_rect.w, slot1_rect.h,
+        if slot1_selected { 2.0 } else { 1.0 }, slot1_border);
+
+    // Tri 1 label and texture name
+    draw_text("Tri 1", (slot1_rect.x + 4.0).floor(), (slot1_rect.y + 12.0).floor(), 9.0, label_color_dim);
+    let tex1_name = if tex1.is_valid() { &tex1.name } else { "(none)" };
+    let tex1_display: String = if tex1_name.len() > 8 { format!("{}...", &tex1_name[..6]) } else { tex1_name.to_string() };
+    draw_text(&tex1_display, (slot1_rect.x + 4.0).floor(), (slot1_rect.y + 24.0).floor(), 10.0, WHITE);
+
+    // Link button between slots
+    let link_x = slot1_x + slot_width + spacing;
+    let link_rect = Rect::new(link_x, content_y + (slot_height - link_btn_size) / 2.0, link_btn_size, link_btn_size);
+    let link_icon = if textures_linked { icon::LINK } else { icon::LINK_OFF };
+    let link_tooltip = if textures_linked { "Unlink triangle textures" } else { "Link triangle textures" };
+    let link_clicked = crate::ui::icon_button(ctx, link_rect, link_icon, icon_font, link_tooltip);
+
+    if link_clicked {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    if textures_linked {
+                        // Unlink: copy texture to texture_2, select Tri1
+                        f.texture_2 = Some(f.texture.clone());
+                        state.selected_triangle = TriangleSelection::Tri1;
+                    } else {
+                        // Link: clear texture_2 (will use texture), select Both
+                        f.texture_2 = None;
+                        state.selected_triangle = TriangleSelection::Both;
+                    }
+                }
+            }
+        }
+    }
+
+    // Triangle 2 texture slot
+    let slot2_x = link_x + link_btn_size + spacing;
+    let slot2_rect = Rect::new(slot2_x, content_y, slot_width, slot_height);
+    let slot2_hovered = ctx.mouse.inside(&slot2_rect);
+    let slot2_bg = if slot2_hovered {
+        Color::from_rgba(50, 60, 70, 255)
+    } else if slot2_selected {
+        Color::from_rgba(40, 50, 65, 255)
+    } else {
+        Color::from_rgba(35, 40, 50, 255)
+    };
+    let slot2_border = if slot2_selected {
+        Color::from_rgba(100, 150, 200, 255)
+    } else {
+        Color::from_rgba(80, 90, 100, 255)
+    };
+    draw_rectangle(slot2_rect.x, slot2_rect.y, slot2_rect.w, slot2_rect.h, slot2_bg);
+    draw_rectangle_lines(slot2_rect.x, slot2_rect.y, slot2_rect.w, slot2_rect.h,
+        if slot2_selected { 2.0 } else { 1.0 }, slot2_border);
+
+    // Tri 2 label and texture name
+    draw_text("Tri 2", (slot2_rect.x + 4.0).floor(), (slot2_rect.y + 12.0).floor(), 9.0, label_color_dim);
+    let tex2_name = if tex2.is_valid() { &tex2.name } else { "(none)" };
+    let tex2_display: String = if tex2_name.len() > 8 { format!("{}...", &tex2_name[..6]) } else { tex2_name.to_string() };
+    draw_text(&tex2_display, (slot2_rect.x + 4.0).floor(), (slot2_rect.y + 24.0).floor(), 10.0, WHITE);
+
+    // Handle texture slot clicks - SELECT the slot and update selected_texture to match
+    if slot1_hovered && ctx.mouse.left_pressed {
+        if textures_linked {
+            // Linked: select both, update selected_texture to match
+            state.selected_triangle = TriangleSelection::Both;
+            state.selected_texture = tex1.clone();
+        } else {
+            // Unlinked: select just tri1
+            state.selected_triangle = TriangleSelection::Tri1;
+            state.selected_texture = tex1.clone();
+        }
+    }
+    if slot2_hovered && ctx.mouse.left_pressed {
+        if textures_linked {
+            // Linked: select both, update selected_texture to match
+            state.selected_triangle = TriangleSelection::Both;
+            state.selected_texture = tex2.clone();
+        } else {
+            // Unlinked: select just tri2
+            state.selected_triangle = TriangleSelection::Tri2;
+            state.selected_texture = tex2.clone();
+        }
+    }
+
+    if slot1_hovered {
+        let tip = if textures_linked { "Click to select (linked)" } else { "Click to select triangle 1" };
+        ctx.tooltip = Some(crate::ui::PendingTooltip { text: String::from(tip), x: ctx.mouse.x, y: ctx.mouse.y });
+    }
+    if slot2_hovered {
+        let tip = if textures_linked { "Click to select (linked)" } else { "Click to select triangle 2" };
+        ctx.tooltip = Some(crate::ui::PendingTooltip { text: String::from(tip), x: ctx.mouse.x, y: ctx.mouse.y });
+    }
+
+    content_y += slot_height + 8.0;
 
     // Heights
     if !face.is_flat() {

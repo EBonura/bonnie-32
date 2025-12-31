@@ -198,16 +198,22 @@ pub fn draw_texture_palette(
         if has_valid_selection {
             state.save_undo();
 
-            // Apply texture to all selections
+            // Apply texture to all selections, respecting triangle selection for horizontal faces
+            let triangle_sel = state.selected_triangle;
             for sel in all_selections {
-                apply_texture_to_selection(&mut state.level, sel, tex_ref.clone());
+                apply_texture_to_selection(&mut state.level, sel, tex_ref.clone(), triangle_sel);
             }
         }
     }
 }
 
 /// Apply a texture to a single selection
-fn apply_texture_to_selection(level: &mut crate::world::Level, selection: super::Selection, tex_ref: crate::world::TextureRef) {
+fn apply_texture_to_selection(
+    level: &mut crate::world::Level,
+    selection: super::Selection,
+    tex_ref: crate::world::TextureRef,
+    triangle_sel: super::TriangleSelection,
+) {
     match selection {
         // Single face selected (from 3D view) - apply to that face only
         super::Selection::SectorFace { room, x, z, face } => {
@@ -216,12 +222,12 @@ fn apply_texture_to_selection(level: &mut crate::world::Level, selection: super:
                     match face {
                         super::SectorFace::Floor => {
                             if let Some(floor) = &mut sector.floor {
-                                floor.texture = tex_ref;
+                                apply_texture_to_horizontal_face(floor, tex_ref, triangle_sel);
                             }
                         }
                         super::SectorFace::Ceiling => {
                             if let Some(ceiling) = &mut sector.ceiling {
-                                ceiling.texture = tex_ref;
+                                apply_texture_to_horizontal_face(ceiling, tex_ref, triangle_sel);
                             }
                         }
                         super::SectorFace::WallNorth(i) => {
@@ -252,15 +258,15 @@ fn apply_texture_to_selection(level: &mut crate::world::Level, selection: super:
         super::Selection::Sector { room, x, z } => {
             if let Some(r) = level.rooms.get_mut(room) {
                 if let Some(sector) = r.get_sector_mut(x, z) {
-                    // Apply to floor if it exists
+                    // Apply to floor if it exists (respecting triangle selection)
                     if let Some(floor) = &mut sector.floor {
-                        floor.texture = tex_ref.clone();
+                        apply_texture_to_horizontal_face(floor, tex_ref.clone(), triangle_sel);
                     }
-                    // Apply to ceiling if it exists
+                    // Apply to ceiling if it exists (respecting triangle selection)
                     if let Some(ceiling) = &mut sector.ceiling {
-                        ceiling.texture = tex_ref.clone();
+                        apply_texture_to_horizontal_face(ceiling, tex_ref.clone(), triangle_sel);
                     }
-                    // Apply to all walls
+                    // Apply to all walls (walls don't have triangle selection)
                     for wall in &mut sector.walls_north {
                         wall.texture = tex_ref.clone();
                     }
@@ -277,6 +283,30 @@ fn apply_texture_to_selection(level: &mut crate::world::Level, selection: super:
             }
         }
         _ => {}
+    }
+}
+
+/// Apply texture to a horizontal face, respecting triangle selection
+fn apply_texture_to_horizontal_face(
+    face: &mut crate::world::HorizontalFace,
+    tex_ref: crate::world::TextureRef,
+    triangle_sel: super::TriangleSelection,
+) {
+    match triangle_sel {
+        super::TriangleSelection::Both => {
+            // Apply to both triangles (keep them linked)
+            face.texture = tex_ref;
+            face.texture_2 = None;
+        }
+        super::TriangleSelection::Tri1 => {
+            // Apply only to triangle 1
+            face.texture = tex_ref;
+            // Don't touch texture_2 - if it was set, keep it
+        }
+        super::TriangleSelection::Tri2 => {
+            // Apply only to triangle 2
+            face.texture_2 = Some(tex_ref);
+        }
     }
 }
 

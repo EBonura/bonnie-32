@@ -39,6 +39,15 @@ pub enum GridViewMode {
     Side,   // Y-Z plane (looking along -X)
 }
 
+/// Which triangle within a horizontal face is selected for editing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TriangleSelection {
+    #[default]
+    Both,   // Edit both triangles (linked behavior)
+    Tri1,   // Edit only triangle 1
+    Tri2,   // Edit only triangle 2
+}
+
 /// Which face within a sector is selected
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectorFace {
@@ -145,6 +154,9 @@ pub struct EditorState {
 
     /// Selected texture reference (pack + name)
     pub selected_texture: crate::world::TextureRef,
+
+    /// Which triangle is selected for texture editing (for horizontal faces)
+    pub selected_triangle: TriangleSelection,
 
     /// 3D viewport camera
     pub camera_3d: Camera,
@@ -351,6 +363,7 @@ impl EditorState {
             selection_rect_end: None,
             current_room: 0,
             selected_texture,
+            selected_triangle: TriangleSelection::Both,
             camera_3d,
             camera_mode: CameraMode::Free,
             orbit_target,

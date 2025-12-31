@@ -19,7 +19,7 @@ use crate::rasterizer::{
     point_to_segment_distance, point_in_triangle_2d,
     Light, RasterSettings,
 };
-use crate::world::SECTOR_SIZE;
+use crate::world::{SECTOR_SIZE, SplitDirection};
 use crate::input::{InputState, Action};
 use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT};
 
@@ -1952,30 +1952,47 @@ pub fn draw_viewport_3d(
                         SectorFace::Floor => {
                             if let Some(floor) = &sector.floor {
                                 let corners = [
-                                    Vec3::new(base_x, room_y + floor.heights[0], base_z),
-                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
-                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
-                                    Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
+                                    Vec3::new(base_x, room_y + floor.heights[0], base_z),                    // NW = 0
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),      // NE = 1
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE), // SE = 2
+                                    Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                 ];
+                                // Draw all 4 edges
                                 for i in 0..4 {
                                     draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, hover_color);
                                 }
-                                // Draw diagonal to show it's a face
-                                draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, hover_color);
+                                // Draw diagonal based on split direction
+                                match floor.split_direction {
+                                    SplitDirection::NwSe => {
+                                        draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, hover_color);
+                                    }
+                                    SplitDirection::NeSw => {
+                                        draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, hover_color);
+                                    }
+                                }
                             }
                         }
                         SectorFace::Ceiling => {
                             if let Some(ceiling) = &sector.ceiling {
                                 let corners = [
-                                    Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
-                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
-                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
-                                    Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
+                                    Vec3::new(base_x, room_y + ceiling.heights[0], base_z),                    // NW = 0
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),      // NE = 1
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE), // SE = 2
+                                    Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                 ];
+                                // Draw all 4 edges
                                 for i in 0..4 {
                                     draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, hover_color);
                                 }
-                                draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, hover_color);
+                                // Draw diagonal based on split direction
+                                match ceiling.split_direction {
+                                    SplitDirection::NwSe => {
+                                        draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, hover_color);
+                                    }
+                                    SplitDirection::NeSw => {
+                                        draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, hover_color);
+                                    }
+                                }
                             }
                         }
                         SectorFace::WallNorth(i) => {
@@ -2053,29 +2070,47 @@ pub fn draw_viewport_3d(
                             SectorFace::Floor => {
                                 if let Some(floor) = &sector.floor {
                                     let corners = [
-                                        Vec3::new(base_x, room_y + floor.heights[0], base_z),
-                                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
-                                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
-                                        Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
+                                        Vec3::new(base_x, room_y + floor.heights[0], base_z),                    // NW = 0
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),      // NE = 1
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE), // SE = 2
+                                        Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                     ];
+                                    // Draw all 4 edges
                                     for i in 0..4 {
                                         draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
                                     }
-                                    draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                    // Draw diagonal based on split direction
+                                    match floor.split_direction {
+                                        SplitDirection::NwSe => {
+                                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                        }
+                                        SplitDirection::NeSw => {
+                                            draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, select_color);
+                                        }
+                                    }
                                 }
                             }
                             SectorFace::Ceiling => {
                                 if let Some(ceiling) = &sector.ceiling {
                                     let corners = [
-                                        Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
-                                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
-                                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
-                                        Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
+                                        Vec3::new(base_x, room_y + ceiling.heights[0], base_z),                    // NW = 0
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),      // NE = 1
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE), // SE = 2
+                                        Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                     ];
+                                    // Draw all 4 edges
                                     for i in 0..4 {
                                         draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
                                     }
-                                    draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                    // Draw diagonal based on split direction
+                                    match ceiling.split_direction {
+                                        SplitDirection::NwSe => {
+                                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                        }
+                                        SplitDirection::NeSw => {
+                                            draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, select_color);
+                                        }
+                                    }
                                 }
                             }
                             SectorFace::WallNorth(i) => {

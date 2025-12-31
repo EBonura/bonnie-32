@@ -5,7 +5,7 @@
 use macroquad::prelude::*;
 use crate::rasterizer::Vec3;
 use crate::ui::{Rect, UiContext};
-use crate::world::SECTOR_SIZE;
+use crate::world::{SplitDirection, SECTOR_SIZE};
 use super::{EditorState, Selection, GridViewMode, CEILING_HEIGHT, CLICK_HEIGHT};
 
 /// Draw the 2D grid view (top-down view of current room)
@@ -360,6 +360,41 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             Vec2::new(sx3, sy3),
             fill_color,
         );
+
+        // Draw diagonal split indicator (only in Top view mode for now)
+        // sx0,sy0 = SW corner, sx1,sy1 = SE corner, sx2,sy2 = NE corner, sx3,sy3 = NW corner
+        if view_mode == GridViewMode::Top {
+            let diag_color = Color::from_rgba(255, 180, 100, 200);
+
+            // Check floor split direction - draw the diagonal line
+            if let Some(floor) = &sector.floor {
+                match floor.split_direction {
+                    SplitDirection::NwSe => {
+                        draw_line(sx3, sy3, sx1, sy1, 2.0, diag_color);
+                    }
+                    SplitDirection::NeSw => {
+                        draw_line(sx2, sy2, sx0, sy0, 2.0, diag_color);
+                    }
+                }
+            }
+
+            // Check ceiling split direction (draw with different color if different from floor)
+            if let Some(ceil) = &sector.ceiling {
+                let floor_split = sector.floor.as_ref().map(|f| f.split_direction).unwrap_or(SplitDirection::NwSe);
+                // Only draw if different from floor (avoid duplicate lines)
+                if ceil.split_direction != floor_split {
+                    let ceil_diag_color = Color::from_rgba(180, 100, 255, 200);
+                    match ceil.split_direction {
+                        SplitDirection::NwSe => {
+                            draw_line(sx3, sy3, sx1, sy1, 2.0, ceil_diag_color);
+                        }
+                        SplitDirection::NeSw => {
+                            draw_line(sx2, sy2, sx0, sy0, 2.0, ceil_diag_color);
+                        }
+                    }
+                }
+            }
+        }
 
         // Draw sector edges
         let edge_color = if is_selected || is_multi_selected || is_hovered {

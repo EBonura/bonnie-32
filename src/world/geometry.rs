@@ -1032,28 +1032,91 @@ pub enum UvProjection {
     Projected,  // Project UVs as if the face were flat (uniform texture across face)
 }
 
+/// Direction of the diagonal split for floor/ceiling triangulation
+/// A quad is always split into 2 triangles - this controls which diagonal is used
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitDirection {
+    #[default]
+    NwSe,   // Split along NW-SE diagonal: Triangle1 = NW,NE,SE, Triangle2 = NW,SE,SW
+    NeSw,   // Split along NE-SW diagonal: Triangle1 = NW,NE,SW, Triangle2 = NE,SE,SW
+}
+
+impl SplitDirection {
+    /// Cycle to the next split direction
+    pub fn next(self) -> Self {
+        match self {
+            SplitDirection::NwSe => SplitDirection::NeSw,
+            SplitDirection::NeSw => SplitDirection::NwSe,
+        }
+    }
+
+    /// Human-readable label
+    pub fn label(&self) -> &'static str {
+        match self {
+            SplitDirection::NwSe => "NW-SE",
+            SplitDirection::NeSw => "NE-SW",
+        }
+    }
+
+    /// Get the corner indices for triangle 1
+    /// Returns [corner_a, corner_b, corner_c] in winding order
+    pub fn triangle_1_corners(&self) -> [usize; 3] {
+        match self {
+            SplitDirection::NwSe => [0, 1, 2], // NW, NE, SE
+            SplitDirection::NeSw => [0, 1, 3], // NW, NE, SW
+        }
+    }
+
+    /// Get the corner indices for triangle 2
+    /// Returns [corner_a, corner_b, corner_c] in winding order
+    pub fn triangle_2_corners(&self) -> [usize; 3] {
+        match self {
+            SplitDirection::NwSe => [0, 2, 3], // NW, SE, SW
+            SplitDirection::NeSw => [1, 2, 3], // NE, SE, SW
+        }
+    }
+}
+
 /// A horizontal face (floor or ceiling)
+/// Consists of 2 triangles that share 4 corner heights but can have different textures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizontalFace {
     /// Corner heights [NW, NE, SE, SW] - allows sloped surfaces
     /// NW = (-X, -Z), NE = (+X, -Z), SE = (+X, +Z), SW = (-X, +Z)
     pub heights: [f32; 4],
-    /// Texture reference
+
+    /// Direction of diagonal split (which diagonal divides the quad into 2 triangles)
+    #[serde(default)]
+    pub split_direction: SplitDirection,
+
+    // === Triangle 1 properties (primary) ===
+    /// Texture reference for triangle 1 (and triangle 2 if texture_2 is None)
     pub texture: TextureRef,
-    /// Custom UV coordinates (None = use default 0,0 to 1,1)
+    /// Custom UV coordinates for triangle 1 (None = use default 0,0 to 1,1)
     #[serde(default)]
     pub uv: Option<[Vec2; 4]>,
+    /// PS1-style vertex colors for texture modulation [NW, NE, SE, SW]
+    #[serde(default = "default_neutral_colors_4")]
+    pub colors: [Color; 4],
+
+    // === Triangle 2 properties (optional overrides) ===
+    /// Texture for triangle 2 (None = use same as triangle 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_2: Option<TextureRef>,
+    /// UV coordinates for triangle 2 (None = use same as triangle 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_2: Option<[Vec2; 4]>,
+    /// Vertex colors for triangle 2 (None = use same as triangle 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colors_2: Option<[Color; 4]>,
+
+    // === Shared properties ===
     /// Is this surface walkable? (for collision/AI)
     #[serde(default = "default_true")]
     pub walkable: bool,
     /// Transparency/blend mode
     #[serde(default)]
     pub blend_mode: BlendMode,
-    /// PS1-style vertex colors for texture modulation [NW, NE, SE, SW]
-    /// 128 = neutral (no tint), <128 = darken, >128 = brighten
-    /// Per-vertex colors enable Gouraud-style color gradients across the face
-    #[serde(default = "default_neutral_colors_4")]
-    pub colors: [Color; 4],
     /// Normal rendering mode (front, both, or back)
     #[serde(default)]
     pub normal_mode: FaceNormalMode,
@@ -1067,11 +1130,15 @@ impl HorizontalFace {
     pub fn flat(height: f32, texture: TextureRef) -> Self {
         Self {
             heights: [height, height, height, height],
+            split_direction: SplitDirection::NwSe,
             texture,
             uv: None,
+            colors: [Color::NEUTRAL; 4],
+            texture_2: None,
+            uv_2: None,
+            colors_2: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
-            colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
         }
@@ -1081,15 +1148,40 @@ impl HorizontalFace {
     pub fn sloped(heights: [f32; 4], texture: TextureRef) -> Self {
         Self {
             heights,
+            split_direction: SplitDirection::NwSe,
             texture,
             uv: None,
+            colors: [Color::NEUTRAL; 4],
+            texture_2: None,
+            uv_2: None,
+            colors_2: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
-            colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
         }
     }
+
+    /// Get effective texture for triangle 2 (returns texture_2 or falls back to texture)
+    pub fn get_texture_2(&self) -> &TextureRef {
+        self.texture_2.as_ref().unwrap_or(&self.texture)
+    }
+
+    /// Get effective UV for triangle 2 (returns uv_2 or falls back to uv)
+    pub fn get_uv_2(&self) -> Option<&[Vec2; 4]> {
+        self.uv_2.as_ref().or(self.uv.as_ref())
+    }
+
+    /// Get effective colors for triangle 2 (returns colors_2 or falls back to colors)
+    pub fn get_colors_2(&self) -> &[Color; 4] {
+        self.colors_2.as_ref().unwrap_or(&self.colors)
+    }
+
+    /// Check if triangle 2 has different properties than triangle 1
+    pub fn has_split_textures(&self) -> bool {
+        self.texture_2.is_some() || self.uv_2.is_some() || self.colors_2.is_some()
+    }
+
 
     /// Set all vertex colors to the same value (uniform tint)
     pub fn set_uniform_color(&mut self, color: Color) {
@@ -1122,37 +1214,47 @@ impl HorizontalFace {
     /// Heights layout: [NW, NE, SE, SW] = [0, 1, 2, 3]
     /// NW = (u=0, v=0), NE = (u=1, v=0), SE = (u=1, v=1), SW = (u=0, v=1)
     ///
-    /// The quad is split into two triangles along the NW-SE diagonal:
-    /// - Triangle 1 (upper-right): NW, NE, SE (u + v <= 1 from NW perspective, or u >= v)
-    /// - Triangle 2 (lower-left): NW, SE, SW (u + v > 1 from NW perspective, or u < v)
-    ///
-    /// We use barycentric interpolation within each triangle to get the exact height.
+    /// The quad is split into two triangles based on split_direction:
+    /// - NW-SE split: Triangle 1 = NW,NE,SE (u >= v), Triangle 2 = NW,SE,SW (u < v)
+    /// - NE-SW split: Triangle 1 = NW,NE,SW (u + v <= 1), Triangle 2 = NE,SE,SW (u + v > 1)
     pub fn interpolate_height(&self, u: f32, v: f32) -> f32 {
         // Clamp to valid range
         let u = u.clamp(0.0, 1.0);
         let v = v.clamp(0.0, 1.0);
 
-        // Determine which triangle we're in based on the NW-SE diagonal
-        // The diagonal goes from (0,0) to (1,1), so points where u >= v are in the upper-right triangle
-        if u >= v {
-            // Upper-right triangle: NW (0,0), NE (1,0), SE (1,1)
-            // Using barycentric coordinates for triangle NW-NE-SE:
-            // P = NW + u*(NE-NW) + v*(SE-NE)
-            // Height = h_NW + u*(h_NE - h_NW) + v*(h_SE - h_NE)
-            let h_nw = self.heights[0];
-            let h_ne = self.heights[1];
-            let h_se = self.heights[2];
-            h_nw + u * (h_ne - h_nw) + v * (h_se - h_ne)
-        } else {
-            // Lower-left triangle: NW (0,0), SE (1,1), SW (0,1)
-            // Using barycentric coordinates for triangle NW-SE-SW:
-            // We can parameterize as: P = NW + u*(SE-SW) + v*(SW-NW)
-            // But it's easier to think of it as:
-            // Height = h_NW + u*(h_SE - h_SW) + v*(h_SW - h_NW)
-            let h_nw = self.heights[0];
-            let h_se = self.heights[2];
-            let h_sw = self.heights[3];
-            h_nw + u * (h_se - h_sw) + v * (h_sw - h_nw)
+        match self.split_direction {
+            SplitDirection::NwSe => {
+                // Split along NW-SE diagonal
+                if u >= v {
+                    // Triangle 1: NW, NE, SE
+                    let h_nw = self.heights[0];
+                    let h_ne = self.heights[1];
+                    let h_se = self.heights[2];
+                    h_nw + u * (h_ne - h_nw) + v * (h_se - h_ne)
+                } else {
+                    // Triangle 2: NW, SE, SW
+                    let h_nw = self.heights[0];
+                    let h_se = self.heights[2];
+                    let h_sw = self.heights[3];
+                    h_nw + u * (h_se - h_sw) + v * (h_sw - h_nw)
+                }
+            }
+            SplitDirection::NeSw => {
+                // Split along NE-SW diagonal
+                if u + v <= 1.0 {
+                    // Triangle 1: NW, NE, SW
+                    let h_nw = self.heights[0];
+                    let h_ne = self.heights[1];
+                    let h_sw = self.heights[3];
+                    h_nw + u * (h_ne - h_nw) + v * (h_sw - h_nw)
+                } else {
+                    // Triangle 2: NE, SE, SW
+                    let h_ne = self.heights[1];
+                    let h_se = self.heights[2];
+                    let h_sw = self.heights[3];
+                    h_sw + u * (h_se - h_sw) + (1.0 - v) * (h_ne - h_se)
+                }
+            }
         }
     }
 
@@ -2359,9 +2461,35 @@ impl Room {
             Vec3::new(base_x, self.position.y + face.heights[3], base_z + SECTOR_SIZE),           // SW
         ];
 
-        // Calculate normal from cross product
-        // For floor (facing up): use edge2 x edge1 to get +Y normal
-        // For ceiling (facing down): use edge1 x edge2 to get -Y normal
+        // Default UVs for triangle 1
+        let uvs_1 = face.uv.unwrap_or([
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(0.0, 1.0),
+        ]);
+
+        // UVs for triangle 2 (use override or fall back to triangle 1's UVs)
+        let uvs_2 = face.get_uv_2().copied().unwrap_or(uvs_1);
+
+        // Colors for each triangle
+        let colors_1 = &face.colors;
+        let colors_2 = face.get_colors_2();
+
+        // Texture IDs for each triangle
+        let texture_id_1 = resolve_texture(&face.texture).unwrap_or(0);
+        let texture_id_2 = resolve_texture(face.get_texture_2()).unwrap_or(0);
+
+        // Handle normal mode: Front, Back, or Both
+        let render_front = face.normal_mode != FaceNormalMode::Back;
+        let render_back = face.normal_mode != FaceNormalMode::Front;
+
+        // Get corner indices for each triangle based on split direction
+        let split = face.split_direction;
+        let tri1_corners = split.triangle_1_corners();
+        let tri2_corners = split.triangle_2_corners();
+
+        // Calculate normal from cross product (using first triangle's edges)
         let edge1 = corners[1] - corners[0]; // NW -> NE (along +X)
         let edge2 = corners[3] - corners[0]; // NW -> SW (along +Z)
         let front_normal = if is_floor {
@@ -2369,52 +2497,44 @@ impl Room {
         } else {
             edge1.cross(edge2).normalize() // +X x +Z = -Y (down)
         };
+        let back_normal = front_normal.scale(-1.0);
 
-        // Default UVs
-        let uvs = face.uv.unwrap_or([
-            Vec2::new(0.0, 0.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(1.0, 1.0),
-            Vec2::new(0.0, 1.0),
-        ]);
-
-        let texture_id = resolve_texture(&face.texture).unwrap_or(0);
-
-        // Handle normal mode: Front, Back, or Both
-        let render_front = face.normal_mode != FaceNormalMode::Back;
-        let render_back = face.normal_mode != FaceNormalMode::Front;
-
-        // Add front-facing face
-        if render_front {
+        // Helper to add a single triangle
+        let add_triangle = |vertices: &mut Vec<Vertex>, faces: &mut Vec<RasterFace>,
+                           c: [usize; 3], uvs: &[Vec2; 4], colors: &[Color; 4],
+                           normal: Vec3, texture_id: usize, flip_winding: bool| {
             let base_idx = vertices.len();
-            for i in 0..4 {
-                vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, face.colors[i]));
-            }
-            // Winding order: floor = CCW from above, ceiling = CW from above (so it faces down)
-            if is_floor {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(face.black_transparent));
+            vertices.push(Vertex::with_color(corners[c[0]], uvs[c[0]], normal, colors[c[0]]));
+            vertices.push(Vertex::with_color(corners[c[1]], uvs[c[1]], normal, colors[c[1]]));
+            vertices.push(Vertex::with_color(corners[c[2]], uvs[c[2]], normal, colors[c[2]]));
+
+            if flip_winding {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id)
+                    .with_black_transparent(face.black_transparent));
             } else {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(face.black_transparent));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id)
+                    .with_black_transparent(face.black_transparent));
             }
+        };
+
+        // Render triangle 1
+        if render_front {
+            let flip = !is_floor; // Ceilings need flipped winding
+            add_triangle(vertices, faces, tri1_corners, &uvs_1, colors_1, front_normal, texture_id_1, flip);
+        }
+        if render_back {
+            let flip = is_floor; // Back faces flip the winding
+            add_triangle(vertices, faces, tri1_corners, &uvs_1, colors_1, back_normal, texture_id_1, flip);
         }
 
-        // Add back-facing face (flipped normal and winding)
+        // Render triangle 2
+        if render_front {
+            let flip = !is_floor;
+            add_triangle(vertices, faces, tri2_corners, &uvs_2, colors_2, front_normal, texture_id_2, flip);
+        }
         if render_back {
-            let base_idx = vertices.len();
-            let back_normal = front_normal.scale(-1.0);
-            for i in 0..4 {
-                vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, face.colors[i]));
-            }
-            // Reverse winding order for back face
-            if is_floor {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-            } else {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(face.black_transparent));
-            }
+            let flip = is_floor;
+            add_triangle(vertices, faces, tri2_corners, &uvs_2, colors_2, back_normal, texture_id_2, flip);
         }
     }
 
