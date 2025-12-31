@@ -718,7 +718,6 @@ fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, i
             if !face_indices.is_empty() {
                 draw_section_label(rect.x, &mut y, rect.w, "Face Properties");
                 draw_face_properties(ctx, rect.x, &mut y, rect.w, state, icon_font);
-                y += 4.0;
             }
         }
     } else {

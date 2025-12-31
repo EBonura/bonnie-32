@@ -97,48 +97,77 @@ pub fn draw_viewport_3d(
         state.set_status("Selection cleared", 0.5);
     }
 
-    // Delete selected faces with Delete or Backspace key (supports multi-selection)
+    // Delete selected elements with Delete or Backspace key (supports multi-selection)
     if inside_viewport && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
         // Collect all selections (primary + multi)
         let mut all_selections: Vec<Selection> = vec![state.selection.clone()];
         all_selections.extend(state.multi_selection.clone());
 
-        // Filter to only SectorFace selections
-        let face_selections: Vec<_> = all_selections.into_iter()
+        // Check for object selections first
+        let object_selections: Vec<_> = all_selections.iter()
             .filter_map(|s| match s {
-                Selection::SectorFace { room, x, z, face } => Some((room, x, z, face)),
+                Selection::Object { room, index } => Some((*room, *index)),
                 _ => None,
             })
             .collect();
 
-        if !face_selections.is_empty() {
+        if !object_selections.is_empty() {
             state.save_undo();
+            // Delete objects in reverse order to preserve indices
+            let mut sorted_objects = object_selections;
+            sorted_objects.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by index descending
+
             let mut deleted_count = 0;
-            let mut affected_rooms = std::collections::HashSet::new();
-
-            for (room_idx, gx, gz, face) in face_selections {
-                let deleted = delete_face(&mut state.level, room_idx, gx, gz, face);
-                if deleted {
+            for (room_idx, obj_idx) in sorted_objects {
+                if state.level.remove_object(room_idx, obj_idx).is_some() {
                     deleted_count += 1;
-                    affected_rooms.insert(room_idx);
-                }
-            }
-
-            // Cleanup affected rooms
-            for room_idx in affected_rooms {
-                if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                    room.cleanup_empty_sectors();
-                    room.trim_empty_edges();
-                    room.recalculate_bounds();
                 }
             }
 
             if deleted_count > 0 {
                 state.set_selection(Selection::None);
                 state.clear_multi_selection();
-                state.mark_portals_dirty();
-                let msg = if deleted_count == 1 { "Deleted 1 face".to_string() } else { format!("Deleted {} faces", deleted_count) };
+                let msg = if deleted_count == 1 { "Deleted 1 object".to_string() } else { format!("Deleted {} objects", deleted_count) };
                 state.set_status(&msg, 2.0);
+            }
+        } else {
+            // Filter to only SectorFace selections
+            let face_selections: Vec<_> = all_selections.into_iter()
+                .filter_map(|s| match s {
+                    Selection::SectorFace { room, x, z, face } => Some((room, x, z, face)),
+                    _ => None,
+                })
+                .collect();
+
+            if !face_selections.is_empty() {
+                state.save_undo();
+                let mut deleted_count = 0;
+                let mut affected_rooms = std::collections::HashSet::new();
+
+                for (room_idx, gx, gz, face) in face_selections {
+                    let deleted = delete_face(&mut state.level, room_idx, gx, gz, face);
+                    if deleted {
+                        deleted_count += 1;
+                        affected_rooms.insert(room_idx);
+                    }
+                }
+
+                // Cleanup affected rooms
+                for room_idx in affected_rooms {
+                    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                        room.cleanup_empty_sectors();
+                        room.trim_empty_edges();
+                        room.recalculate_bounds();
+                    }
+                }
+
+                if deleted_count > 0 {
+                    state.set_selection(Selection::None);
+                    state.clear_multi_selection();
+                    state.mark_portals_dirty();
+                    let msg = if deleted_count == 1 { "Deleted 1 face".to_string() } else { format!("Deleted {} faces", deleted_count) };
+                    state.set_status(&msg, 2.0);
+                }
             }
         }
     }
@@ -444,6 +473,23 @@ pub fn draw_viewport_3d(
                     // Use direct assignment to preserve vertex index selection
                     state.selection = new_selection;
 
+                    // Scroll texture palette to show this face's texture
+                    let tex_to_scroll = state.level.rooms.get(room_idx).and_then(|room| {
+                        room.get_sector(gx, gz).and_then(|sector| {
+                            match &face {
+                                SectorFace::Floor => sector.floor.as_ref().map(|f| f.texture.clone()),
+                                SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.texture.clone()),
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.texture.clone()),
+                            }
+                        })
+                    });
+                    if let Some(tex) = tex_to_scroll {
+                        state.scroll_to_texture(&tex);
+                    }
+
                     // Select this vertex index for color editing (keeps selection, just changes vertex)
                     state.selected_vertex_indices.clear();
                     state.selected_vertex_indices.push(corner_idx);
@@ -497,6 +543,13 @@ pub fn draw_viewport_3d(
                                 }
                             }
                         }
+
+                        // After finding all linked vertices, set viewport_drag_plane_y to average
+                        // This ensures no jump on first frame when linked vertices have different room-relative heights
+                        if !state.drag_initial_heights.is_empty() {
+                            state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
+                                / state.drag_initial_heights.len() as f32;
+                        }
                     }
                 } else if let Some((room_idx, gx, gz, face_idx, edge_idx, wall_face, _)) = hovered_edge {
                     // Start dragging edge (both vertices)
@@ -530,6 +583,23 @@ pub fn draw_viewport_3d(
                     // Use direct assignment to preserve vertex selection
                     state.selection = new_selection;
 
+                    // Scroll texture palette to show this face's texture
+                    let tex_to_scroll = state.level.rooms.get(room_idx).and_then(|room| {
+                        room.get_sector(gx, gz).and_then(|sector| {
+                            match &face_for_selection {
+                                SectorFace::Floor => sector.floor.as_ref().map(|f| f.texture.clone()),
+                                SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.texture.clone()),
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.texture.clone()),
+                            }
+                        })
+                    });
+                    if let Some(tex) = tex_to_scroll {
+                        state.scroll_to_texture(&tex);
+                    }
+
                     // Pre-select the two vertices that make up this edge for color editing
                     // For floor/ceiling: edges are [0:NW-NE, 1:NE-SE, 2:SE-SW, 3:SW-NW]
                     // For walls: edges are [0:BL-BR, 1:BR-TR, 2:TR-TL, 3:TL-BL]
@@ -551,9 +621,6 @@ pub fn draw_viewport_3d(
                     edges_to_drag.push((room_idx, gx, gz, face_idx, edge_idx, wall_face.clone()));
 
                     // Add vertices for all edges to drag
-                    let mut avg_height = 0.0;
-                    let mut height_count = 0;
-
                     for (r_idx, gx, gz, face_idx, edge_idx, wf) in &edges_to_drag {
                         if let Some(room) = state.level.rooms.get(*r_idx) {
                             if let Some(sector) = room.get_sector(*gx, *gz) {
@@ -574,15 +641,11 @@ pub fn draw_viewport_3d(
                                         if !state.dragging_sector_vertices.contains(&key0) {
                                             state.dragging_sector_vertices.push(key0);
                                             state.drag_initial_heights.push(h[corner0]);
-                                            avg_height += h[corner0];
-                                            height_count += 1;
                                         }
                                         let key1 = (*r_idx, *gx, *gz, face, corner1);
                                         if !state.dragging_sector_vertices.contains(&key1) {
                                             state.dragging_sector_vertices.push(key1);
                                             state.drag_initial_heights.push(h[corner1]);
-                                            avg_height += h[corner1];
-                                            height_count += 1;
                                         }
 
                                         // If linking, find coincident vertices for the edge across ALL rooms
@@ -649,15 +712,62 @@ pub fn draw_viewport_3d(
                                             if !state.dragging_sector_vertices.contains(&key0) {
                                                 state.dragging_sector_vertices.push(key0);
                                                 state.drag_initial_heights.push(h[corner0]);
-                                                avg_height += h[corner0];
-                                                height_count += 1;
                                             }
                                             let key1 = (*r_idx, *gx, *gz, *wall_face, corner1);
                                             if !state.dragging_sector_vertices.contains(&key1) {
                                                 state.dragging_sector_vertices.push(key1);
                                                 state.drag_initial_heights.push(h[corner1]);
-                                                avg_height += h[corner1];
-                                                height_count += 1;
+                                            }
+
+                                            // If linking, find coincident vertices for wall edges across ALL rooms
+                                            if state.link_coincident_vertices {
+                                                let base_x = room.position.x + (*gx as f32) * SECTOR_SIZE;
+                                                let base_z = room.position.z + (*gz as f32) * SECTOR_SIZE;
+                                                let room_y = room.position.y;
+
+                                                // Wall corner positions depend on wall direction
+                                                // Walls: [0]=bottom-left, [1]=bottom-right, [2]=top-right, [3]=top-left
+                                                let (x0, z0, x1, z1) = match wall_face {
+                                                    SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
+                                                    SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                    SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE),
+                                                    SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE, base_x, base_z),
+                                                    _ => (base_x, base_z, base_x, base_z),
+                                                };
+
+                                                let edge_positions = [
+                                                    match corner0 {
+                                                        0 => Vec3::new(x0, room_y + h[0], z0), // bottom-left
+                                                        1 => Vec3::new(x1, room_y + h[1], z1), // bottom-right
+                                                        2 => Vec3::new(x1, room_y + h[2], z1), // top-right
+                                                        3 => Vec3::new(x0, room_y + h[3], z0), // top-left
+                                                        _ => unreachable!(),
+                                                    },
+                                                    match corner1 {
+                                                        0 => Vec3::new(x0, room_y + h[0], z0),
+                                                        1 => Vec3::new(x1, room_y + h[1], z1),
+                                                        2 => Vec3::new(x1, room_y + h[2], z1),
+                                                        3 => Vec3::new(x0, room_y + h[3], z0),
+                                                        _ => unreachable!(),
+                                                    },
+                                                ];
+
+                                                const EPSILON: f32 = 0.1;
+                                                let all_room_vertices = collect_all_room_vertices(state);
+                                                for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
+                                                    for ep in &edge_positions {
+                                                        if (pos.x - ep.x).abs() < EPSILON &&
+                                                           (pos.y - ep.y).abs() < EPSILON &&
+                                                           (pos.z - ep.z).abs() < EPSILON {
+                                                            let key = (*ri, *vgx, *vgz, *vface, *ci);
+                                                            if !state.dragging_sector_vertices.contains(&key) {
+                                                                state.dragging_sector_vertices.push(key);
+                                                                let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.y).unwrap_or(0.0);
+                                                                state.drag_initial_heights.push(pos.y - linked_room_y);
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -666,9 +776,11 @@ pub fn draw_viewport_3d(
                         }
                     }
 
-                    // Set drag plane to average height
-                    if height_count > 0 {
-                        state.viewport_drag_plane_y = avg_height / height_count as f32;
+                    // Set drag plane to average height of ALL vertices (including linked ones)
+                    // This prevents jumping when linked vertices have different room-relative heights
+                    if !state.drag_initial_heights.is_empty() {
+                        state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
+                            / state.drag_initial_heights.len() as f32;
                     }
                 } else if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
                     // Object selection/dragging - checked before lights and faces
@@ -711,6 +823,23 @@ pub fn draw_viewport_3d(
                         state.set_selection(new_selection.clone());
                     }
 
+                    // Scroll texture palette to show this face's texture
+                    let tex_to_scroll = state.level.rooms.get(room_idx).and_then(|room| {
+                        room.get_sector(gx, gz).and_then(|sector| {
+                            match &face {
+                                SectorFace::Floor => sector.floor.as_ref().map(|f| f.texture.clone()),
+                                SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.texture.clone()),
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.texture.clone()),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.texture.clone()),
+                            }
+                        })
+                    });
+                    if let Some(tex) = tex_to_scroll {
+                        state.scroll_to_texture(&tex);
+                    }
+
                     // Collect all faces to drag: primary selection + multi-selection
                     let mut faces_to_drag: Vec<(usize, usize, usize, SectorFace)> = Vec::new();
 
@@ -730,9 +859,6 @@ pub fn draw_viewport_3d(
                     }
 
                     // Add vertices for all faces to drag
-                    let mut avg_height = 0.0;
-                    let mut height_count = 0;
-
                     for (r_idx, gx, gz, face) in &faces_to_drag {
                         if let Some(room) = state.level.rooms.get(*r_idx) {
                             if let Some(sector) = room.get_sector(*gx, *gz) {
@@ -749,8 +875,6 @@ pub fn draw_viewport_3d(
                                         if !state.dragging_sector_vertices.contains(&key) {
                                             state.dragging_sector_vertices.push(key);
                                             state.drag_initial_heights.push(h[corner]);
-                                            avg_height += h[corner];
-                                            height_count += 1;
                                         }
                                     }
 
@@ -803,8 +927,6 @@ pub fn draw_viewport_3d(
                                                 if !state.dragging_sector_vertices.contains(&key) {
                                                     state.dragging_sector_vertices.push(key);
                                                     state.drag_initial_heights.push(wall.heights[corner]);
-                                                    avg_height += wall.heights[corner];
-                                                    height_count += 1;
                                                 }
                                             }
                                         }
@@ -815,9 +937,11 @@ pub fn draw_viewport_3d(
                         }
                     }
 
-                    // Set drag plane to average height of all dragged vertices
-                    if height_count > 0 {
-                        state.viewport_drag_plane_y = avg_height / height_count as f32;
+                    // Set drag plane to average height of ALL vertices (including linked ones)
+                    // This prevents jumping when linked vertices have different room-relative heights
+                    if !state.drag_initial_heights.is_empty() {
+                        state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
+                            / state.drag_initial_heights.len() as f32;
                     }
                 } else {
                     // Clicked on nothing - clear selection (unless Shift is held)

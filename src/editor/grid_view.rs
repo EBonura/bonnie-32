@@ -1316,6 +1316,18 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
     }
 
+    // Handle Delete/Backspace key for object deletion in 2D view
+    if inside && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
+        // Check if an object is selected
+        if let Selection::Object { room, index } = state.selection {
+            state.save_undo();
+            if state.level.remove_object(room, index).is_some() {
+                state.set_selection(Selection::None);
+                state.set_status("Object deleted", 2.0);
+            }
+        }
+    }
+
     // Disable scissor rectangle
     unsafe {
         get_internal_gl().quad_gl.scissor(None);

@@ -27,6 +27,9 @@ pub fn draw_texture_palette(
     // Content area (below header)
     let content_rect = Rect::new(rect.x, rect.y + HEADER_HEIGHT, rect.w, rect.h - HEADER_HEIGHT);
 
+    // Store actual width for scroll_to_texture calculations
+    state.texture_palette_width = content_rect.w;
+
     // Get texture count without borrowing state
     let texture_count = state.texture_packs
         .get(state.selected_pack)
@@ -50,11 +53,13 @@ pub fn draw_texture_palette(
     let rows = (texture_count + cols - 1) / cols;
     let total_height = rows as f32 * (THUMB_SIZE + THUMB_PADDING) + THUMB_PADDING;
 
-    // Handle scrolling
+    // Calculate max scroll and always clamp (handles programmatic scroll changes)
+    let max_scroll = (total_height - content_rect.h).max(0.0);
+    state.texture_scroll = state.texture_scroll.clamp(0.0, max_scroll);
+
+    // Handle mouse wheel scrolling
     if ctx.mouse.inside(&content_rect) {
         state.texture_scroll -= ctx.mouse.scroll * 12.0;
-        // Clamp scroll
-        let max_scroll = (total_height - content_rect.h).max(0.0);
         state.texture_scroll = state.texture_scroll.clamp(0.0, max_scroll);
     }
 
