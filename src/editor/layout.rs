@@ -348,18 +348,10 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     // Edit operations
     if toolbar.icon_button(ctx, icon::UNDO, icon_font, "Undo") {
-        if state.can_undo_selection() {
-            state.undo_selection();
-        } else {
-            state.undo();
-        }
+        state.undo();
     }
     if toolbar.icon_button(ctx, icon::REDO, icon_font, "Redo") {
-        if state.can_redo_selection() {
-            state.redo_selection();
-        } else {
-            state.redo();
-        }
+        state.redo();
     }
 
     toolbar.separator();
@@ -641,22 +633,12 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
 
-    // Edit actions
-    // Undo: first try selection undo, then level undo
+    // Edit actions (unified undo/redo for both level and selection changes)
     if actions.triggered("edit.undo", &actx) {
-        if state.can_undo_selection() {
-            state.undo_selection();
-        } else {
-            state.undo();
-        }
+        state.undo();
     }
-    // Redo: first try selection redo, then level redo
     if actions.triggered("edit.redo", &actx) {
-        if state.can_redo_selection() {
-            state.redo_selection();
-        } else {
-            state.redo();
-        }
+        state.redo();
     }
 
     // Copy selected object

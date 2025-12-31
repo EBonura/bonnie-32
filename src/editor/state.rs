@@ -79,6 +79,13 @@ pub struct SelectionSnapshot {
     pub multi_selection: Vec<Selection>,
 }
 
+/// Unified undo event - either a level change or a selection change
+#[derive(Debug, Clone)]
+pub enum UndoEvent {
+    Level(Level),
+    Selection(SelectionSnapshot),
+}
+
 impl Selection {
     /// Check if this selection includes a specific sector (either whole sector or face within it)
     pub fn includes_sector(&self, room_idx: usize, sx: usize, sz: usize) -> bool {
@@ -170,13 +177,9 @@ pub struct EditorState {
     /// Vertex editing mode
     pub link_coincident_vertices: bool, // When true, moving a vertex moves all vertices at same position
 
-    /// Undo/redo (simple version - just level snapshots)
-    pub undo_stack: Vec<Level>,
-    pub redo_stack: Vec<Level>,
-
-    /// Selection history for undo/redo
-    pub selection_undo_stack: Vec<SelectionSnapshot>,
-    pub selection_redo_stack: Vec<SelectionSnapshot>,
+    /// Unified undo/redo stack (level and selection changes in order)
+    pub undo_stack: Vec<UndoEvent>,
+    pub redo_stack: Vec<UndoEvent>,
 
     /// Dirty flag (unsaved changes)
     pub dirty: bool,
@@ -365,8 +368,6 @@ impl EditorState {
             link_coincident_vertices: true, // Default to linked mode
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            selection_undo_stack: Vec::new(),
-            selection_redo_stack: Vec::new(),
             dirty: false,
             status_message: None,
             viewport_last_mouse: (0.0, 0.0),
@@ -444,8 +445,6 @@ impl EditorState {
         self.dirty = false;
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.selection_undo_stack.clear();
-        self.selection_redo_stack.clear();
         self.selection = Selection::None;
         self.multi_selection.clear();
         self.selected_vertex_indices.clear();
@@ -487,91 +486,80 @@ impl EditorState {
         None
     }
 
-    /// Save current state for undo
+    /// Save current level state for undo
     pub fn save_undo(&mut self) {
-        self.undo_stack.push(self.level.clone());
+        self.undo_stack.push(UndoEvent::Level(self.level.clone()));
         self.redo_stack.clear();
         self.dirty = true;
 
         // Limit undo stack size
-        if self.undo_stack.len() > 50 {
+        if self.undo_stack.len() > 100 {
             self.undo_stack.remove(0);
-        }
-    }
-
-    /// Undo last action
-    pub fn undo(&mut self) {
-        if let Some(prev) = self.undo_stack.pop() {
-            self.redo_stack.push(self.level.clone());
-            self.level = prev;
-        }
-    }
-
-    /// Redo last undone action
-    pub fn redo(&mut self) {
-        if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(self.level.clone());
-            self.level = next;
         }
     }
 
     /// Save current selection state for undo
     pub fn save_selection_undo(&mut self) {
-        // Don't save if selection hasn't changed from the last snapshot
-        if let Some(last) = self.selection_undo_stack.last() {
-            if last.selection == self.selection && last.multi_selection == self.multi_selection {
-                return; // No change, don't save duplicate
+        // Don't save if selection hasn't changed from the last selection snapshot
+        for event in self.undo_stack.iter().rev() {
+            if let UndoEvent::Selection(last) = event {
+                if last.selection == self.selection && last.multi_selection == self.multi_selection {
+                    return; // No change from last selection snapshot
+                }
+                break; // Found a different selection snapshot
             }
         }
 
-        self.selection_undo_stack.push(SelectionSnapshot {
+        self.undo_stack.push(UndoEvent::Selection(SelectionSnapshot {
             selection: self.selection.clone(),
             multi_selection: self.multi_selection.clone(),
-        });
-        self.selection_redo_stack.clear();
+        }));
+        self.redo_stack.clear();
 
         // Limit stack size
-        if self.selection_undo_stack.len() > 50 {
-            self.selection_undo_stack.remove(0);
+        if self.undo_stack.len() > 100 {
+            self.undo_stack.remove(0);
         }
     }
 
-    /// Undo last selection change
-    pub fn undo_selection(&mut self) {
-        if let Some(prev) = self.selection_undo_stack.pop() {
-            // Save current state to redo stack
-            self.selection_redo_stack.push(SelectionSnapshot {
-                selection: self.selection.clone(),
-                multi_selection: self.multi_selection.clone(),
-            });
-            // Restore previous state
-            self.set_selection_no_undo(prev.selection);
-            self.multi_selection = prev.multi_selection;
+    /// Undo last action (level or selection)
+    pub fn undo(&mut self) {
+        if let Some(event) = self.undo_stack.pop() {
+            match event {
+                UndoEvent::Level(prev_level) => {
+                    self.redo_stack.push(UndoEvent::Level(self.level.clone()));
+                    self.level = prev_level;
+                }
+                UndoEvent::Selection(prev_sel) => {
+                    self.redo_stack.push(UndoEvent::Selection(SelectionSnapshot {
+                        selection: self.selection.clone(),
+                        multi_selection: self.multi_selection.clone(),
+                    }));
+                    self.set_selection_no_undo(prev_sel.selection);
+                    self.multi_selection = prev_sel.multi_selection;
+                }
+            }
         }
     }
 
-    /// Redo last undone selection change
-    pub fn redo_selection(&mut self) {
-        if let Some(next) = self.selection_redo_stack.pop() {
-            // Save current state to undo stack
-            self.selection_undo_stack.push(SelectionSnapshot {
-                selection: self.selection.clone(),
-                multi_selection: self.multi_selection.clone(),
-            });
-            // Restore next state
-            self.set_selection_no_undo(next.selection);
-            self.multi_selection = next.multi_selection;
+    /// Redo last undone action (level or selection)
+    pub fn redo(&mut self) {
+        if let Some(event) = self.redo_stack.pop() {
+            match event {
+                UndoEvent::Level(next_level) => {
+                    self.undo_stack.push(UndoEvent::Level(self.level.clone()));
+                    self.level = next_level;
+                }
+                UndoEvent::Selection(next_sel) => {
+                    self.undo_stack.push(UndoEvent::Selection(SelectionSnapshot {
+                        selection: self.selection.clone(),
+                        multi_selection: self.multi_selection.clone(),
+                    }));
+                    self.set_selection_no_undo(next_sel.selection);
+                    self.multi_selection = next_sel.multi_selection;
+                }
+            }
         }
-    }
-
-    /// Check if there are selection changes to undo
-    pub fn can_undo_selection(&self) -> bool {
-        !self.selection_undo_stack.is_empty()
-    }
-
-    /// Check if there are selection changes to redo
-    pub fn can_redo_selection(&self) -> bool {
-        !self.selection_redo_stack.is_empty()
     }
 
     /// Get current room being edited
