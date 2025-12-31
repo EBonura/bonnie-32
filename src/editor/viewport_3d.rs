@@ -97,48 +97,77 @@ pub fn draw_viewport_3d(
         state.set_status("Selection cleared", 0.5);
     }
 
-    // Delete selected faces with Delete or Backspace key (supports multi-selection)
+    // Delete selected elements with Delete or Backspace key (supports multi-selection)
     if inside_viewport && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
         // Collect all selections (primary + multi)
         let mut all_selections: Vec<Selection> = vec![state.selection.clone()];
         all_selections.extend(state.multi_selection.clone());
 
-        // Filter to only SectorFace selections
-        let face_selections: Vec<_> = all_selections.into_iter()
+        // Check for object selections first
+        let object_selections: Vec<_> = all_selections.iter()
             .filter_map(|s| match s {
-                Selection::SectorFace { room, x, z, face } => Some((room, x, z, face)),
+                Selection::Object { room, index } => Some((*room, *index)),
                 _ => None,
             })
             .collect();
 
-        if !face_selections.is_empty() {
+        if !object_selections.is_empty() {
             state.save_undo();
+            // Delete objects in reverse order to preserve indices
+            let mut sorted_objects = object_selections;
+            sorted_objects.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by index descending
+
             let mut deleted_count = 0;
-            let mut affected_rooms = std::collections::HashSet::new();
-
-            for (room_idx, gx, gz, face) in face_selections {
-                let deleted = delete_face(&mut state.level, room_idx, gx, gz, face);
-                if deleted {
+            for (room_idx, obj_idx) in sorted_objects {
+                if state.level.remove_object(room_idx, obj_idx).is_some() {
                     deleted_count += 1;
-                    affected_rooms.insert(room_idx);
-                }
-            }
-
-            // Cleanup affected rooms
-            for room_idx in affected_rooms {
-                if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                    room.cleanup_empty_sectors();
-                    room.trim_empty_edges();
-                    room.recalculate_bounds();
                 }
             }
 
             if deleted_count > 0 {
                 state.set_selection(Selection::None);
                 state.clear_multi_selection();
-                state.mark_portals_dirty();
-                let msg = if deleted_count == 1 { "Deleted 1 face".to_string() } else { format!("Deleted {} faces", deleted_count) };
+                let msg = if deleted_count == 1 { "Deleted 1 object".to_string() } else { format!("Deleted {} objects", deleted_count) };
                 state.set_status(&msg, 2.0);
+            }
+        } else {
+            // Filter to only SectorFace selections
+            let face_selections: Vec<_> = all_selections.into_iter()
+                .filter_map(|s| match s {
+                    Selection::SectorFace { room, x, z, face } => Some((room, x, z, face)),
+                    _ => None,
+                })
+                .collect();
+
+            if !face_selections.is_empty() {
+                state.save_undo();
+                let mut deleted_count = 0;
+                let mut affected_rooms = std::collections::HashSet::new();
+
+                for (room_idx, gx, gz, face) in face_selections {
+                    let deleted = delete_face(&mut state.level, room_idx, gx, gz, face);
+                    if deleted {
+                        deleted_count += 1;
+                        affected_rooms.insert(room_idx);
+                    }
+                }
+
+                // Cleanup affected rooms
+                for room_idx in affected_rooms {
+                    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                        room.cleanup_empty_sectors();
+                        room.trim_empty_edges();
+                        room.recalculate_bounds();
+                    }
+                }
+
+                if deleted_count > 0 {
+                    state.set_selection(Selection::None);
+                    state.clear_multi_selection();
+                    state.mark_portals_dirty();
+                    let msg = if deleted_count == 1 { "Deleted 1 face".to_string() } else { format!("Deleted {} faces", deleted_count) };
+                    state.set_status(&msg, 2.0);
+                }
             }
         }
     }
