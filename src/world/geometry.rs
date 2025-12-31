@@ -1023,6 +1023,15 @@ pub enum FaceNormalMode {
     Back,   // Normal faces inward (flipped)
 }
 
+/// UV projection mode for sloped faces
+/// Controls how UVs are interpolated across the face's triangles
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UvProjection {
+    #[default]
+    Default,    // Standard per-vertex UV interpolation (may cause seams on sloped faces)
+    Projected,  // Project UVs as if the face were flat (uniform texture across face)
+}
+
 /// A horizontal face (floor or ceiling)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizontalFace {
@@ -1200,6 +1209,9 @@ pub struct VerticalFace {
     /// If true, pure black pixels (RGB 0,0,0) are treated as transparent (PS1 CLUT-style)
     #[serde(default = "default_true")]
     pub black_transparent: bool,
+    /// UV projection mode for sloped walls
+    #[serde(default)]
+    pub uv_projection: UvProjection,
 }
 
 impl VerticalFace {
@@ -1214,6 +1226,7 @@ impl VerticalFace {
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
+            uv_projection: UvProjection::default(),
         }
     }
 
@@ -1229,6 +1242,7 @@ impl VerticalFace {
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
+            uv_projection: UvProjection::default(),
         }
     }
 
@@ -2445,13 +2459,44 @@ impl Room {
             }
         };
 
-        // Default UVs for wall
-        let uvs = wall.uv.unwrap_or([
-            Vec2::new(0.0, 1.0),  // bottom-left
-            Vec2::new(1.0, 1.0),  // bottom-right
-            Vec2::new(1.0, 0.0),  // top-right
-            Vec2::new(0.0, 0.0),  // top-left
-        ]);
+        // Calculate UVs based on projection mode
+        let uvs = if wall.uv_projection == UvProjection::Projected {
+            // Projected mode: UVs based on normalized position within wall bounds
+            // This creates uniform texture mapping regardless of slope
+            let min_y = wall.heights.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_y = wall.heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let height_range = (max_y - min_y).max(0.001); // Avoid division by zero
+
+            // Get base UVs (custom or default)
+            let base_uvs = wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ]);
+
+            // Calculate UV scale from base UVs (difference between top and bottom)
+            let uv_bottom = (base_uvs[0].y + base_uvs[1].y) / 2.0; // Average of bottom corners
+            let uv_top = (base_uvs[2].y + base_uvs[3].y) / 2.0;    // Average of top corners
+            let uv_range = uv_bottom - uv_top; // Typically 1.0 (V goes 1->0 from bottom to top)
+
+            // Project each corner's V based on its height within the wall's range
+            // heights order: [bottom-left, bottom-right, top-right, top-left]
+            [
+                Vec2::new(base_uvs[0].x, uv_top + uv_range * (1.0 - (wall.heights[0] - min_y) / height_range)),
+                Vec2::new(base_uvs[1].x, uv_top + uv_range * (1.0 - (wall.heights[1] - min_y) / height_range)),
+                Vec2::new(base_uvs[2].x, uv_top + uv_range * (1.0 - (wall.heights[2] - min_y) / height_range)),
+                Vec2::new(base_uvs[3].x, uv_top + uv_range * (1.0 - (wall.heights[3] - min_y) / height_range)),
+            ]
+        } else {
+            // Default mode: standard per-vertex UVs
+            wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ])
+        };
 
         let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
 

@@ -2647,14 +2647,39 @@ fn draw_wall_face_container(
     let btn_spacing = 4.0;
     let mut btn_x = content_x;
 
+    // Collect all wall selections (primary + multi-selection) for UV operations
+    let collect_wall_selections = |state: &EditorState| -> Vec<(usize, usize, usize, crate::world::Direction, usize)> {
+        let mut walls = Vec::new();
+        let mut all_selections: Vec<super::Selection> = vec![state.selection.clone()];
+        all_selections.extend(state.multi_selection.clone());
+
+        for sel in all_selections {
+            if let super::Selection::SectorFace { room, x, z, face } = sel {
+                match face {
+                    super::SectorFace::WallNorth(i) => walls.push((room, x, z, crate::world::Direction::North, i)),
+                    super::SectorFace::WallEast(i) => walls.push((room, x, z, crate::world::Direction::East, i)),
+                    super::SectorFace::WallSouth(i) => walls.push((room, x, z, crate::world::Direction::South, i)),
+                    super::SectorFace::WallWest(i) => walls.push((room, x, z, crate::world::Direction::West, i)),
+                    _ => {} // Skip floor/ceiling for wall UV operations
+                }
+            }
+        }
+        walls
+    };
+
     // Reset UV button
     let reset_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, reset_rect, icon::REFRESH_CW, icon_font, "Reset UV") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    w.uv = None;
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            w.uv = None;
+                        }
+                    }
                 }
             }
         }
@@ -2664,11 +2689,16 @@ fn draw_wall_face_container(
     // Flip Horizontal button
     let flip_h_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, flip_h_rect, icon::FLIP_HORIZONTAL, icon_font, "Flip UV Horizontal") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    flip_uv_horizontal(&mut w.uv);
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            flip_uv_horizontal(&mut w.uv);
+                        }
+                    }
                 }
             }
         }
@@ -2678,11 +2708,16 @@ fn draw_wall_face_container(
     // Flip Vertical button
     let flip_v_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, flip_v_rect, icon::FLIP_VERTICAL, icon_font, "Flip UV Vertical") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    flip_uv_vertical(&mut w.uv);
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            flip_uv_vertical(&mut w.uv);
+                        }
+                    }
                 }
             }
         }
@@ -2692,11 +2727,16 @@ fn draw_wall_face_container(
     // Rotate 90° CW button
     let rotate_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, rotate_rect, icon::ROTATE_CW, icon_font, "Rotate UV 90° CW") {
-        state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    rotate_uv_cw(&mut w.uv);
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            rotate_uv_cw(&mut w.uv);
+                        }
+                    }
                 }
             }
         }
@@ -2706,19 +2746,49 @@ fn draw_wall_face_container(
     // 1:1 Texel mapping button - resets H scale and sets V scale to match wall height
     let texel_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, texel_rect, icon::RATIO, icon_font, "1:1 Texel Mapping") {
-        state.save_undo();
-        // Calculate V scale based on wall height relative to SECTOR_SIZE
-        // SECTOR_SIZE (1024) maps to UV scale 1.0, so a 512-high wall needs scale 0.5
-        // H scale is always 1.0 since wall width is always SECTOR_SIZE
-        let wall_height = wall.height();
-        let v_scale = wall_height / crate::world::SECTOR_SIZE;
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
-                    let mut params = extract_uv_params(&w.uv);
-                    params.x_scale = 1.0; // Wall width is always SECTOR_SIZE
-                    params.y_scale = v_scale;
-                    w.uv = Some(apply_uv_params(&params));
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            // Calculate V scale based on wall height relative to SECTOR_SIZE
+                            let wall_height = w.height();
+                            let v_scale = wall_height / crate::world::SECTOR_SIZE;
+                            let mut params = extract_uv_params(&w.uv);
+                            params.x_scale = 1.0; // Wall width is always SECTOR_SIZE
+                            params.y_scale = v_scale;
+                            w.uv = Some(apply_uv_params(&params));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // UV Projection toggle - makes texture appear flat on sloped walls
+    let is_projected = wall.uv_projection == crate::world::UvProjection::Projected;
+    let proj_icon = if is_projected { icon::LAYERS } else { icon::SCAN };
+    let proj_tooltip = if is_projected { "UV Projection: ON (click to disable)" } else { "UV Projection: OFF (click for uniform texture on slopes)" };
+    let proj_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, proj_rect, proj_icon, icon_font, proj_tooltip) {
+        let walls = collect_wall_selections(state);
+        if !walls.is_empty() {
+            state.save_undo();
+            let new_projection = if is_projected {
+                crate::world::UvProjection::Default
+            } else {
+                crate::world::UvProjection::Projected
+            };
+            for (room_idx, gx, gz, dir, idx) in walls {
+                if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                    if let Some(s) = r.get_sector_mut(gx, gz) {
+                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                            w.uv_projection = new_projection;
+                        }
+                    }
                 }
             }
         }
