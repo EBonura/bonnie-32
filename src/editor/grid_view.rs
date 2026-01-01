@@ -362,7 +362,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         );
 
         // Draw diagonal split indicator (only in Top view mode for now)
-        // sx0,sy0 = SW corner, sx1,sy1 = SE corner, sx2,sy2 = NE corner, sx3,sy3 = NW corner
+        // World coordinates: sx0=NW, sx1=NE, sx2=SE, sx3=SW (based on base_x, base_z mapping)
+        // Note: On screen these appear flipped because screen Y is inverted
         if view_mode == GridViewMode::Top {
             let diag_color = Color::from_rgba(255, 180, 100, 200);
 
@@ -370,10 +371,12 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             if let Some(floor) = &sector.floor {
                 match floor.split_direction {
                     SplitDirection::NwSe => {
-                        draw_line(sx3, sy3, sx1, sy1, 2.0, diag_color);
+                        // NW-SE diagonal: from sx0 (NW) to sx2 (SE)
+                        draw_line(sx0, sy0, sx2, sy2, 2.0, diag_color);
                     }
                     SplitDirection::NeSw => {
-                        draw_line(sx2, sy2, sx0, sy0, 2.0, diag_color);
+                        // NE-SW diagonal: from sx1 (NE) to sx3 (SW)
+                        draw_line(sx1, sy1, sx3, sy3, 2.0, diag_color);
                     }
                 }
             }
@@ -386,10 +389,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     let ceil_diag_color = Color::from_rgba(180, 100, 255, 200);
                     match ceil.split_direction {
                         SplitDirection::NwSe => {
-                            draw_line(sx3, sy3, sx1, sy1, 2.0, ceil_diag_color);
+                            draw_line(sx0, sy0, sx2, sy2, 2.0, ceil_diag_color);
                         }
                         SplitDirection::NeSw => {
-                            draw_line(sx2, sy2, sx0, sy0, 2.0, ceil_diag_color);
+                            draw_line(sx1, sy1, sx3, sy3, 2.0, ceil_diag_color);
                         }
                     }
                 }
@@ -420,6 +423,17 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
         if !sector.walls_west.is_empty() {
             draw_line(sx3, sy3, sx0, sy0, 3.0, wall_color);
+        }
+
+        // Draw diagonal wall indicators
+        let diag_wall_color = Color::from_rgba(220, 180, 120, 255);
+        if !sector.walls_nwse.is_empty() {
+            // NW-SE diagonal: from NW corner (sx0) to SE corner (sx2)
+            draw_line(sx0, sy0, sx2, sy2, 3.0, diag_wall_color);
+        }
+        if !sector.walls_nesw.is_empty() {
+            // NE-SW diagonal: from NE corner (sx1) to SW corner (sx3)
+            draw_line(sx1, sy1, sx3, sy3, 3.0, diag_wall_color);
         }
     }
 
@@ -1358,6 +1372,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     } else {
                         state.set_status("Click on a sector to place object", 2.0);
                     }
+                }
+
+                EditorTool::DrawDiagonalWall => {
+                    // Diagonal walls are placed in 3D viewport where edge detection is possible
+                    state.set_status("Diagonal wall tool: use 3D viewport", 3.0);
                 }
             }
         }

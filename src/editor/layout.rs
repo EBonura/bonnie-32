@@ -368,6 +368,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         (icon::MOVE, "Select", EditorTool::Select),
         (icon::SQUARE, "Floor", EditorTool::DrawFloor),
         (icon::BOX, "Wall", EditorTool::DrawWall),
+        (icon::SLASH, "Diagonal Wall", EditorTool::DrawDiagonalWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
         (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
@@ -2792,11 +2793,23 @@ fn draw_wall_face_container(
     room_idx: usize,
     gx: usize,
     gz: usize,
-    wall_dir: crate::world::Direction,
-    wall_idx: usize,
+    wall_face: super::SectorFace,
     state: &mut EditorState,
     icon_font: Option<&Font>,
 ) -> f32 {
+    // Helper to get mutable wall reference by SectorFace
+    fn get_wall_mut<'a>(sector: &'a mut crate::world::Sector, face: &super::SectorFace) -> Option<&'a mut crate::world::VerticalFace> {
+        match face {
+            super::SectorFace::WallNorth(i) => sector.walls_north.get_mut(*i),
+            super::SectorFace::WallEast(i) => sector.walls_east.get_mut(*i),
+            super::SectorFace::WallSouth(i) => sector.walls_south.get_mut(*i),
+            super::SectorFace::WallWest(i) => sector.walls_west.get_mut(*i),
+            super::SectorFace::WallNwSe(i) => sector.walls_nwse.get_mut(*i),
+            super::SectorFace::WallNeSw(i) => sector.walls_nesw.get_mut(*i),
+            _ => None,
+        }
+    }
+
     let line_height = 18.0;
     let header_height = 22.0;
     let container_height = wall_face_container_height(wall);
@@ -2842,7 +2855,7 @@ fn draw_wall_face_container(
         state.save_undo();
         if let Some(r) = state.level.rooms.get_mut(room_idx) {
             if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                if let Some(w) = get_wall_mut(s, &wall_face) {
                     w.uv = Some(new_uv);
                 }
             }
@@ -2856,7 +2869,8 @@ fn draw_wall_face_container(
     let mut btn_x = content_x;
 
     // Collect all wall selections (primary + multi-selection) for UV operations
-    let collect_wall_selections = |state: &EditorState| -> Vec<(usize, usize, usize, crate::world::Direction, usize)> {
+    // Returns (room, x, z, face) tuples where face is the full SectorFace enum
+    let collect_wall_selections = |state: &EditorState| -> Vec<(usize, usize, usize, super::SectorFace)> {
         let mut walls = Vec::new();
         let mut all_selections: Vec<super::Selection> = vec![state.selection.clone()];
         all_selections.extend(state.multi_selection.clone());
@@ -2864,10 +2878,12 @@ fn draw_wall_face_container(
         for sel in all_selections {
             if let super::Selection::SectorFace { room, x, z, face } = sel {
                 match face {
-                    super::SectorFace::WallNorth(i) => walls.push((room, x, z, crate::world::Direction::North, i)),
-                    super::SectorFace::WallEast(i) => walls.push((room, x, z, crate::world::Direction::East, i)),
-                    super::SectorFace::WallSouth(i) => walls.push((room, x, z, crate::world::Direction::South, i)),
-                    super::SectorFace::WallWest(i) => walls.push((room, x, z, crate::world::Direction::West, i)),
+                    super::SectorFace::WallNorth(_) |
+                    super::SectorFace::WallEast(_) |
+                    super::SectorFace::WallSouth(_) |
+                    super::SectorFace::WallWest(_) |
+                    super::SectorFace::WallNwSe(_) |
+                    super::SectorFace::WallNeSw(_) => walls.push((room, x, z, face)),
                     _ => {} // Skip floor/ceiling for wall UV operations
                 }
             }
@@ -2881,10 +2897,10 @@ fn draw_wall_face_container(
         let walls = collect_wall_selections(state);
         if !walls.is_empty() {
             state.save_undo();
-            for (room_idx, gx, gz, dir, idx) in walls {
+            for (room_idx, gx, gz, face) in walls {
                 if let Some(r) = state.level.rooms.get_mut(room_idx) {
                     if let Some(s) = r.get_sector_mut(gx, gz) {
-                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                        if let Some(w) = get_wall_mut(s, &face) {
                             w.uv = None;
                         }
                     }
@@ -2900,10 +2916,10 @@ fn draw_wall_face_container(
         let walls = collect_wall_selections(state);
         if !walls.is_empty() {
             state.save_undo();
-            for (room_idx, gx, gz, dir, idx) in walls {
+            for (room_idx, gx, gz, face) in walls {
                 if let Some(r) = state.level.rooms.get_mut(room_idx) {
                     if let Some(s) = r.get_sector_mut(gx, gz) {
-                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                        if let Some(w) = get_wall_mut(s, &face) {
                             flip_uv_horizontal(&mut w.uv);
                         }
                     }
@@ -2919,10 +2935,10 @@ fn draw_wall_face_container(
         let walls = collect_wall_selections(state);
         if !walls.is_empty() {
             state.save_undo();
-            for (room_idx, gx, gz, dir, idx) in walls {
+            for (room_idx, gx, gz, face) in walls {
                 if let Some(r) = state.level.rooms.get_mut(room_idx) {
                     if let Some(s) = r.get_sector_mut(gx, gz) {
-                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                        if let Some(w) = get_wall_mut(s, &face) {
                             flip_uv_vertical(&mut w.uv);
                         }
                     }
@@ -2938,10 +2954,10 @@ fn draw_wall_face_container(
         let walls = collect_wall_selections(state);
         if !walls.is_empty() {
             state.save_undo();
-            for (room_idx, gx, gz, dir, idx) in walls {
+            for (room_idx, gx, gz, face) in walls {
                 if let Some(r) = state.level.rooms.get_mut(room_idx) {
                     if let Some(s) = r.get_sector_mut(gx, gz) {
-                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                        if let Some(w) = get_wall_mut(s, &face) {
                             rotate_uv_cw(&mut w.uv);
                         }
                     }
@@ -2957,10 +2973,10 @@ fn draw_wall_face_container(
         let walls = collect_wall_selections(state);
         if !walls.is_empty() {
             state.save_undo();
-            for (room_idx, gx, gz, dir, idx) in walls {
+            for (room_idx, gx, gz, face) in walls {
                 if let Some(r) = state.level.rooms.get_mut(room_idx) {
                     if let Some(s) = r.get_sector_mut(gx, gz) {
-                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                        if let Some(w) = get_wall_mut(s, &face) {
                             // Calculate V scale based on wall height relative to SECTOR_SIZE
                             let wall_height = w.height();
                             let v_scale = wall_height / crate::world::SECTOR_SIZE;
@@ -2990,10 +3006,10 @@ fn draw_wall_face_container(
             } else {
                 crate::world::UvProjection::Projected
             };
-            for (room_idx, gx, gz, dir, idx) in walls {
+            for (room_idx, gx, gz, face) in walls {
                 if let Some(r) = state.level.rooms.get_mut(room_idx) {
                     if let Some(s) = r.get_sector_mut(gx, gz) {
-                        if let Some(w) = s.walls_mut(dir).get_mut(idx) {
+                        if let Some(w) = get_wall_mut(s, &face) {
                             w.uv_projection = new_projection;
                         }
                     }
@@ -3124,7 +3140,7 @@ fn draw_wall_face_container(
             state.save_undo();
             if let Some(r) = state.level.rooms.get_mut(room_idx) {
                 if let Some(s) = r.get_sector_mut(gx, gz) {
-                    if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                    if let Some(w) = get_wall_mut(s, &wall_face) {
                         if state.selected_vertex_indices.is_empty() {
                             // No vertices selected - apply to all
                             w.set_uniform_color(*preset_color);
@@ -3186,7 +3202,7 @@ fn draw_wall_face_container(
         state.save_undo();
         if let Some(r) = state.level.rooms.get_mut(room_idx) {
             if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                if let Some(w) = get_wall_mut(s, &wall_face) {
                     if state.selected_vertex_indices.is_empty() {
                         // No vertices selected - apply to all
                         w.set_uniform_color(new_color);
@@ -3218,7 +3234,7 @@ fn draw_wall_face_container(
         state.save_undo();
         if let Some(r) = state.level.rooms.get_mut(room_idx) {
             if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                if let Some(w) = get_wall_mut(s, &wall_face) {
                     w.normal_mode = match new_mode {
                         0 => crate::world::FaceNormalMode::Front,
                         1 => crate::world::FaceNormalMode::Both,
@@ -3243,7 +3259,7 @@ fn draw_wall_face_container(
         state.save_undo();
         if let Some(r) = state.level.rooms.get_mut(room_idx) {
             if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = s.walls_mut(wall_dir).get_mut(wall_idx) {
+                if let Some(w) = get_wall_mut(s, &wall_face) {
                     w.black_transparent = !w.black_transparent;
                 }
             }
@@ -3336,7 +3352,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             let h = draw_wall_face_container(
                                 ctx, x, y, container_width, wall, "Wall (North)",
                                 Color::from_rgba(255, 180, 120, 255),
-                                *room, *gx, *gz, crate::world::Direction::North, *i, state, icon_font
+                                *room, *gx, *gz, super::SectorFace::WallNorth(*i), state, icon_font
                             );
                             let _ = h + CONTAINER_MARGIN;
                         }
@@ -3346,7 +3362,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             let h = draw_wall_face_container(
                                 ctx, x, y, container_width, wall, "Wall (East)",
                                 Color::from_rgba(255, 180, 120, 255),
-                                *room, *gx, *gz, crate::world::Direction::East, *i, state, icon_font
+                                *room, *gx, *gz, super::SectorFace::WallEast(*i), state, icon_font
                             );
                             let _ = h + CONTAINER_MARGIN;
                         }
@@ -3356,7 +3372,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             let h = draw_wall_face_container(
                                 ctx, x, y, container_width, wall, "Wall (South)",
                                 Color::from_rgba(255, 180, 120, 255),
-                                *room, *gx, *gz, crate::world::Direction::South, *i, state, icon_font
+                                *room, *gx, *gz, super::SectorFace::WallSouth(*i), state, icon_font
                             );
                             let _ = h + CONTAINER_MARGIN;
                         }
@@ -3366,7 +3382,27 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             let h = draw_wall_face_container(
                                 ctx, x, y, container_width, wall, "Wall (West)",
                                 Color::from_rgba(255, 180, 120, 255),
-                                *room, *gx, *gz, crate::world::Direction::West, *i, state, icon_font
+                                *room, *gx, *gz, super::SectorFace::WallWest(*i), state, icon_font
+                            );
+                            let _ = h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(wall) = sector.walls_nwse.get(*i) {
+                            let h = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (NW-SE)",
+                                Color::from_rgba(255, 200, 150, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNwSe(*i), state, icon_font
+                            );
+                            let _ = h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(wall) = sector.walls_nesw.get(*i) {
+                            let h = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (NE-SW)",
+                                Color::from_rgba(255, 200, 150, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNeSw(*i), state, icon_font
                             );
                             let _ = h + CONTAINER_MARGIN;
                         }
@@ -3408,15 +3444,15 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 }
 
                 // === WALLS ===
-                use crate::world::Direction;
-                let wall_dirs: [(&str, &Vec<crate::world::VerticalFace>, Direction); 4] = [
-                    ("North", &sector.walls_north, Direction::North),
-                    ("East", &sector.walls_east, Direction::East),
-                    ("South", &sector.walls_south, Direction::South),
-                    ("West", &sector.walls_west, Direction::West),
+                // Cardinal walls
+                let wall_dirs: [(&str, &Vec<crate::world::VerticalFace>, fn(usize) -> super::SectorFace); 4] = [
+                    ("North", &sector.walls_north, |i| super::SectorFace::WallNorth(i)),
+                    ("East", &sector.walls_east, |i| super::SectorFace::WallEast(i)),
+                    ("South", &sector.walls_south, |i| super::SectorFace::WallSouth(i)),
+                    ("West", &sector.walls_west, |i| super::SectorFace::WallWest(i)),
                 ];
 
-                for (dir_name, walls, dir) in wall_dirs {
+                for (dir_name, walls, make_face) in wall_dirs {
                     for (i, wall) in walls.iter().enumerate() {
                         let label = if walls.len() == 1 {
                             format!("Wall ({})", dir_name)
@@ -3426,10 +3462,40 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                         let h = draw_wall_face_container(
                             ctx, x, y, container_width, wall, &label,
                             Color::from_rgba(255, 180, 120, 255),
-                            *room, *gx, *gz, dir, i, state, icon_font
+                            *room, *gx, *gz, make_face(i), state, icon_font
                         );
                         y += h + CONTAINER_MARGIN;
                     }
+                }
+
+                // Diagonal walls (NW-SE)
+                for (i, wall) in sector.walls_nwse.iter().enumerate() {
+                    let label = if sector.walls_nwse.len() == 1 {
+                        "Wall (NW-SE)".to_string()
+                    } else {
+                        format!("Wall (NW-SE) [{}]", i)
+                    };
+                    let h = draw_wall_face_container(
+                        ctx, x, y, container_width, wall, &label,
+                        Color::from_rgba(255, 200, 150, 255),
+                        *room, *gx, *gz, super::SectorFace::WallNwSe(i), state, icon_font
+                    );
+                    y += h + CONTAINER_MARGIN;
+                }
+
+                // Diagonal walls (NE-SW)
+                for (i, wall) in sector.walls_nesw.iter().enumerate() {
+                    let label = if sector.walls_nesw.len() == 1 {
+                        "Wall (NE-SW)".to_string()
+                    } else {
+                        format!("Wall (NE-SW) [{}]", i)
+                    };
+                    let h = draw_wall_face_container(
+                        ctx, x, y, container_width, wall, &label,
+                        Color::from_rgba(255, 200, 150, 255),
+                        *room, *gx, *gz, super::SectorFace::WallNeSw(i), state, icon_font
+                    );
+                    y += h + CONTAINER_MARGIN;
                 }
             } else {
                 draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
@@ -3450,6 +3516,8 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     super::SectorFace::WallEast(_) => "Wall East".to_string(),
                     super::SectorFace::WallSouth(_) => "Wall South".to_string(),
                     super::SectorFace::WallWest(_) => "Wall West".to_string(),
+                    super::SectorFace::WallNwSe(_) => "Wall NW-SE".to_string(),
+                    super::SectorFace::WallNeSw(_) => "Wall NE-SW".to_string(),
                     _ => "Wall".to_string(),
                 }
             } else {
@@ -3495,6 +3563,8 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             super::SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.heights),
                             super::SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.heights),
                             super::SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.heights),
+                            super::SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).map(|w| w.heights),
+                            super::SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).map(|w| w.heights),
                             _ => None,
                         }
                     } else {
@@ -3903,6 +3973,16 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
                     }
                     super::SectorFace::WallWest(i) => {
                         if let Some(wall) = sector.walls_west.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(wall) = sector.walls_nwse.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(wall) = sector.walls_nesw.get(*i) {
                             height += wall_face_container_height(wall) + CONTAINER_MARGIN;
                         }
                     }

@@ -250,6 +250,16 @@ fn apply_texture_to_selection(
                                 wall.texture = tex_ref;
                             }
                         }
+                        super::SectorFace::WallNwSe(i) => {
+                            if let Some(wall) = sector.walls_nwse.get_mut(i) {
+                                wall.texture = tex_ref;
+                            }
+                        }
+                        super::SectorFace::WallNeSw(i) => {
+                            if let Some(wall) = sector.walls_nesw.get_mut(i) {
+                                wall.texture = tex_ref;
+                            }
+                        }
                     }
                 }
             }

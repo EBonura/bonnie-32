@@ -1445,6 +1445,12 @@ pub struct Sector {
     /// Walls on west edge (-X)
     #[serde(default)]
     pub walls_west: Vec<VerticalFace>,
+    /// Diagonal walls from NW corner to SE corner
+    #[serde(default)]
+    pub walls_nwse: Vec<VerticalFace>,
+    /// Diagonal walls from NE corner to SW corner
+    #[serde(default)]
+    pub walls_nesw: Vec<VerticalFace>,
 }
 
 impl Sector {
@@ -1478,6 +1484,8 @@ impl Sector {
             || !self.walls_east.is_empty()
             || !self.walls_south.is_empty()
             || !self.walls_west.is_empty()
+            || !self.walls_nwse.is_empty()
+            || !self.walls_nesw.is_empty()
     }
 
     /// Get all walls on a given edge
@@ -2228,6 +2236,19 @@ impl Room {
                             self.bounds.expand(Vec3::new(base_x, h, base_z));
                         }
                     }
+                    // Diagonal walls go corner-to-corner, so expand for both corners
+                    for wall in &sector.walls_nwse {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x, h, base_z)); // NW corner
+                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z + SECTOR_SIZE)); // SE corner
+                        }
+                    }
+                    for wall in &sector.walls_nesw {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z)); // NE corner
+                            self.bounds.expand(Vec3::new(base_x, h, base_z + SECTOR_SIZE)); // SW corner
+                        }
+                    }
                 }
             }
         }
@@ -2432,6 +2453,13 @@ impl Room {
             }
             for wall in &sector.walls_west {
                 self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, Direction::West, &resolve_texture);
+            }
+            // Diagonal walls
+            for wall in &sector.walls_nwse {
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, true, &resolve_texture);
+            }
+            for wall in &sector.walls_nesw {
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, false, &resolve_texture);
             }
         }
 
@@ -2654,6 +2682,116 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
             }
             // Two triangles for the quad (CCW winding when viewed from inside room)
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+        }
+
+        // Add back-facing face (flipped normal and winding)
+        if render_back {
+            let base_idx = vertices.len();
+            let back_normal = front_normal.scale(-1.0);
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, wall.colors[i]));
+            }
+            // Reverse winding order for back face
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
+        }
+    }
+
+    /// Helper to add a diagonal wall to render data
+    /// is_nwse: true for NW-SE diagonal (corners 0 and 2), false for NE-SW diagonal (corners 1 and 3)
+    fn add_diagonal_wall_to_render_data<F>(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        faces: &mut Vec<RasterFace>,
+        wall: &VerticalFace,
+        base_x: f32,
+        base_z: f32,
+        is_nwse: bool,
+        resolve_texture: &F,
+    )
+    where
+        F: Fn(&TextureRef) -> Option<usize>,
+    {
+        // Heights are room-relative, so add room.position.y for world-space rendering
+        let y_offset = self.position.y;
+
+        // Diagonal walls span corner-to-corner
+        // wall.heights = [corner1_bottom, corner2_bottom, corner2_top, corner1_top]
+        // Vertex order is reversed from cardinal walls so front face points INTO the room
+        let (corners, front_normal) = if is_nwse {
+            // NW-SE diagonal: wall cuts off SW corner, front faces NE (into room)
+            // Corners: SE (bottom), NW (bottom), NW (top), SE (top) - reversed winding
+            let corners = [
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[1], base_z + SECTOR_SIZE),   // SE bottom
+                Vec3::new(base_x, y_offset + wall.heights[0], base_z),                               // NW bottom
+                Vec3::new(base_x, y_offset + wall.heights[3], base_z),                               // NW top
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[2], base_z + SECTOR_SIZE),   // SE top
+            ];
+            // Normal points NE (into room): (n, 0, -n)
+            let n = 1.0 / (2.0_f32).sqrt();
+            (corners, Vec3::new(n, 0.0, -n))
+        } else {
+            // NE-SW diagonal: wall cuts off NW corner, front faces SE (into room)
+            // Corners: SW (bottom), NE (bottom), NE (top), SW (top) - reversed winding
+            let corners = [
+                Vec3::new(base_x, y_offset + wall.heights[1], base_z + SECTOR_SIZE),                 // SW bottom
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[0], base_z),                 // NE bottom
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[3], base_z),                 // NE top
+                Vec3::new(base_x, y_offset + wall.heights[2], base_z + SECTOR_SIZE),                 // SW top
+            ];
+            // Normal points SE (into room): (n, 0, n)
+            let n = 1.0 / (2.0_f32).sqrt();
+            (corners, Vec3::new(n, 0.0, n))
+        };
+
+        // Calculate UVs based on projection mode
+        let uvs = if wall.uv_projection == UvProjection::Projected {
+            // Projected mode: UVs based on absolute world Y position
+            let base_uvs = wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ]);
+
+            let world_heights = [
+                y_offset + wall.heights[0],
+                y_offset + wall.heights[1],
+                y_offset + wall.heights[2],
+                y_offset + wall.heights[3],
+            ];
+
+            [
+                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE),
+                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE),
+                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE),
+                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE),
+            ]
+        } else {
+            // Default mode: standard per-vertex UVs
+            wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ])
+        };
+
+        let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
+
+        // Handle normal mode: Front, Back, or Both
+        let render_front = wall.normal_mode != FaceNormalMode::Back;
+        let render_back = wall.normal_mode != FaceNormalMode::Front;
+
+        // Add front-facing face
+        if render_front {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
+            }
+            // Two triangles for the quad
             faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
             faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
         }

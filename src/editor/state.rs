@@ -26,6 +26,7 @@ pub enum EditorTool {
     Select,
     DrawFloor,
     DrawWall,
+    DrawDiagonalWall,
     DrawCeiling,
     PlaceObject,
 }
@@ -57,6 +58,8 @@ pub enum SectorFace {
     WallEast(usize),
     WallSouth(usize),
     WallWest(usize),
+    WallNwSe(usize),   // Diagonal wall NW to SE corner
+    WallNeSw(usize),   // Diagonal wall NE to SW corner
 }
 
 /// What is currently selected in the editor
