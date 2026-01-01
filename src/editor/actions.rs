@@ -96,16 +96,16 @@ pub fn create_editor_actions() -> ActionRegistry {
         Action::new("edit.copy")
             .label("Copy")
             .shortcut(Shortcut::ctrl(KeyCode::C))
-            .status_tip("Copy selected object")
+            .status_tip("Copy selected object or face properties")
             .category("Edit")
-            .enabled_when(|ctx| ctx.has_flag(flags::OBJECT_SELECTED)),
+            .enabled_when(|ctx| ctx.has_flag(flags::OBJECT_SELECTED) || ctx.has_flag(flags::SECTOR_SELECTED)),
     );
 
     registry.register(
         Action::new("edit.paste")
             .label("Paste")
             .shortcut(Shortcut::ctrl(KeyCode::V))
-            .status_tip("Paste object at cursor")
+            .status_tip("Paste object or face properties")
             .category("Edit")
             .enabled_when(|ctx| ctx.has_clipboard),
     );

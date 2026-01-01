@@ -1546,14 +1546,19 @@ impl Sector {
 
     /// Calculate where a new wall should be placed on this edge.
     ///
-    /// Simplified logic (max 2 walls per edge):
+    /// Logic (max 3 walls per edge):
     /// - 0 walls: fill floor-to-ceiling with slanted heights
-    /// - 1 wall: fill the remaining gap (floor-to-wall or wall-to-ceiling)
-    /// - 2 walls: fully covered, return None
+    /// - 1-2 walls: fill the gap at mouse_y position (or largest gap if mouse_y is None)
+    /// - 3 walls: fully covered, return None
+    ///
+    /// `mouse_y`: Optional room-relative Y coordinate to select which gap to fill.
     ///
     /// Returns corner heights [bottom-left, bottom-right, top-right, top-left] for the new wall,
     /// or None if edge is fully covered.
-    pub fn next_wall_position(&self, direction: Direction, fallback_bottom: f32, fallback_top: f32) -> Option<[f32; 4]> {
+    pub fn next_wall_position(&self, direction: Direction, fallback_bottom: f32, fallback_top: f32, mouse_y: Option<f32>) -> Option<[f32; 4]> {
+        // Minimum gap size to consider fillable (one click = SECTOR_SIZE / 4)
+        const MIN_GAP: f32 = 256.0;
+
         // Get individual corner heights for floor and ceiling (preserves slant)
         // edge_heights returns (left, right) when looking from INSIDE the sector,
         // but wall heights are [BL, BR, TR, TL] from the WALL's perspective (facing outward).
@@ -1567,41 +1572,97 @@ impl Sector {
 
         let walls = self.walls(direction);
 
-        match walls.len() {
-            0 => {
-                // No walls - fill from floor to ceiling, preserving slant
-                // [bottom-left, bottom-right, top-right, top-left]
-                Some([floor_left, floor_right, ceiling_right, ceiling_left])
-            }
-            1 => {
-                // One wall exists - fill the gap
-                let wall = &walls[0];
-                // Wall heights: [bottom-left, bottom-right, top-right, top-left]
-                let wall_bottom_left = wall.heights[0];
-                let wall_bottom_right = wall.heights[1];
-                let wall_top_right = wall.heights[2];
-                let wall_top_left = wall.heights[3];
+        if walls.len() >= 3 {
+            // Max 3 walls per edge
+            return None;
+        }
 
-                // Check if gap is at bottom (wall doesn't reach floor)
-                let gap_at_bottom = wall_bottom_left > floor_left + 1.0 || wall_bottom_right > floor_right + 1.0;
-                // Check if gap is at top (wall doesn't reach ceiling)
-                let gap_at_top = wall_top_left < ceiling_left - 1.0 || wall_top_right < ceiling_right - 1.0;
+        if walls.is_empty() {
+            // No walls - fill from floor to ceiling, preserving slant
+            // [bottom-left, bottom-right, top-right, top-left]
+            return Some([floor_left, floor_right, ceiling_right, ceiling_left]);
+        }
 
-                if gap_at_bottom {
-                    // Fill from floor to bottom of existing wall
-                    Some([floor_left, floor_right, wall_bottom_right, wall_bottom_left])
-                } else if gap_at_top {
-                    // Fill from top of existing wall to ceiling
-                    Some([wall_top_left, wall_top_right, ceiling_right, ceiling_left])
-                } else {
-                    // Wall already covers floor to ceiling
-                    None
-                }
+        // Sort walls by their bottom height to find gaps
+        let mut sorted_walls: Vec<_> = walls.iter().collect();
+        sorted_walls.sort_by(|a, b| {
+            let a_bottom = a.heights[0].min(a.heights[1]);
+            let b_bottom = b.heights[0].min(b.heights[1]);
+            a_bottom.partial_cmp(&b_bottom).unwrap()
+        });
+
+        // Collect all gaps: (heights, bottom_y, top_y)
+        let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
+
+        // Check gap at bottom (floor to lowest wall)
+        let lowest = sorted_walls[0];
+        let bottom_gap_bottom = floor_left.min(floor_right);
+        let bottom_gap_top = lowest.heights[0].min(lowest.heights[1]);
+        let bottom_gap_size = bottom_gap_top - bottom_gap_bottom;
+        if bottom_gap_size > MIN_GAP {
+            gaps.push((
+                [floor_left, floor_right, lowest.heights[1], lowest.heights[0]],
+                bottom_gap_bottom,
+                bottom_gap_top
+            ));
+        }
+
+        // Check gaps between walls
+        for i in 0..sorted_walls.len() - 1 {
+            let lower = sorted_walls[i];
+            let upper = sorted_walls[i + 1];
+            // Gap between top of lower wall and bottom of upper wall
+            let gap_bottom = lower.heights[2].max(lower.heights[3]);
+            let gap_top = upper.heights[0].min(upper.heights[1]);
+            let gap_size = gap_top - gap_bottom;
+            if gap_size > MIN_GAP {
+                gaps.push((
+                    [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
+                    gap_bottom,
+                    gap_top
+                ));
             }
-            _ => {
-                // 2+ walls - fully covered
-                None
-            }
+        }
+
+        // Check gap at top (highest wall to ceiling)
+        let highest = sorted_walls.last().unwrap();
+        let top_gap_bottom = highest.heights[2].max(highest.heights[3]);
+        let top_gap_top = ceiling_left.max(ceiling_right);
+        let top_gap_size = top_gap_top - top_gap_bottom;
+        if top_gap_size > MIN_GAP {
+            gaps.push((
+                [highest.heights[3], highest.heights[2], ceiling_right, ceiling_left],
+                top_gap_bottom,
+                top_gap_top
+            ));
+        }
+
+        if gaps.is_empty() {
+            return None;
+        }
+
+        // Select gap based on mouse_y position
+        if let Some(y) = mouse_y {
+            // Find gap containing mouse_y, or closest to it
+            let best = gaps.into_iter()
+                .min_by(|a, b| {
+                    // Distance from mouse_y to gap center
+                    let a_center = (a.1 + a.2) / 2.0;
+                    let b_center = (b.1 + b.2) / 2.0;
+                    let a_dist = (y - a_center).abs();
+                    let b_dist = (y - b_center).abs();
+                    a_dist.partial_cmp(&b_dist).unwrap()
+                });
+            best.map(|(heights, _, _)| heights)
+        } else {
+            // No mouse position - return largest gap
+            gaps.into_iter()
+                .max_by(|a, b| {
+                    let a_size = a.2 - a.1;
+                    let b_size = b.2 - b.1;
+                    a_size.partial_cmp(&b_size).unwrap()
+                })
+                .map(|(heights, _, _)| heights)
         }
     }
 

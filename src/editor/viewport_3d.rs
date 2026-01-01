@@ -421,13 +421,55 @@ pub fn draw_viewport_3d(
 
             if let Some((grid_x, grid_z, dir, dist)) = closest_edge {
                 if dist < 80.0 {
+                    // Estimate mouse world Y by projecting floor and ceiling points and interpolating
+                    // Use the wall edge center position for X/Z
+                    let edge_x = match dir {
+                        Direction::North | Direction::South => grid_x + SECTOR_SIZE / 2.0,
+                        Direction::East => grid_x + SECTOR_SIZE,
+                        Direction::West => grid_x,
+                    };
+                    let edge_z = match dir {
+                        Direction::North => grid_z,
+                        Direction::South => grid_z + SECTOR_SIZE,
+                        Direction::East | Direction::West => grid_z + SECTOR_SIZE / 2.0,
+                    };
+
+                    // Project floor and ceiling Y at this edge to screen
+                    let room_y = state.level.rooms.get(state.current_room)
+                        .map(|r| r.position.y)
+                        .unwrap_or(0.0);
+                    let floor_world = Vec3::new(edge_x, room_y + default_y_bottom, edge_z);
+                    let ceiling_world = Vec3::new(edge_x, room_y + default_y_top, edge_z);
+
+                    let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
+                        world_to_screen(floor_world, state.camera_3d.position,
+                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                            fb.width, fb.height),
+                        world_to_screen(ceiling_world, state.camera_3d.position,
+                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                            fb.width, fb.height),
+                    ) {
+                        // Interpolate: screen Y goes from ceiling (top) to floor (bottom)
+                        // ceiling_sy < floor_sy in screen space (Y increases downward)
+                        if (floor_sy - ceiling_sy).abs() > 1.0 {
+                            let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
+                            let t_clamped = t.clamp(0.0, 1.0);
+                            // Interpolate from ceiling to floor in room-relative Y
+                            Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     // Calculate where the new wall should be placed
                     // Uses floor/ceiling heights and finds gaps between existing walls
                     let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
                         if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
                             if let Some(sector) = room.get_sector(gx, gz) {
                                 let has_existing = !sector.walls(dir).is_empty();
-                                match sector.next_wall_position(dir, default_y_bottom, default_y_top) {
+                                match sector.next_wall_position(dir, default_y_bottom, default_y_top, mouse_y_room_relative) {
                                     Some(corner_heights) => {
                                         // 0 = new wall, 1 = filling gap
                                         let state = if has_existing { 1u8 } else { 0u8 };

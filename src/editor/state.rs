@@ -1,8 +1,8 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::{Level, ObjectType, SpawnPointType, LevelObject};
-use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings};
+use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection};
+use crate::rasterizer::{Camera, Vec3, Vec2, Texture, RasterSettings, Color, BlendMode};
 use super::texture_pack::TexturePack;
 
 /// TRLE grid constraints
@@ -10,8 +10,8 @@ use super::texture_pack::TexturePack;
 pub const SECTOR_SIZE: f32 = 1024.0;
 /// Height subdivision ("click") in world units (Y axis)
 pub const CLICK_HEIGHT: f32 = 256.0;
-/// Default ceiling height (2x sector size)
-pub const CEILING_HEIGHT: f32 = 2048.0;
+/// Default ceiling height (3x sector size = 3 meters)
+pub const CEILING_HEIGHT: f32 = 3072.0;
 
 /// Camera mode for 3D viewport
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +89,36 @@ pub enum Selection {
 pub struct SelectionSnapshot {
     pub selection: Selection,
     pub multi_selection: Vec<Selection>,
+}
+
+/// Face properties for clipboard copy/paste (excludes heights)
+#[derive(Debug, Clone)]
+pub enum FaceClipboard {
+    /// Horizontal face properties (floor/ceiling)
+    Horizontal {
+        split_direction: SplitDirection,
+        texture: TextureRef,
+        uv: Option<[Vec2; 4]>,
+        colors: [Color; 4],
+        texture_2: Option<TextureRef>,
+        uv_2: Option<[Vec2; 4]>,
+        colors_2: Option<[Color; 4]>,
+        walkable: bool,
+        blend_mode: BlendMode,
+        normal_mode: FaceNormalMode,
+        black_transparent: bool,
+    },
+    /// Vertical face properties (wall)
+    Vertical {
+        texture: TextureRef,
+        uv: Option<[Vec2; 4]>,
+        solid: bool,
+        blend_mode: BlendMode,
+        colors: [Color; 4],
+        normal_mode: FaceNormalMode,
+        black_transparent: bool,
+        uv_projection: UvProjection,
+    },
 }
 
 /// Unified undo event - either a level change or a selection change
@@ -323,6 +353,9 @@ pub struct EditorState {
 
     /// Clipboard for copy/paste operations (stores copied object)
     pub clipboard: Option<LevelObject>,
+
+    /// Face clipboard for copy/paste face properties (texture, UV, colors, etc.)
+    pub face_clipboard: Option<FaceClipboard>,
 }
 
 impl EditorState {
@@ -444,6 +477,7 @@ impl EditorState {
             player_prop_editing: None,
             player_prop_buffer: String::new(),
             clipboard: None,
+            face_clipboard: None,
         }
     }
 
