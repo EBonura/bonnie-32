@@ -1666,6 +1666,111 @@ impl Sector {
         }
     }
 
+    /// Calculate where a new diagonal wall should be placed.
+    ///
+    /// For diagonal walls, corners are:
+    /// - NW-SE: corner1 = NW (index 0), corner2 = SE (index 2)
+    /// - NE-SW: corner1 = NE (index 1), corner2 = SW (index 3)
+    ///
+    /// Returns corner heights [corner1_bot, corner2_bot, corner2_top, corner1_top] for the new wall,
+    /// or None if the diagonal is fully covered.
+    pub fn next_diagonal_wall_position(&self, is_nwse: bool, fallback_bottom: f32, fallback_top: f32, mouse_y: Option<f32>) -> Option<[f32; 4]> {
+        const MIN_GAP: f32 = 256.0;
+
+        // Get floor/ceiling heights at the diagonal corners
+        let (corner1_idx, corner2_idx) = if is_nwse {
+            (0, 2) // NW, SE
+        } else {
+            (1, 3) // NE, SW
+        };
+
+        let floor_c1 = self.floor.as_ref().map(|f| f.heights[corner1_idx]).unwrap_or(fallback_bottom);
+        let floor_c2 = self.floor.as_ref().map(|f| f.heights[corner2_idx]).unwrap_or(fallback_bottom);
+        let ceiling_c1 = self.ceiling.as_ref().map(|c| c.heights[corner1_idx]).unwrap_or(fallback_top);
+        let ceiling_c2 = self.ceiling.as_ref().map(|c| c.heights[corner2_idx]).unwrap_or(fallback_top);
+
+        let walls = if is_nwse { &self.walls_nwse } else { &self.walls_nesw };
+
+        if walls.len() >= 3 {
+            return None;
+        }
+
+        if walls.is_empty() {
+            // No walls - fill from floor to ceiling
+            // [corner1_bot, corner2_bot, corner2_top, corner1_top]
+            return Some([floor_c1, floor_c2, ceiling_c2, ceiling_c1]);
+        }
+
+        // Sort walls by bottom height
+        let mut sorted_walls: Vec<_> = walls.iter().collect();
+        sorted_walls.sort_by(|a, b| {
+            let a_bottom = a.heights[0].min(a.heights[1]);
+            let b_bottom = b.heights[0].min(b.heights[1]);
+            a_bottom.partial_cmp(&b_bottom).unwrap()
+        });
+
+        // Collect gaps: (heights, bottom_y, top_y)
+        let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
+
+        // Gap at bottom (floor to lowest wall)
+        let lowest = sorted_walls[0];
+        let bottom_gap_bottom = floor_c1.min(floor_c2);
+        let bottom_gap_top = lowest.heights[0].min(lowest.heights[1]);
+        if bottom_gap_top - bottom_gap_bottom > MIN_GAP {
+            gaps.push((
+                [floor_c1, floor_c2, lowest.heights[1], lowest.heights[0]],
+                bottom_gap_bottom,
+                bottom_gap_top
+            ));
+        }
+
+        // Gaps between walls
+        for i in 0..sorted_walls.len() - 1 {
+            let lower = sorted_walls[i];
+            let upper = sorted_walls[i + 1];
+            let gap_bottom = lower.heights[2].max(lower.heights[3]);
+            let gap_top = upper.heights[0].min(upper.heights[1]);
+            if gap_top - gap_bottom > MIN_GAP {
+                gaps.push((
+                    [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
+                    gap_bottom,
+                    gap_top
+                ));
+            }
+        }
+
+        // Gap at top (highest wall to ceiling)
+        let highest = sorted_walls.last().unwrap();
+        let top_gap_bottom = highest.heights[2].max(highest.heights[3]);
+        let top_gap_top = ceiling_c1.max(ceiling_c2);
+        if top_gap_top - top_gap_bottom > MIN_GAP {
+            gaps.push((
+                [highest.heights[3], highest.heights[2], ceiling_c2, ceiling_c1],
+                top_gap_bottom,
+                top_gap_top
+            ));
+        }
+
+        if gaps.is_empty() {
+            return None;
+        }
+
+        // Select gap based on mouse_y
+        if let Some(y) = mouse_y {
+            gaps.into_iter()
+                .min_by(|a, b| {
+                    let a_center = (a.1 + a.2) / 2.0;
+                    let b_center = (b.1 + b.2) / 2.0;
+                    (y - a_center).abs().partial_cmp(&(y - b_center).abs()).unwrap()
+                })
+                .map(|(heights, _, _)| heights)
+        } else {
+            gaps.into_iter()
+                .max_by(|a, b| (a.2 - a.1).partial_cmp(&(b.2 - b.1)).unwrap())
+                .map(|(heights, _, _)| heights)
+        }
+    }
+
     /// Extrude the floor upward by `amount` units.
     /// Creates walls around the perimeter connecting the old floor height to the new height.
     /// Returns true if extrusion was performed, false if no floor exists.

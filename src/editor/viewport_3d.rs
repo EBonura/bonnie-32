@@ -23,6 +23,23 @@ use crate::world::{SECTOR_SIZE, SplitDirection};
 use crate::input::{InputState, Action};
 use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT};
 
+/// Calculate distance from point (px, py) to line segment from (x1, y1) to (x2, y2)
+fn point_to_line_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 0.0001 {
+        // Degenerate line (point)
+        return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
+    }
+    // Project point onto line, clamped to segment
+    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let proj_x = x1 + t * dx;
+    let proj_y = y1 + t * dy;
+    ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+}
+
 /// Draw the 3D viewport using the software rasterizer
 pub fn draw_viewport_3d(
     ctx: &mut UiContext,
@@ -503,90 +520,126 @@ pub fn draw_viewport_3d(
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             use super::CEILING_HEIGHT;
 
-            // Find the closest diagonal edge (NW-SE or NE-SW)
+            // Find the closest sector center first
             let search_radius = 20;
-            let cam_x = state.camera_3d.position.x;
-            let cam_z = state.camera_3d.position.z;
-            let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let cam = &state.camera_3d.position;
+            let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
 
-            // Default wall height (floor to ceiling)
             let (default_y_bottom, default_y_top) = (0.0, CEILING_HEIGHT);
             let mid_y = (default_y_bottom + default_y_top) / 2.0;
 
-            // Find closest diagonal edge
-            let mut closest_diag: Option<(f32, f32, bool, f32)> = None; // (grid_x, grid_z, is_nwse, screen_dist)
+            // Find closest sector center
+            let mut closest_sector: Option<(f32, f32, f32)> = None; // (grid_x, grid_z, screen_dist)
 
             for ix in 0..(search_radius * 2) {
                 for iz in 0..(search_radius * 2) {
                     let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
                     let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
+                    let center = Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0);
 
-                    // Check both diagonal edges of this sector
-                    let diagonals = [
-                        // NW-SE diagonal: center is at (grid_x + SIZE/2, mid_y, grid_z + SIZE/2)
-                        (true, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0)),
-                        // NE-SW diagonal: same center point
-                        (false, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0)),
-                    ];
-
-                    for (is_nwse, center) in diagonals {
-                        // Offset from center to distinguish NW-SE from NE-SW
-                        let (offset_x, offset_z) = if is_nwse {
-                            (-SECTOR_SIZE * 0.25, SECTOR_SIZE * 0.25) // Toward NW-SE line
-                        } else {
-                            (SECTOR_SIZE * 0.25, SECTOR_SIZE * 0.25) // Toward NE-SW line
-                        };
-                        let check_point = Vec3::new(center.x + offset_x, center.y, center.z + offset_z);
-                        if let Some((check_sx, check_sy)) = world_to_screen(check_point, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height)
-                        {
-                            let dist = ((mouse_fb_x - check_sx).powi(2) + (mouse_fb_y - check_sy).powi(2)).sqrt();
-                            if closest_diag.map_or(true, |(_, _, _, best_dist)| dist < best_dist) {
-                                closest_diag = Some((grid_x, grid_z, is_nwse, dist));
-                            }
+                    if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb.width, fb.height)
+                    {
+                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                        if closest_sector.map_or(true, |(_, _, best)| dist < best) {
+                            closest_sector = Some((grid_x, grid_z, dist));
                         }
                     }
                 }
             }
 
-            if let Some((grid_x, grid_z, is_nwse, dist)) = closest_diag {
-                if dist < 80.0 {
-                    // Calculate wall heights based on floor/ceiling
-                    let corner_heights = if let Some(room) = state.level.rooms.get(state.current_room) {
-                        if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
-                            if let Some(sector) = room.get_sector(gx, gz) {
-                                // Get floor and ceiling heights at the diagonal corners
-                                let floor_h = sector.floor.as_ref().map(|f| f.heights.clone());
-                                let ceiling_h = sector.ceiling.as_ref().map(|c| c.heights.clone());
+            if let Some((grid_x, grid_z, dist)) = closest_sector {
+                if dist < 120.0 {
+                    let center_x = grid_x + SECTOR_SIZE / 2.0;
+                    let center_z = grid_z + SECTOR_SIZE / 2.0;
 
-                                if is_nwse {
-                                    // NW-SE: corners are NW (index 0) and SE (index 2)
-                                    let bot1 = floor_h.as_ref().map(|h| h[0]).unwrap_or(default_y_bottom);
-                                    let bot2 = floor_h.as_ref().map(|h| h[2]).unwrap_or(default_y_bottom);
-                                    let top1 = ceiling_h.as_ref().map(|h| h[0]).unwrap_or(default_y_top);
-                                    let top2 = ceiling_h.as_ref().map(|h| h[2]).unwrap_or(default_y_top);
-                                    [bot1, bot2, top2, top1]
-                                } else {
-                                    // NE-SW: corners are NE (index 1) and SW (index 3)
-                                    let bot1 = floor_h.as_ref().map(|h| h[1]).unwrap_or(default_y_bottom);
-                                    let bot2 = floor_h.as_ref().map(|h| h[3]).unwrap_or(default_y_bottom);
-                                    let top1 = ceiling_h.as_ref().map(|h| h[1]).unwrap_or(default_y_top);
-                                    let top2 = ceiling_h.as_ref().map(|h| h[3]).unwrap_or(default_y_top);
-                                    [bot1, bot2, top2, top1]
-                                }
-                            } else {
-                                [default_y_bottom, default_y_bottom, default_y_top, default_y_top]
-                            }
+                    // Choose diagonal type based on which diagonal line the mouse is closer to
+                    let is_nwse = if let Some(_) = world_to_screen(
+                        Vec3::new(center_x, mid_y, center_z), state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb.width, fb.height)
+                    {
+                        // Project NW corner and SE corner to screen
+                        let nw = Vec3::new(grid_x, mid_y, grid_z);
+                        let se = Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE);
+                        let ne = Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z);
+                        let sw = Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE);
+
+                        if let (Some((nw_sx, nw_sy)), Some((se_sx, se_sy)),
+                                Some((ne_sx, ne_sy)), Some((sw_sx, sw_sy))) = (
+                            world_to_screen(nw, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
+                            world_to_screen(se, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
+                            world_to_screen(ne, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
+                            world_to_screen(sw, state.camera_3d.position, state.camera_3d.basis_x,
+                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
+                        ) {
+                            // Calculate distance from mouse to each diagonal line
+                            let dist_nwse = point_to_line_dist(mouse_fb_x, mouse_fb_y, nw_sx, nw_sy, se_sx, se_sy);
+                            let dist_nesw = point_to_line_dist(mouse_fb_x, mouse_fb_y, ne_sx, ne_sy, sw_sx, sw_sy);
+                            dist_nwse < dist_nesw
                         } else {
-                            [default_y_bottom, default_y_bottom, default_y_top, default_y_top]
+                            true // Default to NW-SE
                         }
                     } else {
-                        [default_y_bottom, default_y_bottom, default_y_top, default_y_top]
+                        true
                     };
 
-                    preview_diagonal_wall = Some((grid_x, grid_z, is_nwse, corner_heights));
+                    // Compute mouse Y in room-relative space for gap selection
+                    let room_y = state.level.rooms.get(state.current_room)
+                        .map(|r| r.position.y)
+                        .unwrap_or(0.0);
+                    let floor_world = Vec3::new(center_x, room_y + default_y_bottom, center_z);
+                    let ceiling_world = Vec3::new(center_x, room_y + default_y_top, center_z);
+
+                    let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
+                        world_to_screen(floor_world, state.camera_3d.position,
+                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                            fb.width, fb.height),
+                        world_to_screen(ceiling_world, state.camera_3d.position,
+                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                            fb.width, fb.height),
+                    ) {
+                        if (floor_sy - ceiling_sy).abs() > 1.0 {
+                            let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
+                            let t_clamped = t.clamp(0.0, 1.0);
+                            Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Use gap detection for diagonal walls
+                    let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
+                        if let Some((gx, gz)) = room.world_to_grid(center_x, center_z) {
+                            if let Some(sector) = room.get_sector(gx, gz) {
+                                let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
+                                let has_existing = !walls.is_empty();
+                                match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, mouse_y_room_relative) {
+                                    Some(heights) => Some((heights, if has_existing { 1u8 } else { 0u8 })),
+                                    None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)), // Fully covered
+                                }
+                            } else {
+                                Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                            }
+                        } else {
+                            Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                        }
+                    } else {
+                        Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                    };
+
+                    if let Some((corner_heights, wall_state)) = wall_info {
+                        if wall_state < 2 { // Not fully covered
+                            preview_diagonal_wall = Some((grid_x, grid_z, is_nwse, corner_heights));
+                        }
+                    }
                 }
             }
         }
