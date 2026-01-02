@@ -3329,10 +3329,14 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         state.ortho_drag_viewport = Some(viewport_id);
                         state.ortho_drag_zoom = ortho_zoom;
 
+                        // Use CURRENT mouse position as reference, not original click position.
+                        // This prevents snapping - delta starts at 0 and accumulates from here.
+                        let drag_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+
                         // Start move drag (constrained if gizmo axis was clicked)
                         state.drag_manager.start_move(
                             center,
-                            start_pos,
+                            drag_start_mouse,
                             state.ortho_drag_axis, // Use captured axis constraint
                             indices,
                             initial_positions,

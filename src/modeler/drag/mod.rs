@@ -18,7 +18,7 @@ pub use rotate_tracker::RotateTracker;
 pub use scale_tracker::ScaleTracker;
 pub use box_select::BoxSelectTracker;
 
-use crate::rasterizer::{Vec3, Camera};
+use crate::rasterizer::{Vec3, Camera, screen_to_ray, ray_line_closest_point};
 use crate::ui::{DragState, DragStatus, DragConfig, SnapMode, Axis, apply_drag_update};
 
 /// The type of active drag operation
@@ -106,6 +106,44 @@ impl DragManager {
 
         self.active = ActiveDrag::Move(tracker);
         self.state = Some(DragState::new(initial_position, Vec3::ZERO, initial_mouse));
+        self.config = Some(config);
+    }
+
+    /// Start a move drag operation with camera info for proper offset calculation.
+    /// This prevents snapping when clicking on a gizmo axis.
+    pub fn start_move_3d(
+        &mut self,
+        initial_position: Vec3,
+        initial_mouse: (f32, f32),
+        axis: Option<Axis>,
+        vertex_indices: Vec<usize>,
+        initial_positions: Vec<(usize, Vec3)>,
+        snap_enabled: bool,
+        grid_size: f32,
+        camera: &Camera,
+        viewport_width: usize,
+        viewport_height: usize,
+    ) {
+        let tracker = MoveTracker::new(axis, vertex_indices, initial_positions);
+        let config = tracker.create_config(initial_position, snap_enabled, grid_size);
+
+        // Calculate handle_offset so the first pick returns initial_position
+        // This prevents snapping when clicking on a gizmo axis
+        let handle_offset = if let Some(axis) = axis {
+            // Cast ray from mouse click and find where it intersects the axis line
+            let ray = screen_to_ray(initial_mouse.0, initial_mouse.1, viewport_width, viewport_height, camera);
+            if let Some((closest, _dist)) = ray_line_closest_point(&ray, initial_position, axis.unit_vector()) {
+                // offset = initial_position - closest, so closest + offset = initial_position
+                initial_position - closest
+            } else {
+                Vec3::ZERO
+            }
+        } else {
+            Vec3::ZERO
+        };
+
+        self.active = ActiveDrag::Move(tracker);
+        self.state = Some(DragState::new(initial_position, handle_offset, initial_mouse));
         self.config = Some(config);
     }
 

@@ -377,10 +377,14 @@ fn handle_drag_move(
                         // Save undo state before starting
                         state.push_undo("Drag move");
 
+                        // Use CURRENT mouse position as reference, not original click position.
+                        // This prevents snapping - delta starts at 0 and accumulates from here.
+                        let drag_start_mouse = mouse_pos;
+
                         // Start free move drag (axis = None for screen-space movement)
                         state.drag_manager.start_move(
                             center,
-                            start_pos, // Use the position where drag started
+                            drag_start_mouse,
                             None,      // No axis = free movement
                             indices,
                             initial_positions,
@@ -1751,9 +1755,10 @@ fn handle_move_gizmo(
         state.push_undo("Gizmo Move");
 
         // Start drag with DragManager and sync tool state
+        // Use start_move_3d to calculate proper handle_offset (prevents snap on click)
         let ui_axis = to_ui_axis(axis);
         state.tool_box.tools.move_tool.start_drag(Some(ui_axis));
-        state.drag_manager.start_move(
+        state.drag_manager.start_move_3d(
             setup.center,
             fb_mouse,
             Some(ui_axis),
@@ -1761,6 +1766,9 @@ fn handle_move_gizmo(
             initial_positions,
             state.snap_settings.enabled,
             state.snap_settings.grid_size,
+            &state.camera,
+            fb_width,
+            fb_height,
         );
     }
 
