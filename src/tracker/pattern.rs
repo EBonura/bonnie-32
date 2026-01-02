@@ -2,6 +2,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Per-channel settings (MIDI CC values and audio parameters)
+/// Modeled after PS1 SPU per-voice registers
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelSettings {
+    /// Pan (0=left, 64=center, 127=right) - PS1: per-voice L/R volume
+    pub pan: u8,
+    /// Reverb send level (0-127) - PS1: EON register enables per-voice reverb routing
+    pub wet: u8,
+    /// Modulation wheel (0-127)
+    pub modulation: u8,
+    /// Expression (0-127)
+    pub expression: u8,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            pan: 64,          // Center
+            wet: 0,           // No reverb (PS1: voice not routed to reverb)
+            modulation: 0,    // No modulation
+            expression: 127,  // Full expression
+        }
+    }
+}
+
 /// A single note event in the tracker
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Note {
@@ -167,6 +193,7 @@ impl Default for Pattern {
 
 /// A song is a sequence of pattern indices (arrangement)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Song {
     /// Song name
     pub name: String,
@@ -182,6 +209,8 @@ pub struct Song {
     pub instrument_names: Vec<String>,
     /// Per-channel instrument (GM program number 0-127)
     pub channel_instruments: Vec<u8>,
+    /// Per-channel settings (pan, wet, mod, expr)
+    pub channel_settings: Vec<ChannelSettings>,
 }
 
 impl Song {
@@ -194,6 +223,7 @@ impl Song {
             arrangement: vec![0],
             instrument_names: Vec::new(),
             channel_instruments: vec![0; DEFAULT_CHANNELS], // Piano for all channels
+            channel_settings: vec![ChannelSettings::default(); DEFAULT_CHANNELS],
         }
     }
 
@@ -206,6 +236,7 @@ impl Song {
     pub fn add_channel(&mut self) {
         if self.channel_instruments.len() < MAX_CHANNELS {
             self.channel_instruments.push(0); // Default to piano
+            self.channel_settings.push(ChannelSettings::default());
             // Also add channel to all patterns
             for pattern in &mut self.patterns {
                 pattern.add_channel();
@@ -217,10 +248,28 @@ impl Song {
     pub fn remove_channel(&mut self) {
         if self.channel_instruments.len() > 1 {
             self.channel_instruments.pop();
+            self.channel_settings.pop();
             // Also remove channel from all patterns
             for pattern in &mut self.patterns {
                 pattern.remove_channel();
             }
+        }
+    }
+
+    /// Get channel settings
+    pub fn get_channel_settings(&self, channel: usize) -> ChannelSettings {
+        self.channel_settings.get(channel).copied().unwrap_or_default()
+    }
+
+    /// Get mutable reference to channel settings
+    pub fn get_channel_settings_mut(&mut self, channel: usize) -> Option<&mut ChannelSettings> {
+        self.channel_settings.get_mut(channel)
+    }
+
+    /// Reset channel settings to defaults
+    pub fn reset_channel_settings(&mut self, channel: usize) {
+        if let Some(settings) = self.channel_settings.get_mut(channel) {
+            *settings = ChannelSettings::default();
         }
     }
 
@@ -294,6 +343,9 @@ pub enum Effect {
     SetExpression(u8),
     /// Modulation (Mxx) - mod wheel 00-7F
     SetModulation(u8),
+    /// Set reverb type (Rxx) - PS1 global reverb preset
+    /// 00=Off, 01=Room, 02=StudioS, 03=StudioM, 04=StudioL, 05=Hall, 06=Space, 07=Echo, 08=HalfEcho
+    SetReverbType(u8),
 }
 
 impl Effect {
@@ -312,6 +364,7 @@ impl Effect {
             'F' => Effect::SetSpeed(param),
             'M' => Effect::SetModulation(param),
             'P' => Effect::SetPan(param),
+            'R' => Effect::SetReverbType(param),
             _ => Effect::None,
         }
     }
@@ -332,6 +385,7 @@ impl Effect {
             Effect::SetSpeed(_) => Some('F'),
             Effect::SetModulation(_) => Some('M'),
             Effect::SetPan(_) => Some('P'),
+            Effect::SetReverbType(_) => Some('R'),
         }
     }
 
@@ -351,6 +405,7 @@ impl Effect {
             Effect::SetSpeed(s) => *s,
             Effect::SetModulation(v) => *v,
             Effect::SetPan(p) => *p,
+            Effect::SetReverbType(r) => *r,
         }
     }
 }

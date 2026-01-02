@@ -2,6 +2,7 @@
 
 use super::audio::AudioEngine;
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
+use super::psx_reverb::ReverbType;
 use super::actions::create_tracker_actions;
 use crate::ui::ActionRegistry;
 use std::path::PathBuf;
@@ -813,6 +814,24 @@ impl TrackerState {
             Effect::VolumeSlide(_, _) => {
                 // Would need per-tick processing
             }
+            Effect::SetReverbType(r) => {
+                // Change global reverb type (PS1: one reverb processor shared by all voices)
+                // Values: 00=Off, 01=Room, 02=StudioS, 03=StudioM, 04=StudioL, 05=Hall, 06=HalfEcho, 07=SpaceEcho, 08=ChaosEcho, 09=Delay
+                let reverb_type = match r {
+                    0 => ReverbType::Off,
+                    1 => ReverbType::Room,
+                    2 => ReverbType::StudioSmall,
+                    3 => ReverbType::StudioMedium,
+                    4 => ReverbType::StudioLarge,
+                    5 => ReverbType::Hall,
+                    6 => ReverbType::HalfEcho,
+                    7 => ReverbType::SpaceEcho,
+                    8 => ReverbType::ChaosEcho,
+                    9 => ReverbType::Delay,
+                    _ => ReverbType::Off, // Invalid values default to off
+                };
+                self.audio.set_reverb_preset(reverb_type);
+            }
         }
     }
 
@@ -1126,10 +1145,11 @@ impl TrackerState {
         self.clear_selection();
         self.audio.all_notes_off();
 
-        // Make sure channel instruments are synced with audio engine
+        // Make sure channel instruments and settings are synced with audio engine
         for (ch, &inst) in self.song.channel_instruments.iter().enumerate() {
             self.audio.set_program(ch as i32, inst as i32);
         }
+        self.sync_all_channel_settings();
 
         self.set_status(&format!("Loaded: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
         Ok(())
@@ -1151,6 +1171,7 @@ impl TrackerState {
         self.scroll_row = 0;
         self.clear_selection();
         self.audio.all_notes_off();
+        self.sync_all_channel_settings();
 
         self.set_status("New song created", 2.0);
     }
@@ -1165,5 +1186,63 @@ impl TrackerState {
         self.current_file.as_ref().and_then(|p| {
             p.file_name().map(|f| f.to_string_lossy().to_string())
         })
+    }
+
+    /// Sync a single channel's settings to the audio engine
+    pub fn sync_channel_settings(&self, channel: usize) {
+        let settings = self.song.get_channel_settings(channel);
+        let ch = channel as i32;
+        self.audio.set_pan(ch, settings.pan as i32);
+        self.audio.set_modulation(ch, settings.modulation as i32);
+        self.audio.set_expression(ch, settings.expression as i32);
+        // Note: wet/reverb send would need per-channel support in the audio engine
+        // For now, wet is stored but the global reverb wet level applies to all
+    }
+
+    /// Sync all channel settings to the audio engine
+    pub fn sync_all_channel_settings(&self) {
+        for ch in 0..self.song.num_channels() {
+            self.sync_channel_settings(ch);
+        }
+    }
+
+    /// Update a channel setting and sync to audio
+    pub fn set_channel_pan(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.pan = value;
+            self.audio.set_pan(channel as i32, value as i32);
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_channel_wet(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.wet = value;
+            // TODO: Per-channel reverb send would need audio engine support
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_channel_modulation(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.modulation = value;
+            self.audio.set_modulation(channel as i32, value as i32);
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_channel_expression(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.expression = value;
+            self.audio.set_expression(channel as i32, value as i32);
+            self.dirty = true;
+        }
+    }
+
+    /// Reset channel settings to defaults
+    pub fn reset_channel_settings(&mut self, channel: usize) {
+        self.song.reset_channel_settings(channel);
+        self.sync_channel_settings(channel);
+        self.dirty = true;
     }
 }

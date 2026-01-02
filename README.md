@@ -232,6 +232,14 @@ This project uses the following free texture packs:
 
 ### Music Editor
 
+#### UI/UX
+- [ ] **Text too small**: Everything is very small text-wise. The world editor has better scaling - study that and make text bigger where it makes sense
+- [ ] **Reverb column missing**: Expected reverb type as a separate column on the far right to set the 10 reverb presets. Currently only implemented as `Rxx` effect command in Fx column. Should add a dedicated reverb column.
+- [ ] **Remove "In" (Instrument) column**: The pattern shows "Not In Vl Fx" for each track, but "In" is redundant since instrument is already set per-track in the channel strip
+- [ ] **Help bar at bottom**: Add a help/status bar at the bottom (like world editor). When clicking on a column, show available options there. Highlight the currently selected option.
+- [ ] **Remove global Fx from toolbar**: Since reverb has its own column, the global Fx control at top is redundant
+- [ ] **Per-track sample rate**: PS1 SPU supports per-voice pitch registers (sample rate). Currently Rate is a global lo-fi effect. Need to implement true per-channel pitch control (authentic PS1 behavior).
+
 #### Remaining
 - [ ] Configurable pattern length: Currently hardcoded to 64 rows - should be adjustable
 - [ ] Per-note vs channel FX toggle
@@ -239,6 +247,7 @@ This project uses the following free texture packs:
 
 #### Future
 - [ ] Custom instrument editor: Tab for building custom instruments beyond SF2 soundfonts
+- [ ] **Waveform visualizer**: Add a waveform visualizer somewhere in the UI for visual feedback during playback
 
 ---
 

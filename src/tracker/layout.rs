@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{
-    Rect, UiContext, Toolbar, icon, draw_knob,
+    Rect, UiContext, Toolbar, icon, draw_knob, draw_mini_knob,
     // Theme colors
     BG_COLOR, HEADER_COLOR, TEXT_COLOR, TEXT_DIM,
     ROW_EVEN, ROW_ODD, ROW_BEAT, ROW_HIGHLIGHT,
@@ -173,6 +173,50 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
         state.increase_pattern_length();
     }
 
+    toolbar.separator();
+
+    // Global sample rate (PS1 lo-fi effect - applies to all audio output)
+    let current_rate = state.audio.output_sample_rate();
+    toolbar.label(&format!("Rate:{}", current_rate.name()));
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Lower Sample Rate (more lo-fi)") {
+        let presets = OutputSampleRate::PRESETS;
+        if let Some(idx) = presets.iter().position(|p| p.0 == current_rate.0) {
+            if idx + 1 < presets.len() {
+                state.audio.set_output_sample_rate(presets[idx + 1]);
+            }
+        }
+    }
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Higher Sample Rate (less lo-fi)") {
+        let presets = OutputSampleRate::PRESETS;
+        if let Some(idx) = presets.iter().position(|p| p.0 == current_rate.0) {
+            if idx > 0 {
+                state.audio.set_output_sample_rate(presets[idx - 1]);
+            }
+        }
+    }
+
+    toolbar.separator();
+
+    // Global reverb type (PS1: one reverb processor shared by all voices)
+    let current_reverb = state.audio.reverb_type();
+    let reverb_name = current_reverb.name();
+    let display_name = if reverb_name.len() > 6 { &reverb_name[..6] } else { reverb_name };
+    toolbar.label(&format!("Fx:{}", display_name));
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Previous Reverb Type") {
+        let all_reverbs = ReverbType::ALL;
+        if let Some(idx) = all_reverbs.iter().position(|r| *r == current_reverb) {
+            let new_idx = if idx == 0 { all_reverbs.len() - 1 } else { idx - 1 };
+            state.audio.set_reverb_preset(all_reverbs[new_idx]);
+        }
+    }
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Next Reverb Type") {
+        let all_reverbs = ReverbType::ALL;
+        if let Some(idx) = all_reverbs.iter().position(|r| *r == current_reverb) {
+            let new_idx = (idx + 1) % all_reverbs.len();
+            state.audio.set_reverb_preset(all_reverbs[new_idx]);
+        }
+    }
+
     // Second row - position info and soundfont status
     let y2 = rect.y + 40.0;
     let pattern_num = state.song.arrangement.get(state.current_pattern_idx).copied().unwrap_or(0);
@@ -213,8 +257,8 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
     }
 }
 
-/// Height of the channel strip header (instrument selector, etc.)
-const CHANNEL_STRIP_HEIGHT: f32 = 36.0;
+/// Height of the channel strip header (instrument selector, knobs, reset button)
+const CHANNEL_STRIP_HEIGHT: f32 = 120.0;
 
 /// Draw the pattern editor view
 fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) {
@@ -229,28 +273,28 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         None => return,
     };
 
-    // === Channel strip header (instrument selector) ===
+    // === Channel strip header (instrument selector, knobs, etc.) ===
     draw_rectangle(rect.x, rect.y, rect.w, CHANNEL_STRIP_HEIGHT, Color::new(0.12, 0.12, 0.14, 1.0));
+
+    // Collect channel updates to apply after the loop (avoid borrow conflicts)
+    let mut channel_updates: Vec<(usize, &str, u8)> = Vec::new();
 
     let mut x = rect.x + ROW_NUM_WIDTH;
     for ch in 0..num_channels {
         let ch_x = x;
         let is_current = ch == state.current_channel;
-        let strip_rect = Rect::new(ch_x, rect.y, CHANNEL_WIDTH - 1.0, CHANNEL_STRIP_HEIGHT);
 
         // Background for selected channel
         if is_current {
             draw_rectangle(ch_x, rect.y, CHANNEL_WIDTH - 1.0, CHANNEL_STRIP_HEIGHT, Color::new(0.18, 0.2, 0.24, 1.0));
         }
 
-        // Click to select channel
-        if ctx.mouse.inside(&strip_rect) && is_mouse_button_pressed(MouseButton::Left) {
-            state.current_channel = ch;
-        }
+        // === Row 1: Channel number + Instrument selector ===
+        let row1_y = rect.y + 2.0;
 
         // Channel number
         let ch_color = if is_current { NOTE_COLOR } else { TEXT_COLOR };
-        draw_text(&format!("Ch {}", ch + 1), ch_x + 4.0, rect.y + 12.0, 11.0, ch_color);
+        draw_text(&format!("Ch{}", ch + 1), ch_x + 2.0, row1_y + 10.0, 10.0, ch_color);
 
         // Instrument selector: [-] [instrument name] [+]
         let inst = state.song.get_channel_instrument(ch);
@@ -261,49 +305,97 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             .map(|(_, _, n)| n.as_str())
             .unwrap_or("---");
 
-        // Truncate instrument name to fit
-        let display_name: String = if inst_name.len() > 12 {
-            format!("{:.12}", inst_name)
+        // Truncate instrument name
+        let display_name: String = if inst_name.len() > 10 {
+            format!("{:.10}", inst_name)
         } else {
             inst_name.to_string()
         };
 
-        // [-] button
-        let minus_rect = Rect::new(ch_x + 2.0, rect.y + 16.0, 16.0, 16.0);
-        let minus_hover = ctx.mouse.inside(&minus_rect);
-        draw_rectangle(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h,
-            if minus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
-        draw_text("-", minus_rect.x + 5.0, minus_rect.y + 12.0, 12.0, TEXT_COLOR);
-        if minus_hover && is_mouse_button_pressed(MouseButton::Left) {
+        // [-] button for instrument
+        let inst_minus_rect = Rect::new(ch_x + 26.0, row1_y, 14.0, 14.0);
+        let inst_minus_hover = ctx.mouse.inside(&inst_minus_rect);
+        draw_rectangle(inst_minus_rect.x, inst_minus_rect.y, inst_minus_rect.w, inst_minus_rect.h,
+            if inst_minus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
+        draw_text("-", inst_minus_rect.x + 4.0, inst_minus_rect.y + 11.0, 11.0, TEXT_COLOR);
+        if inst_minus_hover && is_mouse_button_pressed(MouseButton::Left) {
             let new_inst = inst.saturating_sub(1);
-            state.song.set_channel_instrument(ch, new_inst);
-            if ch == state.current_channel {
-                state.audio.set_program(ch as i32, new_inst as i32);
-            }
+            channel_updates.push((ch, "inst", new_inst));
         }
 
-        // Instrument name (clickable to open instrument picker)
-        let name_x = ch_x + 20.0;
-        draw_text(&format!("{:03}:{}", inst, display_name), name_x, rect.y + 28.0, 10.0, INST_COLOR);
+        // Instrument name display
+        draw_text(&format!("{:02}:{}", inst, display_name), ch_x + 42.0, row1_y + 10.0, 9.0, INST_COLOR);
 
-        // [+] button
-        let plus_rect = Rect::new(ch_x + CHANNEL_WIDTH - 20.0, rect.y + 16.0, 16.0, 16.0);
-        let plus_hover = ctx.mouse.inside(&plus_rect);
-        draw_rectangle(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h,
-            if plus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
-        draw_text("+", plus_rect.x + 4.0, plus_rect.y + 12.0, 12.0, TEXT_COLOR);
-        if plus_hover && is_mouse_button_pressed(MouseButton::Left) {
+        // [+] button for instrument
+        let inst_plus_rect = Rect::new(ch_x + CHANNEL_WIDTH - 18.0, row1_y, 14.0, 14.0);
+        let inst_plus_hover = ctx.mouse.inside(&inst_plus_rect);
+        draw_rectangle(inst_plus_rect.x, inst_plus_rect.y, inst_plus_rect.w, inst_plus_rect.h,
+            if inst_plus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
+        draw_text("+", inst_plus_rect.x + 3.0, inst_plus_rect.y + 11.0, 11.0, TEXT_COLOR);
+        if inst_plus_hover && is_mouse_button_pressed(MouseButton::Left) {
             let new_inst = (inst + 1).min(127);
-            state.song.set_channel_instrument(ch, new_inst);
-            if ch == state.current_channel {
-                state.audio.set_program(ch as i32, new_inst as i32);
-            }
+            channel_updates.push((ch, "inst", new_inst));
+        }
+
+        // === Row 2: 4 Mini Knobs in 2x2 grid (Pan/Wet, Mod/Expr) ===
+        let row2_y = row1_y + 16.0;
+        let settings = state.song.get_channel_settings(ch);
+        let knob_radius = 16.0;
+        let knob_h_spacing = 56.0;
+        let knob_v_spacing = 40.0;
+        let knobs_start_x = ch_x + 26.0;
+        let knobs_row1_y = row2_y + 18.0;
+        let knobs_row2_y = knobs_row1_y + knob_v_spacing;
+
+        // Row 1: Pan and Wet
+        if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x, knobs_row1_y, knob_radius, settings.pan, "Pan", true) {
+            channel_updates.push((ch, "pan", new_val));
+        }
+        if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x + knob_h_spacing, knobs_row1_y, knob_radius, settings.wet, "Wet", false) {
+            channel_updates.push((ch, "wet", new_val));
+        }
+
+        // Row 2: Mod and Expr
+        if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x, knobs_row2_y, knob_radius, settings.modulation, "Mod", false) {
+            channel_updates.push((ch, "mod", new_val));
+        }
+        if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x + knob_h_spacing, knobs_row2_y, knob_radius, settings.expression, "Expr", false) {
+            channel_updates.push((ch, "expr", new_val));
+        }
+
+        // === Row 3: Reset button (full width at bottom) ===
+        let reset_y = knobs_row2_y + knob_radius + 14.0;
+        let reset_rect = Rect::new(ch_x + 4.0, reset_y, CHANNEL_WIDTH - 10.0, 14.0);
+        let reset_hover = ctx.mouse.inside(&reset_rect);
+        draw_rectangle(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h,
+            if reset_hover { Color::new(0.4, 0.28, 0.28, 1.0) } else { Color::new(0.25, 0.2, 0.2, 1.0) });
+        let reset_text = "Reset";
+        let reset_dims = measure_text(reset_text, None, 9, 1.0);
+        draw_text(reset_text, reset_rect.x + (reset_rect.w - reset_dims.width) / 2.0, reset_y + 10.0, 9.0, TEXT_DIM);
+        if reset_hover && is_mouse_button_pressed(MouseButton::Left) {
+            channel_updates.push((ch, "reset", 0));
         }
 
         x += CHANNEL_WIDTH;
 
         // Channel separator
         draw_line(x - 1.0, rect.y, x - 1.0, rect.y + rect.h, 1.0, Color::new(0.25, 0.25, 0.3, 1.0));
+    }
+
+    // Apply channel updates
+    for (ch, param, value) in channel_updates {
+        match param {
+            "inst" => {
+                state.song.set_channel_instrument(ch, value);
+                state.audio.set_program(ch as i32, value as i32);
+            }
+            "pan" => state.set_channel_pan(ch, value),
+            "wet" => state.set_channel_wet(ch, value),
+            "mod" => state.set_channel_modulation(ch, value),
+            "expr" => state.set_channel_expression(ch, value),
+            "reset" => state.reset_channel_settings(ch),
+            _ => {}
+        }
     }
 
     // === Column headers (Note, Inst, Vol, etc.) ===
