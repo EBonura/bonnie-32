@@ -5,7 +5,7 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Too
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
-use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
+use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode, CameraMode};
 use super::tools::ModelerToolId;
 use super::viewport::draw_modeler_viewport;
 use super::mesh_editor::EditableMesh;
@@ -274,6 +274,23 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         state.vertex_linking = !state.vertex_linking;
         let mode = if state.vertex_linking { "ON" } else { "OFF" };
         state.set_status(&format!("Vertex Linking: {}", mode), 1.5);
+    }
+
+    toolbar.separator();
+
+    // Camera mode toggle (Free / Orbit)
+    let is_free = state.camera_mode == CameraMode::Free;
+    let is_orbit = state.camera_mode == CameraMode::Orbit;
+
+    if toolbar.icon_button_active(ctx, icon::EYE, icon_font, "Free Camera (WASD + mouse)", is_free) {
+        state.camera_mode = CameraMode::Free;
+        state.set_status("Camera: Free (WASD + right-drag to look)", 2.0);
+    }
+    if toolbar.icon_button_active(ctx, icon::ORBIT, icon_font, "Orbit Camera", is_orbit) {
+        state.camera_mode = CameraMode::Orbit;
+        // Sync orbit camera to current view direction when switching
+        state.sync_camera_from_orbit();
+        state.set_status("Camera: Orbit (right-drag to rotate)", 2.0);
     }
 
     toolbar.separator();

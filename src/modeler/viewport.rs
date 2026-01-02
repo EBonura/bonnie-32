@@ -9,7 +9,7 @@ use crate::rasterizer::{
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
     world_to_screen, draw_floor_grid,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform};
+use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode};
 use super::drag::{DragUpdateResult, ActiveDrag};
 use super::tools::ModelerToolId;
 
@@ -443,38 +443,86 @@ pub fn draw_modeler_viewport(
         }
     };
 
-    // Orbit camera controls
+    // Camera controls (free or orbit mode)
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
-    // Right mouse drag: rotate around target (or pan if Shift held)
-    if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) {
-        if state.viewport_mouse_captured {
-            let dx = mouse_pos.0 - state.viewport_last_mouse.0;
-            let dy = mouse_pos.1 - state.viewport_last_mouse.1;
-
-            if shift_held {
-                let pan_speed = state.orbit_distance * 0.002;
-                state.orbit_target = state.orbit_target - state.camera.basis_x * dx * pan_speed;
-                state.orbit_target = state.orbit_target - state.camera.basis_y * dy * pan_speed;
-            } else {
-                state.orbit_azimuth += dx * 0.005;
-                state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+    match state.camera_mode {
+        CameraMode::Free => {
+            // Free camera: right-drag to look around, WASD to move
+            if ctx.mouse.right_down && inside_viewport && !state.drag_manager.is_dragging() {
+                if state.viewport_mouse_captured {
+                    // Inverted to match Y-down coordinate system (same as world editor)
+                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
+                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
+                    state.camera.rotation_x += dx;
+                    state.camera.rotation_y += dy;
+                    state.camera.update_basis();
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
             }
-            state.sync_camera_from_orbit();
-        }
-        state.viewport_mouse_captured = true;
-    } else if !ctx.mouse.right_down {
-        state.viewport_mouse_captured = false;
-    }
 
-    // Mouse wheel: zoom
-    if inside_viewport {
-        let scroll = ctx.mouse.scroll;
-        if scroll != 0.0 {
-            let zoom_factor = if scroll > 0.0 { 0.98 } else { 1.02 };
-            // Scale: 1024 units = 1 meter, allow 1m to 40m camera distance
-            state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(1024.0, 40960.0);
-            state.sync_camera_from_orbit();
+            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
+            // Hold Shift for faster movement
+            let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
+            let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
+            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() {
+                if is_key_down(KeyCode::W) {
+                    state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::S) {
+                    state.camera.position = state.camera.position - state.camera.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::A) {
+                    state.camera.position = state.camera.position - state.camera.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::D) {
+                    state.camera.position = state.camera.position + state.camera.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::Q) {
+                    state.camera.position = state.camera.position - state.camera.basis_y * move_speed;
+                }
+                if is_key_down(KeyCode::E) {
+                    state.camera.position = state.camera.position + state.camera.basis_y * move_speed;
+                }
+            }
+        }
+
+        CameraMode::Orbit => {
+            // Orbit camera: right-drag rotates around target (or pans with Shift)
+            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) {
+                if state.viewport_mouse_captured {
+                    let dx = mouse_pos.0 - state.viewport_last_mouse.0;
+                    let dy = mouse_pos.1 - state.viewport_last_mouse.1;
+
+                    if shift_held {
+                        // Shift+Right drag: pan the orbit target
+                        let pan_speed = state.orbit_distance * 0.002;
+                        state.orbit_target = state.orbit_target - state.camera.basis_x * dx * pan_speed;
+                        state.orbit_target = state.orbit_target + state.camera.basis_y * dy * pan_speed;
+                    } else {
+                        // Right drag: rotate around target
+                        state.orbit_azimuth += dx * 0.005;
+                        state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+                    }
+                    state.sync_camera_from_orbit();
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Mouse wheel: zoom in/out (change orbit distance)
+            if inside_viewport {
+                let scroll = ctx.mouse.scroll;
+                if scroll != 0.0 {
+                    let zoom_factor = if scroll > 0.0 { 0.98 } else { 1.02 };
+                    // Scale: 1024 units = 1 meter, allow 1m to 40m camera distance
+                    state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(1024.0, 40960.0);
+                    state.sync_camera_from_orbit();
+                }
+            }
         }
     }
 
@@ -1679,9 +1727,7 @@ fn handle_move_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.move_tool.end_drag();
-            if state.drag_manager.end().is_some() {
-                state.push_undo("Gizmo Move");
-            }
+            state.drag_manager.end();
         }
     }
 
@@ -1723,6 +1769,9 @@ fn handle_move_gizmo(
             (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
             (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
         );
+
+        // Save undo state BEFORE starting the gizmo drag
+        state.push_undo("Gizmo Move");
 
         // Start drag with DragManager and sync tool state
         let ui_axis = to_ui_axis(axis);
@@ -1837,9 +1886,7 @@ fn handle_scale_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.scale.end_drag();
-            if state.drag_manager.end().is_some() {
-                state.push_undo("Gizmo Scale");
-            }
+            state.drag_manager.end();
         }
     }
 
@@ -1878,6 +1925,9 @@ fn handle_scale_gizmo(
             (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
             (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
         );
+
+        // Save undo state BEFORE starting the gizmo drag
+        state.push_undo("Gizmo Scale");
 
         // Start drag with DragManager and sync tool state
         let ui_axis = to_ui_axis(axis);
@@ -1982,9 +2032,7 @@ fn handle_rotate_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.rotate.end_drag();
-            if state.drag_manager.end().is_some() {
-                state.push_undo("Gizmo Rotate");
-            }
+            state.drag_manager.end();
         }
     }
 
@@ -2055,6 +2103,9 @@ fn handle_rotate_gizmo(
             mouse_pos.1 - setup.center_screen.1,
         );
         let initial_angle = start_vec.1.atan2(start_vec.0);
+
+        // Save undo state BEFORE starting the gizmo drag
+        state.push_undo("Gizmo Rotate");
 
         // Start drag with DragManager and sync tool state
         let ui_axis = to_ui_axis(axis);

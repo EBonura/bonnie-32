@@ -193,9 +193,9 @@ pub fn create_modeler_actions() -> ActionRegistry {
     registry.register(
         Action::new("transform.scale")
             .label("Scale")
-            .shortcut(Shortcut::key(KeyCode::S))
+            .shortcut(Shortcut::key(KeyCode::T))
             .icon(icon::SCALE_3D)
-            .status_tip("Scale selection (S)")
+            .status_tip("Scale selection (T)")
             .category("Transform")
             .enabled_when(|ctx| ctx.has_selection),
     );
