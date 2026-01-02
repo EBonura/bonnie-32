@@ -194,7 +194,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     let tools = [
         (icon::MOVE, "Move (G)", ModelerToolId::Move),
         (icon::ROTATE_3D, "Rotate (R)", ModelerToolId::Rotate),
-        (icon::SCALE_3D, "Scale (S)", ModelerToolId::Scale),
+        (icon::SCALE_3D, "Scale (T)", ModelerToolId::Scale),
     ];
 
     for (icon_char, tooltip, tool_id) in tools {
@@ -3650,7 +3650,7 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let tool_label = match state.tool_box.active_transform_tool() {
         Some(ModelerToolId::Move) => "Move (G)",
         Some(ModelerToolId::Rotate) => "Rotate (R)",
-        Some(ModelerToolId::Scale) => "Scale (S)",
+        Some(ModelerToolId::Scale) => "Scale (T)",
         _ => "Select",
     };
     draw_text(tool_label, rect.x, y + 14.0, 12.0, TEXT_COLOR);
@@ -4084,18 +4084,60 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     }
 
     // ========================================================================
-    // Transform Actions (Modal - Blender-style G/S/R)
+    // Transform Actions (Modal - G/R/T)
     // These set the modal_transform mode; viewport.rs will start the actual drag
+    // Also select the corresponding tool so the toolbar highlights
+    // Allow switching modes during active modal transform (cancel current and start new)
     // ========================================================================
-    if actions.triggered("transform.grab", &ctx) && !is_dragging {
-        state.modal_transform = ModalTransform::Grab;
-        // Viewport will start the drag on next frame when it sees this flag
+    let in_modal_transform = state.modal_transform != ModalTransform::None;
+    let gizmo_dragging = state.drag_manager.is_dragging() && !in_modal_transform;
+
+    // Helper to cancel current modal transform and restore original positions
+    let cancel_modal = |state: &mut ModelerState| {
+        if state.modal_transform != ModalTransform::None {
+            // Sync tool state
+            match state.modal_transform {
+                ModalTransform::Grab => state.tool_box.tools.move_tool.end_drag(),
+                ModalTransform::Scale => state.tool_box.tools.scale.end_drag(),
+                ModalTransform::Rotate => state.tool_box.tools.rotate.end_drag(),
+                ModalTransform::None => {}
+            }
+            // Cancel drag and restore positions
+            if let Some(original_positions) = state.drag_manager.cancel() {
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, original_pos) in original_positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = original_pos;
+                        }
+                    }
+                }
+            }
+            // Pop undo since we're canceling (the push happened when drag started)
+            state.undo_stack.pop();
+            state.modal_transform = ModalTransform::None;
+        }
+    };
+
+    if actions.triggered("transform.grab", &ctx) && !gizmo_dragging {
+        if state.modal_transform != ModalTransform::Grab {
+            cancel_modal(state);
+            state.modal_transform = ModalTransform::Grab;
+            state.tool_box.toggle(ModelerToolId::Move);
+        }
     }
-    if actions.triggered("transform.rotate", &ctx) && !is_dragging {
-        state.modal_transform = ModalTransform::Rotate;
+    if actions.triggered("transform.rotate", &ctx) && !gizmo_dragging {
+        if state.modal_transform != ModalTransform::Rotate {
+            cancel_modal(state);
+            state.modal_transform = ModalTransform::Rotate;
+            state.tool_box.toggle(ModelerToolId::Rotate);
+        }
     }
-    if actions.triggered("transform.scale", &ctx) && !is_dragging {
-        state.modal_transform = ModalTransform::Scale;
+    if actions.triggered("transform.scale", &ctx) && !gizmo_dragging {
+        if state.modal_transform != ModalTransform::Scale {
+            cancel_modal(state);
+            state.modal_transform = ModalTransform::Scale;
+            state.tool_box.toggle(ModelerToolId::Scale);
+        }
     }
     if actions.triggered("transform.extrude", &ctx) {
         // Perform extrude immediately on selected faces

@@ -65,7 +65,7 @@ impl ScaleTool {
 
 impl Tool for ScaleTool {
     fn id(&self) -> &'static str { "scale" }
-    fn label(&self) -> &'static str { "Scale (S)" }
+    fn label(&self) -> &'static str { "Scale (T)" }
     fn active(&self) -> bool { self.active }
 
     fn do_activate(&mut self) -> bool {
