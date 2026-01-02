@@ -43,8 +43,6 @@ pub struct TrackerState {
     pub octave: u8,
     /// Current default volume (0-127)
     pub default_volume: u8,
-    /// Edit step (how many rows to advance after entering a note)
-    pub edit_step: usize,
     /// Is editing mode active? (vs. navigation only)
     pub edit_mode: bool,
 
@@ -95,6 +93,10 @@ pub struct TrackerState {
     pub knob_edit_text: String,
     /// Action registry for keyboard shortcuts
     pub actions: ActionRegistry,
+
+    /// Clipboard for copy/paste (rows × channels of notes)
+    /// Stored as [channel][row] to match pattern structure
+    pub clipboard: Option<Vec<Vec<Note>>>,
 }
 
 /// Soundfont filename
@@ -174,7 +176,6 @@ impl TrackerState {
 
             octave: 4,
             default_volume: 100,
-            edit_step: 1,
             edit_mode: true,
 
             playing: false,
@@ -200,6 +201,7 @@ impl TrackerState {
             editing_knob: None,
             knob_edit_text: String::new(),
             actions: create_tracker_actions(),
+            clipboard: None,
         }
     }
 
@@ -288,6 +290,35 @@ impl TrackerState {
         }
     }
 
+    /// Get the current pattern length
+    pub fn pattern_length(&self) -> usize {
+        self.current_pattern().map(|p| p.length).unwrap_or(64)
+    }
+
+    /// Increase pattern length by 16 rows (max 256)
+    pub fn increase_pattern_length(&mut self) {
+        let current_len = self.pattern_length();
+        let new_len = (current_len + 16).min(256);
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set_length(new_len);
+        }
+        self.dirty = true;
+    }
+
+    /// Decrease pattern length by 16 rows (min 16)
+    pub fn decrease_pattern_length(&mut self) {
+        let current_len = self.pattern_length();
+        let new_len = current_len.saturating_sub(16).max(16);
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set_length(new_len);
+        }
+        // Make sure cursor is still within bounds
+        if self.current_row >= new_len {
+            self.current_row = new_len - 1;
+        }
+        self.dirty = true;
+    }
+
     /// Move cursor up
     pub fn cursor_up(&mut self) {
         if self.current_row > 0 {
@@ -351,19 +382,32 @@ impl TrackerState {
         }
     }
 
-    /// Enter a note at cursor position
+    /// Enter a note at cursor position (or fill selection if active)
     pub fn enter_note(&mut self, pitch: u8) {
-        let channel = self.current_channel;
-        let row = self.current_row;
         let instrument = self.current_instrument();
+        let note = Note::new(pitch, instrument);
 
-        if let Some(pattern) = self.current_pattern_mut() {
-            let note = Note::new(pitch, instrument);
-            pattern.set(channel, row, note);
+        // Check if we have a selection - if so, fill all selected cells
+        if let Some((start_row, end_row, start_ch, end_ch)) = self.get_selection_bounds() {
+            if let Some(pattern) = self.current_pattern_mut() {
+                for ch in start_ch..=end_ch {
+                    for row in start_row..=end_row {
+                        pattern.set(ch, row, note);
+                    }
+                }
+            }
+        } else {
+            // No selection - just set at cursor position
+            let channel = self.current_channel;
+            let row = self.current_row;
+            if let Some(pattern) = self.current_pattern_mut() {
+                pattern.set(channel, row, note);
+            }
         }
         self.dirty = true;
 
         // Preview the note (make sure audio engine uses correct instrument for channel)
+        let channel = self.current_channel;
         self.audio.set_program(channel as i32, instrument as i32);
         self.audio.note_on(channel as i32, pitch as i32, 100);
 
@@ -467,12 +511,9 @@ impl TrackerState {
         self.dirty = true;
     }
 
-    /// Advance cursor by edit_step rows
+    /// Called after entering a note (no-op, cursor stays on current row)
     fn advance_cursor(&mut self) {
-        if let Some(pattern) = self.current_pattern() {
-            self.current_row = (self.current_row + self.edit_step).min(pattern.length - 1);
-            self.ensure_row_visible();
-        }
+        // Do nothing - cursor stays on current row after note entry
     }
 
     /// Toggle playback from current cursor position
@@ -740,6 +781,186 @@ impl TrackerState {
         };
 
         note_offset.map(|offset| (base_note + offset).min(127))
+    }
+
+    // ========================================================================
+    // Selection Methods
+    // ========================================================================
+
+    /// Start a new selection at the current cursor position
+    pub fn start_selection(&mut self) {
+        self.selection_start = Some((self.current_pattern_idx, self.current_row, self.current_channel));
+        self.selection_end = Some((self.current_pattern_idx, self.current_row, self.current_channel));
+    }
+
+    /// Update selection end to current cursor position
+    pub fn update_selection(&mut self) {
+        if self.selection_start.is_some() {
+            self.selection_end = Some((self.current_pattern_idx, self.current_row, self.current_channel));
+        }
+    }
+
+    /// Clear the current selection
+    pub fn clear_selection(&mut self) {
+        self.selection_start = None;
+        self.selection_end = None;
+    }
+
+    /// Check if there's an active selection
+    pub fn has_selection(&self) -> bool {
+        self.selection_start.is_some() && self.selection_end.is_some()
+    }
+
+    /// Get normalized selection bounds (start_row, end_row, start_channel, end_channel)
+    /// Returns None if no selection, or if selection spans multiple patterns
+    pub fn get_selection_bounds(&self) -> Option<(usize, usize, usize, usize)> {
+        let (pat1, row1, ch1) = self.selection_start?;
+        let (pat2, row2, ch2) = self.selection_end?;
+
+        // Only support selection within same pattern for now
+        if pat1 != pat2 {
+            return None;
+        }
+
+        let start_row = row1.min(row2);
+        let end_row = row1.max(row2);
+        let start_ch = ch1.min(ch2);
+        let end_ch = ch1.max(ch2);
+
+        Some((start_row, end_row, start_ch, end_ch))
+    }
+
+    /// Check if a cell is within the current selection
+    pub fn is_in_selection(&self, row: usize, channel: usize) -> bool {
+        if let Some((start_row, end_row, start_ch, end_ch)) = self.get_selection_bounds() {
+            row >= start_row && row <= end_row && channel >= start_ch && channel <= end_ch
+        } else {
+            false
+        }
+    }
+
+    // ========================================================================
+    // Copy/Paste Methods
+    // ========================================================================
+
+    /// Copy the current selection to clipboard
+    pub fn copy_selection(&mut self) {
+        let bounds = match self.get_selection_bounds() {
+            Some(b) => b,
+            None => {
+                // No selection - copy single cell
+                if let Some(pattern) = self.current_pattern() {
+                    if let Some(note) = pattern.get(self.current_channel, self.current_row) {
+                        self.clipboard = Some(vec![vec![*note]]);
+                        self.set_status("Copied 1 note", 1.0);
+                    }
+                }
+                return;
+            }
+        };
+
+        let (start_row, end_row, start_ch, end_ch) = bounds;
+        let pattern = match self.current_pattern() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let num_channels = end_ch - start_ch + 1;
+        let num_rows = end_row - start_row + 1;
+        let mut clipboard_data: Vec<Vec<Note>> = Vec::with_capacity(num_channels);
+
+        for ch in start_ch..=end_ch {
+            let mut channel_notes: Vec<Note> = Vec::with_capacity(num_rows);
+            for row in start_row..=end_row {
+                let note = pattern.get(ch, row).copied().unwrap_or(Note::EMPTY);
+                channel_notes.push(note);
+            }
+            clipboard_data.push(channel_notes);
+        }
+
+        self.clipboard = Some(clipboard_data);
+        self.set_status(&format!("Copied {} notes ({} rows × {} channels)", num_rows * num_channels, num_rows, num_channels), 1.0);
+    }
+
+    /// Cut the current selection (copy then delete)
+    pub fn cut_selection(&mut self) {
+        self.copy_selection();
+        self.delete_selection();
+    }
+
+    /// Delete notes in the current selection
+    pub fn delete_selection(&mut self) {
+        let bounds = match self.get_selection_bounds() {
+            Some(b) => b,
+            None => {
+                // No selection - delete single cell
+                self.delete_note();
+                return;
+            }
+        };
+
+        let (start_row, end_row, start_ch, end_ch) = bounds;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            for ch in start_ch..=end_ch {
+                for row in start_row..=end_row {
+                    pattern.set(ch, row, Note::EMPTY);
+                }
+            }
+        }
+
+        let count = (end_row - start_row + 1) * (end_ch - start_ch + 1);
+        self.dirty = true;
+        self.set_status(&format!("Deleted {} notes", count), 1.0);
+        self.clear_selection();
+    }
+
+    /// Paste clipboard at current cursor position
+    pub fn paste(&mut self) {
+        let clipboard = match &self.clipboard {
+            Some(c) => c.clone(),
+            None => {
+                self.set_status("Nothing to paste", 1.0);
+                return;
+            }
+        };
+
+        let num_clipboard_channels = clipboard.len();
+        if num_clipboard_channels == 0 {
+            return;
+        }
+
+        // Capture cursor position before borrowing pattern
+        let start_ch = self.current_channel;
+        let start_row = self.current_row;
+
+        let pattern = match self.current_pattern_mut() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let pattern_len = pattern.length;
+        let pattern_channels = pattern.num_channels();
+        let mut pasted = 0;
+
+        for (ch_offset, channel_notes) in clipboard.iter().enumerate() {
+            let target_ch = start_ch + ch_offset;
+            if target_ch >= pattern_channels {
+                break;
+            }
+
+            for (row_offset, note) in channel_notes.iter().enumerate() {
+                let target_row = start_row + row_offset;
+                if target_row >= pattern_len {
+                    break;
+                }
+                pattern.set(target_ch, target_row, *note);
+                pasted += 1;
+            }
+        }
+
+        self.dirty = true;
+        self.set_status(&format!("Pasted {} notes", pasted), 1.0);
     }
 }
 

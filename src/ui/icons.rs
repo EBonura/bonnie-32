@@ -20,7 +20,7 @@ pub mod icon {
 
     // Playback / Transport
     pub const PLAY: char = '\u{e13c}';
-    pub const PAUSE: char = '\u{e131}';
+    pub const PAUSE: char = '\u{e12e}';
     pub const SQUARE: char = '\u{e167}';      // Stop (also used as shape)
     pub const SKIP_BACK: char = '\u{e15f}';   // Rewind to start
     pub const SKIP_FORWARD: char = '\u{e160}';

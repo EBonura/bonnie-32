@@ -113,17 +113,6 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
 
     toolbar.separator();
 
-    // Step controls
-    toolbar.label(&format!("Step:{}", state.edit_step));
-    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease Step") {
-        state.edit_step = state.edit_step.saturating_sub(1);
-    }
-    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase Step") {
-        state.edit_step = (state.edit_step + 1).min(16);
-    }
-
-    toolbar.separator();
-
     // Channel count controls
     toolbar.label(&format!("Ch:{}", state.num_channels()));
     if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Remove Channel") {
@@ -131,6 +120,17 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
     }
     if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Add Channel") {
         state.add_channel();
+    }
+
+    toolbar.separator();
+
+    // Pattern length controls
+    toolbar.label(&format!("Len:{:3}", state.pattern_length()));
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease Pattern Length (-16)") {
+        state.decrease_pattern_length();
+    }
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase Pattern Length (+16)") {
+        state.increase_pattern_length();
     }
 
     // Second row - position info and soundfont status
@@ -300,21 +300,61 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         let mouse_x = ctx.mouse.x;
         let mouse_y = ctx.mouse.y;
 
+        // Check modifier keys for selection modes
+        let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+        let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+            || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+
         // Calculate clicked row
         let clicked_screen_row = ((mouse_y - grid_y_start) / ROW_HEIGHT) as usize;
         let clicked_row = state.scroll_row + clicked_screen_row;
 
         if clicked_row < pattern_length {
-            state.current_row = clicked_row;
-
-            // Calculate clicked channel and column
+            // Calculate clicked channel
             let rel_x = mouse_x - rect.x - ROW_NUM_WIDTH;
             if rel_x >= 0.0 {
                 let clicked_channel = (rel_x / CHANNEL_WIDTH) as usize;
                 if clicked_channel < num_channels {
-                    state.current_channel = clicked_channel;
+                    if shift_held {
+                        // Shift+click: range selection from current position to clicked position
+                        if !state.has_selection() {
+                            // Start selection from current cursor position
+                            state.selection_start = Some((state.current_pattern_idx, state.current_row, state.current_channel));
+                        }
+                        // Extend selection to clicked position
+                        state.selection_end = Some((state.current_pattern_idx, clicked_row, clicked_channel));
+                        // Move cursor to clicked position
+                        state.current_row = clicked_row;
+                        state.current_channel = clicked_channel;
+                    } else if ctrl_held {
+                        // Ctrl+click: toggle cell in selection
+                        // For simplicity, just move cursor and keep/extend selection
+                        // A full multi-selection system would need a different data structure
+                        if state.has_selection() {
+                            // Extend selection to include clicked cell
+                            if let Some((start_row, end_row, start_ch, end_ch)) = state.get_selection_bounds() {
+                                let new_start_row = start_row.min(clicked_row);
+                                let new_end_row = end_row.max(clicked_row);
+                                let new_start_ch = start_ch.min(clicked_channel);
+                                let new_end_ch = end_ch.max(clicked_channel);
+                                state.selection_start = Some((state.current_pattern_idx, new_start_row, new_start_ch));
+                                state.selection_end = Some((state.current_pattern_idx, new_end_row, new_end_ch));
+                            }
+                        } else {
+                            // Start new selection at clicked cell
+                            state.selection_start = Some((state.current_pattern_idx, clicked_row, clicked_channel));
+                            state.selection_end = Some((state.current_pattern_idx, clicked_row, clicked_channel));
+                        }
+                        state.current_row = clicked_row;
+                        state.current_channel = clicked_channel;
+                    } else {
+                        // Normal click: move cursor, clear selection
+                        state.clear_selection();
+                        state.current_row = clicked_row;
+                        state.current_channel = clicked_channel;
+                    }
 
-                    // Calculate column within channel
+                    // Calculate column within channel (always update)
                     let col_x = rel_x - (clicked_channel as f32 * CHANNEL_WIDTH);
                     state.current_column = if col_x < NOTE_WIDTH {
                         0 // Note
@@ -370,6 +410,13 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         let mut x = rect.x + ROW_NUM_WIDTH;
         for ch in 0..pattern_num_channels {
             let note = &pattern.channels[ch][row_idx];
+
+            // Selection highlight (draw before cursor so cursor overlays selection)
+            if state.is_in_selection(row_idx, ch) {
+                // Selection color: semi-transparent blue
+                let selection_color = Color::new(0.2, 0.4, 0.7, 0.5);
+                draw_rectangle(x, y, CHANNEL_WIDTH - 4.0, ROW_HEIGHT, selection_color);
+            }
 
             // Cursor highlight
             if row_idx == state.current_row && ch == state.current_channel {
@@ -948,46 +995,137 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         state.current_pattern().is_some(),
         column_type,
         state.editing_knob.is_some(),
+        state.has_selection(),
+        state.clipboard.is_some(),
     );
 
-    // Navigation using actions
-    if state.actions.triggered("nav.up", &actx) {
-        state.cursor_up();
+    // Check modifier keys
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper); // Cmd on macOS
+
+    // Copy/Paste/Cut actions (handle before navigation to prevent conflicts)
+    if state.actions.triggered("edit.copy", &actx) {
+        state.copy_selection();
     }
-    if state.actions.triggered("nav.down", &actx) {
-        state.cursor_down();
+    if state.actions.triggered("edit.cut", &actx) {
+        state.cut_selection();
     }
-    if state.actions.triggered("nav.left", &actx) {
-        state.cursor_left();
+    if state.actions.triggered("edit.paste", &actx) {
+        state.paste();
     }
-    if state.actions.triggered("nav.right", &actx) {
-        state.cursor_right();
+    if state.actions.triggered("edit.select_all", &actx) {
+        // Select entire pattern
+        if let Some(pattern) = state.current_pattern() {
+            let num_ch = pattern.num_channels();
+            let len = pattern.length;
+            state.selection_start = Some((state.current_pattern_idx, 0, 0));
+            state.selection_end = Some((state.current_pattern_idx, len - 1, num_ch - 1));
+            state.set_status("Selected entire pattern", 1.0);
+        }
+    }
+
+    // Navigation with selection support (Shift+Arrow extends selection)
+    // Use direct key checks since action system doesn't support modifier combinations
+    if is_key_pressed(KeyCode::Up) && !ctrl_held {
+        if shift_held {
+            if !state.has_selection() {
+                state.start_selection();
+            }
+            state.cursor_up();
+            state.update_selection();
+        } else {
+            state.clear_selection();
+            state.cursor_up();
+        }
+    }
+    if is_key_pressed(KeyCode::Down) && !ctrl_held {
+        if shift_held {
+            if !state.has_selection() {
+                state.start_selection();
+            }
+            state.cursor_down();
+            state.update_selection();
+        } else {
+            state.clear_selection();
+            state.cursor_down();
+        }
+    }
+    if is_key_pressed(KeyCode::Left) && !ctrl_held {
+        if shift_held {
+            if !state.has_selection() {
+                state.start_selection();
+            }
+            state.cursor_left();
+            state.update_selection();
+        } else {
+            state.clear_selection();
+            state.cursor_left();
+        }
+    }
+    if is_key_pressed(KeyCode::Right) && !ctrl_held {
+        if shift_held {
+            if !state.has_selection() {
+                state.start_selection();
+            }
+            state.cursor_right();
+            state.update_selection();
+        } else {
+            state.clear_selection();
+            state.cursor_right();
+        }
     }
     if state.actions.triggered("nav.next_channel", &actx) {
+        state.clear_selection();
         state.next_channel();
     }
     if state.actions.triggered("nav.prev_channel", &actx) {
+        state.clear_selection();
         state.prev_channel();
     }
 
     // Page up/down
-    if state.actions.triggered("nav.page_up", &actx) {
-        for _ in 0..16 {
-            state.cursor_up();
+    if is_key_pressed(KeyCode::PageUp) {
+        if shift_held {
+            if !state.has_selection() {
+                state.start_selection();
+            }
+            for _ in 0..16 {
+                state.cursor_up();
+            }
+            state.update_selection();
+        } else {
+            state.clear_selection();
+            for _ in 0..16 {
+                state.cursor_up();
+            }
         }
     }
-    if state.actions.triggered("nav.page_down", &actx) {
-        for _ in 0..16 {
-            state.cursor_down();
+    if is_key_pressed(KeyCode::PageDown) {
+        if shift_held {
+            if !state.has_selection() {
+                state.start_selection();
+            }
+            for _ in 0..16 {
+                state.cursor_down();
+            }
+            state.update_selection();
+        } else {
+            state.clear_selection();
+            for _ in 0..16 {
+                state.cursor_down();
+            }
         }
     }
 
     // Home/End
-    if state.actions.triggered("nav.home", &actx) {
+    if is_key_pressed(KeyCode::Home) {
+        state.clear_selection();
         state.current_row = 0;
         state.scroll_row = 0;
     }
-    if state.actions.triggered("nav.end", &actx) {
+    if is_key_pressed(KeyCode::End) {
+        state.clear_selection();
         if let Some(pattern) = state.current_pattern() {
             state.current_row = pattern.length - 1;
         }
@@ -1014,23 +1152,14 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     // Instrument selection removed - [ and ] are now piano keys
     // Use the instrument list in Instruments view or channel strip +/- buttons instead
 
-    // Edit step
-    if state.actions.triggered("edit_step.decrease", &actx) {
-        state.edit_step = state.edit_step.saturating_sub(1);
-        state.set_status(&format!("Edit step: {}", state.edit_step), 1.0);
-    }
-    if state.actions.triggered("edit_step.increase", &actx) {
-        state.edit_step = (state.edit_step + 1).min(16);
-        state.set_status(&format!("Edit step: {}", state.edit_step), 1.0);
-    }
-
-    // Delete - still using direct key check since it conflicts with note entry context
+    // Delete - handles selection if present
     if is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace) {
-        state.delete_note();
+        state.delete_selection(); // This handles both single note and selection
     }
 
     // Note entry (only in Pattern view, when in edit mode and in note column)
-    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 0 {
+    // Skip if Ctrl/Cmd is held (for copy/paste shortcuts)
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 0 && !ctrl_held {
         // All piano keys: bottom row (Z to /) and top row (Q to ])
         // Note: Period is a piano key now, so we use Apostrophe for note-off
         let note_keys = [
@@ -1051,6 +1180,7 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
             if is_key_pressed(key) {
                 if let Some(pitch) = TrackerState::key_to_note(key, state.octave) {
                     state.enter_note(pitch);
+                    state.clear_selection(); // Clear selection after filling
                 }
             }
         }
@@ -1058,11 +1188,13 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         // Note off with backtick (apostrophe key) - period is now a piano key
         if is_key_pressed(KeyCode::Apostrophe) {
             state.enter_note_off();
+            state.clear_selection();
         }
     }
 
     // Effect entry (in Pattern view, edit mode, effect column = 3)
-    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 3 {
+    // Skip if Ctrl/Cmd is held
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 3 && !ctrl_held {
         // Effect letters: 0-9, A-F for standard effects, + our new ones (C, E, H, M, P, R)
         let effect_keys = [
             (KeyCode::Key0, '0'), (KeyCode::Key1, '1'), (KeyCode::Key2, '2'),
@@ -1083,7 +1215,8 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     }
 
     // Effect parameter entry (in Pattern view, edit mode, fx_param column = 4)
-    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 4 {
+    // Skip if Ctrl/Cmd is held
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 4 && !ctrl_held {
         // Hex digits 0-9, A-F for parameter entry
         let hex_keys = [
             (KeyCode::Key0, 0), (KeyCode::Key1, 1), (KeyCode::Key2, 2),
@@ -1108,7 +1241,8 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     }
 
     // In Instruments view, allow keyboard to preview sounds without entering notes
-    if state.view == TrackerView::Instruments {
+    // Skip if Ctrl/Cmd is held
+    if state.view == TrackerView::Instruments && !ctrl_held {
         // All piano keys: bottom row (Z to /) and top row (Q to ])
         let note_keys = [
             // Bottom row: Z S X D C V G B H N J M , L . ; /
