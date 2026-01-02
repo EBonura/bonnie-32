@@ -465,8 +465,8 @@ pub fn draw_modeler_viewport(
 
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
-            let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
-            let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
+            let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
+            let move_speed = if shift_held { 100.0 } else { base_speed };
             if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() {
                 if is_key_down(KeyCode::W) {
                     state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
@@ -904,10 +904,10 @@ fn apply_box_selection(
 
             if !selected.is_empty() {
                 let count = selected.len();
-                state.selection = ModelerSelection::Vertices(selected);
+                state.set_selection(ModelerSelection::Vertices(selected));
                 state.set_status(&format!("Selected {} vertex(es)", count), 0.5);
             } else if !add_to_selection {
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         SelectMode::Face => {
@@ -945,10 +945,10 @@ fn apply_box_selection(
 
             if !selected.is_empty() {
                 let count = selected.len();
-                state.selection = ModelerSelection::Faces(selected);
+                state.set_selection(ModelerSelection::Faces(selected));
                 state.set_status(&format!("Selected {} face(s)", count), 0.5);
             } else if !add_to_selection {
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         _ => {}
@@ -962,7 +962,6 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
 
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
     let select_color = RasterColor::new(100, 180, 255);  // Blue for selection
-    let vertex_normal = RasterColor::new(180, 180, 190); // Gray for unselected vertices
 
     // =========================================================================
     // Draw hovered vertex (if any) - orange dot
@@ -1114,36 +1113,6 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
             }
         }
     }
-
-    // =========================================================================
-    // Draw all vertices as small dots (only when nothing is hovered/selected, or when in vertex selection)
-    // This provides visual feedback of where vertices are
-    // =========================================================================
-    let show_all_verts = state.hovered_vertex.is_some() ||
-                         matches!(&state.selection, ModelerSelection::Vertices(_)) ||
-                         state.select_mode == SelectMode::Vertex;
-    if show_all_verts {
-        for (idx, vert) in mesh.vertices.iter().enumerate() {
-            // Skip if this vertex is already highlighted as hovered or selected
-            let is_hovered = state.hovered_vertex == Some(idx);
-            let is_selected = matches!(&state.selection, ModelerSelection::Vertices(v) if v.contains(&idx));
-            if is_hovered || is_selected {
-                continue;
-            }
-
-            if let Some((sx, sy)) = world_to_screen(
-                vert.pos,
-                camera.position,
-                camera.basis_x,
-                camera.basis_y,
-                camera.basis_z,
-                fb.width,
-                fb.height,
-            ) {
-                fb.draw_circle(sx as i32, sy as i32, 2, vertex_normal);
-            }
-        }
-    }
 }
 
 /// Handle mesh selection click
@@ -1190,7 +1159,8 @@ fn handle_mesh_selection_click(
                 let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
                                 || is_key_down(KeyCode::X);
                 if multi_select {
-                    // Toggle selection
+                    // Toggle selection - save undo first
+                    state.save_selection_undo();
                     if let ModelerSelection::Vertices(ref mut verts) = state.selection {
                         if let Some(pos) = verts.iter().position(|&v| v == idx) {
                             verts.remove(pos);
@@ -1201,11 +1171,11 @@ fn handle_mesh_selection_click(
                         state.selection = ModelerSelection::Vertices(vec![idx]);
                     }
                 } else {
-                    state.selection = ModelerSelection::Vertices(vec![idx]);
+                    state.set_selection(ModelerSelection::Vertices(vec![idx]));
                 }
             } else if !is_key_down(KeyCode::X) {
                 // Only clear selection if not holding X (multi-select mode)
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         SelectMode::Face => {
@@ -1243,6 +1213,8 @@ fn handle_mesh_selection_click(
                 let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
                                 || is_key_down(KeyCode::X);
                 if multi_select {
+                    // Toggle selection - save undo first
+                    state.save_selection_undo();
                     if let ModelerSelection::Faces(ref mut faces) = state.selection {
                         if let Some(pos) = faces.iter().position(|&f| f == idx) {
                             faces.remove(pos);
@@ -1253,11 +1225,11 @@ fn handle_mesh_selection_click(
                         state.selection = ModelerSelection::Faces(vec![idx]);
                     }
                 } else {
-                    state.selection = ModelerSelection::Faces(vec![idx]);
+                    state.set_selection(ModelerSelection::Faces(vec![idx]));
                 }
             } else if !is_key_down(KeyCode::X) {
                 // Only clear selection if not holding X (multi-select mode)
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         _ => {}
@@ -1486,7 +1458,8 @@ fn handle_hover_click(state: &mut ModelerState) {
     // Priority: vertex > edge > face
     if let Some(vert_idx) = state.hovered_vertex {
         if multi_select {
-            // Toggle vertex in selection
+            // Toggle vertex in selection - save undo first
+            state.save_selection_undo();
             match &mut state.selection {
                 ModelerSelection::Vertices(verts) => {
                     if let Some(pos) = verts.iter().position(|&v| v == vert_idx) {
@@ -1500,7 +1473,7 @@ fn handle_hover_click(state: &mut ModelerState) {
                 }
             }
         } else {
-            state.selection = ModelerSelection::Vertices(vec![vert_idx]);
+            state.set_selection(ModelerSelection::Vertices(vec![vert_idx]));
         }
         state.select_mode = SelectMode::Vertex;
         return;
@@ -1508,6 +1481,8 @@ fn handle_hover_click(state: &mut ModelerState) {
 
     if let Some((v0, v1)) = state.hovered_edge {
         if multi_select {
+            // Toggle edge in selection - save undo first
+            state.save_selection_undo();
             match &mut state.selection {
                 ModelerSelection::Edges(edges) => {
                     if let Some(pos) = edges.iter().position(|e| *e == (v0, v1) || *e == (v1, v0)) {
@@ -1521,7 +1496,7 @@ fn handle_hover_click(state: &mut ModelerState) {
                 }
             }
         } else {
-            state.selection = ModelerSelection::Edges(vec![(v0, v1)]);
+            state.set_selection(ModelerSelection::Edges(vec![(v0, v1)]));
         }
         state.select_mode = SelectMode::Edge;
         return;
@@ -1529,6 +1504,8 @@ fn handle_hover_click(state: &mut ModelerState) {
 
     if let Some(face_idx) = state.hovered_face {
         if multi_select {
+            // Toggle face in selection - save undo first
+            state.save_selection_undo();
             match &mut state.selection {
                 ModelerSelection::Faces(faces) => {
                     if let Some(pos) = faces.iter().position(|&f| f == face_idx) {
@@ -1542,7 +1519,7 @@ fn handle_hover_click(state: &mut ModelerState) {
                 }
             }
         } else {
-            state.selection = ModelerSelection::Faces(vec![face_idx]);
+            state.set_selection(ModelerSelection::Faces(vec![face_idx]));
         }
         state.select_mode = SelectMode::Face;
         return;
@@ -1550,7 +1527,7 @@ fn handle_hover_click(state: &mut ModelerState) {
 
     // Clicked on nothing - clear selection (unless holding X)
     if !is_key_down(KeyCode::X) {
-        state.selection = ModelerSelection::None;
+        state.set_selection(ModelerSelection::None);
     }
 }
 
