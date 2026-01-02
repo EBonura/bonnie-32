@@ -1,4 +1,5 @@
 clockwork.obj
 crawler.obj
 ghost.obj
+ps1_figure.obj
 warrior.obj
