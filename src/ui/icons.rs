@@ -98,6 +98,7 @@ pub mod icon {
 
     // Geometry operations
     pub const UNFOLD_VERTICAL: char = '\u{e1a0}'; // unfold-vertical (extrude)
+    pub const SLASH: char = '\u{e261}';           // slash (diagonal wall)
 
     // Camera modes
     pub const EYE: char = '\u{e0ba}';             // Free camera (eye)

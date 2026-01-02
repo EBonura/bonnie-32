@@ -1,8 +1,8 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::{Level, ObjectType, SpawnPointType, LevelObject};
-use crate::rasterizer::{Camera, Vec3, Texture, RasterSettings};
+use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection};
+use crate::rasterizer::{Camera, Vec3, Vec2, Texture, RasterSettings, Color, BlendMode};
 use super::texture_pack::TexturePack;
 
 /// TRLE grid constraints
@@ -10,8 +10,8 @@ use super::texture_pack::TexturePack;
 pub const SECTOR_SIZE: f32 = 1024.0;
 /// Height subdivision ("click") in world units (Y axis)
 pub const CLICK_HEIGHT: f32 = 256.0;
-/// Default ceiling height (2x sector size)
-pub const CEILING_HEIGHT: f32 = 2048.0;
+/// Default ceiling height (3x sector size = 3 meters)
+pub const CEILING_HEIGHT: f32 = 3072.0;
 
 /// Camera mode for 3D viewport
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +26,7 @@ pub enum EditorTool {
     Select,
     DrawFloor,
     DrawWall,
+    DrawDiagonalWall,
     DrawCeiling,
     PlaceObject,
 }
@@ -39,6 +40,15 @@ pub enum GridViewMode {
     Side,   // Y-Z plane (looking along -X)
 }
 
+/// Which triangle within a horizontal face is selected for editing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TriangleSelection {
+    #[default]
+    Both,   // Edit both triangles (linked behavior)
+    Tri1,   // Edit only triangle 1
+    Tri2,   // Edit only triangle 2
+}
+
 /// Which face within a sector is selected
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectorFace {
@@ -48,6 +58,8 @@ pub enum SectorFace {
     WallEast(usize),
     WallSouth(usize),
     WallWest(usize),
+    WallNwSe(usize),   // Diagonal wall NW to SE corner
+    WallNeSw(usize),   // Diagonal wall NE to SW corner
 }
 
 /// What is currently selected in the editor
@@ -77,6 +89,36 @@ pub enum Selection {
 pub struct SelectionSnapshot {
     pub selection: Selection,
     pub multi_selection: Vec<Selection>,
+}
+
+/// Face properties for clipboard copy/paste (excludes heights)
+#[derive(Debug, Clone)]
+pub enum FaceClipboard {
+    /// Horizontal face properties (floor/ceiling)
+    Horizontal {
+        split_direction: SplitDirection,
+        texture: TextureRef,
+        uv: Option<[Vec2; 4]>,
+        colors: [Color; 4],
+        texture_2: Option<TextureRef>,
+        uv_2: Option<[Vec2; 4]>,
+        colors_2: Option<[Color; 4]>,
+        walkable: bool,
+        blend_mode: BlendMode,
+        normal_mode: FaceNormalMode,
+        black_transparent: bool,
+    },
+    /// Vertical face properties (wall)
+    Vertical {
+        texture: TextureRef,
+        uv: Option<[Vec2; 4]>,
+        solid: bool,
+        blend_mode: BlendMode,
+        colors: [Color; 4],
+        normal_mode: FaceNormalMode,
+        black_transparent: bool,
+        uv_projection: UvProjection,
+    },
 }
 
 /// Unified undo event - either a level change or a selection change
@@ -145,6 +187,9 @@ pub struct EditorState {
 
     /// Selected texture reference (pack + name)
     pub selected_texture: crate::world::TextureRef,
+
+    /// Which triangle is selected for texture editing (for horizontal faces)
+    pub selected_triangle: TriangleSelection,
 
     /// 3D viewport camera
     pub camera_3d: Camera,
@@ -308,6 +353,9 @@ pub struct EditorState {
 
     /// Clipboard for copy/paste operations (stores copied object)
     pub clipboard: Option<LevelObject>,
+
+    /// Face clipboard for copy/paste face properties (texture, UV, colors, etc.)
+    pub face_clipboard: Option<FaceClipboard>,
 }
 
 impl EditorState {
@@ -351,6 +399,7 @@ impl EditorState {
             selection_rect_end: None,
             current_room: 0,
             selected_texture,
+            selected_triangle: TriangleSelection::Both,
             camera_3d,
             camera_mode: CameraMode::Free,
             orbit_target,
@@ -428,6 +477,7 @@ impl EditorState {
             player_prop_editing: None,
             player_prop_buffer: String::new(),
             clipboard: None,
+            face_clipboard: None,
         }
     }
 

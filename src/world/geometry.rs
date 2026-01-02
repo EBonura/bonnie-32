@@ -1032,28 +1032,91 @@ pub enum UvProjection {
     Projected,  // Project UVs as if the face were flat (uniform texture across face)
 }
 
+/// Direction of the diagonal split for floor/ceiling triangulation
+/// A quad is always split into 2 triangles - this controls which diagonal is used
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitDirection {
+    #[default]
+    NwSe,   // Split along NW-SE diagonal: Triangle1 = NW,NE,SE, Triangle2 = NW,SE,SW
+    NeSw,   // Split along NE-SW diagonal: Triangle1 = NW,NE,SW, Triangle2 = NE,SE,SW
+}
+
+impl SplitDirection {
+    /// Cycle to the next split direction
+    pub fn next(self) -> Self {
+        match self {
+            SplitDirection::NwSe => SplitDirection::NeSw,
+            SplitDirection::NeSw => SplitDirection::NwSe,
+        }
+    }
+
+    /// Human-readable label
+    pub fn label(&self) -> &'static str {
+        match self {
+            SplitDirection::NwSe => "NW-SE",
+            SplitDirection::NeSw => "NE-SW",
+        }
+    }
+
+    /// Get the corner indices for triangle 1
+    /// Returns [corner_a, corner_b, corner_c] in winding order
+    pub fn triangle_1_corners(&self) -> [usize; 3] {
+        match self {
+            SplitDirection::NwSe => [0, 1, 2], // NW, NE, SE
+            SplitDirection::NeSw => [0, 1, 3], // NW, NE, SW
+        }
+    }
+
+    /// Get the corner indices for triangle 2
+    /// Returns [corner_a, corner_b, corner_c] in winding order
+    pub fn triangle_2_corners(&self) -> [usize; 3] {
+        match self {
+            SplitDirection::NwSe => [0, 2, 3], // NW, SE, SW
+            SplitDirection::NeSw => [1, 2, 3], // NE, SE, SW
+        }
+    }
+}
+
 /// A horizontal face (floor or ceiling)
+/// Consists of 2 triangles that share 4 corner heights but can have different textures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizontalFace {
     /// Corner heights [NW, NE, SE, SW] - allows sloped surfaces
     /// NW = (-X, -Z), NE = (+X, -Z), SE = (+X, +Z), SW = (-X, +Z)
     pub heights: [f32; 4],
-    /// Texture reference
+
+    /// Direction of diagonal split (which diagonal divides the quad into 2 triangles)
+    #[serde(default)]
+    pub split_direction: SplitDirection,
+
+    // === Triangle 1 properties (primary) ===
+    /// Texture reference for triangle 1 (and triangle 2 if texture_2 is None)
     pub texture: TextureRef,
-    /// Custom UV coordinates (None = use default 0,0 to 1,1)
+    /// Custom UV coordinates for triangle 1 (None = use default 0,0 to 1,1)
     #[serde(default)]
     pub uv: Option<[Vec2; 4]>,
+    /// PS1-style vertex colors for texture modulation [NW, NE, SE, SW]
+    #[serde(default = "default_neutral_colors_4")]
+    pub colors: [Color; 4],
+
+    // === Triangle 2 properties (optional overrides) ===
+    /// Texture for triangle 2 (None = use same as triangle 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_2: Option<TextureRef>,
+    /// UV coordinates for triangle 2 (None = use same as triangle 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_2: Option<[Vec2; 4]>,
+    /// Vertex colors for triangle 2 (None = use same as triangle 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colors_2: Option<[Color; 4]>,
+
+    // === Shared properties ===
     /// Is this surface walkable? (for collision/AI)
     #[serde(default = "default_true")]
     pub walkable: bool,
     /// Transparency/blend mode
     #[serde(default)]
     pub blend_mode: BlendMode,
-    /// PS1-style vertex colors for texture modulation [NW, NE, SE, SW]
-    /// 128 = neutral (no tint), <128 = darken, >128 = brighten
-    /// Per-vertex colors enable Gouraud-style color gradients across the face
-    #[serde(default = "default_neutral_colors_4")]
-    pub colors: [Color; 4],
     /// Normal rendering mode (front, both, or back)
     #[serde(default)]
     pub normal_mode: FaceNormalMode,
@@ -1067,11 +1130,15 @@ impl HorizontalFace {
     pub fn flat(height: f32, texture: TextureRef) -> Self {
         Self {
             heights: [height, height, height, height],
+            split_direction: SplitDirection::NwSe,
             texture,
             uv: None,
+            colors: [Color::NEUTRAL; 4],
+            texture_2: None,
+            uv_2: None,
+            colors_2: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
-            colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
         }
@@ -1081,15 +1148,40 @@ impl HorizontalFace {
     pub fn sloped(heights: [f32; 4], texture: TextureRef) -> Self {
         Self {
             heights,
+            split_direction: SplitDirection::NwSe,
             texture,
             uv: None,
+            colors: [Color::NEUTRAL; 4],
+            texture_2: None,
+            uv_2: None,
+            colors_2: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
-            colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
         }
     }
+
+    /// Get effective texture for triangle 2 (returns texture_2 or falls back to texture)
+    pub fn get_texture_2(&self) -> &TextureRef {
+        self.texture_2.as_ref().unwrap_or(&self.texture)
+    }
+
+    /// Get effective UV for triangle 2 (returns uv_2 or falls back to uv)
+    pub fn get_uv_2(&self) -> Option<&[Vec2; 4]> {
+        self.uv_2.as_ref().or(self.uv.as_ref())
+    }
+
+    /// Get effective colors for triangle 2 (returns colors_2 or falls back to colors)
+    pub fn get_colors_2(&self) -> &[Color; 4] {
+        self.colors_2.as_ref().unwrap_or(&self.colors)
+    }
+
+    /// Check if triangle 2 has different properties than triangle 1
+    pub fn has_split_textures(&self) -> bool {
+        self.texture_2.is_some() || self.uv_2.is_some() || self.colors_2.is_some()
+    }
+
 
     /// Set all vertex colors to the same value (uniform tint)
     pub fn set_uniform_color(&mut self, color: Color) {
@@ -1122,37 +1214,47 @@ impl HorizontalFace {
     /// Heights layout: [NW, NE, SE, SW] = [0, 1, 2, 3]
     /// NW = (u=0, v=0), NE = (u=1, v=0), SE = (u=1, v=1), SW = (u=0, v=1)
     ///
-    /// The quad is split into two triangles along the NW-SE diagonal:
-    /// - Triangle 1 (upper-right): NW, NE, SE (u + v <= 1 from NW perspective, or u >= v)
-    /// - Triangle 2 (lower-left): NW, SE, SW (u + v > 1 from NW perspective, or u < v)
-    ///
-    /// We use barycentric interpolation within each triangle to get the exact height.
+    /// The quad is split into two triangles based on split_direction:
+    /// - NW-SE split: Triangle 1 = NW,NE,SE (u >= v), Triangle 2 = NW,SE,SW (u < v)
+    /// - NE-SW split: Triangle 1 = NW,NE,SW (u + v <= 1), Triangle 2 = NE,SE,SW (u + v > 1)
     pub fn interpolate_height(&self, u: f32, v: f32) -> f32 {
         // Clamp to valid range
         let u = u.clamp(0.0, 1.0);
         let v = v.clamp(0.0, 1.0);
 
-        // Determine which triangle we're in based on the NW-SE diagonal
-        // The diagonal goes from (0,0) to (1,1), so points where u >= v are in the upper-right triangle
-        if u >= v {
-            // Upper-right triangle: NW (0,0), NE (1,0), SE (1,1)
-            // Using barycentric coordinates for triangle NW-NE-SE:
-            // P = NW + u*(NE-NW) + v*(SE-NE)
-            // Height = h_NW + u*(h_NE - h_NW) + v*(h_SE - h_NE)
-            let h_nw = self.heights[0];
-            let h_ne = self.heights[1];
-            let h_se = self.heights[2];
-            h_nw + u * (h_ne - h_nw) + v * (h_se - h_ne)
-        } else {
-            // Lower-left triangle: NW (0,0), SE (1,1), SW (0,1)
-            // Using barycentric coordinates for triangle NW-SE-SW:
-            // We can parameterize as: P = NW + u*(SE-SW) + v*(SW-NW)
-            // But it's easier to think of it as:
-            // Height = h_NW + u*(h_SE - h_SW) + v*(h_SW - h_NW)
-            let h_nw = self.heights[0];
-            let h_se = self.heights[2];
-            let h_sw = self.heights[3];
-            h_nw + u * (h_se - h_sw) + v * (h_sw - h_nw)
+        match self.split_direction {
+            SplitDirection::NwSe => {
+                // Split along NW-SE diagonal
+                if u >= v {
+                    // Triangle 1: NW, NE, SE
+                    let h_nw = self.heights[0];
+                    let h_ne = self.heights[1];
+                    let h_se = self.heights[2];
+                    h_nw + u * (h_ne - h_nw) + v * (h_se - h_ne)
+                } else {
+                    // Triangle 2: NW, SE, SW
+                    let h_nw = self.heights[0];
+                    let h_se = self.heights[2];
+                    let h_sw = self.heights[3];
+                    h_nw + u * (h_se - h_sw) + v * (h_sw - h_nw)
+                }
+            }
+            SplitDirection::NeSw => {
+                // Split along NE-SW diagonal
+                if u + v <= 1.0 {
+                    // Triangle 1: NW, NE, SW
+                    let h_nw = self.heights[0];
+                    let h_ne = self.heights[1];
+                    let h_sw = self.heights[3];
+                    h_nw + u * (h_ne - h_nw) + v * (h_sw - h_nw)
+                } else {
+                    // Triangle 2: NE, SE, SW
+                    let h_ne = self.heights[1];
+                    let h_se = self.heights[2];
+                    let h_sw = self.heights[3];
+                    h_sw + u * (h_se - h_sw) + (1.0 - v) * (h_ne - h_se)
+                }
+            }
         }
     }
 
@@ -1343,6 +1445,12 @@ pub struct Sector {
     /// Walls on west edge (-X)
     #[serde(default)]
     pub walls_west: Vec<VerticalFace>,
+    /// Diagonal walls from NW corner to SE corner
+    #[serde(default)]
+    pub walls_nwse: Vec<VerticalFace>,
+    /// Diagonal walls from NE corner to SW corner
+    #[serde(default)]
+    pub walls_nesw: Vec<VerticalFace>,
 }
 
 impl Sector {
@@ -1376,6 +1484,8 @@ impl Sector {
             || !self.walls_east.is_empty()
             || !self.walls_south.is_empty()
             || !self.walls_west.is_empty()
+            || !self.walls_nwse.is_empty()
+            || !self.walls_nesw.is_empty()
     }
 
     /// Get all walls on a given edge
@@ -1436,14 +1546,19 @@ impl Sector {
 
     /// Calculate where a new wall should be placed on this edge.
     ///
-    /// Simplified logic (max 2 walls per edge):
+    /// Logic (max 3 walls per edge):
     /// - 0 walls: fill floor-to-ceiling with slanted heights
-    /// - 1 wall: fill the remaining gap (floor-to-wall or wall-to-ceiling)
-    /// - 2 walls: fully covered, return None
+    /// - 1-2 walls: fill the gap at mouse_y position (or largest gap if mouse_y is None)
+    /// - 3 walls: fully covered, return None
+    ///
+    /// `mouse_y`: Optional room-relative Y coordinate to select which gap to fill.
     ///
     /// Returns corner heights [bottom-left, bottom-right, top-right, top-left] for the new wall,
     /// or None if edge is fully covered.
-    pub fn next_wall_position(&self, direction: Direction, fallback_bottom: f32, fallback_top: f32) -> Option<[f32; 4]> {
+    pub fn next_wall_position(&self, direction: Direction, fallback_bottom: f32, fallback_top: f32, mouse_y: Option<f32>) -> Option<[f32; 4]> {
+        // Minimum gap size to consider fillable (one click = SECTOR_SIZE / 4)
+        const MIN_GAP: f32 = 256.0;
+
         // Get individual corner heights for floor and ceiling (preserves slant)
         // edge_heights returns (left, right) when looking from INSIDE the sector,
         // but wall heights are [BL, BR, TR, TL] from the WALL's perspective (facing outward).
@@ -1457,41 +1572,202 @@ impl Sector {
 
         let walls = self.walls(direction);
 
-        match walls.len() {
-            0 => {
-                // No walls - fill from floor to ceiling, preserving slant
-                // [bottom-left, bottom-right, top-right, top-left]
-                Some([floor_left, floor_right, ceiling_right, ceiling_left])
-            }
-            1 => {
-                // One wall exists - fill the gap
-                let wall = &walls[0];
-                // Wall heights: [bottom-left, bottom-right, top-right, top-left]
-                let wall_bottom_left = wall.heights[0];
-                let wall_bottom_right = wall.heights[1];
-                let wall_top_right = wall.heights[2];
-                let wall_top_left = wall.heights[3];
+        if walls.len() >= 3 {
+            // Max 3 walls per edge
+            return None;
+        }
 
-                // Check if gap is at bottom (wall doesn't reach floor)
-                let gap_at_bottom = wall_bottom_left > floor_left + 1.0 || wall_bottom_right > floor_right + 1.0;
-                // Check if gap is at top (wall doesn't reach ceiling)
-                let gap_at_top = wall_top_left < ceiling_left - 1.0 || wall_top_right < ceiling_right - 1.0;
+        if walls.is_empty() {
+            // No walls - fill from floor to ceiling, preserving slant
+            // [bottom-left, bottom-right, top-right, top-left]
+            return Some([floor_left, floor_right, ceiling_right, ceiling_left]);
+        }
 
-                if gap_at_bottom {
-                    // Fill from floor to bottom of existing wall
-                    Some([floor_left, floor_right, wall_bottom_right, wall_bottom_left])
-                } else if gap_at_top {
-                    // Fill from top of existing wall to ceiling
-                    Some([wall_top_left, wall_top_right, ceiling_right, ceiling_left])
-                } else {
-                    // Wall already covers floor to ceiling
-                    None
-                }
+        // Sort walls by their bottom height to find gaps
+        let mut sorted_walls: Vec<_> = walls.iter().collect();
+        sorted_walls.sort_by(|a, b| {
+            let a_bottom = a.heights[0].min(a.heights[1]);
+            let b_bottom = b.heights[0].min(b.heights[1]);
+            a_bottom.partial_cmp(&b_bottom).unwrap()
+        });
+
+        // Collect all gaps: (heights, bottom_y, top_y)
+        let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
+
+        // Check gap at bottom (floor to lowest wall)
+        let lowest = sorted_walls[0];
+        let bottom_gap_bottom = floor_left.min(floor_right);
+        let bottom_gap_top = lowest.heights[0].min(lowest.heights[1]);
+        let bottom_gap_size = bottom_gap_top - bottom_gap_bottom;
+        if bottom_gap_size > MIN_GAP {
+            gaps.push((
+                [floor_left, floor_right, lowest.heights[1], lowest.heights[0]],
+                bottom_gap_bottom,
+                bottom_gap_top
+            ));
+        }
+
+        // Check gaps between walls
+        for i in 0..sorted_walls.len() - 1 {
+            let lower = sorted_walls[i];
+            let upper = sorted_walls[i + 1];
+            // Gap between top of lower wall and bottom of upper wall
+            let gap_bottom = lower.heights[2].max(lower.heights[3]);
+            let gap_top = upper.heights[0].min(upper.heights[1]);
+            let gap_size = gap_top - gap_bottom;
+            if gap_size > MIN_GAP {
+                gaps.push((
+                    [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
+                    gap_bottom,
+                    gap_top
+                ));
             }
-            _ => {
-                // 2+ walls - fully covered
-                None
+        }
+
+        // Check gap at top (highest wall to ceiling)
+        let highest = sorted_walls.last().unwrap();
+        let top_gap_bottom = highest.heights[2].max(highest.heights[3]);
+        let top_gap_top = ceiling_left.max(ceiling_right);
+        let top_gap_size = top_gap_top - top_gap_bottom;
+        if top_gap_size > MIN_GAP {
+            gaps.push((
+                [highest.heights[3], highest.heights[2], ceiling_right, ceiling_left],
+                top_gap_bottom,
+                top_gap_top
+            ));
+        }
+
+        if gaps.is_empty() {
+            return None;
+        }
+
+        // Select gap based on mouse_y position
+        if let Some(y) = mouse_y {
+            // Find gap containing mouse_y, or closest to it
+            let best = gaps.into_iter()
+                .min_by(|a, b| {
+                    // Distance from mouse_y to gap center
+                    let a_center = (a.1 + a.2) / 2.0;
+                    let b_center = (b.1 + b.2) / 2.0;
+                    let a_dist = (y - a_center).abs();
+                    let b_dist = (y - b_center).abs();
+                    a_dist.partial_cmp(&b_dist).unwrap()
+                });
+            best.map(|(heights, _, _)| heights)
+        } else {
+            // No mouse position - return largest gap
+            gaps.into_iter()
+                .max_by(|a, b| {
+                    let a_size = a.2 - a.1;
+                    let b_size = b.2 - b.1;
+                    a_size.partial_cmp(&b_size).unwrap()
+                })
+                .map(|(heights, _, _)| heights)
+        }
+    }
+
+    /// Calculate where a new diagonal wall should be placed.
+    ///
+    /// For diagonal walls, corners are:
+    /// - NW-SE: corner1 = NW (index 0), corner2 = SE (index 2)
+    /// - NE-SW: corner1 = NE (index 1), corner2 = SW (index 3)
+    ///
+    /// Returns corner heights [corner1_bot, corner2_bot, corner2_top, corner1_top] for the new wall,
+    /// or None if the diagonal is fully covered.
+    pub fn next_diagonal_wall_position(&self, is_nwse: bool, fallback_bottom: f32, fallback_top: f32, mouse_y: Option<f32>) -> Option<[f32; 4]> {
+        const MIN_GAP: f32 = 256.0;
+
+        // Get floor/ceiling heights at the diagonal corners
+        let (corner1_idx, corner2_idx) = if is_nwse {
+            (0, 2) // NW, SE
+        } else {
+            (1, 3) // NE, SW
+        };
+
+        let floor_c1 = self.floor.as_ref().map(|f| f.heights[corner1_idx]).unwrap_or(fallback_bottom);
+        let floor_c2 = self.floor.as_ref().map(|f| f.heights[corner2_idx]).unwrap_or(fallback_bottom);
+        let ceiling_c1 = self.ceiling.as_ref().map(|c| c.heights[corner1_idx]).unwrap_or(fallback_top);
+        let ceiling_c2 = self.ceiling.as_ref().map(|c| c.heights[corner2_idx]).unwrap_or(fallback_top);
+
+        let walls = if is_nwse { &self.walls_nwse } else { &self.walls_nesw };
+
+        if walls.len() >= 3 {
+            return None;
+        }
+
+        if walls.is_empty() {
+            // No walls - fill from floor to ceiling
+            // [corner1_bot, corner2_bot, corner2_top, corner1_top]
+            return Some([floor_c1, floor_c2, ceiling_c2, ceiling_c1]);
+        }
+
+        // Sort walls by bottom height
+        let mut sorted_walls: Vec<_> = walls.iter().collect();
+        sorted_walls.sort_by(|a, b| {
+            let a_bottom = a.heights[0].min(a.heights[1]);
+            let b_bottom = b.heights[0].min(b.heights[1]);
+            a_bottom.partial_cmp(&b_bottom).unwrap()
+        });
+
+        // Collect gaps: (heights, bottom_y, top_y)
+        let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
+
+        // Gap at bottom (floor to lowest wall)
+        let lowest = sorted_walls[0];
+        let bottom_gap_bottom = floor_c1.min(floor_c2);
+        let bottom_gap_top = lowest.heights[0].min(lowest.heights[1]);
+        if bottom_gap_top - bottom_gap_bottom > MIN_GAP {
+            gaps.push((
+                [floor_c1, floor_c2, lowest.heights[1], lowest.heights[0]],
+                bottom_gap_bottom,
+                bottom_gap_top
+            ));
+        }
+
+        // Gaps between walls
+        for i in 0..sorted_walls.len() - 1 {
+            let lower = sorted_walls[i];
+            let upper = sorted_walls[i + 1];
+            let gap_bottom = lower.heights[2].max(lower.heights[3]);
+            let gap_top = upper.heights[0].min(upper.heights[1]);
+            if gap_top - gap_bottom > MIN_GAP {
+                gaps.push((
+                    [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
+                    gap_bottom,
+                    gap_top
+                ));
             }
+        }
+
+        // Gap at top (highest wall to ceiling)
+        let highest = sorted_walls.last().unwrap();
+        let top_gap_bottom = highest.heights[2].max(highest.heights[3]);
+        let top_gap_top = ceiling_c1.max(ceiling_c2);
+        if top_gap_top - top_gap_bottom > MIN_GAP {
+            gaps.push((
+                [highest.heights[3], highest.heights[2], ceiling_c2, ceiling_c1],
+                top_gap_bottom,
+                top_gap_top
+            ));
+        }
+
+        if gaps.is_empty() {
+            return None;
+        }
+
+        // Select gap based on mouse_y
+        if let Some(y) = mouse_y {
+            gaps.into_iter()
+                .min_by(|a, b| {
+                    let a_center = (a.1 + a.2) / 2.0;
+                    let b_center = (b.1 + b.2) / 2.0;
+                    (y - a_center).abs().partial_cmp(&(y - b_center).abs()).unwrap()
+                })
+                .map(|(heights, _, _)| heights)
+        } else {
+            gaps.into_iter()
+                .max_by(|a, b| (a.2 - a.1).partial_cmp(&(b.2 - b.1)).unwrap())
+                .map(|(heights, _, _)| heights)
         }
     }
 
@@ -2126,6 +2402,19 @@ impl Room {
                             self.bounds.expand(Vec3::new(base_x, h, base_z));
                         }
                     }
+                    // Diagonal walls go corner-to-corner, so expand for both corners
+                    for wall in &sector.walls_nwse {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x, h, base_z)); // NW corner
+                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z + SECTOR_SIZE)); // SE corner
+                        }
+                    }
+                    for wall in &sector.walls_nesw {
+                        for &h in &wall.heights {
+                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z)); // NE corner
+                            self.bounds.expand(Vec3::new(base_x, h, base_z + SECTOR_SIZE)); // SW corner
+                        }
+                    }
                 }
             }
         }
@@ -2331,6 +2620,13 @@ impl Room {
             for wall in &sector.walls_west {
                 self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, Direction::West, &resolve_texture);
             }
+            // Diagonal walls
+            for wall in &sector.walls_nwse {
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, true, &resolve_texture);
+            }
+            for wall in &sector.walls_nesw {
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, false, &resolve_texture);
+            }
         }
 
         (vertices, faces)
@@ -2359,9 +2655,35 @@ impl Room {
             Vec3::new(base_x, self.position.y + face.heights[3], base_z + SECTOR_SIZE),           // SW
         ];
 
-        // Calculate normal from cross product
-        // For floor (facing up): use edge2 x edge1 to get +Y normal
-        // For ceiling (facing down): use edge1 x edge2 to get -Y normal
+        // Default UVs for triangle 1
+        let uvs_1 = face.uv.unwrap_or([
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(0.0, 1.0),
+        ]);
+
+        // UVs for triangle 2 (use override or fall back to triangle 1's UVs)
+        let uvs_2 = face.get_uv_2().copied().unwrap_or(uvs_1);
+
+        // Colors for each triangle
+        let colors_1 = &face.colors;
+        let colors_2 = face.get_colors_2();
+
+        // Texture IDs for each triangle
+        let texture_id_1 = resolve_texture(&face.texture).unwrap_or(0);
+        let texture_id_2 = resolve_texture(face.get_texture_2()).unwrap_or(0);
+
+        // Handle normal mode: Front, Back, or Both
+        let render_front = face.normal_mode != FaceNormalMode::Back;
+        let render_back = face.normal_mode != FaceNormalMode::Front;
+
+        // Get corner indices for each triangle based on split direction
+        let split = face.split_direction;
+        let tri1_corners = split.triangle_1_corners();
+        let tri2_corners = split.triangle_2_corners();
+
+        // Calculate normal from cross product (using first triangle's edges)
         let edge1 = corners[1] - corners[0]; // NW -> NE (along +X)
         let edge2 = corners[3] - corners[0]; // NW -> SW (along +Z)
         let front_normal = if is_floor {
@@ -2369,52 +2691,44 @@ impl Room {
         } else {
             edge1.cross(edge2).normalize() // +X x +Z = -Y (down)
         };
+        let back_normal = front_normal.scale(-1.0);
 
-        // Default UVs
-        let uvs = face.uv.unwrap_or([
-            Vec2::new(0.0, 0.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(1.0, 1.0),
-            Vec2::new(0.0, 1.0),
-        ]);
-
-        let texture_id = resolve_texture(&face.texture).unwrap_or(0);
-
-        // Handle normal mode: Front, Back, or Both
-        let render_front = face.normal_mode != FaceNormalMode::Back;
-        let render_back = face.normal_mode != FaceNormalMode::Front;
-
-        // Add front-facing face
-        if render_front {
+        // Helper to add a single triangle
+        let add_triangle = |vertices: &mut Vec<Vertex>, faces: &mut Vec<RasterFace>,
+                           c: [usize; 3], uvs: &[Vec2; 4], colors: &[Color; 4],
+                           normal: Vec3, texture_id: usize, flip_winding: bool| {
             let base_idx = vertices.len();
-            for i in 0..4 {
-                vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, face.colors[i]));
-            }
-            // Winding order: floor = CCW from above, ceiling = CW from above (so it faces down)
-            if is_floor {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(face.black_transparent));
+            vertices.push(Vertex::with_color(corners[c[0]], uvs[c[0]], normal, colors[c[0]]));
+            vertices.push(Vertex::with_color(corners[c[1]], uvs[c[1]], normal, colors[c[1]]));
+            vertices.push(Vertex::with_color(corners[c[2]], uvs[c[2]], normal, colors[c[2]]));
+
+            if flip_winding {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id)
+                    .with_black_transparent(face.black_transparent));
             } else {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(face.black_transparent));
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id)
+                    .with_black_transparent(face.black_transparent));
             }
+        };
+
+        // Render triangle 1
+        if render_front {
+            let flip = !is_floor; // Ceilings need flipped winding
+            add_triangle(vertices, faces, tri1_corners, &uvs_1, colors_1, front_normal, texture_id_1, flip);
+        }
+        if render_back {
+            let flip = is_floor; // Back faces flip the winding
+            add_triangle(vertices, faces, tri1_corners, &uvs_1, colors_1, back_normal, texture_id_1, flip);
         }
 
-        // Add back-facing face (flipped normal and winding)
+        // Render triangle 2
+        if render_front {
+            let flip = !is_floor;
+            add_triangle(vertices, faces, tri2_corners, &uvs_2, colors_2, front_normal, texture_id_2, flip);
+        }
         if render_back {
-            let base_idx = vertices.len();
-            let back_normal = front_normal.scale(-1.0);
-            for i in 0..4 {
-                vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, face.colors[i]));
-            }
-            // Reverse winding order for back face
-            if is_floor {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-            } else {
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(face.black_transparent));
-                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(face.black_transparent));
-            }
+            let flip = is_floor;
+            add_triangle(vertices, faces, tri2_corners, &uvs_2, colors_2, back_normal, texture_id_2, flip);
         }
     }
 
@@ -2534,6 +2848,116 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
             }
             // Two triangles for the quad (CCW winding when viewed from inside room)
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+        }
+
+        // Add back-facing face (flipped normal and winding)
+        if render_back {
+            let base_idx = vertices.len();
+            let back_normal = front_normal.scale(-1.0);
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, wall.colors[i]));
+            }
+            // Reverse winding order for back face
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
+        }
+    }
+
+    /// Helper to add a diagonal wall to render data
+    /// is_nwse: true for NW-SE diagonal (corners 0 and 2), false for NE-SW diagonal (corners 1 and 3)
+    fn add_diagonal_wall_to_render_data<F>(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        faces: &mut Vec<RasterFace>,
+        wall: &VerticalFace,
+        base_x: f32,
+        base_z: f32,
+        is_nwse: bool,
+        resolve_texture: &F,
+    )
+    where
+        F: Fn(&TextureRef) -> Option<usize>,
+    {
+        // Heights are room-relative, so add room.position.y for world-space rendering
+        let y_offset = self.position.y;
+
+        // Diagonal walls span corner-to-corner
+        // wall.heights = [corner1_bottom, corner2_bottom, corner2_top, corner1_top]
+        // Vertex order is reversed from cardinal walls so front face points INTO the room
+        let (corners, front_normal) = if is_nwse {
+            // NW-SE diagonal: wall cuts off SW corner, front faces NE (into room)
+            // Corners: SE (bottom), NW (bottom), NW (top), SE (top) - reversed winding
+            let corners = [
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[1], base_z + SECTOR_SIZE),   // SE bottom
+                Vec3::new(base_x, y_offset + wall.heights[0], base_z),                               // NW bottom
+                Vec3::new(base_x, y_offset + wall.heights[3], base_z),                               // NW top
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[2], base_z + SECTOR_SIZE),   // SE top
+            ];
+            // Normal points NE (into room): (n, 0, -n)
+            let n = 1.0 / (2.0_f32).sqrt();
+            (corners, Vec3::new(n, 0.0, -n))
+        } else {
+            // NE-SW diagonal: wall cuts off NW corner, front faces SE (into room)
+            // Corners: SW (bottom), NE (bottom), NE (top), SW (top) - reversed winding
+            let corners = [
+                Vec3::new(base_x, y_offset + wall.heights[1], base_z + SECTOR_SIZE),                 // SW bottom
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[0], base_z),                 // NE bottom
+                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[3], base_z),                 // NE top
+                Vec3::new(base_x, y_offset + wall.heights[2], base_z + SECTOR_SIZE),                 // SW top
+            ];
+            // Normal points SE (into room): (n, 0, n)
+            let n = 1.0 / (2.0_f32).sqrt();
+            (corners, Vec3::new(n, 0.0, n))
+        };
+
+        // Calculate UVs based on projection mode
+        let uvs = if wall.uv_projection == UvProjection::Projected {
+            // Projected mode: UVs based on absolute world Y position
+            let base_uvs = wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ]);
+
+            let world_heights = [
+                y_offset + wall.heights[0],
+                y_offset + wall.heights[1],
+                y_offset + wall.heights[2],
+                y_offset + wall.heights[3],
+            ];
+
+            [
+                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE),
+                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE),
+                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE),
+                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE),
+            ]
+        } else {
+            // Default mode: standard per-vertex UVs
+            wall.uv.unwrap_or([
+                Vec2::new(0.0, 1.0),  // bottom-left
+                Vec2::new(1.0, 1.0),  // bottom-right
+                Vec2::new(1.0, 0.0),  // top-right
+                Vec2::new(0.0, 0.0),  // top-left
+            ])
+        };
+
+        let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
+
+        // Handle normal mode: Front, Back, or Both
+        let render_front = wall.normal_mode != FaceNormalMode::Back;
+        let render_back = wall.normal_mode != FaceNormalMode::Front;
+
+        // Add front-facing face
+        if render_front {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
+            }
+            // Two triangles for the quad
             faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
             faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
         }
