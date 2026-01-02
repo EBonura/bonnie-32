@@ -7,7 +7,7 @@ use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
-    world_to_screen, draw_floor_grid,
+    world_to_screen, draw_floor_grid, point_in_triangle_2d,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode};
 use super::drag::{DragUpdateResult, ActiveDrag};
@@ -1256,13 +1256,12 @@ fn find_hovered_element(
     let camera = &state.camera;
     let mesh = state.mesh();
 
-    const VERTEX_THRESHOLD: f32 = 12.0;
-    const EDGE_THRESHOLD: f32 = 8.0;
-    const FACE_THRESHOLD: f32 = 25.0;
+    const VERTEX_THRESHOLD: f32 = 6.0;
+    const EDGE_THRESHOLD: f32 = 4.0;
 
     let mut hovered_vertex: Option<(usize, f32)> = None; // (index, distance)
     let mut hovered_edge: Option<((usize, usize), f32)> = None;
-    let mut hovered_face: Option<(usize, f32)> = None;
+    let mut hovered_face: Option<(usize, f32)> = None; // (index, depth) - depth for Z-ordering
 
     // Precompute which vertices are on front-facing faces (for backface culling)
     let mut vertex_on_front_face = vec![false; mesh.vertices.len()];
@@ -1355,7 +1354,7 @@ fn find_hovered_element(
         }
     }
 
-    // If no vertex or edge hovered, check faces
+    // If no vertex or edge hovered, check faces using point-in-triangle
     if hovered_vertex.is_none() && hovered_edge.is_none() {
         for (idx, face) in mesh.faces.iter().enumerate() {
             if let (Some(v0), Some(v1), Some(v2)) = (
@@ -1375,12 +1374,18 @@ fn find_hovered_element(
                         continue; // Backface - skip
                     }
 
-                    let center_sx = (sx0 + sx1 + sx2) / 3.0;
-                    let center_sy = (sy0 + sy1 + sy2) / 3.0;
-                    let dist = ((mouse_fb_x - center_sx).powi(2) + (mouse_fb_y - center_sy).powi(2)).sqrt();
-                    if dist < FACE_THRESHOLD {
-                        if hovered_face.map_or(true, |(_, best_dist)| dist < best_dist) {
-                            hovered_face = Some((idx, dist));
+                    // Check if mouse is inside the triangle
+                    if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) {
+                        // Calculate depth at mouse position for Z-ordering
+                        let depth = interpolate_depth_in_triangle(
+                            mouse_fb_x, mouse_fb_y,
+                            sx0, sy0, (v0.pos - camera.position).dot(camera.basis_z),
+                            sx1, sy1, (v1.pos - camera.position).dot(camera.basis_z),
+                            sx2, sy2, (v2.pos - camera.position).dot(camera.basis_z),
+                        );
+                        // Pick the closest (smallest depth) face
+                        if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {
+                            hovered_face = Some((idx, depth));
                         }
                     }
                 }
@@ -1414,6 +1419,29 @@ fn point_to_line_distance(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) 
     let proj_y = y0 + t * dy;
 
     ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+}
+
+/// Interpolate depth at a point inside a triangle using barycentric coordinates
+fn interpolate_depth_in_triangle(
+    px: f32, py: f32,
+    x0: f32, y0: f32, d0: f32,
+    x1: f32, y1: f32, d1: f32,
+    x2: f32, y2: f32, d2: f32,
+) -> f32 {
+    // Signed area of full triangle (v0, v1, v2)
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if area.abs() < 0.0001 {
+        // Degenerate triangle, just return average depth
+        return (d0 + d1 + d2) / 3.0;
+    }
+
+    // Barycentric coordinates using signed areas of sub-triangles
+    let w0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) / area;
+    let w1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) / area;
+    let w2 = 1.0 - w0 - w1;
+
+    // Interpolate depth
+    w0 * d0 + w1 * d1 + w2 * d2
 }
 
 /// Update hover state based on current mouse position

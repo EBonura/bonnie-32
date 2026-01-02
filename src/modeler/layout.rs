@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry, draw_icon_centered};
-use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection};
+use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
 use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode, CameraMode};
@@ -2815,9 +2815,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         let mut hovered_face: Option<usize> = None;
 
         if inside_viewport && state.active_viewport == viewport_id && !state.drag_manager.is_dragging() && state.modal_transform == ModalTransform::None {
-            const VERTEX_THRESHOLD: f32 = 10.0;
-            const EDGE_THRESHOLD: f32 = 6.0;
-            const FACE_THRESHOLD: f32 = 20.0;
+            const VERTEX_THRESHOLD: f32 = 6.0;
+            const EDGE_THRESHOLD: f32 = 4.0;
 
             // Check vertices
             let mut best_vert_dist = VERTEX_THRESHOLD;
@@ -2851,25 +2850,24 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 }
             }
 
-            // Check faces if no vertex or edge hovered
+            // Check faces if no vertex or edge hovered - use point-in-triangle
             if hovered_vertex.is_none() && hovered_edge.is_none() {
-                let mut best_face_dist = FACE_THRESHOLD;
                 for (idx, face) in mesh.faces.iter().enumerate() {
                     if let (Some(v0), Some(v1), Some(v2)) = (
                         mesh.vertices.get(face.v0),
                         mesh.vertices.get(face.v1),
                         mesh.vertices.get(face.v2),
                     ) {
-                        // Face center
-                        let center_pos = crate::rasterizer::Vertex {
-                            pos: (v0.pos + v1.pos + v2.pos) * (1.0 / 3.0),
-                            ..v0.clone()
-                        };
-                        let (sx, sy) = project_vertex(&center_pos);
-                        let dist = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
-                        if dist < best_face_dist {
-                            best_face_dist = dist;
+                        let (sx0, sy0) = project_vertex(v0);
+                        let (sx1, sy1) = project_vertex(v1);
+                        let (sx2, sy2) = project_vertex(v2);
+
+                        // Check if mouse is inside the triangle
+                        if point_in_triangle_2d(mouse_pos.0, mouse_pos.1, sx0, sy0, sx1, sy1, sx2, sy2) {
+                            // In ortho view, just pick the first matching face
+                            // (no depth ordering needed as we see orthographically)
                             hovered_face = Some(idx);
+                            break;
                         }
                     }
                 }
