@@ -402,9 +402,15 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             }),
         ];
 
-        // Find current index
+        // Find current index - need exact comparison for Spawn variants
+        // TODO: Simplify - maybe derive PartialEq on ObjectType or use index-based approach
         let current_idx = object_types.iter().position(|(_, obj_type)| {
-            std::mem::discriminant(&state.selected_object_type) == std::mem::discriminant(obj_type)
+            match (&state.selected_object_type, obj_type) {
+                (ObjectType::Spawn(a), ObjectType::Spawn(b)) => {
+                    std::mem::discriminant(a) == std::mem::discriminant(b)
+                }
+                _ => std::mem::discriminant(&state.selected_object_type) == std::mem::discriminant(obj_type)
+            }
         }).unwrap_or(0);
 
         // Draw "< Type >" navigation

@@ -20,7 +20,7 @@ pub mod icon {
 
     // Playback / Transport
     pub const PLAY: char = '\u{e13c}';
-    pub const PAUSE: char = '\u{e131}';
+    pub const PAUSE: char = '\u{e12e}';
     pub const SQUARE: char = '\u{e167}';      // Stop (also used as shape)
     pub const SKIP_BACK: char = '\u{e15f}';   // Rewind to start
     pub const SKIP_FORWARD: char = '\u{e160}';
@@ -31,10 +31,10 @@ pub mod icon {
     pub const MOVE: char = '\u{e121}';
     pub const CIRCLE_CHEVRON_LEFT: char = '\u{e4de}';
     pub const CIRCLE_CHEVRON_RIGHT: char = '\u{e4df}';
-    pub const CHEVRON_UP: char = '\u{e071}';
-    pub const CHEVRON_DOWN: char = '\u{e06e}';
-    pub const CHEVRON_LEFT: char = '\u{e06f}';
-    pub const CHEVRON_RIGHT: char = '\u{e070}';
+    pub const CHEVRON_UP: char = '\u{e070}';
+    pub const CHEVRON_DOWN: char = '\u{e06d}';
+    pub const CHEVRON_LEFT: char = '\u{e06e}';
+    pub const CHEVRON_RIGHT: char = '\u{e06f}';
 
     // Link/Unlink (for vertex mode)
     pub const LINK: char = '\u{e103}';      // link-2

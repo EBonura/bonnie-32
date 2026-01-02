@@ -2,10 +2,10 @@
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, draw_ps1_color_picker_with_blend_mode, ps1_color_picker_with_blend_mode_height, ActionRegistry, draw_icon_centered};
-use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection};
+use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
-use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode};
+use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, AtlasEditMode, CameraMode};
 use super::tools::ModelerToolId;
 use super::viewport::draw_modeler_viewport;
 use super::mesh_editor::EditableMesh;
@@ -194,7 +194,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     let tools = [
         (icon::MOVE, "Move (G)", ModelerToolId::Move),
         (icon::ROTATE_3D, "Rotate (R)", ModelerToolId::Rotate),
-        (icon::SCALE_3D, "Scale (S)", ModelerToolId::Scale),
+        (icon::SCALE_3D, "Scale (T)", ModelerToolId::Scale),
     ];
 
     for (icon_char, tooltip, tool_id) in tools {
@@ -274,6 +274,23 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         state.vertex_linking = !state.vertex_linking;
         let mode = if state.vertex_linking { "ON" } else { "OFF" };
         state.set_status(&format!("Vertex Linking: {}", mode), 1.5);
+    }
+
+    toolbar.separator();
+
+    // Camera mode toggle (Free / Orbit)
+    let is_free = state.camera_mode == CameraMode::Free;
+    let is_orbit = state.camera_mode == CameraMode::Orbit;
+
+    if toolbar.icon_button_active(ctx, icon::EYE, icon_font, "Free Camera (WASD + mouse)", is_free) {
+        state.camera_mode = CameraMode::Free;
+        state.set_status("Camera: Free (WASD + right-drag to look)", 2.0);
+    }
+    if toolbar.icon_button_active(ctx, icon::ORBIT, icon_font, "Orbit Camera", is_orbit) {
+        state.camera_mode = CameraMode::Orbit;
+        // Sync orbit camera to current view direction when switching
+        state.sync_camera_from_orbit();
+        state.set_status("Camera: Orbit (right-drag to rotate)", 2.0);
     }
 
     toolbar.separator();
@@ -2798,9 +2815,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         let mut hovered_face: Option<usize> = None;
 
         if inside_viewport && state.active_viewport == viewport_id && !state.drag_manager.is_dragging() && state.modal_transform == ModalTransform::None {
-            const VERTEX_THRESHOLD: f32 = 10.0;
-            const EDGE_THRESHOLD: f32 = 6.0;
-            const FACE_THRESHOLD: f32 = 20.0;
+            const VERTEX_THRESHOLD: f32 = 6.0;
+            const EDGE_THRESHOLD: f32 = 4.0;
 
             // Check vertices
             let mut best_vert_dist = VERTEX_THRESHOLD;
@@ -2834,25 +2850,24 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 }
             }
 
-            // Check faces if no vertex or edge hovered
+            // Check faces if no vertex or edge hovered - use point-in-triangle
             if hovered_vertex.is_none() && hovered_edge.is_none() {
-                let mut best_face_dist = FACE_THRESHOLD;
                 for (idx, face) in mesh.faces.iter().enumerate() {
                     if let (Some(v0), Some(v1), Some(v2)) = (
                         mesh.vertices.get(face.v0),
                         mesh.vertices.get(face.v1),
                         mesh.vertices.get(face.v2),
                     ) {
-                        // Face center
-                        let center_pos = crate::rasterizer::Vertex {
-                            pos: (v0.pos + v1.pos + v2.pos) * (1.0 / 3.0),
-                            ..v0.clone()
-                        };
-                        let (sx, sy) = project_vertex(&center_pos);
-                        let dist = ((mouse_pos.0 - sx).powi(2) + (mouse_pos.1 - sy).powi(2)).sqrt();
-                        if dist < best_face_dist {
-                            best_face_dist = dist;
+                        let (sx0, sy0) = project_vertex(v0);
+                        let (sx1, sy1) = project_vertex(v1);
+                        let (sx2, sy2) = project_vertex(v2);
+
+                        // Check if mouse is inside the triangle
+                        if point_in_triangle_2d(mouse_pos.0, mouse_pos.1, sx0, sy0, sx1, sy1, sx2, sy2) {
+                            // In ortho view, just pick the first matching face
+                            // (no depth ordering needed as we see orthographically)
                             hovered_face = Some(idx);
+                            break;
                         }
                     }
                 }
@@ -2996,6 +3011,21 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 dest_size: Some(vec2(rect.w, rect.h)),
                 ..Default::default()
             },
+        );
+    }
+
+    // Enable scissor clipping for selection overlays, wireframes, and gizmos
+    // This prevents them from rendering outside the ortho viewport bounds
+    let dpi = screen_dpi_scale();
+    gl_use_default_material();
+    unsafe {
+        get_internal_gl().quad_gl.scissor(
+            Some((
+                (rect.x * dpi) as i32,
+                (rect.y * dpi) as i32,
+                (rect.w * dpi) as i32,
+                (rect.h * dpi) as i32,
+            ))
         );
     }
 
@@ -3176,14 +3206,21 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         }
     }
 
+    // Disable scissor clipping
+    unsafe {
+        get_internal_gl().quad_gl.scissor(None);
+    }
+
     // =========================================================================
     // Handle click to select in ortho views
     // =========================================================================
-    if inside_viewport && state.active_viewport == viewport_id && is_mouse_button_pressed(MouseButton::Left) && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() {
+    // Skip selection if gizmo is hovered - gizmo takes precedence
+    if inside_viewport && state.active_viewport == viewport_id && is_mouse_button_pressed(MouseButton::Left) && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() && state.ortho_gizmo_hovered_axis.is_none() {
         let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_key_down(KeyCode::X);
 
         if let Some(vert_idx) = state.hovered_vertex {
             if multi_select {
+                state.save_selection_undo();
                 match &mut state.selection {
                     super::state::ModelerSelection::Vertices(verts) => {
                         if let Some(pos) = verts.iter().position(|&v| v == vert_idx) {
@@ -3195,11 +3232,12 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                     _ => state.selection = super::state::ModelerSelection::Vertices(vec![vert_idx]),
                 }
             } else {
-                state.selection = super::state::ModelerSelection::Vertices(vec![vert_idx]);
+                state.set_selection(super::state::ModelerSelection::Vertices(vec![vert_idx]));
             }
             state.select_mode = SelectMode::Vertex;
         } else if let Some((v0, v1)) = state.hovered_edge {
             if multi_select {
+                state.save_selection_undo();
                 match &mut state.selection {
                     super::state::ModelerSelection::Edges(edges) => {
                         if let Some(pos) = edges.iter().position(|e| *e == (v0, v1) || *e == (v1, v0)) {
@@ -3211,11 +3249,12 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                     _ => state.selection = super::state::ModelerSelection::Edges(vec![(v0, v1)]),
                 }
             } else {
-                state.selection = super::state::ModelerSelection::Edges(vec![(v0, v1)]);
+                state.set_selection(super::state::ModelerSelection::Edges(vec![(v0, v1)]));
             }
             state.select_mode = SelectMode::Edge;
         } else if let Some(face_idx) = state.hovered_face {
             if multi_select {
+                state.save_selection_undo();
                 match &mut state.selection {
                     super::state::ModelerSelection::Faces(faces) => {
                         if let Some(pos) = faces.iter().position(|&f| f == face_idx) {
@@ -3227,12 +3266,12 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                     _ => state.selection = super::state::ModelerSelection::Faces(vec![face_idx]),
                 }
             } else {
-                state.selection = super::state::ModelerSelection::Faces(vec![face_idx]);
+                state.set_selection(super::state::ModelerSelection::Faces(vec![face_idx]));
             }
             state.select_mode = SelectMode::Face;
         } else if !is_key_down(KeyCode::X) {
             // Clicked on nothing - clear selection
-            state.selection = super::state::ModelerSelection::None;
+            state.set_selection(super::state::ModelerSelection::None);
         }
     }
 
@@ -3245,8 +3284,16 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
         // Start drag on left-down (when we have selection and not clicking to select)
         // Use ortho_drag_pending_start to detect drag vs click, similar to box select
+        // Only start if gizmo is hovered OR if there's a selection (free move)
         if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && !state.drag_manager.is_dragging() {
+            // Store the gizmo axis that was clicked (if any)
+            // Convert from state::Axis to ui::drag_tracker::Axis
             state.ortho_drag_pending_start = Some((ctx.mouse.x, ctx.mouse.y));
+            state.ortho_drag_axis = state.ortho_gizmo_hovered_axis.map(|a| match a {
+                super::state::Axis::X => crate::ui::drag_tracker::Axis::X,
+                super::state::Axis::Y => crate::ui::drag_tracker::Axis::Y,
+                super::state::Axis::Z => crate::ui::drag_tracker::Axis::Z,
+            });
         }
 
         // Check if we should convert pending start to actual ortho move
@@ -3280,11 +3327,15 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         state.ortho_drag_viewport = Some(viewport_id);
                         state.ortho_drag_zoom = ortho_zoom;
 
-                        // Start free move drag
+                        // Use CURRENT mouse position as reference, not original click position.
+                        // This prevents snapping - delta starts at 0 and accumulates from here.
+                        let drag_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+
+                        // Start move drag (constrained if gizmo axis was clicked)
                         state.drag_manager.start_move(
                             center,
-                            start_pos,
-                            None, // Free movement
+                            drag_start_mouse,
+                            state.ortho_drag_axis, // Use captured axis constraint
                             indices,
                             initial_positions,
                             state.snap_settings.enabled,
@@ -3297,6 +3348,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             } else if !ctx.mouse.left_down {
                 // Mouse released without dragging - clear pending
                 state.ortho_drag_pending_start = None;
+                state.ortho_drag_axis = None;
             }
         }
 
@@ -3304,7 +3356,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
     // Continue ortho drag (if we're the active ortho drag viewport)
     // This is OUTSIDE the inside_viewport check so drag continues even if mouse leaves viewport
-    if state.drag_manager.active.is_free_move() && state.ortho_drag_viewport == Some(viewport_id) {
+    // Use is_move() not is_free_move() since we may have axis constraints from gizmo click
+    if state.drag_manager.active.is_move() && state.ortho_drag_viewport == Some(viewport_id) {
         // Use the stored zoom from when drag started
         let drag_zoom = state.ortho_drag_zoom;
 
@@ -3327,10 +3380,19 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 let dx = ctx.mouse.x - drag_state.initial_mouse.0;
                 let dy = ctx.mouse.y - drag_state.initial_mouse.1;
 
-                let delta = screen_to_world_delta(dx, dy);
+                let mut delta = screen_to_world_delta(dx, dy);
 
                 // Apply delta to initial positions
                 if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
+                    // Apply axis constraint if present
+                    if let Some(axis) = &tracker.axis {
+                        match axis {
+                            crate::ui::drag_tracker::Axis::X => { delta.y = 0.0; delta.z = 0.0; }
+                            crate::ui::drag_tracker::Axis::Y => { delta.x = 0.0; delta.z = 0.0; }
+                            crate::ui::drag_tracker::Axis::Z => { delta.x = 0.0; delta.y = 0.0; }
+                        }
+                    }
+
                     // Collect updates first, then apply (borrow checker)
                     let updates: Vec<_> = tracker.initial_positions.iter()
                         .map(|(idx, start_pos)| (*idx, *start_pos + delta))
@@ -3586,7 +3648,7 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let tool_label = match state.tool_box.active_transform_tool() {
         Some(ModelerToolId::Move) => "Move (G)",
         Some(ModelerToolId::Rotate) => "Rotate (R)",
-        Some(ModelerToolId::Scale) => "Scale (S)",
+        Some(ModelerToolId::Scale) => "Scale (T)",
         _ => "Select",
     };
     draw_text(tool_label, rect.x, y + 14.0, 12.0, TEXT_COLOR);
@@ -4005,33 +4067,75 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     // ========================================================================
     if actions.triggered("select.vertex_mode", &ctx) {
         state.select_mode = SelectMode::Vertex;
-        state.selection = super::state::ModelerSelection::None;
+        state.set_selection(super::state::ModelerSelection::None);
         state.set_status("Vertex mode", 1.0);
     }
     if actions.triggered("select.edge_mode", &ctx) {
         state.select_mode = SelectMode::Edge;
-        state.selection = super::state::ModelerSelection::None;
+        state.set_selection(super::state::ModelerSelection::None);
         state.set_status("Edge mode", 1.0);
     }
     if actions.triggered("select.face_mode", &ctx) {
         state.select_mode = SelectMode::Face;
-        state.selection = super::state::ModelerSelection::None;
+        state.set_selection(super::state::ModelerSelection::None);
         state.set_status("Face mode", 1.0);
     }
 
     // ========================================================================
-    // Transform Actions (Modal - Blender-style G/S/R)
+    // Transform Actions (Modal - G/R/T)
     // These set the modal_transform mode; viewport.rs will start the actual drag
+    // Also select the corresponding tool so the toolbar highlights
+    // Allow switching modes during active modal transform (cancel current and start new)
     // ========================================================================
-    if actions.triggered("transform.grab", &ctx) && !is_dragging {
-        state.modal_transform = ModalTransform::Grab;
-        // Viewport will start the drag on next frame when it sees this flag
+    let in_modal_transform = state.modal_transform != ModalTransform::None;
+    let gizmo_dragging = state.drag_manager.is_dragging() && !in_modal_transform;
+
+    // Helper to cancel current modal transform and restore original positions
+    let cancel_modal = |state: &mut ModelerState| {
+        if state.modal_transform != ModalTransform::None {
+            // Sync tool state
+            match state.modal_transform {
+                ModalTransform::Grab => state.tool_box.tools.move_tool.end_drag(),
+                ModalTransform::Scale => state.tool_box.tools.scale.end_drag(),
+                ModalTransform::Rotate => state.tool_box.tools.rotate.end_drag(),
+                ModalTransform::None => {}
+            }
+            // Cancel drag and restore positions
+            if let Some(original_positions) = state.drag_manager.cancel() {
+                if let Some(mesh) = state.mesh_mut() {
+                    for (vert_idx, original_pos) in original_positions {
+                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                            vert.pos = original_pos;
+                        }
+                    }
+                }
+            }
+            // Pop undo since we're canceling (the push happened when drag started)
+            state.undo_stack.pop();
+            state.modal_transform = ModalTransform::None;
+        }
+    };
+
+    if actions.triggered("transform.grab", &ctx) && !gizmo_dragging {
+        if state.modal_transform != ModalTransform::Grab {
+            cancel_modal(state);
+            state.modal_transform = ModalTransform::Grab;
+            state.tool_box.toggle(ModelerToolId::Move);
+        }
     }
-    if actions.triggered("transform.rotate", &ctx) && !is_dragging {
-        state.modal_transform = ModalTransform::Rotate;
+    if actions.triggered("transform.rotate", &ctx) && !gizmo_dragging {
+        if state.modal_transform != ModalTransform::Rotate {
+            cancel_modal(state);
+            state.modal_transform = ModalTransform::Rotate;
+            state.tool_box.toggle(ModelerToolId::Rotate);
+        }
     }
-    if actions.triggered("transform.scale", &ctx) && !is_dragging {
-        state.modal_transform = ModalTransform::Scale;
+    if actions.triggered("transform.scale", &ctx) && !gizmo_dragging {
+        if state.modal_transform != ModalTransform::Scale {
+            cancel_modal(state);
+            state.modal_transform = ModalTransform::Scale;
+            state.tool_box.toggle(ModelerToolId::Scale);
+        }
     }
     if actions.triggered("transform.extrude", &ctx) {
         // Perform extrude immediately on selected faces

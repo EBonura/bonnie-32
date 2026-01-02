@@ -168,7 +168,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     // ========================================================================
-    // Transform Actions (Blender-style G/R/S)
+    // Transform Actions (G/R/T - similar to Blender but T for scale since S is camera strafe)
     // ========================================================================
     registry.register(
         Action::new("transform.grab")
@@ -193,9 +193,9 @@ pub fn create_modeler_actions() -> ActionRegistry {
     registry.register(
         Action::new("transform.scale")
             .label("Scale")
-            .shortcut(Shortcut::key(KeyCode::S))
+            .shortcut(Shortcut::key(KeyCode::T))
             .icon(icon::SCALE_3D)
-            .status_tip("Scale selection (S)")
+            .status_tip("Scale selection")
             .category("Transform")
             .enabled_when(|ctx| ctx.has_selection),
     );

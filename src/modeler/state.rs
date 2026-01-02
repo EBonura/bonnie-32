@@ -14,6 +14,18 @@ use super::drag::DragManager;
 use super::tools::ModelerToolBox;
 
 // ============================================================================
+// Camera Mode
+// ============================================================================
+
+/// Camera mode for 3D viewport
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraMode {
+    #[default]
+    Free,   // WASD + mouse look (FPS style)
+    Orbit,  // Rotate around target point
+}
+
+// ============================================================================
 // PicoCAD-Style Viewport System
 // ============================================================================
 
@@ -315,7 +327,7 @@ impl SelectMode {
 }
 
 /// Current selection in the modeler
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ModelerSelection {
     #[default]
     None,
@@ -609,13 +621,14 @@ pub struct ModelerState {
     pub select_mode: SelectMode,
     pub selection: ModelerSelection,
 
-    // Camera (orbit mode for perspective view)
+    // Camera (free or orbit mode for perspective view)
     pub camera: Camera,
+    pub camera_mode: CameraMode,
     pub raster_settings: RasterSettings,
-    pub orbit_target: Vec3,      // Point the camera orbits around
-    pub orbit_distance: f32,     // Distance from target
-    pub orbit_azimuth: f32,      // Horizontal angle (radians)
-    pub orbit_elevation: f32,    // Vertical angle (radians)
+    pub orbit_target: Vec3,      // Point the camera orbits around (orbit mode)
+    pub orbit_distance: f32,     // Distance from target (orbit mode)
+    pub orbit_azimuth: f32,      // Horizontal angle in radians (orbit mode)
+    pub orbit_elevation: f32,    // Vertical angle in radians (orbit mode)
 
     // PicoCAD-style 4-panel viewport system
     pub view_mode: ViewMode,           // Build vs Texture (V to toggle)
@@ -678,8 +691,8 @@ pub struct ModelerState {
     pub status_message: Option<(String, f64)>,
 
     // Undo/Redo system
-    pub undo_stack: Vec<UndoState>,
-    pub redo_stack: Vec<UndoState>,
+    pub undo_stack: Vec<UndoEvent>,
+    pub redo_stack: Vec<UndoEvent>,
     pub max_undo_levels: usize,
 
     // Snap/quantization settings
@@ -702,6 +715,8 @@ pub struct ModelerState {
     pub ortho_drag_viewport: Option<ViewportId>,
     /// Zoom level of the ortho viewport when drag started
     pub ortho_drag_zoom: f32,
+    /// Axis constraint captured when gizmo was clicked (for ortho drag)
+    pub ortho_drag_axis: Option<crate::ui::drag_tracker::Axis>,
 
     // Hover state (like world editor - auto-detect element under cursor)
     /// Hovered vertex index (highest priority)
@@ -748,26 +763,36 @@ impl ContextMenu {
     }
 }
 
-/// Snapshot of mesh state for undo/redo
+/// Unified undo event - either a mesh change or a selection change
 #[derive(Debug, Clone)]
-pub struct UndoState {
-    pub mesh: EditableMesh,
-    pub selection: ModelerSelection,
-    pub atlas: Option<TextureAtlas>, // Optional: only saved when atlas changes
-    pub description: String,
+pub enum UndoEvent {
+    /// Mesh edit (geometry, UVs, etc.)
+    Mesh {
+        object_index: Option<usize>,
+        mesh: EditableMesh,
+        atlas: Option<TextureAtlas>,
+        description: String,
+    },
+    /// Selection change only
+    Selection(ModelerSelection),
 }
 
 impl ModelerState {
     pub fn new() -> Self {
-        // Orbit camera setup
+        // Camera setup
         // Scale: 1024 units = 1 meter (SECTOR_SIZE)
+        // Default to free camera mode (like the world editor)
         let orbit_target = Vec3::new(0.0, 1024.0, 0.0); // Center at 1 meter height
         let orbit_distance = 4096.0; // 4 meters back
         let orbit_azimuth = 0.8;      // ~45 degrees
         let orbit_elevation = 0.3;    // ~17 degrees up
 
         let mut camera = Camera::new();
-        Self::update_camera_from_orbit(&mut camera, orbit_target, orbit_distance, orbit_azimuth, orbit_elevation);
+        // Initialize camera position for free mode (similar starting view)
+        camera.position = Vec3::new(-2048.0, 2048.0, -2048.0);
+        camera.rotation_x = 0.3;  // Looking slightly down
+        camera.rotation_y = 0.8;  // Looking toward origin
+        camera.update_basis();
 
         // Project is the single source of truth for mesh data
         let project = MeshProject::default();
@@ -784,6 +809,7 @@ impl ModelerState {
             selection: ModelerSelection::None,
 
             camera,
+            camera_mode: CameraMode::Free, // Default to free camera (like world editor)
             raster_settings: RasterSettings::game(), // Use game settings (no backface wireframe)
             orbit_target,
             orbit_distance,
@@ -861,6 +887,7 @@ impl ModelerState {
             ortho_drag_pending_start: None,
             ortho_drag_viewport: None,
             ortho_drag_zoom: 1.0,
+            ortho_drag_axis: None,
 
             hovered_vertex: None,
             hovered_edge: None,
@@ -1103,69 +1130,102 @@ impl ModelerState {
     }
 
     // ========================================================================
-    // Undo/Redo System
+    // Undo/Redo System (matches world editor pattern)
     // ========================================================================
 
-    /// Save current state to undo stack before making a change
-    pub fn push_undo(&mut self, description: &str) {
-        let state = UndoState {
+    /// Save current mesh state for undo (before making geometry changes)
+    pub fn save_undo(&mut self, description: &str) {
+        self.undo_stack.push(UndoEvent::Mesh {
+            object_index: self.project.selected_object,
             mesh: self.mesh().clone(),
-            selection: self.selection.clone(),
-            atlas: None, // Don't save atlas for mesh-only changes
+            atlas: None,
             description: description.to_string(),
-        };
-        self.undo_stack.push(state);
+        });
+        self.redo_stack.clear();
+        self.dirty = true;
 
-        // Limit stack size
-        while self.undo_stack.len() > self.max_undo_levels {
+        // Limit undo stack size
+        if self.undo_stack.len() > self.max_undo_levels {
             self.undo_stack.remove(0);
         }
-
-        // Clear redo stack when new action is performed
-        self.redo_stack.clear();
     }
 
-    /// Save current state including texture atlas to undo stack (for paint operations)
-    pub fn push_undo_with_atlas(&mut self, description: &str) {
-        let state = UndoState {
+    /// Save current mesh state including texture atlas (for paint operations)
+    pub fn save_undo_with_atlas(&mut self, description: &str) {
+        self.undo_stack.push(UndoEvent::Mesh {
+            object_index: self.project.selected_object,
             mesh: self.mesh().clone(),
-            selection: self.selection.clone(),
             atlas: Some(self.project.atlas.clone()),
             description: description.to_string(),
-        };
-        self.undo_stack.push(state);
+        });
+        self.redo_stack.clear();
+        self.dirty = true;
 
-        // Limit stack size
-        while self.undo_stack.len() > self.max_undo_levels {
+        // Limit undo stack size
+        if self.undo_stack.len() > self.max_undo_levels {
             self.undo_stack.remove(0);
         }
-
-        // Clear redo stack when new action is performed
-        self.redo_stack.clear();
     }
 
-    /// Undo the last action (Ctrl+Z)
-    pub fn undo(&mut self) -> bool {
-        if let Some(undo_state) = self.undo_stack.pop() {
-            // Save current state to redo stack (include atlas if the undo state had one)
-            let redo_state = UndoState {
-                mesh: self.mesh().clone(),
-                selection: self.selection.clone(),
-                atlas: if undo_state.atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
-                description: undo_state.description.clone(),
-            };
-            self.redo_stack.push(redo_state);
+    /// Save current selection state for undo
+    pub fn save_selection_undo(&mut self) {
+        // Don't save if selection hasn't changed from the last selection snapshot
+        for event in self.undo_stack.iter().rev() {
+            if let UndoEvent::Selection(last_sel) = event {
+                if *last_sel == self.selection {
+                    return; // No change from last selection snapshot
+                }
+                break; // Found a different selection snapshot
+            }
+        }
 
-            // Restore the undo state - directly to project (single source of truth)
-            if let Some(mesh) = self.mesh_mut() {
-                *mesh = undo_state.mesh;
+        self.undo_stack.push(UndoEvent::Selection(self.selection.clone()));
+        self.redo_stack.clear();
+
+        // Limit stack size
+        if self.undo_stack.len() > self.max_undo_levels {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// Undo last action (mesh edit or selection)
+    pub fn undo(&mut self) -> bool {
+        if let Some(event) = self.undo_stack.pop() {
+            match event {
+                UndoEvent::Mesh { object_index, mesh, atlas, description } => {
+                    // Save current state to redo stack
+                    let current_mesh = if let Some(idx) = object_index {
+                        self.project.objects.get(idx).map(|o| o.mesh.clone())
+                    } else {
+                        None
+                    };
+                    self.redo_stack.push(UndoEvent::Mesh {
+                        object_index,
+                        mesh: current_mesh.unwrap_or_else(EditableMesh::new),
+                        atlas: if atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
+                        description: description.clone(),
+                    });
+
+                    // Restore the mesh to the correct object
+                    if let Some(idx) = object_index {
+                        if let Some(obj) = self.project.objects.get_mut(idx) {
+                            obj.mesh = mesh;
+                        }
+                        self.project.selected_object = Some(idx);
+                    }
+                    if let Some(a) = atlas {
+                        self.project.atlas = a;
+                    }
+                    self.dirty = true;
+                    self.set_status(&format!("Undo: {}", description), 1.0);
+                }
+                UndoEvent::Selection(prev_sel) => {
+                    // Save current selection to redo stack
+                    self.redo_stack.push(UndoEvent::Selection(self.selection.clone()));
+                    self.selection = prev_sel;
+                    self.set_status("Undo selection", 1.0);
+                }
             }
-            self.selection = undo_state.selection;
-            if let Some(atlas) = undo_state.atlas {
-                self.project.atlas = atlas;
-            }
-            self.dirty = true;
-            self.set_status(&format!("Undo: {}", undo_state.description), 1.0);
             true
         } else {
             self.set_status("Nothing to undo", 1.0);
@@ -1173,33 +1233,59 @@ impl ModelerState {
         }
     }
 
-    /// Redo the last undone action (Ctrl+Shift+Z or Ctrl+Y)
+    /// Redo last undone action (mesh edit or selection)
     pub fn redo(&mut self) -> bool {
-        if let Some(redo_state) = self.redo_stack.pop() {
-            // Save current state to undo stack (include atlas if the redo state had one)
-            let undo_state = UndoState {
-                mesh: self.mesh().clone(),
-                selection: self.selection.clone(),
-                atlas: if redo_state.atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
-                description: redo_state.description.clone(),
-            };
-            self.undo_stack.push(undo_state);
+        if let Some(event) = self.redo_stack.pop() {
+            match event {
+                UndoEvent::Mesh { object_index, mesh, atlas, description } => {
+                    // Save current state to undo stack
+                    let current_mesh = if let Some(idx) = object_index {
+                        self.project.objects.get(idx).map(|o| o.mesh.clone())
+                    } else {
+                        None
+                    };
+                    self.undo_stack.push(UndoEvent::Mesh {
+                        object_index,
+                        mesh: current_mesh.unwrap_or_else(EditableMesh::new),
+                        atlas: if atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
+                        description: description.clone(),
+                    });
 
-            // Restore the redo state - directly to project (single source of truth)
-            if let Some(mesh) = self.mesh_mut() {
-                *mesh = redo_state.mesh;
+                    // Restore the mesh to the correct object
+                    if let Some(idx) = object_index {
+                        if let Some(obj) = self.project.objects.get_mut(idx) {
+                            obj.mesh = mesh;
+                        }
+                        self.project.selected_object = Some(idx);
+                    }
+                    if let Some(a) = atlas {
+                        self.project.atlas = a;
+                    }
+                    self.dirty = true;
+                    self.set_status(&format!("Redo: {}", description), 1.0);
+                }
+                UndoEvent::Selection(next_sel) => {
+                    // Save current selection to undo stack
+                    self.undo_stack.push(UndoEvent::Selection(self.selection.clone()));
+                    self.selection = next_sel;
+                    self.set_status("Redo selection", 1.0);
+                }
             }
-            self.selection = redo_state.selection;
-            if let Some(atlas) = redo_state.atlas {
-                self.project.atlas = atlas;
-            }
-            self.dirty = true;
-            self.set_status(&format!("Redo: {}", redo_state.description), 1.0);
             true
         } else {
             self.set_status("Nothing to redo", 1.0);
             false
         }
+    }
+
+    /// Backwards compatibility: alias for save_undo
+    pub fn push_undo(&mut self, description: &str) {
+        self.save_undo(description);
+    }
+
+    /// Backwards compatibility: alias for save_undo_with_atlas
+    pub fn push_undo_with_atlas(&mut self, description: &str) {
+        self.save_undo_with_atlas(description);
     }
 
     /// Check if undo is available
@@ -1210,6 +1296,19 @@ impl ModelerState {
     /// Check if redo is available
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
+    }
+
+    /// Set selection with undo support (saves previous selection to undo stack)
+    pub fn set_selection(&mut self, new_selection: ModelerSelection) {
+        if self.selection != new_selection {
+            self.save_selection_undo();
+            self.selection = new_selection;
+        }
+    }
+
+    /// Clear selection with undo support
+    pub fn clear_selection(&mut self) {
+        self.set_selection(ModelerSelection::None);
     }
 }
 

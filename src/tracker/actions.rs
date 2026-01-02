@@ -162,22 +162,39 @@ pub fn create_tracker_actions() -> ActionRegistry {
     );
 
     // ========================================================================
-    // Edit Step Actions
+    // Edit Actions (Copy/Paste/Cut)
     // ========================================================================
     registry.register(
-        Action::new("edit_step.decrease")
-            .label("Decrease Edit Step")
-            .shortcut(Shortcut::key(KeyCode::F9))
-            .status_tip("Decrease edit step size")
-            .category("Edit Step"),
+        Action::new("edit.copy")
+            .label("Copy")
+            .shortcut(Shortcut::ctrl(KeyCode::C))
+            .status_tip("Copy selection to clipboard")
+            .category("Edit"),
     );
 
     registry.register(
-        Action::new("edit_step.increase")
-            .label("Increase Edit Step")
-            .shortcut(Shortcut::key(KeyCode::F10))
-            .status_tip("Increase edit step size")
-            .category("Edit Step"),
+        Action::new("edit.paste")
+            .label("Paste")
+            .shortcut(Shortcut::ctrl(KeyCode::V))
+            .status_tip("Paste clipboard at cursor")
+            .category("Edit")
+            .enabled_when(|ctx| ctx.has_clipboard),
+    );
+
+    registry.register(
+        Action::new("edit.cut")
+            .label("Cut")
+            .shortcut(Shortcut::ctrl(KeyCode::X))
+            .status_tip("Cut selection to clipboard")
+            .category("Edit"),
+    );
+
+    registry.register(
+        Action::new("edit.select_all")
+            .label("Select All")
+            .shortcut(Shortcut::ctrl(KeyCode::A))
+            .status_tip("Select entire pattern")
+            .category("Edit"),
     );
 
     // ========================================================================
@@ -253,6 +270,8 @@ pub fn build_context(
     has_pattern: bool,
     column_type: &str, // "note", "instrument", "effect"
     editing_knob: bool,
+    has_selection: bool,
+    has_clipboard: bool,
 ) -> ActionContext {
     let mut flags = 0u32;
 
@@ -276,8 +295,8 @@ pub fn build_context(
     ActionContext {
         can_undo: false, // Tracker doesn't have undo yet
         can_redo: false,
-        has_selection: false, // No block selection yet
-        has_clipboard: false,
+        has_selection,
+        has_clipboard,
         mode: "tracker",
         text_editing: editing_knob, // Block shortcuts when editing knob values
         has_face_selection: false,
@@ -306,10 +325,10 @@ mod tests {
         let registry = create_tracker_actions();
 
         // Note delete requires being in note column
-        let ctx = build_context(false, true, "effect", false);
+        let ctx = build_context(false, true, "effect", false, false, false);
         assert!(!registry.is_enabled("note.delete", &ctx));
 
-        let ctx2 = build_context(false, true, "note", false);
+        let ctx2 = build_context(false, true, "note", false, false, false);
         assert!(registry.is_enabled("note.delete", &ctx2));
     }
 
@@ -318,8 +337,20 @@ mod tests {
         let registry = create_tracker_actions();
 
         // When editing a knob, shortcuts should be blocked
-        let ctx = build_context(false, true, "note", true);
+        let ctx = build_context(false, true, "note", true, false, false);
         // text_editing = true should disable actions
         assert!(!registry.is_enabled("note.delete", &ctx));
+    }
+
+    #[test]
+    fn test_clipboard_actions() {
+        let registry = create_tracker_actions();
+
+        // Paste requires clipboard
+        let ctx_no_clipboard = build_context(false, true, "note", false, false, false);
+        assert!(!registry.is_enabled("edit.paste", &ctx_no_clipboard));
+
+        let ctx_with_clipboard = build_context(false, true, "note", false, false, true);
+        assert!(registry.is_enabled("edit.paste", &ctx_with_clipboard));
     }
 }

@@ -7,9 +7,9 @@ use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
-    world_to_screen, draw_floor_grid,
+    world_to_screen, draw_floor_grid, point_in_triangle_2d,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform};
+use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode};
 use super::drag::{DragUpdateResult, ActiveDrag};
 use super::tools::ModelerToolId;
 
@@ -377,10 +377,14 @@ fn handle_drag_move(
                         // Save undo state before starting
                         state.push_undo("Drag move");
 
+                        // Use CURRENT mouse position as reference, not original click position.
+                        // This prevents snapping - delta starts at 0 and accumulates from here.
+                        let drag_start_mouse = mouse_pos;
+
                         // Start free move drag (axis = None for screen-space movement)
                         state.drag_manager.start_move(
                             center,
-                            start_pos, // Use the position where drag started
+                            drag_start_mouse,
                             None,      // No axis = free movement
                             indices,
                             initial_positions,
@@ -443,38 +447,86 @@ pub fn draw_modeler_viewport(
         }
     };
 
-    // Orbit camera controls
+    // Camera controls (free or orbit mode)
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
-    // Right mouse drag: rotate around target (or pan if Shift held)
-    if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) {
-        if state.viewport_mouse_captured {
-            let dx = mouse_pos.0 - state.viewport_last_mouse.0;
-            let dy = mouse_pos.1 - state.viewport_last_mouse.1;
-
-            if shift_held {
-                let pan_speed = state.orbit_distance * 0.002;
-                state.orbit_target = state.orbit_target - state.camera.basis_x * dx * pan_speed;
-                state.orbit_target = state.orbit_target - state.camera.basis_y * dy * pan_speed;
-            } else {
-                state.orbit_azimuth += dx * 0.005;
-                state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+    match state.camera_mode {
+        CameraMode::Free => {
+            // Free camera: right-drag to look around, WASD to move
+            if ctx.mouse.right_down && inside_viewport && !state.drag_manager.is_dragging() {
+                if state.viewport_mouse_captured {
+                    // Inverted to match Y-down coordinate system (same as world editor)
+                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
+                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
+                    state.camera.rotation_x += dx;
+                    state.camera.rotation_y += dy;
+                    state.camera.update_basis();
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
             }
-            state.sync_camera_from_orbit();
-        }
-        state.viewport_mouse_captured = true;
-    } else if !ctx.mouse.right_down {
-        state.viewport_mouse_captured = false;
-    }
 
-    // Mouse wheel: zoom
-    if inside_viewport {
-        let scroll = ctx.mouse.scroll;
-        if scroll != 0.0 {
-            let zoom_factor = if scroll > 0.0 { 0.98 } else { 1.02 };
-            // Scale: 1024 units = 1 meter, allow 1m to 40m camera distance
-            state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(1024.0, 40960.0);
-            state.sync_camera_from_orbit();
+            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
+            // Hold Shift for faster movement
+            let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
+            let move_speed = if shift_held { 100.0 } else { base_speed };
+            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() {
+                if is_key_down(KeyCode::W) {
+                    state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::S) {
+                    state.camera.position = state.camera.position - state.camera.basis_z * move_speed;
+                }
+                if is_key_down(KeyCode::A) {
+                    state.camera.position = state.camera.position - state.camera.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::D) {
+                    state.camera.position = state.camera.position + state.camera.basis_x * move_speed;
+                }
+                if is_key_down(KeyCode::Q) {
+                    state.camera.position = state.camera.position - state.camera.basis_y * move_speed;
+                }
+                if is_key_down(KeyCode::E) {
+                    state.camera.position = state.camera.position + state.camera.basis_y * move_speed;
+                }
+            }
+        }
+
+        CameraMode::Orbit => {
+            // Orbit camera: right-drag rotates around target (or pans with Shift)
+            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) {
+                if state.viewport_mouse_captured {
+                    let dx = mouse_pos.0 - state.viewport_last_mouse.0;
+                    let dy = mouse_pos.1 - state.viewport_last_mouse.1;
+
+                    if shift_held {
+                        // Shift+Right drag: pan the orbit target
+                        let pan_speed = state.orbit_distance * 0.002;
+                        state.orbit_target = state.orbit_target - state.camera.basis_x * dx * pan_speed;
+                        state.orbit_target = state.orbit_target + state.camera.basis_y * dy * pan_speed;
+                    } else {
+                        // Right drag: rotate around target
+                        state.orbit_azimuth += dx * 0.005;
+                        state.orbit_elevation = (state.orbit_elevation + dy * 0.005).clamp(-1.4, 1.4);
+                    }
+                    state.sync_camera_from_orbit();
+                }
+                state.viewport_mouse_captured = true;
+            } else if !ctx.mouse.right_down {
+                state.viewport_mouse_captured = false;
+            }
+
+            // Mouse wheel: zoom in/out (change orbit distance)
+            if inside_viewport {
+                let scroll = ctx.mouse.scroll;
+                if scroll != 0.0 {
+                    let zoom_factor = if scroll > 0.0 { 0.98 } else { 1.02 };
+                    // Scale: 1024 units = 1 meter, allow 1m to 40m camera distance
+                    state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(1024.0, 40960.0);
+                    state.sync_camera_from_orbit();
+                }
+            }
         }
     }
 
@@ -856,10 +908,10 @@ fn apply_box_selection(
 
             if !selected.is_empty() {
                 let count = selected.len();
-                state.selection = ModelerSelection::Vertices(selected);
+                state.set_selection(ModelerSelection::Vertices(selected));
                 state.set_status(&format!("Selected {} vertex(es)", count), 0.5);
             } else if !add_to_selection {
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         SelectMode::Face => {
@@ -897,10 +949,10 @@ fn apply_box_selection(
 
             if !selected.is_empty() {
                 let count = selected.len();
-                state.selection = ModelerSelection::Faces(selected);
+                state.set_selection(ModelerSelection::Faces(selected));
                 state.set_status(&format!("Selected {} face(s)", count), 0.5);
             } else if !add_to_selection {
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         _ => {}
@@ -914,7 +966,6 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
 
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
     let select_color = RasterColor::new(100, 180, 255);  // Blue for selection
-    let vertex_normal = RasterColor::new(180, 180, 190); // Gray for unselected vertices
 
     // =========================================================================
     // Draw hovered vertex (if any) - orange dot
@@ -1066,36 +1117,6 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
             }
         }
     }
-
-    // =========================================================================
-    // Draw all vertices as small dots (only when nothing is hovered/selected, or when in vertex selection)
-    // This provides visual feedback of where vertices are
-    // =========================================================================
-    let show_all_verts = state.hovered_vertex.is_some() ||
-                         matches!(&state.selection, ModelerSelection::Vertices(_)) ||
-                         state.select_mode == SelectMode::Vertex;
-    if show_all_verts {
-        for (idx, vert) in mesh.vertices.iter().enumerate() {
-            // Skip if this vertex is already highlighted as hovered or selected
-            let is_hovered = state.hovered_vertex == Some(idx);
-            let is_selected = matches!(&state.selection, ModelerSelection::Vertices(v) if v.contains(&idx));
-            if is_hovered || is_selected {
-                continue;
-            }
-
-            if let Some((sx, sy)) = world_to_screen(
-                vert.pos,
-                camera.position,
-                camera.basis_x,
-                camera.basis_y,
-                camera.basis_z,
-                fb.width,
-                fb.height,
-            ) {
-                fb.draw_circle(sx as i32, sy as i32, 2, vertex_normal);
-            }
-        }
-    }
 }
 
 /// Handle mesh selection click
@@ -1142,7 +1163,8 @@ fn handle_mesh_selection_click(
                 let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
                                 || is_key_down(KeyCode::X);
                 if multi_select {
-                    // Toggle selection
+                    // Toggle selection - save undo first
+                    state.save_selection_undo();
                     if let ModelerSelection::Vertices(ref mut verts) = state.selection {
                         if let Some(pos) = verts.iter().position(|&v| v == idx) {
                             verts.remove(pos);
@@ -1153,11 +1175,11 @@ fn handle_mesh_selection_click(
                         state.selection = ModelerSelection::Vertices(vec![idx]);
                     }
                 } else {
-                    state.selection = ModelerSelection::Vertices(vec![idx]);
+                    state.set_selection(ModelerSelection::Vertices(vec![idx]));
                 }
             } else if !is_key_down(KeyCode::X) {
                 // Only clear selection if not holding X (multi-select mode)
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         SelectMode::Face => {
@@ -1195,6 +1217,8 @@ fn handle_mesh_selection_click(
                 let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
                                 || is_key_down(KeyCode::X);
                 if multi_select {
+                    // Toggle selection - save undo first
+                    state.save_selection_undo();
                     if let ModelerSelection::Faces(ref mut faces) = state.selection {
                         if let Some(pos) = faces.iter().position(|&f| f == idx) {
                             faces.remove(pos);
@@ -1205,11 +1229,11 @@ fn handle_mesh_selection_click(
                         state.selection = ModelerSelection::Faces(vec![idx]);
                     }
                 } else {
-                    state.selection = ModelerSelection::Faces(vec![idx]);
+                    state.set_selection(ModelerSelection::Faces(vec![idx]));
                 }
             } else if !is_key_down(KeyCode::X) {
                 // Only clear selection if not holding X (multi-select mode)
-                state.selection = ModelerSelection::None;
+                state.set_selection(ModelerSelection::None);
             }
         }
         _ => {}
@@ -1232,13 +1256,12 @@ fn find_hovered_element(
     let camera = &state.camera;
     let mesh = state.mesh();
 
-    const VERTEX_THRESHOLD: f32 = 12.0;
-    const EDGE_THRESHOLD: f32 = 8.0;
-    const FACE_THRESHOLD: f32 = 25.0;
+    const VERTEX_THRESHOLD: f32 = 6.0;
+    const EDGE_THRESHOLD: f32 = 4.0;
 
     let mut hovered_vertex: Option<(usize, f32)> = None; // (index, distance)
     let mut hovered_edge: Option<((usize, usize), f32)> = None;
-    let mut hovered_face: Option<(usize, f32)> = None;
+    let mut hovered_face: Option<(usize, f32)> = None; // (index, depth) - depth for Z-ordering
 
     // Precompute which vertices are on front-facing faces (for backface culling)
     let mut vertex_on_front_face = vec![false; mesh.vertices.len()];
@@ -1331,7 +1354,7 @@ fn find_hovered_element(
         }
     }
 
-    // If no vertex or edge hovered, check faces
+    // If no vertex or edge hovered, check faces using point-in-triangle
     if hovered_vertex.is_none() && hovered_edge.is_none() {
         for (idx, face) in mesh.faces.iter().enumerate() {
             if let (Some(v0), Some(v1), Some(v2)) = (
@@ -1351,12 +1374,18 @@ fn find_hovered_element(
                         continue; // Backface - skip
                     }
 
-                    let center_sx = (sx0 + sx1 + sx2) / 3.0;
-                    let center_sy = (sy0 + sy1 + sy2) / 3.0;
-                    let dist = ((mouse_fb_x - center_sx).powi(2) + (mouse_fb_y - center_sy).powi(2)).sqrt();
-                    if dist < FACE_THRESHOLD {
-                        if hovered_face.map_or(true, |(_, best_dist)| dist < best_dist) {
-                            hovered_face = Some((idx, dist));
+                    // Check if mouse is inside the triangle
+                    if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) {
+                        // Calculate depth at mouse position for Z-ordering
+                        let depth = interpolate_depth_in_triangle(
+                            mouse_fb_x, mouse_fb_y,
+                            sx0, sy0, (v0.pos - camera.position).dot(camera.basis_z),
+                            sx1, sy1, (v1.pos - camera.position).dot(camera.basis_z),
+                            sx2, sy2, (v2.pos - camera.position).dot(camera.basis_z),
+                        );
+                        // Pick the closest (smallest depth) face
+                        if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {
+                            hovered_face = Some((idx, depth));
                         }
                     }
                 }
@@ -1390,6 +1419,29 @@ fn point_to_line_distance(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) 
     let proj_y = y0 + t * dy;
 
     ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+}
+
+/// Interpolate depth at a point inside a triangle using barycentric coordinates
+fn interpolate_depth_in_triangle(
+    px: f32, py: f32,
+    x0: f32, y0: f32, d0: f32,
+    x1: f32, y1: f32, d1: f32,
+    x2: f32, y2: f32, d2: f32,
+) -> f32 {
+    // Signed area of full triangle (v0, v1, v2)
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if area.abs() < 0.0001 {
+        // Degenerate triangle, just return average depth
+        return (d0 + d1 + d2) / 3.0;
+    }
+
+    // Barycentric coordinates using signed areas of sub-triangles
+    let w0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) / area;
+    let w1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) / area;
+    let w2 = 1.0 - w0 - w1;
+
+    // Interpolate depth
+    w0 * d0 + w1 * d1 + w2 * d2
 }
 
 /// Update hover state based on current mouse position
@@ -1438,7 +1490,8 @@ fn handle_hover_click(state: &mut ModelerState) {
     // Priority: vertex > edge > face
     if let Some(vert_idx) = state.hovered_vertex {
         if multi_select {
-            // Toggle vertex in selection
+            // Toggle vertex in selection - save undo first
+            state.save_selection_undo();
             match &mut state.selection {
                 ModelerSelection::Vertices(verts) => {
                     if let Some(pos) = verts.iter().position(|&v| v == vert_idx) {
@@ -1452,7 +1505,7 @@ fn handle_hover_click(state: &mut ModelerState) {
                 }
             }
         } else {
-            state.selection = ModelerSelection::Vertices(vec![vert_idx]);
+            state.set_selection(ModelerSelection::Vertices(vec![vert_idx]));
         }
         state.select_mode = SelectMode::Vertex;
         return;
@@ -1460,6 +1513,8 @@ fn handle_hover_click(state: &mut ModelerState) {
 
     if let Some((v0, v1)) = state.hovered_edge {
         if multi_select {
+            // Toggle edge in selection - save undo first
+            state.save_selection_undo();
             match &mut state.selection {
                 ModelerSelection::Edges(edges) => {
                     if let Some(pos) = edges.iter().position(|e| *e == (v0, v1) || *e == (v1, v0)) {
@@ -1473,7 +1528,7 @@ fn handle_hover_click(state: &mut ModelerState) {
                 }
             }
         } else {
-            state.selection = ModelerSelection::Edges(vec![(v0, v1)]);
+            state.set_selection(ModelerSelection::Edges(vec![(v0, v1)]));
         }
         state.select_mode = SelectMode::Edge;
         return;
@@ -1481,6 +1536,8 @@ fn handle_hover_click(state: &mut ModelerState) {
 
     if let Some(face_idx) = state.hovered_face {
         if multi_select {
+            // Toggle face in selection - save undo first
+            state.save_selection_undo();
             match &mut state.selection {
                 ModelerSelection::Faces(faces) => {
                     if let Some(pos) = faces.iter().position(|&f| f == face_idx) {
@@ -1494,7 +1551,7 @@ fn handle_hover_click(state: &mut ModelerState) {
                 }
             }
         } else {
-            state.selection = ModelerSelection::Faces(vec![face_idx]);
+            state.set_selection(ModelerSelection::Faces(vec![face_idx]));
         }
         state.select_mode = SelectMode::Face;
         return;
@@ -1502,7 +1559,7 @@ fn handle_hover_click(state: &mut ModelerState) {
 
     // Clicked on nothing - clear selection (unless holding X)
     if !is_key_down(KeyCode::X) {
-        state.selection = ModelerSelection::None;
+        state.set_selection(ModelerSelection::None);
     }
 }
 
@@ -1679,9 +1736,7 @@ fn handle_move_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.move_tool.end_drag();
-            if state.drag_manager.end().is_some() {
-                state.push_undo("Gizmo Move");
-            }
+            state.drag_manager.end();
         }
     }
 
@@ -1724,10 +1779,14 @@ fn handle_move_gizmo(
             (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
         );
 
+        // Save undo state BEFORE starting the gizmo drag
+        state.push_undo("Gizmo Move");
+
         // Start drag with DragManager and sync tool state
+        // Use start_move_3d to calculate proper handle_offset (prevents snap on click)
         let ui_axis = to_ui_axis(axis);
         state.tool_box.tools.move_tool.start_drag(Some(ui_axis));
-        state.drag_manager.start_move(
+        state.drag_manager.start_move_3d(
             setup.center,
             fb_mouse,
             Some(ui_axis),
@@ -1735,6 +1794,9 @@ fn handle_move_gizmo(
             initial_positions,
             state.snap_settings.enabled,
             state.snap_settings.grid_size,
+            &state.camera,
+            fb_width,
+            fb_height,
         );
     }
 
@@ -1837,9 +1899,7 @@ fn handle_scale_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.scale.end_drag();
-            if state.drag_manager.end().is_some() {
-                state.push_undo("Gizmo Scale");
-            }
+            state.drag_manager.end();
         }
     }
 
@@ -1878,6 +1938,9 @@ fn handle_scale_gizmo(
             (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
             (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
         );
+
+        // Save undo state BEFORE starting the gizmo drag
+        state.push_undo("Gizmo Scale");
 
         // Start drag with DragManager and sync tool state
         let ui_axis = to_ui_axis(axis);
@@ -1982,9 +2045,7 @@ fn handle_rotate_gizmo(
         } else {
             // End drag - sync tool state
             state.tool_box.tools.rotate.end_drag();
-            if state.drag_manager.end().is_some() {
-                state.push_undo("Gizmo Rotate");
-            }
+            state.drag_manager.end();
         }
     }
 
@@ -2055,6 +2116,9 @@ fn handle_rotate_gizmo(
             mouse_pos.1 - setup.center_screen.1,
         );
         let initial_angle = start_vec.1.atan2(start_vec.0);
+
+        // Save undo state BEFORE starting the gizmo drag
+        state.push_undo("Gizmo Rotate");
 
         // Start drag with DragManager and sync tool state
         let ui_axis = to_ui_axis(axis);

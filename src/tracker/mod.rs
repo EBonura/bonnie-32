@@ -14,6 +14,7 @@ mod audio;
 mod pattern;
 mod layout;
 mod psx_reverb;
+mod io;
 pub mod actions;
 
 // Re-export public API

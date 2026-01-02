@@ -43,8 +43,6 @@ pub struct TrackerState {
     pub octave: u8,
     /// Current default volume (0-127)
     pub default_volume: u8,
-    /// Edit step (how many rows to advance after entering a note)
-    pub edit_step: usize,
     /// Is editing mode active? (vs. navigation only)
     pub edit_mode: bool,
 
@@ -95,6 +93,10 @@ pub struct TrackerState {
     pub knob_edit_text: String,
     /// Action registry for keyboard shortcuts
     pub actions: ActionRegistry,
+
+    /// Clipboard for copy/paste (rows × channels of notes)
+    /// Stored as [channel][row] to match pattern structure
+    pub clipboard: Option<Vec<Vec<Note>>>,
 }
 
 /// Soundfont filename
@@ -174,7 +176,6 @@ impl TrackerState {
 
             octave: 4,
             default_volume: 100,
-            edit_step: 1,
             edit_mode: true,
 
             playing: false,
@@ -200,6 +201,7 @@ impl TrackerState {
             editing_knob: None,
             knob_edit_text: String::new(),
             actions: create_tracker_actions(),
+            clipboard: None,
         }
     }
 
@@ -288,6 +290,159 @@ impl TrackerState {
         }
     }
 
+    /// Get the current pattern length
+    pub fn pattern_length(&self) -> usize {
+        self.current_pattern().map(|p| p.length).unwrap_or(64)
+    }
+
+    /// Increase pattern length by 16 rows (max 256)
+    pub fn increase_pattern_length(&mut self) {
+        let current_len = self.pattern_length();
+        let new_len = (current_len + 16).min(256);
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set_length(new_len);
+        }
+        self.dirty = true;
+    }
+
+    /// Decrease pattern length by 16 rows (min 16)
+    pub fn decrease_pattern_length(&mut self) {
+        let current_len = self.pattern_length();
+        let new_len = current_len.saturating_sub(16).max(16);
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set_length(new_len);
+        }
+        // Make sure cursor is still within bounds
+        if self.current_row >= new_len {
+            self.current_row = new_len - 1;
+        }
+        self.dirty = true;
+    }
+
+    // ========================================================================
+    // Pattern Bank Management
+    // ========================================================================
+
+    /// Get the total number of patterns in the bank
+    pub fn pattern_count(&self) -> usize {
+        self.song.patterns.len()
+    }
+
+    /// Create a new empty pattern in the bank (doesn't add to arrangement)
+    /// Returns the index of the new pattern
+    pub fn create_pattern(&mut self) -> usize {
+        let num_channels = self.song.num_channels();
+        let new_pattern = super::pattern::Pattern::with_channels(64, num_channels);
+        self.song.patterns.push(new_pattern);
+        self.dirty = true;
+        self.song.patterns.len() - 1
+    }
+
+    /// Duplicate a pattern in the bank
+    /// Returns the index of the new pattern, or None if source doesn't exist
+    pub fn duplicate_pattern(&mut self, pattern_idx: usize) -> Option<usize> {
+        let pattern = self.song.patterns.get(pattern_idx)?.clone();
+        self.song.patterns.push(pattern);
+        self.dirty = true;
+        Some(self.song.patterns.len() - 1)
+    }
+
+    /// Delete a pattern from the bank (also removes from arrangement)
+    /// Returns false if pattern doesn't exist or is the last one
+    pub fn delete_pattern(&mut self, pattern_idx: usize) -> bool {
+        if self.song.patterns.len() <= 1 || pattern_idx >= self.song.patterns.len() {
+            return false;
+        }
+
+        // Remove the pattern
+        self.song.patterns.remove(pattern_idx);
+
+        // Update arrangement: remove references to deleted pattern, adjust indices
+        self.song.arrangement.retain(|&idx| idx != pattern_idx);
+        for idx in &mut self.song.arrangement {
+            if *idx > pattern_idx {
+                *idx -= 1;
+            }
+        }
+
+        // Make sure arrangement isn't empty
+        if self.song.arrangement.is_empty() {
+            self.song.arrangement.push(0);
+        }
+
+        // Adjust current pattern index if needed
+        if self.current_pattern_idx >= self.song.arrangement.len() {
+            self.current_pattern_idx = self.song.arrangement.len() - 1;
+        }
+
+        self.dirty = true;
+        true
+    }
+
+    // ========================================================================
+    // Arrangement Management
+    // ========================================================================
+
+    /// Insert a pattern into the arrangement at the given position
+    pub fn arrangement_insert(&mut self, position: usize, pattern_idx: usize) {
+        if pattern_idx < self.song.patterns.len() {
+            let pos = position.min(self.song.arrangement.len());
+            self.song.arrangement.insert(pos, pattern_idx);
+            self.dirty = true;
+        }
+    }
+
+    /// Remove an entry from the arrangement at the given position
+    /// Won't remove if it's the last entry
+    pub fn arrangement_remove(&mut self, position: usize) -> bool {
+        if self.song.arrangement.len() > 1 && position < self.song.arrangement.len() {
+            self.song.arrangement.remove(position);
+            // Adjust current position if needed
+            if self.current_pattern_idx >= self.song.arrangement.len() {
+                self.current_pattern_idx = self.song.arrangement.len() - 1;
+            }
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move an arrangement entry up (earlier in sequence)
+    pub fn arrangement_move_up(&mut self, position: usize) -> bool {
+        if position > 0 && position < self.song.arrangement.len() {
+            self.song.arrangement.swap(position, position - 1);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move an arrangement entry down (later in sequence)
+    pub fn arrangement_move_down(&mut self, position: usize) -> bool {
+        if position + 1 < self.song.arrangement.len() {
+            self.song.arrangement.swap(position, position + 1);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set the pattern at a specific arrangement position
+    pub fn arrangement_set_pattern(&mut self, position: usize, pattern_idx: usize) {
+        if position < self.song.arrangement.len() && pattern_idx < self.song.patterns.len() {
+            self.song.arrangement[position] = pattern_idx;
+            self.dirty = true;
+        }
+    }
+
+    /// Get arrangement length
+    pub fn arrangement_len(&self) -> usize {
+        self.song.arrangement.len()
+    }
+
     /// Move cursor up
     pub fn cursor_up(&mut self) {
         if self.current_row > 0 {
@@ -351,19 +506,32 @@ impl TrackerState {
         }
     }
 
-    /// Enter a note at cursor position
+    /// Enter a note at cursor position (or fill selection if active)
     pub fn enter_note(&mut self, pitch: u8) {
-        let channel = self.current_channel;
-        let row = self.current_row;
         let instrument = self.current_instrument();
+        let note = Note::new(pitch, instrument);
 
-        if let Some(pattern) = self.current_pattern_mut() {
-            let note = Note::new(pitch, instrument);
-            pattern.set(channel, row, note);
+        // Check if we have a selection - if so, fill all selected cells
+        if let Some((start_row, end_row, start_ch, end_ch)) = self.get_selection_bounds() {
+            if let Some(pattern) = self.current_pattern_mut() {
+                for ch in start_ch..=end_ch {
+                    for row in start_row..=end_row {
+                        pattern.set(ch, row, note);
+                    }
+                }
+            }
+        } else {
+            // No selection - just set at cursor position
+            let channel = self.current_channel;
+            let row = self.current_row;
+            if let Some(pattern) = self.current_pattern_mut() {
+                pattern.set(channel, row, note);
+            }
         }
         self.dirty = true;
 
         // Preview the note (make sure audio engine uses correct instrument for channel)
+        let channel = self.current_channel;
         self.audio.set_program(channel as i32, instrument as i32);
         self.audio.note_on(channel as i32, pitch as i32, 100);
 
@@ -467,12 +635,9 @@ impl TrackerState {
         self.dirty = true;
     }
 
-    /// Advance cursor by edit_step rows
+    /// Called after entering a note (no-op, cursor stays on current row)
     fn advance_cursor(&mut self) {
-        if let Some(pattern) = self.current_pattern() {
-            self.current_row = (self.current_row + self.edit_step).min(pattern.length - 1);
-            self.ensure_row_visible();
-        }
+        // Do nothing - cursor stays on current row after note entry
     }
 
     /// Toggle playback from current cursor position
@@ -741,10 +906,264 @@ impl TrackerState {
 
         note_offset.map(|offset| (base_note + offset).min(127))
     }
+
+    // ========================================================================
+    // Selection Methods
+    // ========================================================================
+
+    /// Start a new selection at the current cursor position
+    pub fn start_selection(&mut self) {
+        self.selection_start = Some((self.current_pattern_idx, self.current_row, self.current_channel));
+        self.selection_end = Some((self.current_pattern_idx, self.current_row, self.current_channel));
+    }
+
+    /// Update selection end to current cursor position
+    pub fn update_selection(&mut self) {
+        if self.selection_start.is_some() {
+            self.selection_end = Some((self.current_pattern_idx, self.current_row, self.current_channel));
+        }
+    }
+
+    /// Clear the current selection
+    pub fn clear_selection(&mut self) {
+        self.selection_start = None;
+        self.selection_end = None;
+    }
+
+    /// Check if there's an active selection
+    pub fn has_selection(&self) -> bool {
+        self.selection_start.is_some() && self.selection_end.is_some()
+    }
+
+    /// Get normalized selection bounds (start_row, end_row, start_channel, end_channel)
+    /// Returns None if no selection, or if selection spans multiple patterns
+    pub fn get_selection_bounds(&self) -> Option<(usize, usize, usize, usize)> {
+        let (pat1, row1, ch1) = self.selection_start?;
+        let (pat2, row2, ch2) = self.selection_end?;
+
+        // Only support selection within same pattern for now
+        if pat1 != pat2 {
+            return None;
+        }
+
+        let start_row = row1.min(row2);
+        let end_row = row1.max(row2);
+        let start_ch = ch1.min(ch2);
+        let end_ch = ch1.max(ch2);
+
+        Some((start_row, end_row, start_ch, end_ch))
+    }
+
+    /// Check if a cell is within the current selection
+    pub fn is_in_selection(&self, row: usize, channel: usize) -> bool {
+        if let Some((start_row, end_row, start_ch, end_ch)) = self.get_selection_bounds() {
+            row >= start_row && row <= end_row && channel >= start_ch && channel <= end_ch
+        } else {
+            false
+        }
+    }
+
+    // ========================================================================
+    // Copy/Paste Methods
+    // ========================================================================
+
+    /// Copy the current selection to clipboard
+    pub fn copy_selection(&mut self) {
+        let bounds = match self.get_selection_bounds() {
+            Some(b) => b,
+            None => {
+                // No selection - copy single cell
+                if let Some(pattern) = self.current_pattern() {
+                    if let Some(note) = pattern.get(self.current_channel, self.current_row) {
+                        self.clipboard = Some(vec![vec![*note]]);
+                        self.set_status("Copied 1 note", 1.0);
+                    }
+                }
+                return;
+            }
+        };
+
+        let (start_row, end_row, start_ch, end_ch) = bounds;
+        let pattern = match self.current_pattern() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let num_channels = end_ch - start_ch + 1;
+        let num_rows = end_row - start_row + 1;
+        let mut clipboard_data: Vec<Vec<Note>> = Vec::with_capacity(num_channels);
+
+        for ch in start_ch..=end_ch {
+            let mut channel_notes: Vec<Note> = Vec::with_capacity(num_rows);
+            for row in start_row..=end_row {
+                let note = pattern.get(ch, row).copied().unwrap_or(Note::EMPTY);
+                channel_notes.push(note);
+            }
+            clipboard_data.push(channel_notes);
+        }
+
+        self.clipboard = Some(clipboard_data);
+        self.set_status(&format!("Copied {} notes ({} rows × {} channels)", num_rows * num_channels, num_rows, num_channels), 1.0);
+    }
+
+    /// Cut the current selection (copy then delete)
+    pub fn cut_selection(&mut self) {
+        self.copy_selection();
+        self.delete_selection();
+    }
+
+    /// Delete notes in the current selection
+    pub fn delete_selection(&mut self) {
+        let bounds = match self.get_selection_bounds() {
+            Some(b) => b,
+            None => {
+                // No selection - delete single cell
+                self.delete_note();
+                return;
+            }
+        };
+
+        let (start_row, end_row, start_ch, end_ch) = bounds;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            for ch in start_ch..=end_ch {
+                for row in start_row..=end_row {
+                    pattern.set(ch, row, Note::EMPTY);
+                }
+            }
+        }
+
+        let count = (end_row - start_row + 1) * (end_ch - start_ch + 1);
+        self.dirty = true;
+        self.set_status(&format!("Deleted {} notes", count), 1.0);
+        self.clear_selection();
+    }
+
+    /// Paste clipboard at current cursor position
+    pub fn paste(&mut self) {
+        let clipboard = match &self.clipboard {
+            Some(c) => c.clone(),
+            None => {
+                self.set_status("Nothing to paste", 1.0);
+                return;
+            }
+        };
+
+        let num_clipboard_channels = clipboard.len();
+        if num_clipboard_channels == 0 {
+            return;
+        }
+
+        // Capture cursor position before borrowing pattern
+        let start_ch = self.current_channel;
+        let start_row = self.current_row;
+
+        let pattern = match self.current_pattern_mut() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let pattern_len = pattern.length;
+        let pattern_channels = pattern.num_channels();
+        let mut pasted = 0;
+
+        for (ch_offset, channel_notes) in clipboard.iter().enumerate() {
+            let target_ch = start_ch + ch_offset;
+            if target_ch >= pattern_channels {
+                break;
+            }
+
+            for (row_offset, note) in channel_notes.iter().enumerate() {
+                let target_row = start_row + row_offset;
+                if target_row >= pattern_len {
+                    break;
+                }
+                pattern.set(target_ch, target_row, *note);
+                pasted += 1;
+            }
+        }
+
+        self.dirty = true;
+        self.set_status(&format!("Pasted {} notes", pasted), 1.0);
+    }
 }
 
 impl Default for TrackerState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// File I/O Methods
+// ============================================================================
+
+impl TrackerState {
+    /// Save the current song to a file
+    pub fn save_to_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        super::io::save_song(&self.song, path)?;
+        self.current_file = Some(path.to_path_buf());
+        self.dirty = false;
+        self.set_status(&format!("Saved: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
+        Ok(())
+    }
+
+    /// Load a song from a file
+    pub fn load_from_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let song = super::io::load_song(path)?;
+        self.song = song;
+        self.current_file = Some(path.to_path_buf());
+        self.dirty = false;
+
+        // Reset playback state
+        self.playing = false;
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.current_row = 0;
+        self.current_pattern_idx = 0;
+        self.current_channel = 0;
+        self.scroll_row = 0;
+        self.clear_selection();
+        self.audio.all_notes_off();
+
+        // Make sure channel instruments are synced with audio engine
+        for (ch, &inst) in self.song.channel_instruments.iter().enumerate() {
+            self.audio.set_program(ch as i32, inst as i32);
+        }
+
+        self.set_status(&format!("Loaded: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
+        Ok(())
+    }
+
+    /// Create a new empty song
+    pub fn new_song(&mut self) {
+        self.song = Song::new();
+        self.current_file = None;
+        self.dirty = false;
+
+        // Reset all state
+        self.playing = false;
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.current_row = 0;
+        self.current_pattern_idx = 0;
+        self.current_channel = 0;
+        self.scroll_row = 0;
+        self.clear_selection();
+        self.audio.all_notes_off();
+
+        self.set_status("New song created", 2.0);
+    }
+
+    /// Check if there are unsaved changes
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.dirty
+    }
+
+    /// Get the current file name (for display)
+    pub fn current_file_name(&self) -> Option<String> {
+        self.current_file.as_ref().and_then(|p| {
+            p.file_name().map(|f| f.to_string_lossy().to_string())
+        })
     }
 }

@@ -146,6 +146,17 @@ impl Pattern {
             }
         }
     }
+
+    /// Set the pattern length (resize all channels)
+    /// If shrinking, notes beyond the new length are lost
+    /// If growing, new rows are filled with empty notes
+    pub fn set_length(&mut self, new_length: usize) {
+        let new_len = new_length.clamp(1, 256);
+        for channel in &mut self.channels {
+            channel.resize(new_len, Note::EMPTY);
+        }
+        self.length = new_len;
+    }
 }
 
 impl Default for Pattern {
