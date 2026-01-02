@@ -56,6 +56,46 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
     let toolbar_rect = Rect::new(rect.x, rect.y, rect.w, 36.0);
     let mut toolbar = Toolbar::new(toolbar_rect);
 
+    // File operations (native only - no file dialogs on WASM)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if toolbar.icon_button(ctx, icon::FILE_PLUS, icon_font, "New Song (Ctrl+N)") {
+            state.new_song();
+        }
+        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Open Song (Ctrl+O)") {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Bonnie Song", &["bsong"])
+                .pick_file()
+            {
+                if let Err(e) = state.load_from_file(&path) {
+                    state.set_status(&format!("Load failed: {}", e), 3.0);
+                }
+            }
+        }
+        // Save button - show dirty indicator
+        let save_icon = if state.dirty { icon::SAVE } else { icon::SAVE };
+        let save_tooltip = if state.current_file.is_some() { "Save (Ctrl+S)" } else { "Save As (Ctrl+S)" };
+        if toolbar.icon_button(ctx, save_icon, icon_font, save_tooltip) {
+            if let Some(path) = state.current_file.clone() {
+                if let Err(e) = state.save_to_file(&path) {
+                    state.set_status(&format!("Save failed: {}", e), 3.0);
+                }
+            } else {
+                // No current file - prompt for location
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Bonnie Song", &["bsong"])
+                    .set_file_name("song.bsong")
+                    .save_file()
+                {
+                    if let Err(e) = state.save_to_file(&path) {
+                        state.set_status(&format!("Save failed: {}", e), 3.0);
+                    }
+                }
+            }
+        }
+        toolbar.separator();
+    }
+
     // View mode buttons
     let view_icons = [
         (TrackerView::Pattern, icon::GRID, "Pattern Editor"),
@@ -147,15 +187,29 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
         rect.x + 10.0, y2 + 14.0, 12.0, TEXT_COLOR
     );
 
+    // Song name / file name with dirty indicator
+    let song_display = if let Some(filename) = state.current_file_name() {
+        if state.dirty {
+            format!("*{}", filename)
+        } else {
+            filename
+        }
+    } else if state.dirty {
+        "*Untitled".to_string()
+    } else {
+        "Untitled".to_string()
+    };
+    draw_text(&song_display, rect.x + 350.0, y2 + 14.0, 12.0, TEXT_COLOR);
+
     // Soundfont status
     let sf_status = state.audio.soundfont_name()
         .map(|n| format!("SF: {}", n))
         .unwrap_or_else(|| "No Soundfont".to_string());
-    draw_text(&sf_status, rect.x + 350.0, y2 + 14.0, 12.0, if state.audio.is_loaded() { TEXT_DIM } else { Color::new(0.8, 0.3, 0.3, 1.0) });
+    draw_text(&sf_status, rect.x + 500.0, y2 + 14.0, 12.0, if state.audio.is_loaded() { TEXT_DIM } else { Color::new(0.8, 0.3, 0.3, 1.0) });
 
     // Status message
     if let Some(status) = state.get_status() {
-        draw_text(status, rect.x + 550.0, y2 + 14.0, 12.0, Color::new(1.0, 0.8, 0.3, 1.0));
+        draw_text(status, rect.x + 680.0, y2 + 14.0, 12.0, Color::new(1.0, 0.8, 0.3, 1.0));
     }
 }
 
@@ -466,28 +520,292 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
     }
 }
 
-/// Draw the arrangement view (placeholder)
-fn draw_arrangement_view(_ctx: &mut UiContext, rect: Rect, state: &TrackerState) {
+/// State for arrangement view interactions
+static mut ARRANGEMENT_SELECTION: usize = 0;
+static mut PATTERN_BANK_SELECTION: usize = 0;
+static mut ARRANGEMENT_FOCUS: bool = true; // true = arrangement, false = pattern bank
+
+fn draw_arrangement_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
-    // Header
-    draw_text("Song Arrangement", rect.x + 10.0, rect.y + 24.0, 16.0, TEXT_COLOR);
+    // Layout: Pattern Bank (left) | Arrangement (right)
+    let bank_width = 200.0;
+    let arrangement_width = rect.w - bank_width - 20.0;
+    let list_top = rect.y + 40.0;
+    let list_height = rect.h - 80.0;
+    let row_h = 24.0;
 
-    // Draw arrangement as list
-    let mut y = rect.y + 50.0;
-    for (i, &pattern_idx) in state.song.arrangement.iter().enumerate() {
-        let is_current = i == state.current_pattern_idx;
-        let bg = if is_current { ROW_HIGHLIGHT } else if i % 2 == 0 { ROW_EVEN } else { ROW_ODD };
-        draw_rectangle(rect.x + 10.0, y, 200.0, 24.0, bg);
+    // === Pattern Bank (left side) ===
+    draw_text("Pattern Bank", rect.x + 10.0, rect.y + 24.0, 14.0, TEXT_COLOR);
+
+    let bank_rect = Rect::new(rect.x + 10.0, list_top, bank_width - 20.0, list_height);
+    draw_rectangle(bank_rect.x, bank_rect.y, bank_rect.w, bank_rect.h, Color::new(0.08, 0.08, 0.1, 1.0));
+
+    // Get selection state (using unsafe statics for simplicity)
+    let (arr_sel, bank_sel, arr_focus) = unsafe {
+        (ARRANGEMENT_SELECTION, PATTERN_BANK_SELECTION, ARRANGEMENT_FOCUS)
+    };
+
+    // Draw patterns in bank - collect data first to avoid borrow issues
+    let visible_bank_rows = (list_height / row_h) as usize;
+    let pattern_count = state.song.patterns.len();
+    let mut bank_click_action: Option<usize> = None; // pattern to add via right-click
+
+    for i in 0..pattern_count.min(visible_bank_rows) {
+        let pattern = &state.song.patterns[i];
+        let y = bank_rect.y + (i as f32 * row_h);
+        let is_selected = !arr_focus && i == bank_sel;
+        let is_in_arrangement = state.song.arrangement.contains(&i);
+
+        let bg = if is_selected {
+            CURSOR_COLOR
+        } else if i % 2 == 0 {
+            ROW_EVEN
+        } else {
+            ROW_ODD
+        };
+        draw_rectangle(bank_rect.x, y, bank_rect.w, row_h - 2.0, bg);
+
+        // Pattern info: index, length, note count indicator
+        let note_count: usize = pattern.channels.iter()
+            .flat_map(|ch| ch.iter())
+            .filter(|n| !n.is_empty())
+            .count();
+        // Use * for patterns with notes, - for empty
+        let indicator = if note_count > 0 { "*" } else { "-" };
+
+        let text_color = if is_selected { Color::new(0.0, 0.0, 0.0, 1.0) } else { TEXT_COLOR };
         draw_text(
-            &format!("{:02}: Pattern {:02}", i, pattern_idx),
-            rect.x + 20.0, y + 16.0, 14.0,
-            if is_current { NOTE_COLOR } else { TEXT_COLOR }
+            &format!("{} {:02} [{:3} rows]", indicator, i, pattern.length),
+            bank_rect.x + 6.0, y + 16.0, 12.0, text_color
         );
-        y += 26.0;
+
+        // Show if used in arrangement with ">" indicator
+        if is_in_arrangement {
+            draw_text(">", bank_rect.x + bank_rect.w - 16.0, y + 16.0, 12.0,
+                if is_selected { Color::new(0.0, 0.0, 0.0, 1.0) } else { NOTE_COLOR });
+        }
+
+        // Click to select
+        let mouse = mouse_position();
+        if mouse.0 >= bank_rect.x && mouse.0 <= bank_rect.x + bank_rect.w
+            && mouse.1 >= y && mouse.1 <= y + row_h - 2.0
+        {
+            if is_mouse_button_pressed(MouseButton::Left) {
+                unsafe {
+                    PATTERN_BANK_SELECTION = i;
+                    ARRANGEMENT_FOCUS = false;
+                }
+            }
+            // Double-click to add to arrangement
+            // (We'd need double-click detection, for now use right-click)
+            if is_mouse_button_pressed(MouseButton::Right) {
+                bank_click_action = Some(i);
+            }
+        }
     }
 
-    draw_text("(Press + to add pattern, - to remove)", rect.x + 10.0, rect.y + rect.h - 30.0, 12.0, TEXT_DIM);
+    // Handle deferred bank click action
+    if let Some(pattern_idx) = bank_click_action {
+        state.arrangement_insert(state.song.arrangement.len(), pattern_idx);
+    }
+
+    // === Arrangement (right side) ===
+    let arr_x = rect.x + bank_width + 10.0;
+    draw_text("Arrangement", arr_x, rect.y + 24.0, 14.0, TEXT_COLOR);
+
+    let arr_rect = Rect::new(arr_x, list_top, arrangement_width - 20.0, list_height);
+    draw_rectangle(arr_rect.x, arr_rect.y, arr_rect.w, arr_rect.h, Color::new(0.08, 0.08, 0.1, 1.0));
+
+    // Draw arrangement entries
+    let visible_arr_rows = (list_height / row_h) as usize;
+    for (i, &pattern_idx) in state.song.arrangement.iter().enumerate() {
+        if i >= visible_arr_rows { break; }
+
+        let y = arr_rect.y + (i as f32 * row_h);
+        let is_current = i == state.current_pattern_idx;
+        let is_selected = arr_focus && i == arr_sel;
+
+        let bg = if is_selected {
+            CURSOR_COLOR
+        } else if is_current {
+            ROW_HIGHLIGHT
+        } else if i % 2 == 0 {
+            ROW_EVEN
+        } else {
+            ROW_ODD
+        };
+        draw_rectangle(arr_rect.x, y, arr_rect.w, row_h - 2.0, bg);
+
+        // Show position number and pattern reference
+        let text_color = if is_selected { Color::new(0.0, 0.0, 0.0, 1.0) }
+            else if is_current { NOTE_COLOR } else { TEXT_COLOR };
+        draw_text(
+            &format!("{:02} > Pattern {:02}", i, pattern_idx),
+            arr_rect.x + 6.0, y + 16.0, 12.0, text_color
+        );
+
+        // Playback indicator
+        if is_current && state.playing {
+            draw_text(">", arr_rect.x + arr_rect.w - 20.0, y + 16.0, 12.0, PLAYBACK_ROW_COLOR);
+        }
+
+        // Click to select
+        let mouse = mouse_position();
+        if mouse.0 >= arr_rect.x && mouse.0 <= arr_rect.x + arr_rect.w
+            && mouse.1 >= y && mouse.1 <= y + row_h - 2.0
+        {
+            if is_mouse_button_pressed(MouseButton::Left) {
+                unsafe {
+                    ARRANGEMENT_SELECTION = i;
+                    ARRANGEMENT_FOCUS = true;
+                }
+            }
+            // Double-click (or Enter) to jump to that position
+            if is_mouse_button_pressed(MouseButton::Right) {
+                state.current_pattern_idx = i;
+                state.current_row = 0;
+                state.view = TrackerView::Pattern;
+            }
+        }
+    }
+
+    // === Help text ===
+    let help_y = rect.y + rect.h - 30.0;
+    draw_text(
+        "Tab: Switch focus | +: New pattern | Enter: Add to arrangement | Del: Remove | ↑↓: Move",
+        rect.x + 10.0, help_y, 11.0, TEXT_DIM
+    );
+
+    // === Keyboard handling for arrangement view ===
+    handle_arrangement_input(ctx, state);
+}
+
+/// Handle keyboard input for arrangement view
+fn handle_arrangement_input(_ctx: &mut UiContext, state: &mut TrackerState) {
+    let (arr_sel, bank_sel, arr_focus) = unsafe {
+        (ARRANGEMENT_SELECTION, PATTERN_BANK_SELECTION, ARRANGEMENT_FOCUS)
+    };
+
+    // Tab switches focus between bank and arrangement
+    if is_key_pressed(KeyCode::Tab) {
+        unsafe { ARRANGEMENT_FOCUS = !ARRANGEMENT_FOCUS; }
+    }
+
+    // Navigation
+    if is_key_pressed(KeyCode::Up) {
+        if arr_focus {
+            unsafe { ARRANGEMENT_SELECTION = arr_sel.saturating_sub(1); }
+        } else {
+            unsafe { PATTERN_BANK_SELECTION = bank_sel.saturating_sub(1); }
+        }
+    }
+    if is_key_pressed(KeyCode::Down) {
+        if arr_focus {
+            unsafe {
+                if arr_sel + 1 < state.song.arrangement.len() {
+                    ARRANGEMENT_SELECTION = arr_sel + 1;
+                }
+            }
+        } else {
+            unsafe {
+                if bank_sel + 1 < state.song.patterns.len() {
+                    PATTERN_BANK_SELECTION = bank_sel + 1;
+                }
+            }
+        }
+    }
+
+    // Pattern bank actions
+    if !arr_focus {
+        // + or Insert: Create new pattern
+        if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) || is_key_pressed(KeyCode::Insert) {
+            let new_idx = state.create_pattern();
+            state.set_status(&format!("Created pattern {:02}", new_idx), 1.5);
+            unsafe { PATTERN_BANK_SELECTION = new_idx; }
+        }
+
+        // Enter: Add selected pattern to arrangement
+        if is_key_pressed(KeyCode::Enter) {
+            state.arrangement_insert(state.song.arrangement.len(), bank_sel);
+            state.set_status(&format!("Added pattern {:02} to arrangement", bank_sel), 1.5);
+        }
+
+        // D: Duplicate pattern
+        if is_key_pressed(KeyCode::D) {
+            if let Some(new_idx) = state.duplicate_pattern(bank_sel) {
+                state.set_status(&format!("Duplicated to pattern {:02}", new_idx), 1.5);
+                unsafe { PATTERN_BANK_SELECTION = new_idx; }
+            }
+        }
+
+        // Delete: Delete pattern (if not the last one)
+        if is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace) {
+            if state.delete_pattern(bank_sel) {
+                state.set_status("Pattern deleted", 1.5);
+                unsafe {
+                    if PATTERN_BANK_SELECTION >= state.song.patterns.len() {
+                        PATTERN_BANK_SELECTION = state.song.patterns.len().saturating_sub(1);
+                    }
+                }
+            } else {
+                state.set_status("Cannot delete last pattern", 1.5);
+            }
+        }
+    }
+
+    // Arrangement actions
+    if arr_focus && arr_sel < state.song.arrangement.len() {
+        // Enter: Jump to pattern and switch to pattern view
+        if is_key_pressed(KeyCode::Enter) {
+            state.current_pattern_idx = arr_sel;
+            state.current_row = 0;
+            state.view = TrackerView::Pattern;
+        }
+
+        // Delete/Backspace: Remove from arrangement
+        if is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace) {
+            if state.arrangement_remove(arr_sel) {
+                state.set_status("Removed from arrangement", 1.5);
+                unsafe {
+                    if ARRANGEMENT_SELECTION >= state.song.arrangement.len() {
+                        ARRANGEMENT_SELECTION = state.song.arrangement.len().saturating_sub(1);
+                    }
+                }
+            }
+        }
+
+        // Shift+Up/Down: Move arrangement entry
+        let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+        if shift && is_key_pressed(KeyCode::Up) {
+            if state.arrangement_move_up(arr_sel) {
+                unsafe { ARRANGEMENT_SELECTION = arr_sel - 1; }
+            }
+        }
+        if shift && is_key_pressed(KeyCode::Down) {
+            if state.arrangement_move_down(arr_sel) {
+                unsafe { ARRANGEMENT_SELECTION = arr_sel + 1; }
+            }
+        }
+
+        // +/-: Change which pattern is at this position
+        if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) {
+            let current_pat = state.song.arrangement[arr_sel];
+            let new_pat = (current_pat + 1) % state.song.patterns.len();
+            state.arrangement_set_pattern(arr_sel, new_pat);
+        }
+        if is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract) {
+            let current_pat = state.song.arrangement[arr_sel];
+            let new_pat = if current_pat == 0 { state.song.patterns.len() - 1 } else { current_pat - 1 };
+            state.arrangement_set_pattern(arr_sel, new_pat);
+        }
+
+        // Insert: Insert the currently selected bank pattern at this position
+        if is_key_pressed(KeyCode::Insert) {
+            state.arrangement_insert(arr_sel, bank_sel);
+            state.set_status(&format!("Inserted pattern {:02}", bank_sel), 1.5);
+        }
+    }
 }
 
 /// Piano key layout for drawing
@@ -1003,6 +1321,45 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
     let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
         || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper); // Cmd on macOS
+
+    // File operations (native only - Ctrl+S/O/N)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Ctrl+N - New song
+        if ctrl_held && is_key_pressed(KeyCode::N) {
+            state.new_song();
+        }
+        // Ctrl+O - Open song
+        if ctrl_held && is_key_pressed(KeyCode::O) {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Bonnie Song", &["bsong"])
+                .pick_file()
+            {
+                if let Err(e) = state.load_from_file(&path) {
+                    state.set_status(&format!("Load failed: {}", e), 3.0);
+                }
+            }
+        }
+        // Ctrl+S - Save song
+        if ctrl_held && is_key_pressed(KeyCode::S) {
+            if let Some(path) = state.current_file.clone() {
+                if let Err(e) = state.save_to_file(&path) {
+                    state.set_status(&format!("Save failed: {}", e), 3.0);
+                }
+            } else {
+                // No current file - prompt for location
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Bonnie Song", &["bsong"])
+                    .set_file_name("song.bsong")
+                    .save_file()
+                {
+                    if let Err(e) = state.save_to_file(&path) {
+                        state.set_status(&format!("Save failed: {}", e), 3.0);
+                    }
+                }
+            }
+        }
+    }
 
     // Copy/Paste/Cut actions (handle before navigation to prevent conflicts)
     if state.actions.triggered("edit.copy", &actx) {

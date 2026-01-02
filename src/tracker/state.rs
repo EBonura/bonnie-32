@@ -319,6 +319,130 @@ impl TrackerState {
         self.dirty = true;
     }
 
+    // ========================================================================
+    // Pattern Bank Management
+    // ========================================================================
+
+    /// Get the total number of patterns in the bank
+    pub fn pattern_count(&self) -> usize {
+        self.song.patterns.len()
+    }
+
+    /// Create a new empty pattern in the bank (doesn't add to arrangement)
+    /// Returns the index of the new pattern
+    pub fn create_pattern(&mut self) -> usize {
+        let num_channels = self.song.num_channels();
+        let new_pattern = super::pattern::Pattern::with_channels(64, num_channels);
+        self.song.patterns.push(new_pattern);
+        self.dirty = true;
+        self.song.patterns.len() - 1
+    }
+
+    /// Duplicate a pattern in the bank
+    /// Returns the index of the new pattern, or None if source doesn't exist
+    pub fn duplicate_pattern(&mut self, pattern_idx: usize) -> Option<usize> {
+        let pattern = self.song.patterns.get(pattern_idx)?.clone();
+        self.song.patterns.push(pattern);
+        self.dirty = true;
+        Some(self.song.patterns.len() - 1)
+    }
+
+    /// Delete a pattern from the bank (also removes from arrangement)
+    /// Returns false if pattern doesn't exist or is the last one
+    pub fn delete_pattern(&mut self, pattern_idx: usize) -> bool {
+        if self.song.patterns.len() <= 1 || pattern_idx >= self.song.patterns.len() {
+            return false;
+        }
+
+        // Remove the pattern
+        self.song.patterns.remove(pattern_idx);
+
+        // Update arrangement: remove references to deleted pattern, adjust indices
+        self.song.arrangement.retain(|&idx| idx != pattern_idx);
+        for idx in &mut self.song.arrangement {
+            if *idx > pattern_idx {
+                *idx -= 1;
+            }
+        }
+
+        // Make sure arrangement isn't empty
+        if self.song.arrangement.is_empty() {
+            self.song.arrangement.push(0);
+        }
+
+        // Adjust current pattern index if needed
+        if self.current_pattern_idx >= self.song.arrangement.len() {
+            self.current_pattern_idx = self.song.arrangement.len() - 1;
+        }
+
+        self.dirty = true;
+        true
+    }
+
+    // ========================================================================
+    // Arrangement Management
+    // ========================================================================
+
+    /// Insert a pattern into the arrangement at the given position
+    pub fn arrangement_insert(&mut self, position: usize, pattern_idx: usize) {
+        if pattern_idx < self.song.patterns.len() {
+            let pos = position.min(self.song.arrangement.len());
+            self.song.arrangement.insert(pos, pattern_idx);
+            self.dirty = true;
+        }
+    }
+
+    /// Remove an entry from the arrangement at the given position
+    /// Won't remove if it's the last entry
+    pub fn arrangement_remove(&mut self, position: usize) -> bool {
+        if self.song.arrangement.len() > 1 && position < self.song.arrangement.len() {
+            self.song.arrangement.remove(position);
+            // Adjust current position if needed
+            if self.current_pattern_idx >= self.song.arrangement.len() {
+                self.current_pattern_idx = self.song.arrangement.len() - 1;
+            }
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move an arrangement entry up (earlier in sequence)
+    pub fn arrangement_move_up(&mut self, position: usize) -> bool {
+        if position > 0 && position < self.song.arrangement.len() {
+            self.song.arrangement.swap(position, position - 1);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move an arrangement entry down (later in sequence)
+    pub fn arrangement_move_down(&mut self, position: usize) -> bool {
+        if position + 1 < self.song.arrangement.len() {
+            self.song.arrangement.swap(position, position + 1);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set the pattern at a specific arrangement position
+    pub fn arrangement_set_pattern(&mut self, position: usize, pattern_idx: usize) {
+        if position < self.song.arrangement.len() && pattern_idx < self.song.patterns.len() {
+            self.song.arrangement[position] = pattern_idx;
+            self.dirty = true;
+        }
+    }
+
+    /// Get arrangement length
+    pub fn arrangement_len(&self) -> usize {
+        self.song.arrangement.len()
+    }
+
     /// Move cursor up
     pub fn cursor_up(&mut self) {
         if self.current_row > 0 {
@@ -967,5 +1091,79 @@ impl TrackerState {
 impl Default for TrackerState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// File I/O Methods
+// ============================================================================
+
+impl TrackerState {
+    /// Save the current song to a file
+    pub fn save_to_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        super::io::save_song(&self.song, path)?;
+        self.current_file = Some(path.to_path_buf());
+        self.dirty = false;
+        self.set_status(&format!("Saved: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
+        Ok(())
+    }
+
+    /// Load a song from a file
+    pub fn load_from_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let song = super::io::load_song(path)?;
+        self.song = song;
+        self.current_file = Some(path.to_path_buf());
+        self.dirty = false;
+
+        // Reset playback state
+        self.playing = false;
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.current_row = 0;
+        self.current_pattern_idx = 0;
+        self.current_channel = 0;
+        self.scroll_row = 0;
+        self.clear_selection();
+        self.audio.all_notes_off();
+
+        // Make sure channel instruments are synced with audio engine
+        for (ch, &inst) in self.song.channel_instruments.iter().enumerate() {
+            self.audio.set_program(ch as i32, inst as i32);
+        }
+
+        self.set_status(&format!("Loaded: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
+        Ok(())
+    }
+
+    /// Create a new empty song
+    pub fn new_song(&mut self) {
+        self.song = Song::new();
+        self.current_file = None;
+        self.dirty = false;
+
+        // Reset all state
+        self.playing = false;
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.current_row = 0;
+        self.current_pattern_idx = 0;
+        self.current_channel = 0;
+        self.scroll_row = 0;
+        self.clear_selection();
+        self.audio.all_notes_off();
+
+        self.set_status("New song created", 2.0);
+    }
+
+    /// Check if there are unsaved changes
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.dirty
+    }
+
+    /// Get the current file name (for display)
+    pub fn current_file_name(&self) -> Option<String> {
+        self.current_file.as_ref().and_then(|p| {
+            p.file_name().map(|f| f.to_string_lossy().to_string())
+        })
     }
 }
