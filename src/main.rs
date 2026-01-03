@@ -22,6 +22,9 @@ mod game;
 mod project;
 mod input;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod mcp;
+
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level, save_level};
@@ -30,6 +33,9 @@ use editor::{EditorAction, draw_editor, draw_example_browser, BrowserAction, dis
 use modeler::{ModelerAction, ModelBrowserAction, MeshBrowserAction, draw_model_browser, draw_mesh_browser, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
 use std::path::PathBuf;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 fn window_conf() -> Conf {
     Conf {
@@ -52,6 +58,68 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // Start HTTP server for MCP integration (native only)
+    #[cfg(not(target_arch = "wasm32"))]
+    let http_state = {
+        use std::sync::Mutex;
+
+        // Shared state for HTTP server
+        let state = Arc::new(Mutex::new(mcp::HttpState::default()));
+        let state_clone = state.clone();
+
+        // Start tiny_http server in background thread
+        std::thread::spawn(move || {
+            let server = match tiny_http::Server::http("127.0.0.1:7779") {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to start HTTP server on port 7779: {}", e);
+                    return;
+                }
+            };
+
+            println!("MCP HTTP server listening on http://127.0.0.1:7779");
+
+            for request in server.incoming_requests() {
+                let response = match request.url() {
+                    "/screenshot" => {
+                        let state = state_clone.lock().unwrap();
+                        if let Some(ref png_data) = state.screenshot {
+                            tiny_http::Response::from_data(png_data.clone())
+                                .with_header(tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"image/png"[..]
+                                ).unwrap())
+                        } else {
+                            tiny_http::Response::from_string("No screenshot available")
+                                .with_status_code(503)
+                        }
+                    }
+                    "/state" => {
+                        let state = state_clone.lock().unwrap();
+                        let json = format!(
+                            r#"{{"tab":"{}","status":"{}"}}"#,
+                            state.current_tab,
+                            state.status
+                        );
+                        tiny_http::Response::from_string(json)
+                            .with_header(tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..]
+                            ).unwrap())
+                    }
+                    _ => {
+                        tiny_http::Response::from_string("Not found")
+                            .with_status_code(404)
+                    }
+                };
+
+                let _ = request.respond(response);
+            }
+        });
+
+        state
+    };
+
     // Initialize framebuffer (used by 3D viewport in editor)
     let mut fb = Framebuffer::new(WIDTH, HEIGHT);
 
@@ -877,6 +945,52 @@ async fn main() {
                         while get_time() - frame_start < target_frame_time {
                             // Busy wait - browser will handle frame pacing
                         }
+                    }
+                }
+            }
+        }
+
+        // Update HTTP state with screenshot (native only)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Capture screenshot as PNG
+            let screen_image = get_screen_data();
+            let width = screen_image.width as u32;
+            let height = screen_image.height as u32;
+
+            // Flip the image vertically (OpenGL has Y=0 at bottom, PNG expects Y=0 at top)
+            let row_size = (width * 4) as usize; // RGBA = 4 bytes per pixel
+            let mut flipped_bytes = vec![0u8; screen_image.bytes.len()];
+            for y in 0..height as usize {
+                let src_row = y * row_size;
+                let dst_row = (height as usize - 1 - y) * row_size;
+                flipped_bytes[dst_row..dst_row + row_size]
+                    .copy_from_slice(&screen_image.bytes[src_row..src_row + row_size]);
+            }
+
+            // Encode as PNG in memory
+            let mut png_data = Vec::new();
+            {
+                use image::codecs::png::PngEncoder;
+                use image::ImageEncoder;
+
+                let encoder = PngEncoder::new(&mut png_data);
+                if encoder
+                    .write_image(&flipped_bytes, width, height, image::ExtendedColorType::Rgba8)
+                    .is_ok()
+                {
+                    // Update shared state (non-blocking try_lock to avoid frame stutter)
+                    if let Ok(mut state) = http_state.try_lock() {
+                        state.screenshot = Some(png_data);
+                        state.current_tab = match app.active_tool {
+                            Tool::Home => "Home".to_string(),
+                            Tool::WorldEditor => "World".to_string(),
+                            Tool::Test => "Game".to_string(),
+                            Tool::Modeler => "Assets".to_string(),
+                            Tool::Tracker => "Music".to_string(),
+                            Tool::InputTest => "Input".to_string(),
+                        };
+                        state.status = "Engine running".to_string();
                     }
                 }
             }
