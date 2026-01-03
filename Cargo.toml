@@ -1,3 +1,6 @@
+[workspace]
+members = ["xtask"]
+
 [package]
 name = "bonnie-engine"
 version = "0.1.3"
