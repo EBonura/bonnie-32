@@ -1,4 +1,5 @@
 /target
+/dist
 
 # Local WASM testing (copied assets for python http server)
 docs/assets/
