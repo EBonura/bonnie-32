@@ -278,14 +278,15 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             draw_rectangle(ch_x, rect.y, CHANNEL_WIDTH - 1.0, CHANNEL_STRIP_HEIGHT, Color::new(0.18, 0.2, 0.24, 1.0));
         }
 
-        // === Row 1: Channel number + Instrument selector ===
+        // === Row 1: Channel number (centered) ===
         let row1_y = rect.y + 2.0;
-
-        // Channel number
         let ch_color = if is_current { NOTE_COLOR } else { TEXT_COLOR };
-        draw_text(&format!("Ch{}", ch + 1), ch_x + 2.0, row1_y + 11.0, 12.0, ch_color);
+        let ch_label = format!("Ch{}", ch + 1);
+        let ch_dims = measure_text(&ch_label, None, 12, 1.0);
+        draw_text(&ch_label, ch_x + (CHANNEL_WIDTH - ch_dims.width) / 2.0, row1_y + 12.0, 12.0, ch_color);
 
-        // Instrument selector: [-] [instrument name] [+]
+        // === Row 2: Instrument selector (full width): [-] [name] [+] ===
+        let row2_y = rect.y + 18.0;
         let inst = state.song.get_channel_instrument(ch);
         let presets = state.audio.get_preset_names();
         let inst_name = presets
@@ -294,15 +295,17 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             .map(|(_, _, n)| n.as_str())
             .unwrap_or("---");
 
-        // Truncate instrument name
-        let display_name: String = if inst_name.len() > 10 {
-            format!("{:.10}", inst_name)
+        // Truncate instrument name to fit
+        let display_name: String = if inst_name.len() > 12 {
+            format!("{:.12}", inst_name)
         } else {
             inst_name.to_string()
         };
 
-        // [-] button for instrument
-        let inst_minus_rect = Rect::new(ch_x + 28.0, row1_y, 16.0, 16.0);
+        // [-] button
+        let btn_size = 16.0;
+        let btn_margin = 2.0;
+        let inst_minus_rect = Rect::new(ch_x + btn_margin, row2_y, btn_size, btn_size);
         let inst_minus_hover = ctx.mouse.inside(&inst_minus_rect);
         draw_rectangle(inst_minus_rect.x, inst_minus_rect.y, inst_minus_rect.w, inst_minus_rect.h,
             if inst_minus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
@@ -312,11 +315,16 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             channel_updates.push((ch, "inst", new_inst));
         }
 
-        // Instrument name display
-        draw_text(&format!("{:02}:{}", inst, display_name), ch_x + 46.0, row1_y + 11.0, 11.0, INST_COLOR);
+        // Instrument name display (centered between buttons)
+        let name_text = format!("{:02}:{}", inst, display_name);
+        let name_dims = measure_text(&name_text, None, 11, 1.0);
+        let name_area_start = ch_x + btn_margin + btn_size + 2.0;
+        let name_area_end = ch_x + CHANNEL_WIDTH - btn_margin - btn_size - 2.0;
+        let name_x = name_area_start + (name_area_end - name_area_start - name_dims.width) / 2.0;
+        draw_text(&name_text, name_x, row2_y + 11.0, 11.0, INST_COLOR);
 
-        // [+] button for instrument
-        let inst_plus_rect = Rect::new(ch_x + CHANNEL_WIDTH - 20.0, row1_y, 16.0, 16.0);
+        // [+] button
+        let inst_plus_rect = Rect::new(ch_x + CHANNEL_WIDTH - btn_margin - btn_size, row2_y, btn_size, btn_size);
         let inst_plus_hover = ctx.mouse.inside(&inst_plus_rect);
         draw_rectangle(inst_plus_rect.x, inst_plus_rect.y, inst_plus_rect.w, inst_plus_rect.h,
             if inst_plus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
@@ -326,16 +334,15 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             channel_updates.push((ch, "inst", new_inst));
         }
 
-        // === Row 2: 3 Mini Knobs in a row (Pan, Mod, Expr) ===
+        // === Row 3: 3 Mini Knobs (Pan, Mod, Expr) ===
         let settings = state.song.get_channel_settings(ch);
         let knob_radius = 16.0;
         let knob_spacing = 38.0;
-        let knobs_y = rect.y + 55.0;
-        // Center the 3 knobs: total width from first to last center = 2*spacing = 76px
+        let knobs_y = rect.y + 58.0;
+        // Center the 3 knobs
         let knobs_total_width = knob_spacing * 2.0 + knob_radius * 2.0;
         let knobs_start_x = ch_x + (CHANNEL_WIDTH - knobs_total_width) / 2.0 + knob_radius;
 
-        // Pan (bipolar), Mod, Expr in a single row
         if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x, knobs_y, knob_radius, settings.pan, "Pan", true) {
             channel_updates.push((ch, "pan", new_val));
         }
@@ -346,7 +353,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             channel_updates.push((ch, "expr", new_val));
         }
 
-        // === Reset button (at bottom) ===
+        // === Row 4: Reset button ===
         let reset_y = rect.y + CHANNEL_STRIP_HEIGHT - 20.0;
         let reset_rect = Rect::new(ch_x + 4.0, reset_y, CHANNEL_WIDTH - 10.0, 16.0);
         let reset_hover = ctx.mouse.inside(&reset_rect);
@@ -388,7 +395,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
     // Global Wet knob (PS1 has single global reverb processor) - same size as channel knobs
     let wet_value = (state.audio.reverb_wet_level() * 127.0) as u8;
     let wet_knob_x = reverb_strip_x + 25.0; // Centered: (50 - 32) / 2 + 16
-    let wet_knob_y = rect.y + 55.0; // Same Y as channel knobs
+    let wet_knob_y = rect.y + 58.0; // Same Y as channel knobs (row 3)
     if let Some(new_val) = draw_mini_knob(ctx, wet_knob_x, wet_knob_y, 16.0, wet_value, "Wet", false) {
         state.audio.set_reverb_wet_level(new_val as f32 / 127.0);
     }
