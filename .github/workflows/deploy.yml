@@ -38,10 +38,10 @@ jobs:
           keep_files: true  # Preserve /dev/ folder
 
       - name: Deploy to itch.io
-        uses: Oval-Tutu/publish-to-itch-with-butler@1.0.0
-        with:
-          api-key: ${{ secrets.BUTLER_API_KEY }}
-          itch_user: bonnie-games
-          itch_game: bonnie-engine
-          channel: html5
-          package: ./dist/web
+        env:
+          BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+        run: |
+          curl -L -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip butler.zip
+          chmod +x butler
+          ./butler push ./dist/web bonnie-games/bonnie-engine:html5
