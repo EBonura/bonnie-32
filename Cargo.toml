@@ -34,7 +34,7 @@ tiny_http = "0.12"  # Lightweight HTTP server for MCP integration
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }  # HTTP client for MCP server
 rmcp = { version = "0.12", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
-schemars = "0.8"  # For JSON schema generation
+schemars = "1.0"  # For JSON schema generation (must match rmcp's version)
 serde_json = "1.0"  # Required by rmcp tool macro
 
 [profile.release]

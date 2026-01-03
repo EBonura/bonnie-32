@@ -6,12 +6,27 @@
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters,
     model::*,
     tool, tool_handler, tool_router,
     transport::io::stdio,
 };
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 const ENGINE_URL: &str = "http://127.0.0.1:7779";
+
+/// Parameters for the click tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClickParams {
+    /// X coordinate in pixels
+    pub x: f64,
+    /// Y coordinate in pixels
+    pub y: f64,
+    /// Mouse button: "left" (default) or "right"
+    #[serde(default)]
+    pub button: Option<String>,
+}
 
 /// MCP Server that proxies to Bonnie Engine's HTTP API
 #[derive(Clone)]
@@ -74,6 +89,33 @@ impl BonnieMcp {
                             Content::text(format!("Failed to read state: {}", e))
                         ])),
                     }
+                } else {
+                    Ok(CallToolResult::success(vec![
+                        Content::text(format!("Engine returned error: {}", response.status()))
+                    ]))
+                }
+            }
+            Err(_) => {
+                Ok(CallToolResult::success(vec![
+                    Content::text("Bonnie Engine is not running. Start it with 'cargo run' or run the bonnie-engine binary.".to_string())
+                ]))
+            }
+        }
+    }
+
+    /// Click at a position in the engine window
+    #[tool(description = "Simulate a mouse click at the specified (x, y) pixel coordinates in the engine window. Use take_screenshot first to see the current view and determine coordinates. Optional button parameter: 'left' (default) or 'right'.")]
+    async fn click(&self, params: Parameters<ClickParams>) -> Result<CallToolResult, McpError> {
+        let p = &params.0;
+        let button_str = p.button.as_deref().unwrap_or("left");
+        let url = format!("{}/click?x={}&y={}&button={}", ENGINE_URL, p.x, p.y, button_str);
+
+        match reqwest::get(&url).await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    Ok(CallToolResult::success(vec![
+                        Content::text(format!("Clicked at ({}, {}) with {} button", p.x, p.y, button_str))
+                    ]))
                 } else {
                     Ok(CallToolResult::success(vec![
                         Content::text(format!("Engine returned error: {}", response.status()))

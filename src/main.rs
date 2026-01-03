@@ -80,37 +80,70 @@ async fn main() {
             println!("MCP HTTP server listening on http://127.0.0.1:7779");
 
             for request in server.incoming_requests() {
-                let response = match request.url() {
-                    "/screenshot" => {
-                        let state = state_clone.lock().unwrap();
-                        if let Some(ref png_data) = state.screenshot {
-                            tiny_http::Response::from_data(png_data.clone())
-                                .with_header(tiny_http::Header::from_bytes(
-                                    &b"Content-Type"[..],
-                                    &b"image/png"[..]
-                                ).unwrap())
-                        } else {
-                            tiny_http::Response::from_string("No screenshot available")
-                                .with_status_code(503)
+                let url = request.url().to_string();
+                let response = if url == "/screenshot" {
+                    let state = state_clone.lock().unwrap();
+                    if let Some(ref png_data) = state.screenshot {
+                        tiny_http::Response::from_data(png_data.clone())
+                            .with_header(tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"image/png"[..]
+                            ).unwrap())
+                    } else {
+                        tiny_http::Response::from_string("No screenshot available")
+                            .with_status_code(503)
+                    }
+                } else if url == "/state" {
+                    let state = state_clone.lock().unwrap();
+                    let json = format!(
+                        r#"{{"tab":"{}","status":"{}","width":{},"height":{}}}"#,
+                        state.current_tab,
+                        state.status,
+                        state.screen_width,
+                        state.screen_height
+                    );
+                    tiny_http::Response::from_string(json)
+                        .with_header(tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..]
+                        ).unwrap())
+                } else if url.starts_with("/click?") {
+                    // Parse click parameters: /click?x=100&y=200&button=left
+                    let query = &url[7..]; // Skip "/click?"
+                    let mut x: Option<f32> = None;
+                    let mut y: Option<f32> = None;
+                    let mut button = mcp::MouseButton::Left;
+
+                    for param in query.split('&') {
+                        if let Some((key, value)) = param.split_once('=') {
+                            match key {
+                                "x" => x = value.parse().ok(),
+                                "y" => y = value.parse().ok(),
+                                "button" => {
+                                    if value == "right" {
+                                        button = mcp::MouseButton::Right;
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
-                    "/state" => {
-                        let state = state_clone.lock().unwrap();
-                        let json = format!(
-                            r#"{{"tab":"{}","status":"{}"}}"#,
-                            state.current_tab,
-                            state.status
-                        );
-                        tiny_http::Response::from_string(json)
+
+                    if let (Some(x), Some(y)) = (x, y) {
+                        let mut state = state_clone.lock().unwrap();
+                        state.pending_clicks.push(mcp::PendingClick { x, y, button });
+                        tiny_http::Response::from_string(r#"{"status":"ok"}"#)
                             .with_header(tiny_http::Header::from_bytes(
                                 &b"Content-Type"[..],
                                 &b"application/json"[..]
                             ).unwrap())
+                    } else {
+                        tiny_http::Response::from_string(r#"{"error":"Missing x or y parameter"}"#)
+                            .with_status_code(400)
                     }
-                    _ => {
-                        tiny_http::Response::from_string("Not found")
-                            .with_status_code(404)
-                    }
+                } else {
+                    tiny_http::Response::from_string("Not found")
+                        .with_status_code(404)
                 };
 
                 let _ = request.respond(response);
@@ -169,7 +202,25 @@ async fn main() {
 
         // Update UI context with mouse state
         let mouse_pos = mouse_position();
-        let left_down = is_mouse_button_down(MouseButton::Left);
+        let mut left_down = is_mouse_button_down(MouseButton::Left);
+        let mut right_down = is_mouse_button_down(MouseButton::Right);
+        let mut mcp_click_pos: Option<(f32, f32)> = None;
+
+        // Process MCP clicks (native only)
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(mut state) = http_state.try_lock() {
+            if let Some(click) = state.pending_clicks.pop() {
+                mcp_click_pos = Some((click.x, click.y));
+                match click.button {
+                    mcp::MouseButton::Left => left_down = true,
+                    mcp::MouseButton::Right => right_down = true,
+                }
+            }
+        }
+
+        // Use MCP click position if available, otherwise use real mouse
+        let effective_mouse_pos = mcp_click_pos.unwrap_or(mouse_pos);
+
         // Detect double-click (300ms window, 10px radius)
         let left_pressed = left_down && !last_left_down;
         let current_time = get_time();
@@ -177,22 +228,21 @@ async fn main() {
         let double_click_radius = 10.0;
         let double_clicked = if left_pressed {
             let time_delta = current_time - last_click_time;
-            let dx = mouse_pos.0 - last_click_pos.0;
-            let dy = mouse_pos.1 - last_click_pos.1;
+            let dx = effective_mouse_pos.0 - last_click_pos.0;
+            let dy = effective_mouse_pos.1 - last_click_pos.1;
             let dist = (dx * dx + dy * dy).sqrt();
             let is_double = time_delta < double_click_threshold && dist < double_click_radius;
             last_click_time = current_time;
-            last_click_pos = mouse_pos;
+            last_click_pos = effective_mouse_pos;
             is_double
         } else {
             false
         };
 
-        let right_down = is_mouse_button_down(MouseButton::Right);
         let right_pressed = right_down && !last_right_down;
         let mouse_state = MouseState {
-            x: mouse_pos.0,
-            y: mouse_pos.1,
+            x: effective_mouse_pos.0,
+            y: effective_mouse_pos.1,
             left_down,
             right_down,
             left_pressed,
@@ -982,6 +1032,8 @@ async fn main() {
                     // Update shared state (non-blocking try_lock to avoid frame stutter)
                     if let Ok(mut state) = http_state.try_lock() {
                         state.screenshot = Some(png_data);
+                        state.screen_width = screen_width();
+                        state.screen_height = screen_height();
                         state.current_tab = match app.active_tool {
                             Tool::Home => "Home".to_string(),
                             Tool::WorldEditor => "World".to_string(),
