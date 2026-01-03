@@ -463,23 +463,37 @@ impl TrackerState {
     }
 
     /// Move cursor left
+    /// Columns within channel: 0=Note, 1=Volume, 2=Effect, 3=Effect param
+    /// Special column 4 = Global Reverb (not within a channel)
     pub fn cursor_left(&mut self) {
-        if self.current_column > 0 {
+        if self.current_column == 4 {
+            // From global reverb, go to last channel's last column
+            self.current_column = 3;
+            self.current_channel = self.num_channels() - 1;
+        } else if self.current_column > 0 {
             self.current_column -= 1;
         } else if self.current_channel > 0 {
             self.current_channel -= 1;
-            self.current_column = 4; // fx_param column
+            self.current_column = 3; // fx param column (last column in channel)
         }
     }
 
     /// Move cursor right
+    /// Columns within channel: 0=Note, 1=Volume, 2=Effect, 3=Effect param
+    /// Special column 4 = Global Reverb (not within a channel)
     pub fn cursor_right(&mut self) {
         let num_ch = self.num_channels();
-        if self.current_column < 4 {
+        if self.current_column == 4 {
+            // Already at global reverb, can't go further right
+            return;
+        } else if self.current_column < 3 {
             self.current_column += 1;
         } else if self.current_channel < num_ch - 1 {
             self.current_channel += 1;
             self.current_column = 0;
+        } else {
+            // At last channel's last column, go to global reverb
+            self.current_column = 4;
         }
     }
 
@@ -636,6 +650,27 @@ impl TrackerState {
         self.dirty = true;
     }
 
+    /// Set global reverb preset at cursor row (0-9)
+    /// PS1 has a single global reverb processor, so this affects all channels
+    pub fn set_reverb(&mut self, preset: u8) {
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set_reverb(row, Some(preset.min(9)));
+        }
+        self.dirty = true;
+    }
+
+    /// Clear global reverb at cursor row
+    pub fn clear_reverb(&mut self) {
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set_reverb(row, None);
+        }
+        self.dirty = true;
+    }
+
     /// Called after entering a note (no-op, cursor stays on current row)
     fn advance_cursor(&mut self) {
         // Do nothing - cursor stays on current row after note entry
@@ -717,6 +752,9 @@ impl TrackerState {
         let mut notes_to_play: Vec<(usize, Option<u8>, Option<u8>, Option<u8>, Option<u8>)> = Vec::new();
         let mut effects_to_apply: Vec<(usize, Effect)> = Vec::new();
 
+        // Global reverb for this row (PS1 has single global reverb processor)
+        let reverb_change = pattern.get_reverb(playback_row);
+
         for channel in 0..num_channels {
             if let Some(note) = pattern.get(channel, playback_row) {
                 // Collect note data
@@ -757,6 +795,24 @@ impl TrackerState {
         // Now apply effects
         for (channel, effect) in effects_to_apply {
             self.apply_effect(channel, effect);
+        }
+
+        // Apply reverb change if any (PS1: global reverb shared by all voices)
+        if let Some(r) = reverb_change {
+            let reverb_type = match r {
+                0 => ReverbType::Off,
+                1 => ReverbType::Room,
+                2 => ReverbType::StudioSmall,
+                3 => ReverbType::StudioMedium,
+                4 => ReverbType::StudioLarge,
+                5 => ReverbType::Hall,
+                6 => ReverbType::HalfEcho,
+                7 => ReverbType::SpaceEcho,
+                8 => ReverbType::ChaosEcho,
+                9 => ReverbType::Delay,
+                _ => ReverbType::Off, // Invalid values default to off
+            };
+            self.audio.set_reverb_preset(reverb_type);
         }
     }
 
@@ -814,24 +870,7 @@ impl TrackerState {
             Effect::VolumeSlide(_, _) => {
                 // Would need per-tick processing
             }
-            Effect::SetReverbType(r) => {
-                // Change global reverb type (PS1: one reverb processor shared by all voices)
-                // Values: 00=Off, 01=Room, 02=StudioS, 03=StudioM, 04=StudioL, 05=Hall, 06=HalfEcho, 07=SpaceEcho, 08=ChaosEcho, 09=Delay
-                let reverb_type = match r {
-                    0 => ReverbType::Off,
-                    1 => ReverbType::Room,
-                    2 => ReverbType::StudioSmall,
-                    3 => ReverbType::StudioMedium,
-                    4 => ReverbType::StudioLarge,
-                    5 => ReverbType::Hall,
-                    6 => ReverbType::HalfEcho,
-                    7 => ReverbType::SpaceEcho,
-                    8 => ReverbType::ChaosEcho,
-                    9 => ReverbType::Delay,
-                    _ => ReverbType::Off, // Invalid values default to off
-                };
-                self.audio.set_reverb_preset(reverb_type);
-            }
+            // Note: Reverb is now handled via the dedicated reverb column, not the Fx column
         }
     }
 
@@ -1211,14 +1250,6 @@ impl TrackerState {
         if let Some(settings) = self.song.channel_settings.get_mut(channel) {
             settings.pan = value;
             self.audio.set_pan(channel as i32, value as i32);
-            self.dirty = true;
-        }
-    }
-
-    pub fn set_channel_wet(&mut self, channel: usize, value: u8) {
-        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
-            settings.wet = value;
-            // TODO: Per-channel reverb send would need audio engine support
             self.dirty = true;
         }
     }

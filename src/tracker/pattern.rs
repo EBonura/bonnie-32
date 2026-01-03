@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct ChannelSettings {
     /// Pan (0=left, 64=center, 127=right) - PS1: per-voice L/R volume
     pub pan: u8,
-    /// Reverb send level (0-127) - PS1: EON register enables per-voice reverb routing
-    pub wet: u8,
     /// Modulation wheel (0-127)
     pub modulation: u8,
     /// Expression (0-127)
@@ -21,7 +19,6 @@ impl Default for ChannelSettings {
     fn default() -> Self {
         Self {
             pan: 64,          // Center
-            wet: 0,           // No reverb (PS1: voice not routed to reverb)
             modulation: 0,    // No modulation
             expression: 127,  // Full expression
         }
@@ -124,6 +121,10 @@ pub struct Pattern {
     pub length: usize,
     /// Notes per channel [channel][row] - using Vec for serde compatibility
     pub channels: Vec<Vec<Note>>,
+    /// Global reverb per row (PS1 has a single global reverb processor)
+    /// 0=Off, 1=Room, 2=StudioS, 3=StudioM, 4=StudioL, 5=Hall, 6=HalfEcho, 7=SpaceEcho, 8=ChaosEcho, 9=Delay
+    #[serde(default)]
+    pub reverb: Vec<Option<u8>>,
 }
 
 impl Pattern {
@@ -137,6 +138,7 @@ impl Pattern {
         Self {
             length: len,
             channels: vec![vec![Note::EMPTY; len]; ch_count],
+            reverb: vec![None; len],
         }
     }
 
@@ -181,7 +183,20 @@ impl Pattern {
         for channel in &mut self.channels {
             channel.resize(new_len, Note::EMPTY);
         }
+        self.reverb.resize(new_len, None);
         self.length = new_len;
+    }
+
+    /// Get the global reverb preset at a specific row
+    pub fn get_reverb(&self, row: usize) -> Option<u8> {
+        self.reverb.get(row).copied().flatten()
+    }
+
+    /// Set the global reverb preset at a specific row
+    pub fn set_reverb(&mut self, row: usize, preset: Option<u8>) {
+        if let Some(slot) = self.reverb.get_mut(row) {
+            *slot = preset;
+        }
     }
 }
 
@@ -315,6 +330,7 @@ impl Default for Song {
 }
 
 /// Effect commands (similar to MOD/XM trackers + MIDI effects)
+/// Note: Reverb is now a separate column, not an effect command
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effect {
     /// No effect
@@ -343,13 +359,11 @@ pub enum Effect {
     SetExpression(u8),
     /// Modulation (Mxx) - mod wheel 00-7F
     SetModulation(u8),
-    /// Set reverb type (Rxx) - PS1 global reverb preset
-    /// 00=Off, 01=Room, 02=StudioS, 03=StudioM, 04=StudioL, 05=Hall, 06=Space, 07=Echo, 08=HalfEcho
-    SetReverbType(u8),
 }
 
 impl Effect {
     /// Parse effect from character and parameter
+    /// Note: 'R' (reverb) is no longer an effect - use the dedicated reverb column
     pub fn from_char(c: char, param: u8) -> Self {
         match c.to_ascii_uppercase() {
             '0' => Effect::Arpeggio(param >> 4, param & 0x0F),
@@ -364,7 +378,6 @@ impl Effect {
             'F' => Effect::SetSpeed(param),
             'M' => Effect::SetModulation(param),
             'P' => Effect::SetPan(param),
-            'R' => Effect::SetReverbType(param),
             _ => Effect::None,
         }
     }
@@ -385,7 +398,6 @@ impl Effect {
             Effect::SetSpeed(_) => Some('F'),
             Effect::SetModulation(_) => Some('M'),
             Effect::SetPan(_) => Some('P'),
-            Effect::SetReverbType(_) => Some('R'),
         }
     }
 
@@ -405,7 +417,6 @@ impl Effect {
             Effect::SetSpeed(s) => *s,
             Effect::SetModulation(v) => *v,
             Effect::SetPan(p) => *p,
-            Effect::SetReverbType(r) => *r,
         }
     }
 }

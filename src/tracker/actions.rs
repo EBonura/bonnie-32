@@ -18,12 +18,14 @@ pub mod flags {
     pub const HAS_SONG: u32 = 1 << 3;
     /// In note column
     pub const NOTE_COLUMN: u32 = 1 << 4;
-    /// In instrument column
+    /// In instrument column (unused - instrument is per-channel now)
     pub const INSTRUMENT_COLUMN: u32 = 1 << 5;
     /// In effect column
     pub const EFFECT_COLUMN: u32 = 1 << 6;
     /// Editing a knob value
     pub const EDITING_KNOB: u32 = 1 << 7;
+    /// In reverb column
+    pub const REVERB_COLUMN: u32 = 1 << 8;
 }
 
 /// Create the complete action registry for the tracker
@@ -268,7 +270,7 @@ pub fn create_tracker_actions() -> ActionRegistry {
 pub fn build_context(
     is_playing: bool,
     has_pattern: bool,
-    column_type: &str, // "note", "instrument", "effect"
+    column_type: &str, // "note", "volume", "effect", "reverb"
     editing_knob: bool,
     has_selection: bool,
     has_clipboard: bool,
@@ -287,8 +289,8 @@ pub fn build_context(
 
     match column_type {
         "note" => flags |= flags::NOTE_COLUMN,
-        "instrument" => flags |= flags::INSTRUMENT_COLUMN,
         "effect" => flags |= flags::EFFECT_COLUMN,
+        "reverb" => flags |= flags::REVERB_COLUMN,
         _ => {}
     }
 
