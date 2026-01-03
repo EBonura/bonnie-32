@@ -38,7 +38,7 @@ jobs:
           keep_files: true  # Preserve /dev/ folder
 
       - name: Deploy to itch.io
-        uses: Oval-Tutu/publish-to-itch-with-butler@v1
+        uses: Oval-Tutu/publish-to-itch-with-butler@1.0.0
         with:
           api-key: ${{ secrets.BUTLER_API_KEY }}
           itch_user: bonnie-games
