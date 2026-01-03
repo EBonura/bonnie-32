@@ -2,6 +2,29 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Per-channel settings (MIDI CC values and audio parameters)
+/// Modeled after PS1 SPU per-voice registers
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelSettings {
+    /// Pan (0=left, 64=center, 127=right) - PS1: per-voice L/R volume
+    pub pan: u8,
+    /// Modulation wheel (0-127)
+    pub modulation: u8,
+    /// Expression (0-127)
+    pub expression: u8,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            pan: 64,          // Center
+            modulation: 0,    // No modulation
+            expression: 127,  // Full expression
+        }
+    }
+}
+
 /// A single note event in the tracker
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Note {
@@ -98,6 +121,10 @@ pub struct Pattern {
     pub length: usize,
     /// Notes per channel [channel][row] - using Vec for serde compatibility
     pub channels: Vec<Vec<Note>>,
+    /// Global reverb per row (PS1 has a single global reverb processor)
+    /// 0=Off, 1=Room, 2=StudioS, 3=StudioM, 4=StudioL, 5=Hall, 6=HalfEcho, 7=SpaceEcho, 8=ChaosEcho, 9=Delay
+    #[serde(default)]
+    pub reverb: Vec<Option<u8>>,
 }
 
 impl Pattern {
@@ -111,6 +138,7 @@ impl Pattern {
         Self {
             length: len,
             channels: vec![vec![Note::EMPTY; len]; ch_count],
+            reverb: vec![None; len],
         }
     }
 
@@ -155,7 +183,20 @@ impl Pattern {
         for channel in &mut self.channels {
             channel.resize(new_len, Note::EMPTY);
         }
+        self.reverb.resize(new_len, None);
         self.length = new_len;
+    }
+
+    /// Get the global reverb preset at a specific row
+    pub fn get_reverb(&self, row: usize) -> Option<u8> {
+        self.reverb.get(row).copied().flatten()
+    }
+
+    /// Set the global reverb preset at a specific row
+    pub fn set_reverb(&mut self, row: usize, preset: Option<u8>) {
+        if let Some(slot) = self.reverb.get_mut(row) {
+            *slot = preset;
+        }
     }
 }
 
@@ -167,6 +208,7 @@ impl Default for Pattern {
 
 /// A song is a sequence of pattern indices (arrangement)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Song {
     /// Song name
     pub name: String,
@@ -182,6 +224,8 @@ pub struct Song {
     pub instrument_names: Vec<String>,
     /// Per-channel instrument (GM program number 0-127)
     pub channel_instruments: Vec<u8>,
+    /// Per-channel settings (pan, wet, mod, expr)
+    pub channel_settings: Vec<ChannelSettings>,
 }
 
 impl Song {
@@ -194,6 +238,7 @@ impl Song {
             arrangement: vec![0],
             instrument_names: Vec::new(),
             channel_instruments: vec![0; DEFAULT_CHANNELS], // Piano for all channels
+            channel_settings: vec![ChannelSettings::default(); DEFAULT_CHANNELS],
         }
     }
 
@@ -206,6 +251,7 @@ impl Song {
     pub fn add_channel(&mut self) {
         if self.channel_instruments.len() < MAX_CHANNELS {
             self.channel_instruments.push(0); // Default to piano
+            self.channel_settings.push(ChannelSettings::default());
             // Also add channel to all patterns
             for pattern in &mut self.patterns {
                 pattern.add_channel();
@@ -217,10 +263,28 @@ impl Song {
     pub fn remove_channel(&mut self) {
         if self.channel_instruments.len() > 1 {
             self.channel_instruments.pop();
+            self.channel_settings.pop();
             // Also remove channel from all patterns
             for pattern in &mut self.patterns {
                 pattern.remove_channel();
             }
+        }
+    }
+
+    /// Get channel settings
+    pub fn get_channel_settings(&self, channel: usize) -> ChannelSettings {
+        self.channel_settings.get(channel).copied().unwrap_or_default()
+    }
+
+    /// Get mutable reference to channel settings
+    pub fn get_channel_settings_mut(&mut self, channel: usize) -> Option<&mut ChannelSettings> {
+        self.channel_settings.get_mut(channel)
+    }
+
+    /// Reset channel settings to defaults
+    pub fn reset_channel_settings(&mut self, channel: usize) {
+        if let Some(settings) = self.channel_settings.get_mut(channel) {
+            *settings = ChannelSettings::default();
         }
     }
 
@@ -266,6 +330,7 @@ impl Default for Song {
 }
 
 /// Effect commands (similar to MOD/XM trackers + MIDI effects)
+/// Note: Reverb is now a separate column, not an effect command
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effect {
     /// No effect
@@ -298,6 +363,7 @@ pub enum Effect {
 
 impl Effect {
     /// Parse effect from character and parameter
+    /// Note: 'R' (reverb) is no longer an effect - use the dedicated reverb column
     pub fn from_char(c: char, param: u8) -> Self {
         match c.to_ascii_uppercase() {
             '0' => Effect::Arpeggio(param >> 4, param & 0x0F),

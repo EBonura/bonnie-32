@@ -44,3 +44,21 @@ This texture pack is released under CC0, meaning it is dedicated to the public d
 - **Usage**: Nature/water texture tiles for world editor
 
 A collection of 24 hand-painted 64x64 tiles including grass, water, cobblestone, and foliage variations.
+
+### Dark Military Fantasy Textures
+
+- **Source**: [OpenGameArt](https://opengameart.org/content/dark-military-fantasy-textures)
+- **Author**: Lamoot
+- **License**: CC0 (Public Domain)
+- **Usage**: Military/fantasy texture pack for world editor
+
+A collection of 131 64x64 textures including beach, bunker, cathedral, city, cliff, field, greenhouse, lighthouse, quarry, rails, rune, sandbag, sewer, and water themes. Released under CC0, dedicated to the public domain with no restrictions on use.
+
+### Crates
+
+- **Source**: [OpenGameArt](https://opengameart.org/content/crates-2)
+- **Author**: Shadowman
+- **License**: CC0 (Public Domain)
+- **Usage**: Crate texture pack for world editor
+
+A collection of 24 crate textures (3 styles × 8 variations), originally 1024x1024, downscaled to 64x64. Created using Filter Forge. Released under CC0, dedicated to the public domain with no restrictions on use.

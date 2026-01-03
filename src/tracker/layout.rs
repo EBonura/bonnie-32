@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::ui::{
-    Rect, UiContext, Toolbar, icon, draw_knob,
+    Rect, UiContext, Toolbar, icon, draw_knob, draw_mini_knob,
     // Theme colors
     BG_COLOR, HEADER_COLOR, TEXT_COLOR, TEXT_DIM,
     ROW_EVEN, ROW_ODD, ROW_BEAT, ROW_HIGHLIGHT,
@@ -16,23 +16,28 @@ use super::actions::build_context;
 
 // Layout constants
 const ROW_HEIGHT: f32 = 18.0;
-const CHANNEL_WIDTH: f32 = 140.0;
+const CHANNEL_WIDTH: f32 = 116.0; // Note + Vol + Fx + FxParam (no per-channel reverb)
 const ROW_NUM_WIDTH: f32 = 30.0;
 const NOTE_WIDTH: f32 = 36.0;
-const INST_WIDTH: f32 = 24.0;
+// Instrument column removed - instrument is now per-channel in the channel strip
 const VOL_WIDTH: f32 = 24.0;
 const FX_WIDTH: f32 = 16.0;
 const FXPARAM_WIDTH: f32 = 24.0;
+const GLOBAL_REVERB_WIDTH: f32 = 24.0; // Single global reverb column (0-9)
+
+/// Status bar height
+const STATUS_BAR_HEIGHT: f32 = 22.0;
 
 /// Draw the tracker interface
 pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_font: Option<&Font>) {
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
-    // Split into header and main area
+    // Split into header, main area, and status bar
     let header_height = 60.0;
     let header_rect = Rect::new(rect.x, rect.y, rect.w, header_height);
-    let main_rect = Rect::new(rect.x, rect.y + header_height, rect.w, rect.h - header_height);
+    let status_rect = Rect::new(rect.x, rect.y + rect.h - STATUS_BAR_HEIGHT, rect.w, STATUS_BAR_HEIGHT);
+    let main_rect = Rect::new(rect.x, rect.y + header_height, rect.w, rect.h - header_height - STATUS_BAR_HEIGHT);
 
     // Draw header (transport, info)
     draw_header(ctx, header_rect, state, icon_font);
@@ -43,6 +48,9 @@ pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, i
         TrackerView::Arrangement => draw_arrangement_view(ctx, main_rect, state),
         TrackerView::Instruments => draw_instruments_view(ctx, main_rect, state),
     }
+
+    // Draw status bar at bottom
+    draw_status_bar(status_rect, state);
 
     // Handle input
     handle_input(ctx, state);
@@ -173,6 +181,31 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
         state.increase_pattern_length();
     }
 
+    toolbar.separator();
+
+    // Global sample rate (PS1 lo-fi effect - applies to all audio output)
+    let current_rate = state.audio.output_sample_rate();
+    toolbar.label(&format!("Rate:{}", current_rate.name()));
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Lower Sample Rate (more lo-fi)") {
+        let presets = OutputSampleRate::PRESETS;
+        if let Some(idx) = presets.iter().position(|p| p.0 == current_rate.0) {
+            if idx + 1 < presets.len() {
+                state.audio.set_output_sample_rate(presets[idx + 1]);
+            }
+        }
+    }
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Higher Sample Rate (less lo-fi)") {
+        let presets = OutputSampleRate::PRESETS;
+        if let Some(idx) = presets.iter().position(|p| p.0 == current_rate.0) {
+            if idx > 0 {
+                state.audio.set_output_sample_rate(presets[idx - 1]);
+            }
+        }
+    }
+
+    // Note: Global reverb type control removed from toolbar
+    // Reverb type is now set via the Rxx effect command in the pattern Fx column
+
     // Second row - position info and soundfont status
     let y2 = rect.y + 40.0;
     let pattern_num = state.song.arrangement.get(state.current_pattern_idx).copied().unwrap_or(0);
@@ -184,7 +217,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
                  state.current_row,
                  state.current_pattern().map(|p| p.length).unwrap_or(64),
                  state.current_channel + 1),
-        rect.x + 10.0, y2 + 14.0, 12.0, TEXT_COLOR
+        rect.x + 10.0, y2 + 14.0, 14.0, TEXT_COLOR
     );
 
     // Song name / file name with dirty indicator
@@ -199,22 +232,22 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
     } else {
         "Untitled".to_string()
     };
-    draw_text(&song_display, rect.x + 350.0, y2 + 14.0, 12.0, TEXT_COLOR);
+    draw_text(&song_display, rect.x + 380.0, y2 + 14.0, 14.0, TEXT_COLOR);
 
     // Soundfont status
     let sf_status = state.audio.soundfont_name()
         .map(|n| format!("SF: {}", n))
         .unwrap_or_else(|| "No Soundfont".to_string());
-    draw_text(&sf_status, rect.x + 500.0, y2 + 14.0, 12.0, if state.audio.is_loaded() { TEXT_DIM } else { Color::new(0.8, 0.3, 0.3, 1.0) });
+    draw_text(&sf_status, rect.x + 540.0, y2 + 14.0, 14.0, if state.audio.is_loaded() { TEXT_DIM } else { Color::new(0.8, 0.3, 0.3, 1.0) });
 
     // Status message
     if let Some(status) = state.get_status() {
-        draw_text(status, rect.x + 680.0, y2 + 14.0, 12.0, Color::new(1.0, 0.8, 0.3, 1.0));
+        draw_text(status, rect.x + 720.0, y2 + 14.0, 14.0, Color::new(1.0, 0.8, 0.3, 1.0));
     }
 }
 
-/// Height of the channel strip header (instrument selector, etc.)
-const CHANNEL_STRIP_HEIGHT: f32 = 36.0;
+/// Height of the channel strip header (instrument selector, knobs, reset button)
+const CHANNEL_STRIP_HEIGHT: f32 = 120.0;
 
 /// Draw the pattern editor view
 fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) {
@@ -229,30 +262,31 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         None => return,
     };
 
-    // === Channel strip header (instrument selector) ===
+    // === Channel strip header (instrument selector, knobs, etc.) ===
     draw_rectangle(rect.x, rect.y, rect.w, CHANNEL_STRIP_HEIGHT, Color::new(0.12, 0.12, 0.14, 1.0));
+
+    // Collect channel updates to apply after the loop (avoid borrow conflicts)
+    let mut channel_updates: Vec<(usize, &str, u8)> = Vec::new();
 
     let mut x = rect.x + ROW_NUM_WIDTH;
     for ch in 0..num_channels {
         let ch_x = x;
         let is_current = ch == state.current_channel;
-        let strip_rect = Rect::new(ch_x, rect.y, CHANNEL_WIDTH - 1.0, CHANNEL_STRIP_HEIGHT);
 
         // Background for selected channel
         if is_current {
             draw_rectangle(ch_x, rect.y, CHANNEL_WIDTH - 1.0, CHANNEL_STRIP_HEIGHT, Color::new(0.18, 0.2, 0.24, 1.0));
         }
 
-        // Click to select channel
-        if ctx.mouse.inside(&strip_rect) && is_mouse_button_pressed(MouseButton::Left) {
-            state.current_channel = ch;
-        }
-
-        // Channel number
+        // === Row 1: Channel number (centered) ===
+        let row1_y = rect.y + 2.0;
         let ch_color = if is_current { NOTE_COLOR } else { TEXT_COLOR };
-        draw_text(&format!("Ch {}", ch + 1), ch_x + 4.0, rect.y + 12.0, 11.0, ch_color);
+        let ch_label = format!("Ch{}", ch + 1);
+        let ch_dims = measure_text(&ch_label, None, 12, 1.0);
+        draw_text(&ch_label, ch_x + (CHANNEL_WIDTH - ch_dims.width) / 2.0, row1_y + 12.0, 12.0, ch_color);
 
-        // Instrument selector: [-] [instrument name] [+]
+        // === Row 2: Instrument selector (full width): [-] [name] [+] ===
+        let row2_y = rect.y + 18.0;
         let inst = state.song.get_channel_instrument(ch);
         let presets = state.audio.get_preset_names();
         let inst_name = presets
@@ -269,41 +303,101 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         };
 
         // [-] button
-        let minus_rect = Rect::new(ch_x + 2.0, rect.y + 16.0, 16.0, 16.0);
-        let minus_hover = ctx.mouse.inside(&minus_rect);
-        draw_rectangle(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h,
-            if minus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
-        draw_text("-", minus_rect.x + 5.0, minus_rect.y + 12.0, 12.0, TEXT_COLOR);
-        if minus_hover && is_mouse_button_pressed(MouseButton::Left) {
+        let btn_size = 16.0;
+        let btn_margin = 2.0;
+        let inst_minus_rect = Rect::new(ch_x + btn_margin, row2_y, btn_size, btn_size);
+        let inst_minus_hover = ctx.mouse.inside(&inst_minus_rect);
+        draw_rectangle(inst_minus_rect.x, inst_minus_rect.y, inst_minus_rect.w, inst_minus_rect.h,
+            if inst_minus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
+        draw_text("-", inst_minus_rect.x + 5.0, inst_minus_rect.y + 12.0, 12.0, TEXT_COLOR);
+        if inst_minus_hover && is_mouse_button_pressed(MouseButton::Left) {
             let new_inst = inst.saturating_sub(1);
-            state.song.set_channel_instrument(ch, new_inst);
-            if ch == state.current_channel {
-                state.audio.set_program(ch as i32, new_inst as i32);
-            }
+            channel_updates.push((ch, "inst", new_inst));
         }
 
-        // Instrument name (clickable to open instrument picker)
-        let name_x = ch_x + 20.0;
-        draw_text(&format!("{:03}:{}", inst, display_name), name_x, rect.y + 28.0, 10.0, INST_COLOR);
+        // Instrument name display (centered between buttons)
+        let name_text = format!("{:02}:{}", inst, display_name);
+        let name_dims = measure_text(&name_text, None, 11, 1.0);
+        let name_area_start = ch_x + btn_margin + btn_size + 2.0;
+        let name_area_end = ch_x + CHANNEL_WIDTH - btn_margin - btn_size - 2.0;
+        let name_x = name_area_start + (name_area_end - name_area_start - name_dims.width) / 2.0;
+        draw_text(&name_text, name_x, row2_y + 11.0, 11.0, INST_COLOR);
 
         // [+] button
-        let plus_rect = Rect::new(ch_x + CHANNEL_WIDTH - 20.0, rect.y + 16.0, 16.0, 16.0);
-        let plus_hover = ctx.mouse.inside(&plus_rect);
-        draw_rectangle(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h,
-            if plus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
-        draw_text("+", plus_rect.x + 4.0, plus_rect.y + 12.0, 12.0, TEXT_COLOR);
-        if plus_hover && is_mouse_button_pressed(MouseButton::Left) {
+        let inst_plus_rect = Rect::new(ch_x + CHANNEL_WIDTH - btn_margin - btn_size, row2_y, btn_size, btn_size);
+        let inst_plus_hover = ctx.mouse.inside(&inst_plus_rect);
+        draw_rectangle(inst_plus_rect.x, inst_plus_rect.y, inst_plus_rect.w, inst_plus_rect.h,
+            if inst_plus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
+        draw_text("+", inst_plus_rect.x + 4.0, inst_plus_rect.y + 12.0, 12.0, TEXT_COLOR);
+        if inst_plus_hover && is_mouse_button_pressed(MouseButton::Left) {
             let new_inst = (inst + 1).min(127);
-            state.song.set_channel_instrument(ch, new_inst);
-            if ch == state.current_channel {
-                state.audio.set_program(ch as i32, new_inst as i32);
-            }
+            channel_updates.push((ch, "inst", new_inst));
+        }
+
+        // === Row 3: 3 Mini Knobs (Pan, Mod, Expr) ===
+        let settings = state.song.get_channel_settings(ch);
+        let knob_radius = 16.0;
+        let knob_spacing = 38.0;
+        let knobs_y = rect.y + 58.0;
+        // Center the 3 knobs
+        let knobs_total_width = knob_spacing * 2.0 + knob_radius * 2.0;
+        let knobs_start_x = ch_x + (CHANNEL_WIDTH - knobs_total_width) / 2.0 + knob_radius;
+
+        if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x, knobs_y, knob_radius, settings.pan, "Pan", true) {
+            channel_updates.push((ch, "pan", new_val));
+        }
+        if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x + knob_spacing, knobs_y, knob_radius, settings.modulation, "Mod", false) {
+            channel_updates.push((ch, "mod", new_val));
+        }
+        if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x + knob_spacing * 2.0, knobs_y, knob_radius, settings.expression, "Expr", false) {
+            channel_updates.push((ch, "expr", new_val));
+        }
+
+        // === Row 4: Reset button ===
+        let reset_y = rect.y + CHANNEL_STRIP_HEIGHT - 20.0;
+        let reset_rect = Rect::new(ch_x + 4.0, reset_y, CHANNEL_WIDTH - 10.0, 16.0);
+        let reset_hover = ctx.mouse.inside(&reset_rect);
+        draw_rectangle(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h,
+            if reset_hover { Color::new(0.4, 0.28, 0.28, 1.0) } else { Color::new(0.25, 0.2, 0.2, 1.0) });
+        let reset_text = "Reset";
+        let reset_dims = measure_text(reset_text, None, 11, 1.0);
+        draw_text(reset_text, reset_rect.x + (reset_rect.w - reset_dims.width) / 2.0, reset_y + 12.0, 11.0, TEXT_DIM);
+        if reset_hover && is_mouse_button_pressed(MouseButton::Left) {
+            channel_updates.push((ch, "reset", 0));
         }
 
         x += CHANNEL_WIDTH;
 
         // Channel separator
         draw_line(x - 1.0, rect.y, x - 1.0, rect.y + rect.h, 1.0, Color::new(0.25, 0.25, 0.3, 1.0));
+    }
+
+    // Apply channel updates
+    for (ch, param, value) in channel_updates {
+        match param {
+            "inst" => {
+                state.song.set_channel_instrument(ch, value);
+                state.audio.set_program(ch as i32, value as i32);
+            }
+            "pan" => state.set_channel_pan(ch, value),
+            "mod" => state.set_channel_modulation(ch, value),
+            "expr" => state.set_channel_expression(ch, value),
+            "reset" => state.reset_channel_settings(ch),
+            _ => {}
+        }
+    }
+
+    // === Global reverb controls (above the Rv column) ===
+    let reverb_strip_x = rect.x + ROW_NUM_WIDTH + (num_channels as f32 * CHANNEL_WIDTH);
+    let reverb_strip_bg = Color::new(0.10, 0.12, 0.16, 1.0);
+    draw_rectangle(reverb_strip_x, rect.y, 50.0, CHANNEL_STRIP_HEIGHT, reverb_strip_bg);
+
+    // Global Wet knob (PS1 has single global reverb processor) - same size as channel knobs
+    let wet_value = (state.audio.reverb_wet_level() * 127.0) as u8;
+    let wet_knob_x = reverb_strip_x + 25.0; // Centered: (50 - 32) / 2 + 16
+    let wet_knob_y = rect.y + 58.0; // Same Y as channel knobs (row 3)
+    if let Some(new_val) = draw_mini_knob(ctx, wet_knob_x, wet_knob_y, 16.0, wet_value, "Wet", false) {
+        state.audio.set_reverb_wet_level(new_val as f32 / 127.0);
     }
 
     // === Column headers (Note, Inst, Vol, etc.) ===
@@ -325,16 +419,21 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             }
         }
 
-        // Column labels
+        // Column labels (Note, Volume, Fx - instrument is per-channel in strip)
         let is_current = ch == state.current_channel;
         let label_color = if is_current { NOTE_COLOR } else { TEXT_DIM };
-        draw_text("Not", ch_x + 4.0, header_y + 13.0, 10.0, label_color);
-        draw_text("In", ch_x + NOTE_WIDTH + 2.0, header_y + 13.0, 10.0, label_color);
-        draw_text("Vl", ch_x + NOTE_WIDTH + INST_WIDTH + 2.0, header_y + 13.0, 10.0, label_color);
-        draw_text("Fx", ch_x + NOTE_WIDTH + INST_WIDTH + VOL_WIDTH + 2.0, header_y + 13.0, 10.0, label_color);
+        draw_text("Not", ch_x + 4.0, header_y + 14.0, 12.0, label_color);
+        draw_text("Vl", ch_x + NOTE_WIDTH + 2.0, header_y + 14.0, 12.0, label_color);
+        draw_text("Fx", ch_x + NOTE_WIDTH + VOL_WIDTH + 2.0, header_y + 14.0, 12.0, label_color);
 
         x += CHANNEL_WIDTH;
     }
+
+    // Global reverb column header (after all channels)
+    let reverb_header_x = x;
+    let is_reverb_selected = state.current_column == 4;
+    let rv_label_color = if is_reverb_selected { NOTE_COLOR } else { TEXT_DIM };
+    draw_text("Rv", reverb_header_x + 2.0, header_y + 14.0, 12.0, rv_label_color);
 
     // Handle mouse clicks and scrolling on pattern grid
     let grid_y_start = rect.y + CHANNEL_STRIP_HEIGHT + ROW_HEIGHT;
@@ -409,19 +508,24 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
                     }
 
                     // Calculate column within channel (always update)
+                    // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param
                     let col_x = rel_x - (clicked_channel as f32 * CHANNEL_WIDTH);
                     state.current_column = if col_x < NOTE_WIDTH {
                         0 // Note
-                    } else if col_x < NOTE_WIDTH + INST_WIDTH {
-                        1 // Instrument
-                    } else if col_x < NOTE_WIDTH + INST_WIDTH + VOL_WIDTH {
-                        2 // Volume
-                    } else if col_x < NOTE_WIDTH + INST_WIDTH + VOL_WIDTH + FX_WIDTH {
-                        3 // Effect
+                    } else if col_x < NOTE_WIDTH + VOL_WIDTH {
+                        1 // Volume
+                    } else if col_x < NOTE_WIDTH + VOL_WIDTH + FX_WIDTH {
+                        2 // Effect
                     } else {
-                        4 // Effect param
+                        3 // Effect param
                     };
                 }
+            }
+
+            // Check if clicked on global reverb column (after all channels)
+            let reverb_col_x = ROW_NUM_WIDTH + (num_channels as f32 * CHANNEL_WIDTH);
+            if rel_x >= reverb_col_x - ROW_NUM_WIDTH && rel_x < reverb_col_x + GLOBAL_REVERB_WIDTH - ROW_NUM_WIDTH {
+                state.current_column = 4; // Global reverb column
             }
         }
     }
@@ -472,20 +576,19 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
                 draw_rectangle(x, y, CHANNEL_WIDTH - 4.0, ROW_HEIGHT, selection_color);
             }
 
-            // Cursor highlight
-            if row_idx == state.current_row && ch == state.current_channel {
+            // Cursor highlight for channel columns (0-3)
+            // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param
+            if row_idx == state.current_row && ch == state.current_channel && state.current_column < 4 {
                 let col_x = x + match state.current_column {
                     0 => 0.0,
                     1 => NOTE_WIDTH,
-                    2 => NOTE_WIDTH + INST_WIDTH,
-                    3 => NOTE_WIDTH + INST_WIDTH + VOL_WIDTH,
-                    _ => NOTE_WIDTH + INST_WIDTH + VOL_WIDTH + FX_WIDTH,
+                    2 => NOTE_WIDTH + VOL_WIDTH,
+                    _ => NOTE_WIDTH + VOL_WIDTH + FX_WIDTH,
                 };
                 let col_w = match state.current_column {
                     0 => NOTE_WIDTH,
-                    1 => INST_WIDTH,
-                    2 => VOL_WIDTH,
-                    3 => FX_WIDTH,
+                    1 => VOL_WIDTH,
+                    2 => FX_WIDTH,
                     _ => FXPARAM_WIDTH,
                 };
                 draw_rectangle(col_x, y, col_w, ROW_HEIGHT, CURSOR_COLOR);
@@ -496,27 +599,36 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             let note_color = if note.pitch.is_some() { NOTE_COLOR } else { TEXT_DIM };
             draw_text(&note_str, x + 2.0, y + 14.0, 12.0, note_color);
 
-            // Instrument
-            let inst_str = note.instrument.map(|i| format!("{:02X}", i)).unwrap_or_else(|| "--".to_string());
-            let inst_color = if note.instrument.is_some() { INST_COLOR } else { TEXT_DIM };
-            draw_text(&inst_str, x + NOTE_WIDTH + 2.0, y + 14.0, 12.0, inst_color);
-
-            // Volume
+            // Volume (instrument column removed - instrument is per-channel)
             let vol_str = note.volume.map(|v| format!("{:02X}", v)).unwrap_or_else(|| "--".to_string());
             let vol_color = if note.volume.is_some() { VOL_COLOR } else { TEXT_DIM };
-            draw_text(&vol_str, x + NOTE_WIDTH + INST_WIDTH + 2.0, y + 14.0, 12.0, vol_color);
+            draw_text(&vol_str, x + NOTE_WIDTH + 2.0, y + 14.0, 12.0, vol_color);
 
             // Effect
             let fx_str = note.effect.map(|e| e.to_string()).unwrap_or_else(|| "-".to_string());
             let fx_color = if note.effect.is_some() { FX_COLOR } else { TEXT_DIM };
-            draw_text(&fx_str, x + NOTE_WIDTH + INST_WIDTH + VOL_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
+            draw_text(&fx_str, x + NOTE_WIDTH + VOL_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
 
             // Effect param
             let fxp_str = note.effect_param.map(|p| format!("{:02X}", p)).unwrap_or_else(|| "--".to_string());
-            draw_text(&fxp_str, x + NOTE_WIDTH + INST_WIDTH + VOL_WIDTH + FX_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
+            draw_text(&fxp_str, x + NOTE_WIDTH + VOL_WIDTH + FX_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
 
             x += CHANNEL_WIDTH;
         }
+
+        // Global reverb column (single column after all channels)
+        let reverb_x = x;
+        let reverb = pattern.get_reverb(row_idx);
+
+        // Cursor highlight for global reverb column (column 4)
+        if row_idx == state.current_row && state.current_column == 4 {
+            draw_rectangle(reverb_x, y, GLOBAL_REVERB_WIDTH, ROW_HEIGHT, CURSOR_COLOR);
+        }
+
+        // Reverb value (single digit 0-9)
+        let rv_str = reverb.map(|r| format!("{}", r.min(9))).unwrap_or_else(|| "-".to_string());
+        let rv_color = if reverb.is_some() { Color::new(0.6, 0.8, 1.0, 1.0) } else { TEXT_DIM };
+        draw_text(&rv_str, reverb_x + 6.0, y + 14.0, 12.0, rv_color);
     }
 }
 
@@ -536,7 +648,7 @@ fn draw_arrangement_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let row_h = 24.0;
 
     // === Pattern Bank (left side) ===
-    draw_text("Pattern Bank", rect.x + 10.0, rect.y + 24.0, 14.0, TEXT_COLOR);
+    draw_text("Pattern Bank", rect.x + 10.0, rect.y + 24.0, 16.0, TEXT_COLOR);
 
     let bank_rect = Rect::new(rect.x + 10.0, list_top, bank_width - 20.0, list_height);
     draw_rectangle(bank_rect.x, bank_rect.y, bank_rect.w, bank_rect.h, Color::new(0.08, 0.08, 0.1, 1.0));
@@ -612,7 +724,7 @@ fn draw_arrangement_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
     // === Arrangement (right side) ===
     let arr_x = rect.x + bank_width + 10.0;
-    draw_text("Arrangement", arr_x, rect.y + 24.0, 14.0, TEXT_COLOR);
+    draw_text("Arrangement", arr_x, rect.y + 24.0, 16.0, TEXT_COLOR);
 
     let arr_rect = Rect::new(arr_x, list_top, arrangement_width - 20.0, list_height);
     draw_rectangle(arr_rect.x, arr_rect.y, arr_rect.w, arr_rect.h, Color::new(0.08, 0.08, 0.1, 1.0));
@@ -674,7 +786,7 @@ fn draw_arrangement_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let help_y = rect.y + rect.h - 30.0;
     draw_text(
         "Tab: Switch focus | +: New pattern | Enter: Add to arrangement | Del: Remove | ↑↓: Move",
-        rect.x + 10.0, help_y, 11.0, TEXT_DIM
+        rect.x + 10.0, help_y, 12.0, TEXT_DIM
     );
 
     // === Keyboard handling for arrangement view ===
@@ -869,7 +981,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
     // === LEFT: Instrument List ===
     draw_rectangle(list_rect.x, list_rect.y, list_rect.w, list_rect.h, Color::new(0.09, 0.09, 0.11, 1.0));
-    draw_text("Instruments (GM)", list_rect.x + 10.0, list_rect.y + 20.0, 14.0, TEXT_COLOR);
+    draw_text("Instruments (GM)", list_rect.x + 10.0, list_rect.y + 20.0, 16.0, TEXT_COLOR);
 
     // Scrollable instrument list
     let presets = state.audio.get_preset_names();
@@ -943,7 +1055,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let black_key_w = 16.0;
     let black_key_h = 60.0;
 
-    draw_text(&format!("Piano - Octave {}", state.octave), piano_x, piano_y - 10.0, 14.0, TEXT_COLOR);
+    draw_text(&format!("Piano - Octave {}", state.octave), piano_x, piano_y - 10.0, 16.0, TEXT_COLOR);
 
     // Define all white keys we need to display (semitones 0-36, ~3 octaves: C to C)
     // semitone offset, note name
@@ -1055,7 +1167,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let sample_rate_y = info_y + 25.0;
     let spu_enabled = state.audio.is_spu_resampling_enabled();
 
-    draw_text("SPU Sample Rate", piano_x, sample_rate_y, 14.0, TEXT_COLOR);
+    draw_text("SPU Sample Rate", piano_x, sample_rate_y, 16.0, TEXT_COLOR);
 
     let sr_btn_w = 52.0;
     let sr_btn_h = 22.0;
@@ -1118,7 +1230,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
     // === PS1 REVERB PRESETS ===
     let reverb_y = sample_rate_y + 45.0;
-    draw_text("PS1 Reverb", piano_x, reverb_y, 14.0, TEXT_COLOR);
+    draw_text("PS1 Reverb", piano_x, reverb_y, 16.0, TEXT_COLOR);
 
     let preset_btn_w = 80.0;
     let preset_btn_h = 22.0;
@@ -1179,7 +1291,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let effects_y = reverb_y + 80.0;
     let ch = state.current_channel;
 
-    draw_text("Channel Effects", piano_x, effects_y, 14.0, TEXT_COLOR);
+    draw_text("Channel Effects", piano_x, effects_y, 16.0, TEXT_COLOR);
 
     let knob_radius = 28.0;
     let knob_spacing = 70.0;
@@ -1298,14 +1410,58 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
               piano_x, help_y + 34.0, 12.0, TEXT_DIM);
 }
 
+/// Draw the status bar at the bottom with context-sensitive help
+fn draw_status_bar(rect: Rect, state: &TrackerState) {
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::new(0.16, 0.16, 0.18, 1.0));
+
+    // Left side: Column-specific help based on current column and view
+    let column_help = match state.view {
+        TrackerView::Pattern => {
+            // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param, 4=Global Reverb
+            match state.current_column {
+                0 => "Note: Z-/ Q-] piano keys | ` note-off | Del clear",
+                1 => "Volume: 00-7F (hex) | Del clear",
+                2 => "Effect: 0=Arp 1=SlideUp 2=SlideDown 3=Porta 4=Vib A=VolSlide C=Vol E=Expr M=Mod P=Pan",
+                3 => "Effect Param: 00-FF (hex) | Del clear",
+                _ => "Global Reverb (PS1 SPU): 0=Off 1=Room 2=StudioS 3=StudioM 4=StudioL 5=Hall 6=HalfEcho 7=SpaceEcho 8=Chaos 9=Delay",
+            }
+        }
+        TrackerView::Arrangement => {
+            "Tab: switch focus | Enter: edit pattern | +: new pattern | Del: remove | Shift+↑↓: reorder"
+        }
+        TrackerView::Instruments => {
+            "Z-/ Q-]: preview notes | Click instrument to select | Drag knobs to adjust"
+        }
+    };
+
+    draw_text(column_help, rect.x + 10.0, rect.y + 15.0, 14.0, TEXT_COLOR);
+
+    // Right side: Global shortcuts
+    #[cfg(not(target_arch = "wasm32"))]
+    let shortcuts = "Ctrl+S: Save | Ctrl+O: Open | Ctrl+N: New | Space: Play/Pause";
+    #[cfg(target_arch = "wasm32")]
+    let shortcuts = "Space: Play/Pause | Esc: Stop | Numpad+/-: Octave";
+
+    let shortcuts_width = shortcuts.len() as f32 * 6.5; // Approximate width
+    draw_text(
+        shortcuts,
+        rect.x + rect.w - shortcuts_width - 10.0,
+        rect.y + 15.0,
+        12.0,
+        TEXT_DIM,
+    );
+}
+
 /// Handle keyboard and mouse input
 fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     // Build action context
+    // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param, 4=Global Reverb
     let column_type = match state.current_column {
         0 => "note",
-        1 => "instrument",
+        1 => "volume",
+        2 => "effect",
         3 => "effect",
-        4 => "effect",
+        4 => "reverb", // Global reverb column
         _ => "other",
     };
     let actx = build_context(
@@ -1549,9 +1705,9 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         }
     }
 
-    // Effect entry (in Pattern view, edit mode, effect column = 3)
+    // Effect entry (in Pattern view, edit mode, effect column = 2)
     // Skip if Ctrl/Cmd is held
-    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 3 && !ctrl_held {
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 2 && !ctrl_held {
         // Effect letters: 0-9, A-F for standard effects, + our new ones (C, E, H, M, P, R)
         let effect_keys = [
             (KeyCode::Key0, '0'), (KeyCode::Key1, '1'), (KeyCode::Key2, '2'),
@@ -1571,9 +1727,9 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         }
     }
 
-    // Effect parameter entry (in Pattern view, edit mode, fx_param column = 4)
+    // Effect parameter entry (in Pattern view, edit mode, fx_param column = 3)
     // Skip if Ctrl/Cmd is held
-    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 4 && !ctrl_held {
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 3 && !ctrl_held {
         // Hex digits 0-9, A-F for parameter entry
         let hex_keys = [
             (KeyCode::Key0, 0), (KeyCode::Key1, 1), (KeyCode::Key2, 2),
@@ -1593,6 +1749,24 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
                     .map(|p| p & 0x0F)
                     .unwrap_or(0));
                 state.set_effect_param_low(nibble);
+            }
+        }
+    }
+
+    // Reverb entry (in Pattern view, edit mode, reverb column = 4)
+    // Skip if Ctrl/Cmd is held
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 4 && !ctrl_held {
+        // Digits 0-9 for reverb preset
+        let reverb_keys = [
+            (KeyCode::Key0, 0), (KeyCode::Key1, 1), (KeyCode::Key2, 2),
+            (KeyCode::Key3, 3), (KeyCode::Key4, 4), (KeyCode::Key5, 5),
+            (KeyCode::Key6, 6), (KeyCode::Key7, 7), (KeyCode::Key8, 8),
+            (KeyCode::Key9, 9),
+        ];
+
+        for (key, preset) in reverb_keys {
+            if is_key_pressed(key) {
+                state.set_reverb(preset);
             }
         }
     }

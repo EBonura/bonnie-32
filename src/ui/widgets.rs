@@ -710,6 +710,129 @@ pub fn draw_knob(
     }
 }
 
+/// Draw a compact mini knob for channel strips
+/// - Smaller than regular knob (no label above, no value box below)
+/// - Just shows knob with value in center
+/// - Returns new value if changed via drag
+pub fn draw_mini_knob(
+    ctx: &mut UiContext,
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+    value: u8,
+    label: &str,
+    is_bipolar: bool,
+) -> Option<u8> {
+    let knob_rect = Rect::new(center_x - radius, center_y - radius, radius * 2.0, radius * 2.0);
+    let hovered = ctx.mouse.inside(&knob_rect);
+
+    // Colors
+    let bg_color = Color::new(0.12, 0.12, 0.15, 1.0);
+    let ring_color = if hovered {
+        Color::new(0.35, 0.35, 0.4, 1.0)
+    } else {
+        Color::new(0.25, 0.25, 0.3, 1.0)
+    };
+    let indicator_color = ACCENT_COLOR;
+    let text_color = Color::new(0.7, 0.7, 0.7, 1.0);
+
+    // Draw knob body (thinner ring for mini version)
+    let ring_thickness = 3.0;
+    draw_circle(center_x, center_y, radius, ring_color);
+    draw_circle(center_x, center_y, radius - ring_thickness, bg_color);
+
+    // Knob rotation: map 0-127 to angle range
+    let start_angle = 225.0_f32.to_radians();
+    let end_angle = -45.0_f32.to_radians();
+    let angle_range = start_angle - end_angle;
+
+    let normalized = value as f32 / 127.0;
+    let angle = start_angle - normalized * angle_range;
+
+    // Draw arc showing value
+    let arc_radius = radius - ring_thickness / 2.0;
+    let segments = 20;
+
+    if is_bipolar {
+        let center_angle = start_angle - 0.5 * angle_range;
+        let (from_angle, to_angle) = if value < 64 {
+            (angle, center_angle)
+        } else {
+            (center_angle, angle)
+        };
+
+        for i in 0..segments {
+            let t1 = i as f32 / segments as f32;
+            let t2 = (i + 1) as f32 / segments as f32;
+            let a1 = from_angle + (to_angle - from_angle) * t1;
+            let a2 = from_angle + (to_angle - from_angle) * t2;
+
+            if a1 >= end_angle && a1 <= start_angle && a2 >= end_angle && a2 <= start_angle {
+                let x1 = center_x + arc_radius * a1.cos();
+                let y1 = center_y - arc_radius * a1.sin();
+                let x2 = center_x + arc_radius * a2.cos();
+                let y2 = center_y - arc_radius * a2.sin();
+                draw_line(x1, y1, x2, y2, ring_thickness, indicator_color);
+            }
+        }
+    } else {
+        for i in 0..segments {
+            let t1 = i as f32 / segments as f32;
+            let t2 = (i + 1) as f32 / segments as f32;
+            let a1 = start_angle - t1 * normalized * angle_range;
+            let a2 = start_angle - t2 * normalized * angle_range;
+
+            let x1 = center_x + arc_radius * a1.cos();
+            let y1 = center_y - arc_radius * a1.sin();
+            let x2 = center_x + arc_radius * a2.cos();
+            let y2 = center_y - arc_radius * a2.sin();
+            draw_line(x1, y1, x2, y2, ring_thickness, indicator_color);
+        }
+    }
+
+    // Draw pointer line
+    let inner_radius = radius * 0.3;
+    let outer_radius = radius * 0.7;
+    let pointer_x1 = center_x + inner_radius * angle.cos();
+    let pointer_y1 = center_y - inner_radius * angle.sin();
+    let pointer_x2 = center_x + outer_radius * angle.cos();
+    let pointer_y2 = center_y - outer_radius * angle.sin();
+    draw_line(pointer_x1, pointer_y1, pointer_x2, pointer_y2, 1.5, indicator_color);
+
+    // Label below knob (small text)
+    let label_dims = measure_text(label, None, 9, 1.0);
+    draw_text(
+        label,
+        center_x - label_dims.width / 2.0,
+        center_y + radius + 9.0,
+        9.0,
+        text_color,
+    );
+
+    // Handle drag interaction
+    let mut new_value = None;
+    if hovered && is_mouse_button_down(MouseButton::Left) {
+        let dx = ctx.mouse.x - center_x;
+        let dy = center_y - ctx.mouse.y;
+        let mouse_angle = dx.atan2(dy);
+
+        let min_angle = -135.0_f32.to_radians();
+        let max_angle = 45.0_f32.to_radians();
+        let mut norm = (mouse_angle - min_angle) / (max_angle - min_angle);
+
+        if mouse_angle > max_angle && mouse_angle <= std::f32::consts::PI {
+            norm = 1.0;
+        } else if mouse_angle < min_angle && mouse_angle >= -std::f32::consts::PI {
+            norm = 0.0;
+        }
+
+        norm = norm.clamp(0.0, 1.0);
+        new_value = Some((norm * 127.0).round() as u8);
+    }
+
+    new_value
+}
+
 // =============================================================================
 // Drag Value Widget (for numeric input with drag-to-adjust)
 // =============================================================================
