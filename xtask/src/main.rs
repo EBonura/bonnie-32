@@ -1,9 +1,8 @@
 //! Build automation tasks for Bonnie Engine
 //!
 //! Usage:
-//!   cargo xtask build-web       # Build WASM for web deployment
-//!   cargo xtask package-itch    # Create zip for itch.io upload
-//!   cargo xtask package-steam   # Build native for Steam (placeholder)
+//!   cargo xtask build-web        # Build WASM for web deployment
+//!   cargo xtask build-web --dev  # Build with DEV banner
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -20,19 +19,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build WASM for web deployment (GitHub Pages)
+    /// Build WASM for web deployment
     BuildWeb {
         /// Mark as dev build (adds DEV banner to index.html)
         #[arg(long)]
         dev: bool,
-    },
-    /// Create zip file ready for itch.io upload
-    PackageItch,
-    /// Build native executables for Steam (placeholder)
-    PackageSteam {
-        /// Target platform: windows, macos, linux
-        #[arg(long)]
-        platform: Option<String>,
     },
 }
 
@@ -41,8 +32,6 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::BuildWeb { dev } => build_web(dev),
-        Commands::PackageItch => package_itch(),
-        Commands::PackageSteam { platform } => package_steam(platform),
     }
 }
 
@@ -149,81 +138,5 @@ fn build_web(dev: bool) -> Result<()> {
     }
 
     println!("Web build complete: dist/web/");
-    Ok(())
-}
-
-/// Create zip for itch.io
-fn package_itch() -> Result<()> {
-    // First build web
-    build_web(false)?;
-
-    let root = project_root();
-    let dist = root.join("dist");
-    let zip_path = dist.join("bonnie-engine-itch.zip");
-
-    // Remove old zip if exists
-    if zip_path.exists() {
-        std::fs::remove_file(&zip_path)?;
-    }
-
-    println!("Creating itch.io zip...");
-    run_cmd(
-        Command::new("zip")
-            .current_dir(dist.join("web"))
-            .args(["-r", "../bonnie-engine-itch.zip", "."]),
-    )?;
-
-    println!("itch.io package ready: dist/bonnie-engine-itch.zip");
-    Ok(())
-}
-
-/// Build for Steam (placeholder)
-fn package_steam(platform: Option<String>) -> Result<()> {
-    let root = project_root();
-    let platform = platform.unwrap_or_else(|| {
-        if cfg!(target_os = "windows") {
-            "windows".to_string()
-        } else if cfg!(target_os = "macos") {
-            "macos".to_string()
-        } else {
-            "linux".to_string()
-        }
-    });
-
-    let dist = root.join(format!("dist/steam/{}", platform));
-
-    println!("Building native release for {}...", platform);
-
-    // Clean and create dist folder
-    if dist.exists() {
-        std::fs::remove_dir_all(&dist)?;
-    }
-    std::fs::create_dir_all(&dist)?;
-
-    // Build native release
-    run_cmd(
-        Command::new("cargo")
-            .current_dir(&root)
-            .args(["build", "--release"]),
-    )?;
-
-    // Copy binary
-    let binary_name = if platform == "windows" {
-        "bonnie-engine.exe"
-    } else {
-        "bonnie-engine"
-    };
-
-    std::fs::copy(
-        root.join(format!("target/release/{}", binary_name)),
-        dist.join(binary_name),
-    )?;
-
-    // Copy assets
-    copy_dir_recursive(&root.join("assets"), &dist.join("assets"))?;
-
-    println!("Steam build complete: dist/steam/{}/", platform);
-    println!("Note: Steamworks SDK integration not yet implemented");
-
     Ok(())
 }

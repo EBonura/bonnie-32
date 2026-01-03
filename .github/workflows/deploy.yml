@@ -1,7 +1,8 @@
-name: Deploy to GitHub Pages
+name: Deploy
 
-# Deploys main branch to root of GitHub Pages
-# Access at: https://ebonura.github.io/bonnie-engine/
+# Deploys main branch to GitHub Pages and itch.io
+# GitHub Pages: https://ebonura.github.io/bonnie-engine/
+# itch.io: https://bonnie-games.itch.io/bonnie-engine
 
 on:
   push:
@@ -29,9 +30,18 @@ jobs:
       - name: Build web with xtask
         run: cargo xtask build-web
 
-      - name: Deploy to gh-pages root
+      - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist/web
           keep_files: true  # Preserve /dev/ folder
+
+      - name: Deploy to itch.io
+        uses: Oval-Tutu/publish-to-itch-with-butler@v1
+        with:
+          api-key: ${{ secrets.BUTLER_API_KEY }}
+          itch_user: bonnie-games
+          itch_game: bonnie-engine
+          channel: html5
+          package: ./dist/web
