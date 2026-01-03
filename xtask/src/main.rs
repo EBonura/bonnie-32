@@ -63,16 +63,30 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
     )
 }
 
-/// Copy directory recursively
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+/// Directories to exclude from web builds (reduces file count for itch.io)
+const EXCLUDED_ASSET_DIRS: &[&str] = &[
+    "quake-like",
+    "dark-fantasy-townhouse",
+];
+
+/// Copy directory recursively, skipping excluded directory names
+fn copy_dir_recursive_filtered(src: &Path, dst: &Path, exclude: &[&str]) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip excluded directories
+        if src_path.is_dir() && exclude.iter().any(|e| *e == name_str) {
+            println!("Skipping excluded directory: {}", src_path.display());
+            continue;
+        }
 
         if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+            copy_dir_recursive_filtered(&src_path, &dst_path, exclude)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
         }
@@ -123,8 +137,8 @@ fn build_web(dev: bool) -> Result<()> {
         )?;
     }
 
-    // Copy assets
-    copy_dir_recursive(&root.join("assets"), &dist.join("assets"))?;
+    // Copy assets (excluding large/unused directories to stay under itch.io file limit)
+    copy_dir_recursive_filtered(&root.join("assets"), &dist.join("assets"), EXCLUDED_ASSET_DIRS)?;
 
     // Apply dev modifications if requested
     if dev {
