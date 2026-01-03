@@ -331,7 +331,9 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         let knob_radius = 16.0;
         let knob_spacing = 38.0;
         let knobs_y = rect.y + 55.0;
-        let knobs_start_x = ch_x + 4.0;
+        // Center the 3 knobs: total width from first to last center = 2*spacing = 76px
+        let knobs_total_width = knob_spacing * 2.0 + knob_radius * 2.0;
+        let knobs_start_x = ch_x + (CHANNEL_WIDTH - knobs_total_width) / 2.0 + knob_radius;
 
         // Pan (bipolar), Mod, Expr in a single row
         if let Some(new_val) = draw_mini_knob(ctx, knobs_start_x, knobs_y, knob_radius, settings.pan, "Pan", true) {
@@ -385,7 +387,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
 
     // Global Wet knob (PS1 has single global reverb processor) - same size as channel knobs
     let wet_value = (state.audio.reverb_wet_level() * 127.0) as u8;
-    let wet_knob_x = reverb_strip_x + 12.0;
+    let wet_knob_x = reverb_strip_x + 25.0; // Centered: (50 - 32) / 2 + 16
     let wet_knob_y = rect.y + 55.0; // Same Y as channel knobs
     if let Some(new_val) = draw_mini_knob(ctx, wet_knob_x, wet_knob_y, 16.0, wet_value, "Wet", false) {
         state.audio.set_reverb_wet_level(new_val as f32 / 127.0);
