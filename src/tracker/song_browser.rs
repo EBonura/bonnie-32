@@ -279,7 +279,7 @@ pub fn discover_songs() -> Vec<SongInfo> {
     if let Ok(entries) = std::fs::read_dir(songs_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "bsong").unwrap_or(false) {
+            if path.extension().map(|e| e == "ron").unwrap_or(false) {
                 if let Some(stem) = path.file_stem() {
                     songs.push(SongInfo {
                         name: stem.to_string_lossy().to_string(),
@@ -295,7 +295,7 @@ pub fn discover_songs() -> Vec<SongInfo> {
     songs
 }
 
-/// Generate the next available song filename (song_001.bsong, song_002.bsong, etc.)
+/// Generate the next available song filename (song_001.ron, song_002.ron, etc.)
 pub fn next_available_song_name() -> PathBuf {
     let songs_dir = PathBuf::from("assets/songs");
     let _ = std::fs::create_dir_all(&songs_dir);
@@ -317,7 +317,7 @@ pub fn next_available_song_name() -> PathBuf {
     }
 
     let next_num = highest + 1;
-    songs_dir.join(format!("song_{:03}.bsong", next_num))
+    songs_dir.join(format!("song_{:03}.ron", next_num))
 }
 
 /// Load song list from manifest asynchronously (for WASM)
@@ -332,10 +332,10 @@ pub async fn load_song_list() -> Vec<SongInfo> {
     let mut songs = Vec::new();
     for line in manifest.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || !line.ends_with(".bsong") {
+        if line.is_empty() || line.starts_with('#') || !line.ends_with(".ron") {
             continue;
         }
-        let name = line.strip_suffix(".bsong").unwrap_or(line).to_string();
+        let name = line.strip_suffix(".ron").unwrap_or(line).to_string();
         let path = PathBuf::from(format!("assets/songs/{}", line));
         songs.push(SongInfo { name, path });
     }

@@ -192,11 +192,11 @@ fn generate_songs_manifest() {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let path = e.path();
-                // Only include .bsong files, skip directories
+                // Only include .ron files, skip directories
                 path.is_file()
                     && path
                         .extension()
-                        .map(|ext| ext.to_ascii_lowercase() == "bsong")
+                        .map(|ext| ext.to_ascii_lowercase() == "ron")
                         .unwrap_or(false)
             })
             .collect();

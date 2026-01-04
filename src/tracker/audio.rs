@@ -387,6 +387,8 @@ struct AudioState {
     output_sample_rate: OutputSampleRate,
     /// PS1 SPU Gaussian resampler
     resampler: SpuResampler,
+    /// Master volume (0.0 to 2.0, default 1.0)
+    master_volume: f32,
 }
 
 // =============================================================================
@@ -432,9 +434,11 @@ mod native {
                     // Apply PS1 SPU Gaussian resampling (authentic sample rate conversion)
                     state.resampler.process(&mut left_buffer[..samples_needed], &mut right_buffer[..samples_needed]);
 
+                    // Apply master volume
+                    let master = state.master_volume;
                     for i in 0..samples_needed {
-                        data[i * 2] = left_buffer[i];
-                        data[i * 2 + 1] = right_buffer[i];
+                        data[i * 2] = left_buffer[i] * master;
+                        data[i * 2 + 1] = right_buffer[i] * master;
                     }
                 } else {
                     for sample in data.iter_mut() {
@@ -533,6 +537,7 @@ impl AudioEngine {
             reverb: PsxReverb::new(SAMPLE_RATE),
             output_sample_rate: OutputSampleRate::default(),
             resampler: SpuResampler::new(),
+            master_volume: 1.0,
         }));
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -596,6 +601,17 @@ impl AudioEngine {
     /// Get current output sample rate mode
     pub fn output_sample_rate(&self) -> OutputSampleRate {
         self.state.lock().unwrap().output_sample_rate
+    }
+
+    /// Set master volume (0.0 to 2.0)
+    pub fn set_master_volume(&self, volume: f32) {
+        let mut state = self.state.lock().unwrap();
+        state.master_volume = volume.clamp(0.0, 2.0);
+    }
+
+    /// Get master volume
+    pub fn master_volume(&self) -> f32 {
+        self.state.lock().unwrap().master_volume
     }
 
     /// Enable or disable SPU resampling emulation
@@ -688,6 +704,13 @@ impl AudioEngine {
 
             // Apply PS1 SPU Gaussian resampling (authentic sample rate conversion)
             state.resampler.process(&mut self.left_buffer[..samples], &mut self.right_buffer[..samples]);
+
+            // Apply master volume
+            let master = state.master_volume;
+            for i in 0..samples {
+                self.left_buffer[i] *= master;
+                self.right_buffer[i] *= master;
+            }
 
             wasm::write_audio(&self.left_buffer[..samples], &self.right_buffer[..samples]);
         }

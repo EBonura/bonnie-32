@@ -15,6 +15,16 @@ pub struct ChannelSettings {
     pub expression: u8,
 }
 
+/// Global reverb settings (PS1 has a single global reverb processor)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReverbSettings {
+    /// Reverb preset type (0-9, see ReverbType)
+    pub preset: u8,
+    /// Wet/dry mix level (0-127, where 64 = 50%)
+    pub wet: u8,
+}
+
 impl Default for ChannelSettings {
     fn default() -> Self {
         Self {
@@ -25,18 +35,32 @@ impl Default for ChannelSettings {
     }
 }
 
+impl Default for ReverbSettings {
+    fn default() -> Self {
+        Self {
+            preset: 0,  // Off
+            wet: 64,    // 50% wet
+        }
+    }
+}
+
 /// A single note event in the tracker
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Note {
     /// MIDI note number (0-127), None = no note / continue
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pitch: Option<u8>,
     /// Instrument index (0-127), None = use previous
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument: Option<u8>,
     /// Volume (0-127), None = use previous
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<u8>,
     /// Effect command (e.g., 'V' for vibrato)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<char>,
     /// Effect parameter
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect_param: Option<u8>,
 }
 
@@ -224,8 +248,17 @@ pub struct Song {
     pub instrument_names: Vec<String>,
     /// Per-channel instrument (GM program number 0-127)
     pub channel_instruments: Vec<u8>,
-    /// Per-channel settings (pan, wet, mod, expr)
+    /// Per-channel settings (pan, mod, expr)
     pub channel_settings: Vec<ChannelSettings>,
+    /// Global reverb settings (PS1 has single global reverb)
+    pub reverb: ReverbSettings,
+    /// Master volume (0-200, where 100 = 1.0)
+    #[serde(default = "default_master_volume")]
+    pub master_volume: u8,
+}
+
+fn default_master_volume() -> u8 {
+    100
 }
 
 impl Song {
@@ -239,6 +272,8 @@ impl Song {
             instrument_names: Vec::new(),
             channel_instruments: vec![0; DEFAULT_CHANNELS], // Piano for all channels
             channel_settings: vec![ChannelSettings::default(); DEFAULT_CHANNELS],
+            reverb: ReverbSettings::default(),
+            master_volume: 100,
         }
     }
 

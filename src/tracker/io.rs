@@ -1,6 +1,6 @@
 //! Song file I/O for the tracker
 //!
-//! Saves and loads songs in RON format (.bsong extension)
+//! Saves and loads songs in RON format (.ron extension)
 
 use std::fs;
 use std::path::Path;

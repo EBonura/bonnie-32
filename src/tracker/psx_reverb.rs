@@ -136,6 +136,39 @@ impl ReverbType {
         ReverbType::Delay,
     ];
 
+    /// Convert from u8 index to ReverbType
+    pub fn from_index(index: u8) -> Self {
+        match index {
+            0 => ReverbType::Off,
+            1 => ReverbType::Room,
+            2 => ReverbType::StudioSmall,
+            3 => ReverbType::StudioMedium,
+            4 => ReverbType::StudioLarge,
+            5 => ReverbType::Hall,
+            6 => ReverbType::HalfEcho,
+            7 => ReverbType::SpaceEcho,
+            8 => ReverbType::ChaosEcho,
+            9 => ReverbType::Delay,
+            _ => ReverbType::Off,
+        }
+    }
+
+    /// Convert to u8 index
+    pub fn to_index(&self) -> u8 {
+        match self {
+            ReverbType::Off => 0,
+            ReverbType::Room => 1,
+            ReverbType::StudioSmall => 2,
+            ReverbType::StudioMedium => 3,
+            ReverbType::StudioLarge => 4,
+            ReverbType::Hall => 5,
+            ReverbType::HalfEcho => 6,
+            ReverbType::SpaceEcho => 7,
+            ReverbType::ChaosEcho => 8,
+            ReverbType::Delay => 9,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             ReverbType::Off => "Off",
@@ -289,6 +322,10 @@ impl PsxReverb {
 
     /// Set the reverb preset
     pub fn set_preset(&mut self, reverb_type: ReverbType) {
+        // Only update if preset actually changed (avoid clearing buffers unnecessarily)
+        if self.reverb_type == reverb_type {
+            return;
+        }
         self.reverb_type = reverb_type;
         self.preset = *reverb_type.preset();
         self.enabled = reverb_type != ReverbType::Off;

@@ -105,6 +105,9 @@ pub struct TrackerState {
 
     /// Preview song for browser playback (uses this instead of main song when Some)
     preview_song: Option<Song>,
+
+    /// Tap tempo: timestamps of recent taps (for calculating BPM)
+    tap_times: Vec<f64>,
 }
 
 /// Soundfont filename
@@ -212,7 +215,46 @@ impl TrackerState {
             clipboard: None,
             song_browser: SongBrowser::new(),
             preview_song: None,
+            tap_times: Vec::new(),
         }
+    }
+
+    /// Record a tap for tap tempo calculation
+    /// Returns the calculated BPM if enough taps have been recorded
+    pub fn tap_tempo(&mut self) -> Option<u16> {
+        let now = macroquad::time::get_time();
+
+        // If last tap was more than 2 seconds ago, reset
+        if let Some(&last) = self.tap_times.last() {
+            if now - last > 2.0 {
+                self.tap_times.clear();
+            }
+        }
+
+        self.tap_times.push(now);
+
+        // Keep only last 8 taps
+        if self.tap_times.len() > 8 {
+            self.tap_times.remove(0);
+        }
+
+        // Need at least 2 taps to calculate BPM
+        if self.tap_times.len() < 2 {
+            return None;
+        }
+
+        // Calculate average interval between taps
+        let mut total_interval = 0.0;
+        for i in 1..self.tap_times.len() {
+            total_interval += self.tap_times[i] - self.tap_times[i - 1];
+        }
+        let avg_interval = total_interval / (self.tap_times.len() - 1) as f64;
+
+        // Convert interval to BPM (60 seconds / interval)
+        let bpm = (60.0 / avg_interval).round() as u16;
+
+        // Clamp to valid range
+        Some(bpm.clamp(40, 300))
     }
 
     /// Set status message
@@ -1222,6 +1264,11 @@ impl Default for TrackerState {
 impl TrackerState {
     /// Save the current song to a file
     pub fn save_to_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        // Capture current audio settings from audio engine before saving
+        self.song.reverb.preset = self.audio.reverb_type().to_index();
+        self.song.reverb.wet = (self.audio.reverb_wet_level() * 127.0) as u8;
+        self.song.master_volume = (self.audio.master_volume() * 100.0) as u8;
+
         super::io::save_song(&self.song, path)?;
         self.current_file = Some(path.to_path_buf());
         self.dirty = false;
@@ -1252,6 +1299,14 @@ impl TrackerState {
             self.audio.set_program(ch as i32, inst as i32);
         }
         self.sync_all_channel_settings();
+
+        // Apply reverb settings from loaded song
+        let reverb_type = ReverbType::from_index(self.song.reverb.preset);
+        self.audio.set_reverb_preset(reverb_type);
+        self.audio.set_reverb_wet_level(self.song.reverb.wet as f32 / 127.0);
+
+        // Apply master volume from loaded song
+        self.audio.set_master_volume(self.song.master_volume as f32 / 100.0);
 
         self.set_status(&format!("Loaded: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
         Ok(())

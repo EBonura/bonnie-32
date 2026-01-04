@@ -295,6 +295,17 @@ impl Toolbar {
         letter_button_active(ctx, btn_rect, letter, tooltip, is_active)
     }
 
+    /// Add a text button (for short labels like "Tap")
+    pub fn text_button(&mut self, ctx: &mut UiContext, text: &str, tooltip: &str) -> bool {
+        let height = (self.rect.h - 4.0).round();
+        let font_size = 14.0;
+        let text_dims = measure_text(text, None, font_size as u16, 1.0);
+        let width = (text_dims.width + 12.0).round(); // Padding on sides
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), width, height);
+        self.cursor_x += width + self.spacing;
+        text_button(ctx, btn_rect, text, tooltip)
+    }
+
     /// Add an arrow picker widget: "< label >" with clickable arrows
     /// Returns true if either arrow was clicked. The callback receives -1 (left) or +1 (right).
     pub fn arrow_picker<F>(&mut self, ctx: &mut UiContext, icon_font: Option<&Font>, label: &str, on_change: &mut F) -> bool
@@ -500,6 +511,46 @@ pub fn letter_button_active(ctx: &mut UiContext, rect: Rect, letter: char, toolt
     let text_x = rect.x + (rect.w - text_dims.width) / 2.0;
     let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
     draw_text(&text, text_x, text_y, font_size as f32, letter_color);
+
+    clicked
+}
+
+/// Text button (for toolbar text buttons)
+pub fn text_button(ctx: &mut UiContext, rect: Rect, text: &str, tooltip: &str) -> bool {
+    let id = ctx.next_id();
+    let hovered = ctx.mouse.inside(&rect);
+    let pressed = ctx.mouse.clicking(&rect);
+    let clicked = ctx.mouse.clicked(&rect);
+
+    if hovered {
+        ctx.set_hot(id);
+        if !tooltip.is_empty() {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+    }
+
+    let corner_radius = 4.0;
+
+    // Draw background
+    if pressed {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(60, 60, 70, 255));
+    } else if hovered {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(50, 50, 60, 255));
+    }
+
+    // Text color
+    let text_color = if hovered {
+        Color::from_rgba(220, 220, 220, 255)
+    } else {
+        Color::from_rgba(180, 180, 180, 255)
+    };
+
+    // Draw text centered
+    let font_size = 14.0_f32;
+    let text_dims = measure_text(text, None, font_size as u16, 1.0);
+    let text_x = rect.x + (rect.w - text_dims.width) / 2.0;
+    let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+    draw_text(text, text_x, text_y, font_size, text_color);
 
     clicked
 }

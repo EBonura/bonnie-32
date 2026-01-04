@@ -149,9 +149,9 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
     #[cfg(not(target_arch = "wasm32"))]
     {
         if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Open (Ctrl+O)") {
-            // Open file dialog to load .bsong file
+            // Open file dialog to load .ron song file
             if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Bonnie Song", &["bsong"])
+                .add_filter("Song", &["ron"])
                 .set_directory("assets/songs")
                 .pick_file()
             {
@@ -179,9 +179,9 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
         }
         if toolbar.icon_button(ctx, icon::SAVE_AS, icon_font, "Save As") {
             if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Bonnie Song", &["bsong"])
+                .add_filter("Song", &["ron"])
                 .set_directory("assets/songs")
-                .set_file_name(&format!("{}.bsong", state.song.name))
+                .set_file_name(&format!("{}.ron", state.song.name))
                 .save_file()
             {
                 if let Err(e) = state.save_to_file(&path) {
@@ -245,13 +245,35 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
 
     toolbar.separator();
 
-    // BPM controls
+    // BPM controls (Shift+click for ±10, normal click for ±1)
+    let bpm_step = if is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) { 10 } else { 1 };
     toolbar.label(&format!("BPM:{:3}", state.song.bpm));
-    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease BPM") {
-        state.song.bpm = (state.song.bpm as i32 - 5).clamp(40, 300) as u16;
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease BPM (Shift+click for ±10)") {
+        state.song.bpm = (state.song.bpm as i32 - bpm_step).clamp(40, 300) as u16;
     }
-    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase BPM") {
-        state.song.bpm = (state.song.bpm as i32 + 5).clamp(40, 300) as u16;
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase BPM (Shift+click for ±10)") {
+        state.song.bpm = (state.song.bpm as i32 + bpm_step).clamp(40, 300) as u16;
+    }
+    if toolbar.text_button(ctx, "Tap", "Tap Tempo - click repeatedly to set BPM") {
+        if let Some(bpm) = state.tap_tempo() {
+            state.song.bpm = bpm;
+            state.set_status(&format!("BPM: {}", bpm), 1.0);
+        }
+    }
+
+    toolbar.separator();
+
+    // Master volume controls (Shift+click for ±10, normal click for ±5)
+    let vol_step = if is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) { 10 } else { 5 };
+    let current_vol = (state.audio.master_volume() * 100.0) as i32;
+    toolbar.label(&format!("Vol:{:3}%", current_vol));
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease Volume (Shift for ±10)") {
+        let new_vol = (current_vol - vol_step).clamp(0, 200) as f32 / 100.0;
+        state.audio.set_master_volume(new_vol);
+    }
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase Volume (Shift for ±10)") {
+        let new_vol = (current_vol + vol_step).clamp(0, 200) as f32 / 100.0;
+        state.audio.set_master_volume(new_vol);
     }
 
     toolbar.separator();
