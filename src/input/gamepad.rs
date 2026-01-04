@@ -46,7 +46,11 @@ mod platform {
         fn bonnie_gamepad_get_right_stick_y() -> i32;
         fn bonnie_gamepad_get_left_trigger() -> i32;
         fn bonnie_gamepad_get_right_trigger() -> i32;
+        fn bonnie_gamepad_copy_name(dest_ptr: *mut u8, max_len: usize) -> usize;
     }
+
+    // Static buffer for gamepad name (256 bytes should be plenty)
+    static mut GAMEPAD_NAME_BUFFER: [u8; 256] = [0u8; 256];
 
     pub struct Gamepad {
         deadzone: f32,
@@ -63,6 +67,19 @@ mod platform {
 
         pub fn has_gamepad(&self) -> bool {
             unsafe { bonnie_gamepad_has_gamepad() != 0 }
+        }
+
+        pub fn gamepad_name(&self) -> String {
+            if !self.has_gamepad() {
+                return String::new();
+            }
+            unsafe {
+                let len = bonnie_gamepad_copy_name(GAMEPAD_NAME_BUFFER.as_mut_ptr(), GAMEPAD_NAME_BUFFER.len());
+                if len == 0 {
+                    return String::new();
+                }
+                String::from_utf8_lossy(&GAMEPAD_NAME_BUFFER[..len]).to_string()
+            }
         }
 
         pub fn is_button_down(&self, button: u32) -> bool {
@@ -93,6 +110,14 @@ mod platform {
 
         pub fn right_trigger(&self) -> f32 {
             (unsafe { bonnie_gamepad_get_right_trigger() }) as f32 / 10000.0
+        }
+
+        pub fn deadzone(&self) -> f32 {
+            self.deadzone
+        }
+
+        pub fn set_deadzone(&mut self, deadzone: f32) {
+            self.deadzone = deadzone.clamp(0.0, 0.5);
         }
     }
 
@@ -137,6 +162,12 @@ mod platform {
 
         pub fn has_gamepad(&self) -> bool {
             self.gilrs.gamepads().next().is_some()
+        }
+
+        pub fn gamepad_name(&self) -> String {
+            self.get_active_gamepad()
+                .map(|gp| gp.name().to_string())
+                .unwrap_or_default()
         }
 
         fn get_active_gamepad(&self) -> Option<gilrs::Gamepad<'_>> {
@@ -203,6 +234,14 @@ mod platform {
         pub fn right_trigger(&self) -> f32 {
             let Some(gp) = self.get_active_gamepad() else { return 0.0 };
             gp.value(Axis::RightZ).max(0.0)
+        }
+
+        pub fn deadzone(&self) -> f32 {
+            self.deadzone
+        }
+
+        pub fn set_deadzone(&mut self, deadzone: f32) {
+            self.deadzone = deadzone.clamp(0.0, 0.5);
         }
     }
 

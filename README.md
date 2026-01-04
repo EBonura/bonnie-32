@@ -322,6 +322,41 @@ For implementing authentic PS1 constraints:
 - [ ] Face splitting/subdividing
 - [ ] Selection box (drag to select multiple)
 
+---
+
+### Feedback Session (January 2026)
+
+#### Music Editor Layout
+- [ ] **Shared view between pattern editor and instruments**: Allow quick switching between pattern editing and instrument selection without changing tabs. Instrument panel should be accessible alongside the pattern editor.
+- [ ] **Move instrument panel to right side**: Remove the separate Instruments tab and place instrument selection on the right side of the pattern editor with a toggle button to show/hide it.
+- [ ] **Piano roll quick tool**: Add a piano roll that slides up from the bottom as a quick entry tool. Keep the pattern editor as the main detailed editing view.
+
+#### Controller Support
+- [ ] **Auto-detect controller type**: Detect whether the connected controller is Xbox, PlayStation, or other and map controls accordingly. PlayStation layout should be the default since the engine targets PS1 aesthetics.
+
+#### World Editor - UI/UX
+- [ ] **Remove play button from world editor toolbar**: The play button in the world editor toolbar is confusing. Use the Game tab instead for testing levels.
+- [ ] **Preserve existing textures when changing texture pack**: Currently switching texture packs deletes loaded textures. Should add new textures while keeping existing ones.
+- [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
+- [ ] **Fix texture selection visibility**: Textures that aren't fully visible in the browser can't be selected. Fix click detection for partially visible textures.
+- [ ] **Camera floor limit**: Add a minimum camera height so users can't accidentally go below the floor level. Should be slightly below the camera's current position.
+- [ ] **2D view auto-center on current room**: The 2D grid view should center on the currently selected room. Also auto-center in 3D editor when switching rooms.
+- [ ] **Backface culling toggle**: Add a toggle in settings to enable/disable backface culling for debugging geometry.
+- [ ] **Extended multi-selection**: Current multi-selection is limited. Should support larger selections and more operations.
+- [ ] **Scroll wheel for camera dolly**: Use mouse scroll wheel for forward/backward camera movement (dolly) in addition to zoom.
+- [ ] **Shift+click for range select, Ctrl+click for toggle select**: Standard selection behavior - Shift extends selection range, Ctrl toggles individual items.
+- [ ] **Add deselect functionality**: Currently there's no way to deselect all. Add Escape or click-on-empty to deselect.
+- [ ] **Single click deselects multi-selection**: When you have multiple items selected, clicking on a single cell should deselect everything and select only that cell.
+- [ ] **Gradient fills across cells**: Support linear and spherical gradient fills across multiple selected cells for vertex colors.
+- [ ] **Auto-select room vs room lock**: Automatically select the room the cursor is in, rather than requiring manual room locking.
+- [ ] **Color slider lock + double-click reset**: Add a lock toggle to color sliders to prevent accidental changes. Double-click should reset to default value. Should work for both face colors and single vertex colors.
+- [ ] **Fix vertex color removal**: The "remove color" option doesn't work properly for vertex colors.
+- [ ] **Load textures on new level**: When creating a new level, textures aren't loaded automatically. Should load default texture pack.
+- [ ] **Hold button for continuous placement**: When holding the mouse button in floor/wall/ceiling mode, should continuously place geometry as the mouse moves.
+- [ ] **Batch slope/height editing**: When multiple faces are selected, changing slope or height should apply to all selected faces proportionally.
+- [ ] **Better floor placement highlight**: Improve the visual feedback when placing floors to make it clearer where the floor will be placed.
+- [ ] **Increase texture cache time**: Textures are being unloaded too quickly from cache. Increase the retention time to avoid reloading.
+
 ### Level Design Features
 - [ ] Water/liquid volumes (with different rendering)
 - [ ] Trigger volumes (for events, cutscenes)
