@@ -26,8 +26,13 @@ pub fn load_song(path: &Path) -> Result<Song, String> {
     let contents =
         fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
 
+    load_song_from_str(&contents)
+}
+
+/// Load a song from a RON string (for WASM async loading)
+pub fn load_song_from_str(contents: &str) -> Result<Song, String> {
     let song: Song =
-        ron::from_str(&contents).map_err(|e| format!("Failed to parse song: {}", e))?;
+        ron::from_str(contents).map_err(|e| format!("Failed to parse song: {}", e))?;
 
     Ok(song)
 }

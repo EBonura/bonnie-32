@@ -24,6 +24,7 @@ pub fn draw_test_viewport(
     textures: &[RasterTexture],
     fb: &mut Framebuffer,
     input: &InputState,
+    ctx: &crate::ui::UiContext,
 ) {
     let frame_start = FrameTimings::start();
 
@@ -68,11 +69,11 @@ pub fn draw_test_viewport(
                 // Third-person camera follows player
                 game.update_camera_follow_player(level);
                 // Handle Dark Souls style player input
-                handle_player_input(game, level, &rect, input);
+                handle_player_input(game, level, &rect, input, ctx);
             }
             CameraMode::FreeFly => {
                 // Free-fly noclip camera
-                handle_freefly_input(game, &rect, input);
+                handle_freefly_input(game, &rect, input, ctx);
             }
         }
     }
@@ -321,8 +322,8 @@ pub fn draw_test_viewport(
 
 /// Handle player input during gameplay (Dark Souls style character controls)
 /// Camera orbits around player with right stick, movement is relative to camera direction.
-fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, input: &InputState) {
-    let mouse_pos = mouse_position();
+fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, input: &InputState, ctx: &crate::ui::UiContext) {
+    let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let inside = mouse_pos.0 >= rect.x
         && mouse_pos.0 < rect.x + rect.w
         && mouse_pos.1 >= rect.y
@@ -333,7 +334,7 @@ fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, inp
     let look_sensitivity = 2.5;
 
     // Mouse look to rotate camera around player (RMB drag)
-    if inside && is_mouse_button_down(MouseButton::Right) {
+    if inside && ctx.mouse.right_down {
         let dx = mouse_pos.0 - game.viewport_last_mouse.0;
         let dy = mouse_pos.1 - game.viewport_last_mouse.1;
 
@@ -432,8 +433,8 @@ fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, inp
 }
 
 /// Handle free-fly camera input (noclip spectator mode)
-fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputState) {
-    let mouse_pos = mouse_position();
+fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputState, ctx: &crate::ui::UiContext) {
+    let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let inside = mouse_pos.0 >= rect.x
         && mouse_pos.0 < rect.x + rect.w
         && mouse_pos.1 >= rect.y
@@ -444,7 +445,7 @@ fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputStat
     let look_sensitivity = 2.5;
 
     // Mouse look (RMB drag)
-    if inside && is_mouse_button_down(MouseButton::Right) {
+    if inside && ctx.mouse.right_down {
         let dx = mouse_pos.0 - game.viewport_last_mouse.0;
         let dy = mouse_pos.1 - game.viewport_last_mouse.1;
 

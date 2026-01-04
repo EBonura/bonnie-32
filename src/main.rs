@@ -195,7 +195,7 @@ async fn main() {
         // Draw active tool content
         match app.active_tool {
             Tool::Home => {
-                landing::draw_landing(content_rect, &mut app.landing);
+                landing::draw_landing(content_rect, &mut app.landing, &ui_ctx);
             }
 
             Tool::WorldEditor => {
@@ -427,6 +427,7 @@ async fn main() {
                     &game_textures,
                     &mut fb,
                     &app.input,
+                    &ui_ctx,
                 );
             }
 
@@ -778,8 +779,27 @@ async fn main() {
                 let delta = get_frame_time() as f64;
                 app.tracker.update_playback(delta);
 
+                // Block background input if song browser is open
+                let real_mouse_tracker = mouse_state;
+                if app.tracker.song_browser.open {
+                    ui_ctx.begin_modal();
+                }
+
                 // Draw tracker UI
                 tracker::draw_tracker(&mut ui_ctx, content_rect, &mut app.tracker, app.icon_font.as_ref());
+
+                // Draw song browser overlay if open
+                if app.tracker.song_browser.open {
+                    // End modal blocking so the browser itself can receive input
+                    ui_ctx.end_modal(real_mouse_tracker);
+
+                    let _browser_action = tracker::draw_song_browser(
+                        &mut ui_ctx,
+                        &mut app.tracker,
+                        app.icon_font.as_ref(),
+                    );
+                    // Actions are handled internally by draw_song_browser
+                }
             }
 
             Tool::InputTest => {
@@ -848,6 +868,28 @@ async fn main() {
                     ms.mesh_browser.set_preview(mesh);
                 } else {
                     ms.modeler_state.set_status("Failed to load mesh preview", 3.0);
+                }
+            }
+        }
+
+        // Handle pending async song load (WASM) - after all drawing is complete
+        #[cfg(target_arch = "wasm32")]
+        if let Tool::Tracker = app.active_tool {
+            let ts = &mut app.tracker;
+            // Load song list from manifest if pending
+            if ts.song_browser.pending_load_list {
+                ts.song_browser.pending_load_list = false;
+                use tracker::load_song_list;
+                let songs = load_song_list().await;
+                ts.song_browser.songs = songs;
+            }
+            // Load individual song preview if pending
+            if let Some(path) = ts.song_browser.pending_load_path.take() {
+                use tracker::load_song_async;
+                if let Some(song) = load_song_async(&path).await {
+                    ts.song_browser.set_preview(song);
+                } else {
+                    ts.set_status("Failed to load song preview", 3.0);
                 }
             }
         }

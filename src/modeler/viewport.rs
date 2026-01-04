@@ -175,7 +175,7 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
 }
 
 /// Handle modal transforms (G=Grab, S=Scale, R=Rotate) using DragManager
-fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
+fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: &crate::ui::UiContext) {
     if state.modal_transform == ModalTransform::None {
         return;
     }
@@ -233,7 +233,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
     }
 
     // Confirm on left click
-    if is_mouse_button_pressed(MouseButton::Left) {
+    if ctx.mouse.left_pressed {
         // Sync tool state before ending
         match state.modal_transform {
             ModalTransform::Grab => state.tool_box.tools.move_tool.end_drag(),
@@ -248,7 +248,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32)) {
     }
 
     // Cancel on right click (Escape is handled through ActionRegistry in handle_actions())
-    if is_mouse_button_pressed(MouseButton::Right) {
+    if ctx.mouse.right_pressed {
         // Sync tool state before cancelling
         match state.modal_transform {
             ModalTransform::Grab => state.tool_box.tools.move_tool.end_drag(),
@@ -332,7 +332,7 @@ fn handle_drag_move(
         }
 
         // Cancel drag on right-click
-        if is_mouse_button_pressed(MouseButton::Right) {
+        if ctx.mouse.right_pressed {
             if let Some(original_positions) = state.drag_manager.cancel() {
                 if let Some(mesh) = state.mesh_mut() {
                     for (vert_idx, original_pos) in original_positions {
@@ -347,7 +347,7 @@ fn handle_drag_move(
     } else if !state.drag_manager.is_dragging() {
         // Not in any drag - check for free move start
         // Store potential start position (similar to box select)
-        if is_mouse_button_pressed(MouseButton::Left) && inside_viewport {
+        if ctx.mouse.left_pressed && inside_viewport {
             state.free_drag_pending_start = Some(mouse_pos);
         }
 
@@ -611,7 +611,7 @@ pub fn draw_modeler_viewport(
         }
     }
 
-    handle_modal_transform(state, mouse_pos);
+    handle_modal_transform(state, mouse_pos, ctx);
 
     // Handle left-click drag to move selection (if not in modal transform)
     handle_drag_move(ctx, state, mouse_pos, inside_viewport, fb_width, fb_height);
@@ -773,7 +773,7 @@ pub fn draw_modeler_viewport(
 
     // Handle single-click selection using hover system (like world editor)
     // Only if not clicking on gizmo
-    if inside_viewport && is_mouse_button_pressed(MouseButton::Left)
+    if inside_viewport && ctx.mouse.left_pressed
         && state.modal_transform == ModalTransform::None
         && state.gizmo_hovered_axis.is_none()
         && !state.drag_manager.is_dragging()
@@ -834,7 +834,7 @@ fn handle_box_selection(
     } else if !state.drag_manager.is_dragging() {
         // Not in any drag - check for box select start
         // We need to detect drag start vs click, so we track potential start position
-        if is_mouse_button_pressed(MouseButton::Left) && inside_viewport {
+        if ctx.mouse.left_pressed && inside_viewport {
             // Store potential start position (will become box select if dragged far enough)
             state.box_select_pending_start = Some(mouse_pos);
         }
@@ -1759,7 +1759,7 @@ fn handle_move_gizmo(
     state.tool_box.tools.move_tool.set_hovered_axis(state.gizmo_hovered_axis.map(to_ui_axis));
 
     // Start drag on click
-    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
+    if ctx.mouse.left_pressed && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
         let axis = state.gizmo_hovered_axis.unwrap();
 
         // Get vertex indices and initial positions
@@ -1920,7 +1920,7 @@ fn handle_scale_gizmo(
     state.tool_box.tools.scale.set_hovered_axis(state.gizmo_hovered_axis.map(to_ui_axis));
 
     // Start drag on click
-    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
+    if ctx.mouse.left_pressed && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
         let axis = state.gizmo_hovered_axis.unwrap();
 
         // Get vertex indices and initial positions
@@ -2096,7 +2096,7 @@ fn handle_rotate_gizmo(
     state.tool_box.tools.rotate.set_hovered_axis(state.gizmo_hovered_axis.map(to_ui_axis));
 
     // Start drag on click
-    if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
+    if ctx.mouse.left_pressed && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
         let axis = state.gizmo_hovered_axis.unwrap();
 
         // Get vertex indices and initial positions

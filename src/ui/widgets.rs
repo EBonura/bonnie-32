@@ -67,8 +67,8 @@ pub fn draw_scrollable_list(
     };
 
     // Handle scrolling
-    if ctx.mouse.inside(&rect) {
-        let scroll_delta = mouse_wheel().1 * 30.0;
+    if ctx.mouse.inside(&rect) && ctx.mouse.scroll != 0.0 {
+        let scroll_delta = ctx.mouse.scroll * 30.0;
         let max_scroll = (items.len() as f32 * row_height - rect.h).max(0.0);
         *scroll_offset = (*scroll_offset - scroll_delta).clamp(0.0, max_scroll);
     }
@@ -170,13 +170,13 @@ pub fn draw_link(
     font_size: f32,
     color: Color,
     hover_color: Color,
+    ctx: &super::UiContext,
 ) -> LinkResult {
     let dims = measure_text(text, None, font_size as u16, 1.0);
     let link_rect = Rect::new(x, y - dims.height, dims.width, dims.height + 4.0);
 
-    let (mx, my) = mouse_position();
-    let hovered = link_rect.contains(mx, my);
-    let clicked = hovered && is_mouse_button_pressed(MouseButton::Left);
+    let hovered = ctx.mouse.inside(&link_rect);
+    let clicked = hovered && ctx.mouse.left_pressed;
 
     // Draw text with appropriate color
     let draw_color = if hovered { hover_color } else { color };
@@ -209,6 +209,7 @@ pub fn draw_link_row(
     color: Color,
     hover_color: Color,
     separator_color: Color,
+    ctx: &super::UiContext,
 ) -> f32 {
     let mut cursor_x = x;
     let sep_dims = measure_text(separator, None, font_size as u16, 1.0);
@@ -221,7 +222,7 @@ pub fn draw_link_row(
         }
 
         // Draw link
-        let result = draw_link(cursor_x, y, text, url, font_size, color, hover_color);
+        let result = draw_link(cursor_x, y, text, url, font_size, color, hover_color, ctx);
         cursor_x += result.rect.w;
     }
 
@@ -663,7 +664,7 @@ pub fn draw_knob(
     let mut new_value = None;
     let mut start_editing = false;
 
-    if hovered && is_mouse_button_down(MouseButton::Left) {
+    if hovered && ctx.mouse.left_down {
         // Calculate angle from mouse position to center
         let dx = ctx.mouse.x - center_x;
         let dy = center_y - ctx.mouse.y; // Flip Y for standard math coords
@@ -700,7 +701,7 @@ pub fn draw_knob(
     }
 
     // Click on value box to start editing
-    if box_hovered && is_mouse_button_pressed(MouseButton::Left) && !is_editing {
+    if box_hovered && ctx.mouse.left_pressed && !is_editing {
         start_editing = true;
     }
 
@@ -811,7 +812,7 @@ pub fn draw_mini_knob(
 
     // Handle drag interaction
     let mut new_value = None;
-    if hovered && is_mouse_button_down(MouseButton::Left) {
+    if hovered && ctx.mouse.left_down {
         let dx = ctx.mouse.x - center_x;
         let dy = center_y - ctx.mouse.y;
         let mouse_angle = dx.atan2(dy);

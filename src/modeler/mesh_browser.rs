@@ -676,7 +676,7 @@ pub fn draw_mesh_browser(
     draw_text("Auto", auto_rect.x + 4.0, auto_rect.y + 14.0, 11.0, if auto_selected { WHITE } else { TEXT_COLOR });
     if ctx.mouse.inside(&auto_rect) {
         ctx.set_tooltip("Auto-detect CLUT depth based on color count", ctx.mouse.x, ctx.mouse.y);
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if ctx.mouse.left_pressed {
             browser.clut_depth_override = None;
         }
     }
@@ -689,7 +689,7 @@ pub fn draw_mesh_browser(
     draw_text("4-bit", bpp4_rect.x + 4.0, bpp4_rect.y + 14.0, 11.0, if bpp4_selected { WHITE } else { TEXT_COLOR });
     if ctx.mouse.inside(&bpp4_rect) {
         ctx.set_tooltip("Force 4-bit CLUT (16 colors) - reduces dithering artifacts", ctx.mouse.x, ctx.mouse.y);
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if ctx.mouse.left_pressed {
             browser.clut_depth_override = Some(ClutDepth::Bpp4);
         }
     }
@@ -702,7 +702,7 @@ pub fn draw_mesh_browser(
     draw_text("8-bit", bpp8_rect.x + 4.0, bpp8_rect.y + 14.0, 11.0, if bpp8_selected { WHITE } else { TEXT_COLOR });
     if ctx.mouse.inside(&bpp8_rect) {
         ctx.set_tooltip("Force 8-bit CLUT (256 colors) - preserves more detail", ctx.mouse.x, ctx.mouse.y);
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if ctx.mouse.left_pressed {
             browser.clut_depth_override = Some(ClutDepth::Bpp8);
         }
     }

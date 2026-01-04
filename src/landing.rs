@@ -73,7 +73,7 @@ impl LandingState {
 }
 
 /// Draw the landing page
-pub fn draw_landing(rect: Rect, state: &mut LandingState) {
+pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiContext) {
     // DPI scale for high-DPI displays (layout only, not font sizes)
     let dpi = screen_dpi_scale();
 
@@ -81,7 +81,7 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState) {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
     // Handle scrolling
-    let scroll_delta = mouse_wheel().1 * 3.0;
+    let scroll_delta = ctx.mouse.scroll * 3.0;
     state.scroll_y += scroll_delta;
     state.scroll_y = state.scroll_y.min(0.0); // Can't scroll above top
 
@@ -193,6 +193,7 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState) {
         link_color,
         hover_color,
         MUTED_COLOR,
+        ctx,
     );
     y += 30.0;
 

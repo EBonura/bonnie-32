@@ -3374,13 +3374,10 @@ fn handle_camera_input(
             }
 
             // Mouse wheel: zoom in/out (change orbit distance)
-            if inside_viewport {
-                let scroll = mouse_wheel().1;
-                if scroll != 0.0 {
-                    let zoom_factor = if scroll > 0.0 { 0.9 } else { 1.1 };
-                    state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(100.0, 20000.0);
-                    state.sync_camera_from_orbit();
-                }
+            if inside_viewport && ctx.mouse.scroll != 0.0 {
+                let zoom_factor = if ctx.mouse.scroll > 0.0 { 0.9 } else { 1.1 };
+                state.orbit_distance = (state.orbit_distance * zoom_factor).clamp(100.0, 20000.0);
+                state.sync_camera_from_orbit();
             }
         }
     }

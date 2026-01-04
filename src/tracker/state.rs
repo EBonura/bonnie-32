@@ -4,6 +4,7 @@ use super::audio::AudioEngine;
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
 use super::psx_reverb::ReverbType;
 use super::actions::create_tracker_actions;
+use super::song_browser::SongBrowser;
 use crate::ui::ActionRegistry;
 use std::path::PathBuf;
 
@@ -98,6 +99,12 @@ pub struct TrackerState {
     /// Clipboard for copy/paste (rows × channels of notes)
     /// Stored as [channel][row] to match pattern structure
     pub clipboard: Option<Vec<Vec<Note>>>,
+
+    /// Song browser dialog
+    pub song_browser: SongBrowser,
+
+    /// Preview song for browser playback (uses this instead of main song when Some)
+    preview_song: Option<Song>,
 }
 
 /// Soundfont filename
@@ -203,6 +210,8 @@ impl TrackerState {
             knob_edit_text: String::new(),
             actions: create_tracker_actions(),
             clipboard: None,
+            song_browser: SongBrowser::new(),
+            preview_song: None,
         }
     }
 
@@ -710,6 +719,33 @@ impl TrackerState {
         self.scroll_row = 0;
         self.audio.all_notes_off();
         self.last_played_notes = [None; MAX_CHANNELS];
+        self.preview_song = None;
+    }
+
+    /// Start preview playback of a song from the browser
+    pub fn start_preview_playback(&mut self, song: Song) {
+        self.audio.all_notes_off();
+        self.preview_song = Some(song);
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.playback_time = 0.0;
+        self.playing = true;
+        self.last_played_notes = [None; MAX_CHANNELS];
+    }
+
+    /// Stop preview playback
+    pub fn stop_preview_playback(&mut self) {
+        self.playing = false;
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.audio.all_notes_off();
+        self.last_played_notes = [None; MAX_CHANNELS];
+        self.preview_song = None;
+    }
+
+    /// Get the current song for playback (preview song if set, else main song)
+    fn playback_song(&self) -> &Song {
+        self.preview_song.as_ref().unwrap_or(&self.song)
     }
 
     /// Update playback (called each frame)
@@ -725,7 +761,7 @@ impl TrackerState {
         }
 
         self.playback_time += delta;
-        let tick_duration = self.song.tick_duration();
+        let tick_duration = self.playback_song().tick_duration();
 
         while self.playback_time >= tick_duration {
             self.playback_time -= tick_duration;
@@ -736,18 +772,19 @@ impl TrackerState {
 
     /// Play notes at current playback row
     fn play_current_row(&mut self) {
-        let pattern_num = match self.song.arrangement.get(self.playback_pattern_idx) {
+        let song = self.playback_song();
+        let pattern_num = match song.arrangement.get(self.playback_pattern_idx) {
             Some(&n) => n,
             None => return,
         };
 
-        let pattern = match self.song.patterns.get(pattern_num) {
+        let pattern = match song.patterns.get(pattern_num) {
             Some(p) => p,
             None => return,
         };
 
         // Collect note data first to avoid borrow issues
-        let num_channels = self.song.num_channels();
+        let num_channels = song.num_channels();
         let playback_row = self.playback_row;
         let mut notes_to_play: Vec<(usize, Option<u8>, Option<u8>, Option<u8>, Option<u8>)> = Vec::new();
         let mut effects_to_apply: Vec<(usize, Effect)> = Vec::new();
@@ -755,10 +792,15 @@ impl TrackerState {
         // Global reverb for this row (PS1 has single global reverb processor)
         let reverb_change = pattern.get_reverb(playback_row);
 
+        // Get channel instruments from the playback song
+        let channel_instruments: Vec<u8> = (0..num_channels)
+            .map(|ch| song.get_channel_instrument(ch))
+            .collect();
+
         for channel in 0..num_channels {
             if let Some(note) = pattern.get(channel, playback_row) {
                 // Collect note data
-                let inst = note.instrument.unwrap_or_else(|| self.song.get_channel_instrument(channel));
+                let inst = note.instrument.unwrap_or(channel_instruments[channel]);
                 notes_to_play.push((channel, note.pitch, Some(inst), note.volume, None));
 
                 // Collect effect
@@ -876,7 +918,8 @@ impl TrackerState {
 
     /// Advance playback to next row
     fn advance_playback(&mut self) {
-        let pattern_num = match self.song.arrangement.get(self.playback_pattern_idx) {
+        let song = self.playback_song();
+        let pattern_num = match song.arrangement.get(self.playback_pattern_idx) {
             Some(&n) => n,
             None => {
                 self.stop_playback();
@@ -884,7 +927,7 @@ impl TrackerState {
             }
         };
 
-        let pattern_len = match self.song.patterns.get(pattern_num) {
+        let pattern_len = match song.patterns.get(pattern_num) {
             Some(p) => p.length,
             None => {
                 self.stop_playback();
@@ -892,20 +935,24 @@ impl TrackerState {
             }
         };
 
+        let arrangement_len = song.arrangement.len();
+
         self.playback_row += 1;
         if self.playback_row >= pattern_len {
             self.playback_row = 0;
             self.playback_pattern_idx += 1;
-            if self.playback_pattern_idx >= self.song.arrangement.len() {
+            if self.playback_pattern_idx >= arrangement_len {
                 // Loop or stop
                 self.playback_pattern_idx = 0; // Loop for now
             }
         }
 
-        // Update view cursor to follow playback
-        self.current_row = self.playback_row;
-        self.current_pattern_idx = self.playback_pattern_idx;
-        self.ensure_row_visible();
+        // Update view cursor to follow playback (only for main song, not preview)
+        if self.preview_song.is_none() {
+            self.current_row = self.playback_row;
+            self.current_pattern_idx = self.playback_pattern_idx;
+            self.ensure_row_visible();
+        }
     }
 
     /// Convert keyboard key to MIDI note

@@ -135,7 +135,7 @@ pub fn draw_modeler(
     draw_status_bar(status_rect, state);
 
     // Handle keyboard shortcuts using action registry
-    let keyboard_action = handle_actions(&layout.actions, state);
+    let keyboard_action = handle_actions(&layout.actions, state, ctx);
     let action = if keyboard_action != ModelerAction::None { keyboard_action } else { action };
 
     // Draw context menu (on top of everything)
@@ -329,7 +329,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
 }
 
 /// Draw the Overview panel (PicoCAD-style object list)
-fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     let row_height = 22.0;
     let icon_width = 20.0;
     let mut y = rect.y;
@@ -350,7 +350,7 @@ fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
 
     // List of objects
     let selected_idx = state.project.selected_object;
-    let mouse_pos = mouse_position();
+    let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let mut clicked_object: Option<usize> = None;
     let mut toggle_visibility: Option<usize> = None;
 
@@ -407,7 +407,7 @@ fn draw_overview_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
         draw_text(&count_text, count_x, y + 16.0, 12.0, count_color);
 
         // Handle clicks
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if ctx.mouse.left_pressed {
             if eye_hovered {
                 toggle_visibility = Some(i);
             } else if is_hovered && !obj.locked {
@@ -892,7 +892,7 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
         let text_color = if is_current { WHITE } else { TEXT_DIM };
         draw_text(label, btn_x + 3.0, *y + 12.0, 10.0, text_color);
 
-        if hovered && is_mouse_button_pressed(MouseButton::Left) && !is_current {
+        if hovered && ctx.mouse.left_pressed && !is_current {
             state.push_undo_with_atlas("Resize Atlas");
             state.project.atlas.resize(size, size);
             state.dirty = true;
@@ -1206,7 +1206,7 @@ fn draw_uv_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, 
         let icon_color = if has_selection { TEXT_COLOR } else { Color::from_rgba(80, 80, 85, 255) };
         draw_icon_centered(icon_font, *icon_char, &btn_rect, 12.0, icon_color);
 
-        if has_selection && hovered && is_mouse_button_pressed(MouseButton::Left) {
+        if has_selection && hovered && ctx.mouse.left_pressed {
             match *action {
                 "uv_flip_h" => flip_selected_uvs(state, true, false),
                 "uv_flip_v" => flip_selected_uvs(state, false, true),
@@ -1287,8 +1287,8 @@ fn draw_paint_tools_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32
 }
 
 /// Handle atlas interactions (painting and UV editing)
-fn handle_atlas_interaction(_ctx: &mut UiContext, atlas_rect: Rect, scale: f32, state: &mut ModelerState) {
-    let (mx, my) = mouse_position();
+fn handle_atlas_interaction(ctx: &mut UiContext, atlas_rect: Rect, scale: f32, state: &mut ModelerState) {
+    let (mx, my) = (ctx.mouse.x, ctx.mouse.y);
     let inside_atlas = atlas_rect.contains(mx, my);
 
     if !inside_atlas {
@@ -1303,7 +1303,7 @@ fn handle_atlas_interaction(_ctx: &mut UiContext, atlas_rect: Rect, scale: f32, 
 
         match state.brush_type {
             super::state::BrushType::Square => {
-                if is_mouse_button_down(MouseButton::Left) {
+                if ctx.mouse.left_down {
                     if !state.paint_stroke_active {
                         state.push_undo_with_atlas("Paint");
                         state.paint_stroke_active = true;
@@ -1320,7 +1320,7 @@ fn handle_atlas_interaction(_ctx: &mut UiContext, atlas_rect: Rect, scale: f32, 
                 }
             }
             super::state::BrushType::Fill => {
-                if is_mouse_button_pressed(MouseButton::Left) {
+                if ctx.mouse.left_pressed {
                     state.push_undo_with_atlas("Fill");
                     let fill_color = crate::rasterizer::Color::with_blend(
                         state.paint_color.r,
@@ -1396,7 +1396,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
     if uv_hovered {
         ctx.set_tooltip("UV Edit Mode", ctx.mouse.x, ctx.mouse.y);
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if ctx.mouse.left_pressed {
             state.atlas_edit_mode = AtlasEditMode::Uv;
         }
     }
@@ -1419,7 +1419,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
     if paint_hovered {
         ctx.set_tooltip("Paint Mode", ctx.mouse.x, ctx.mouse.y);
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if ctx.mouse.left_pressed {
             state.atlas_edit_mode = AtlasEditMode::Paint;
             state.uv_selection.clear();
         }
@@ -1507,7 +1507,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     };
 
     let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
-    let (mx, my) = mouse_position();
+    let (mx, my) = (ctx.mouse.x, ctx.mouse.y);
     let inside_atlas = atlas_rect.contains(mx, my);
 
     // Draw UVs of selected faces only (cleaner view)
@@ -1618,7 +1618,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         }
 
         // Handle click for selection and drag
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if ctx.mouse.left_pressed {
             if let Some((obj_idx, vert_idx, _, _)) = nearest_uv_vertex {
                 let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
@@ -1663,7 +1663,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
         // Handle UV box selection
         if let Some(start) = state.uv_box_select_start {
-            if is_mouse_button_down(MouseButton::Left) {
+            if ctx.mouse.left_down {
                 // Draw box selection rectangle
                 let x0 = start.0.min(mx);
                 let y0 = start.1.min(my);
@@ -1716,7 +1716,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         }
 
         // Continue UV drag (snap to pixel boundaries)
-        if state.uv_drag_active && is_mouse_button_down(MouseButton::Left) {
+        if state.uv_drag_active && ctx.mouse.left_down {
             let du = (mx - state.uv_drag_start.0) / atlas_screen_w;
             let dv = -(my - state.uv_drag_start.1) / atlas_screen_h; // Flip Y
 
@@ -1737,7 +1737,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         }
 
         // End UV drag
-        if !is_mouse_button_down(MouseButton::Left) && state.uv_drag_active {
+        if !ctx.mouse.left_down && state.uv_drag_active {
             state.uv_drag_active = false;
             state.uv_drag_start_uvs.clear();
             // Project is single source of truth - viewport reads from it directly
@@ -1876,14 +1876,14 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
                 state.dirty = true;
 
                 // Confirm with click or Enter
-                if is_mouse_button_pressed(MouseButton::Left) || is_key_pressed(KeyCode::Enter) {
+                if ctx.mouse.left_pressed || is_key_pressed(KeyCode::Enter) {
                     state.uv_modal_transform = super::state::UvModalTransform::None;
                     state.uv_modal_start_uvs.clear();
                     state.set_status("UV transform applied", 0.5);
                 }
 
                 // Cancel with Escape or right-click
-                if is_key_pressed(KeyCode::Escape) || is_mouse_button_pressed(MouseButton::Right) {
+                if is_key_pressed(KeyCode::Escape) || ctx.mouse.right_pressed {
                     // Restore original UVs
                     if let Some(obj) = state.project.objects.get_mut(obj_idx) {
                         for &(vi, original_uv) in &state.uv_modal_start_uvs {
@@ -1911,7 +1911,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
         match state.brush_type {
             super::state::BrushType::Square => {
-                if is_mouse_button_down(MouseButton::Left) {
+                if ctx.mouse.left_down {
                     // Save undo at stroke start
                     if !state.paint_stroke_active {
                         state.push_undo_with_atlas("Paint");
@@ -1932,7 +1932,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             }
             super::state::BrushType::Fill => {
                 // Fill tool: only trigger on click, not drag
-                if is_mouse_button_pressed(MouseButton::Left) {
+                if ctx.mouse.left_pressed {
                     state.push_undo_with_atlas("Fill");
                     let fill_color = crate::rasterizer::Color::with_blend(
                         state.paint_color.r,
@@ -2102,7 +2102,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         draw_text(label, size_btn_x + 3.0, size_btn_y + 12.0, 11.0, text_color);
 
         // Handle click - resize atlas
-        if hovered && is_mouse_button_pressed(MouseButton::Left) && !is_current {
+        if hovered && ctx.mouse.left_pressed && !is_current {
             state.push_undo_with_atlas("Resize Atlas");
             state.project.atlas.resize(size, size);
             state.dirty = true;
@@ -2147,7 +2147,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             draw_icon_centered(icon_font, *icon_char, &btn_rect, 12.0, icon_color);
 
             // Handle click
-            if enabled && hovered && is_mouse_button_pressed(MouseButton::Left) {
+            if enabled && hovered && ctx.mouse.left_pressed {
                 match *action {
                     "uv_flip_h" => flip_selected_uvs(state, true, false),
                     "uv_flip_v" => flip_selected_uvs(state, false, true),
@@ -2222,7 +2222,7 @@ fn draw_clut_editor_panel(
         ctx.set_tooltip("Add 4-bit CLUT (16 colors)", ctx.mouse.x, ctx.mouse.y);
     }
 
-    if hovered_4bit && is_mouse_button_pressed(MouseButton::Left) {
+    if hovered_4bit && ctx.mouse.left_pressed {
         let clut = Clut::new_4bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
         let id = state.project.clut_pool.add_clut(clut);
         state.selected_clut = Some(id);
@@ -2243,7 +2243,7 @@ fn draw_clut_editor_panel(
         ctx.set_tooltip("Add 8-bit CLUT (256 colors)", ctx.mouse.x, ctx.mouse.y);
     }
 
-    if hovered_8bit && is_mouse_button_pressed(MouseButton::Left) {
+    if hovered_8bit && ctx.mouse.left_pressed {
         let clut = Clut::new_8bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
         let id = state.project.clut_pool.add_clut(clut);
         state.selected_clut = Some(id);
@@ -2295,7 +2295,7 @@ fn draw_clut_editor_panel(
             draw_text(badge_text, badge_x + 2.0, item_y + 11.0, 9.0, TEXT_DIM);
 
             // Handle click
-            if hovered && is_mouse_button_pressed(MouseButton::Left) {
+            if hovered && ctx.mouse.left_pressed {
                 state.selected_clut = Some(clut.id);
                 state.selected_clut_entry = 0;
             }
@@ -2374,7 +2374,7 @@ fn draw_clut_editor_panel(
                     }
 
                     // Handle click to select
-                    if hovered && is_mouse_button_pressed(MouseButton::Left) {
+                    if hovered && ctx.mouse.left_pressed {
                         state.selected_clut_entry = idx;
                         state.active_palette_index = idx as u8;
                     }
@@ -2409,7 +2409,7 @@ fn draw_clut_editor_panel(
                 }
                 draw_text("Semi-trans", semi_x + 18.0, cur_y + 10.0, 10.0, TEXT_COLOR);
 
-                if ctx.mouse.inside(&semi_rect) && is_mouse_button_pressed(MouseButton::Left) {
+                if ctx.mouse.inside(&semi_rect) && ctx.mouse.left_pressed {
                     // Toggle semi-transparent bit
                     if let Some(clut_mut) = state.project.clut_pool.get_mut(clut_id) {
                         let c = &mut clut_mut.colors[state.selected_clut_entry];
@@ -3215,7 +3215,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // Handle click to select in ortho views
     // =========================================================================
     // Skip selection if gizmo is hovered - gizmo takes precedence
-    if inside_viewport && state.active_viewport == viewport_id && is_mouse_button_pressed(MouseButton::Left) && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() && state.ortho_gizmo_hovered_axis.is_none() {
+    if inside_viewport && state.active_viewport == viewport_id && ctx.mouse.left_pressed && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() && state.ortho_gizmo_hovered_axis.is_none() {
         let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_key_down(KeyCode::X);
 
         if let Some(vert_idx) = state.hovered_vertex {
@@ -3285,7 +3285,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         // Start drag on left-down (when we have selection and not clicking to select)
         // Use ortho_drag_pending_start to detect drag vs click, similar to box select
         // Only start if gizmo is hovered OR if there's a selection (free move)
-        if is_mouse_button_pressed(MouseButton::Left) && inside_viewport && !state.drag_manager.is_dragging() {
+        if ctx.mouse.left_pressed && inside_viewport && !state.drag_manager.is_dragging() {
             // Store the gizmo axis that was clicked (if any)
             // Convert from state::Axis to ui::drag_tracker::Axis
             state.ortho_drag_pending_start = Some((ctx.mouse.x, ctx.mouse.y));
@@ -3466,7 +3466,7 @@ fn draw_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: 
 /// DEPRECATED: Draw the Atlas panel with the actual texture and painting support
 /// Kept for reference, replaced by draw_texture_uv_panel
 #[allow(dead_code)]
-fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
+fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     // Cache atlas dimensions to avoid borrow issues
     let atlas_width = state.project.atlas.width;
     let atlas_height = state.project.atlas.height;
@@ -3507,7 +3507,7 @@ fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) 
     draw_rectangle_lines(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, 1.0, Color::from_rgba(100, 100, 105, 255));
 
     // Handle painting in texture mode
-    let (mx, my) = mouse_position();
+    let (mx, my) = (ctx.mouse.x, ctx.mouse.y);
     let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
 
     if state.view_mode == super::state::ViewMode::Texture && atlas_rect.contains(mx, my) {
@@ -3523,7 +3523,7 @@ fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) 
         draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
 
         // Paint on click/drag
-        if is_mouse_button_down(MouseButton::Left) {
+        if ctx.mouse.left_down {
             // Save undo at stroke start
             if !state.paint_stroke_active {
                 state.push_undo_with_atlas("Paint");
@@ -3591,7 +3591,7 @@ fn draw_atlas_panel(_ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) 
 
         // Handle click to select color
         let swatch_rect = Rect::new(sx, sy, swatch_size - 2.0, swatch_size - 2.0);
-        if is_mouse_button_pressed(MouseButton::Left) && swatch_rect.contains(mx, my) {
+        if ctx.mouse.left_pressed && swatch_rect.contains(mx, my) {
             state.paint_color = crate::rasterizer::Color::new(*r, *g, *b);
         }
     }
@@ -3998,7 +3998,7 @@ fn reset_selected_uvs(state: &mut ModelerState) {
 
 /// Handle all keyboard actions using the action registry
 /// Returns a ModelerAction if a file action was triggered
-fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> ModelerAction {
+fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &crate::ui::UiContext) -> ModelerAction {
     use crate::rasterizer::ShadingMode;
     use crate::ui::Axis as UiAxis;
 
@@ -4246,7 +4246,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState) -> Modeler
     // ========================================================================
     if actions.triggered("context.open_menu", &ctx) {
         // Tab key opens context menu at mouse position
-        let (mx, my) = mouse_position();
+        let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
         let world_pos = screen_to_world_position(state, mx, my);
         let snapped = state.snap_settings.snap_vec3(world_pos);
         state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));

@@ -13,11 +13,13 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/levels");
     println!("cargo:rerun-if-changed=assets/models");
     println!("cargo:rerun-if-changed=assets/meshes");
+    println!("cargo:rerun-if-changed=assets/songs");
 
     generate_texture_manifest();
     generate_levels_manifest();
     generate_models_manifest();
     generate_meshes_manifest();
+    generate_songs_manifest();
 }
 
 /// Generate manifest for texture packs
@@ -173,6 +175,44 @@ fn generate_meshes_manifest() {
     }
 
     // Write manifest file
+    let mut file = fs::File::create(manifest_path).unwrap();
+    file.write_all(manifest.as_bytes()).unwrap();
+}
+
+/// Generate manifest for songs (for WASM builds)
+fn generate_songs_manifest() {
+    let songs_dir = Path::new("assets/songs");
+    let manifest_path = Path::new("assets/songs/manifest.txt");
+
+    let mut manifest = String::new();
+
+    if songs_dir.exists() {
+        let mut songs: Vec<_> = fs::read_dir(songs_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let path = e.path();
+                // Only include .bsong files, skip directories
+                path.is_file()
+                    && path
+                        .extension()
+                        .map(|ext| ext.to_ascii_lowercase() == "bsong")
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        songs.sort_by_key(|e| e.file_name());
+
+        for song_entry in songs {
+            let song_name = song_entry.file_name().to_string_lossy().to_string();
+            manifest.push_str(&format!("{}\n", song_name));
+        }
+    }
+
+    // Write manifest file (create directory if needed)
+    if let Some(parent) = manifest_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let mut file = fs::File::create(manifest_path).unwrap();
     file.write_all(manifest.as_bytes()).unwrap();
 }
