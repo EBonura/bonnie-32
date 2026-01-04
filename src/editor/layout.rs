@@ -459,6 +459,35 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.set_status(&format!("Wireframe: {}", mode), 2.0);
     }
 
+    // Backface culling toggle (cycles through 3 states)
+    // State 0: Both sides visible (backface_cull=false)
+    // State 1: Wireframe on back (backface_cull=true, backface_wireframe=true) - default
+    // State 2: Hidden (backface_cull=true, backface_wireframe=false)
+    let (backface_icon, backface_tooltip) = if !state.raster_settings.backface_cull {
+        (icon::EYE, "Backfaces: Both Sides Visible")
+    } else if state.raster_settings.backface_wireframe {
+        (icon::SCAN, "Backfaces: Wireframe")
+    } else {
+        (icon::EYE_OFF, "Backfaces: Hidden")
+    };
+    if toolbar.icon_button(ctx, backface_icon, icon_font, backface_tooltip) {
+        // Cycle to next state
+        if !state.raster_settings.backface_cull {
+            // Was: both visible → Now: wireframe on back
+            state.raster_settings.backface_cull = true;
+            state.raster_settings.backface_wireframe = true;
+            state.set_status("Backfaces: Wireframe", 2.0);
+        } else if state.raster_settings.backface_wireframe {
+            // Was: wireframe → Now: hidden
+            state.raster_settings.backface_wireframe = false;
+            state.set_status("Backfaces: Hidden", 2.0);
+        } else {
+            // Was: hidden → Now: both visible
+            state.raster_settings.backface_cull = false;
+            state.set_status("Backfaces: Both Sides Visible", 2.0);
+        }
+    }
+
     toolbar.separator();
 
     // Room navigation

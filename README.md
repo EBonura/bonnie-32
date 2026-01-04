@@ -342,7 +342,7 @@ For implementing authentic PS1 constraints:
 - [ ] **Fix texture selection visibility**: Textures that aren't fully visible in the browser can't be selected. Fix click detection for partially visible textures.
 - [ ] **Camera floor limit**: Add a minimum camera height so users can't accidentally go below the floor level. Should be slightly below the camera's current position.
 - [ ] **2D view auto-center on current room**: The 2D grid view should center on the currently selected room. Also auto-center in 3D editor when switching rooms.
-- [ ] **Backface culling toggle**: Add a toggle in settings to enable/disable backface culling for debugging geometry.
+- [x] **Backface culling toggle**: Cycle button in toolbar (EYE=both sides, SCAN=wireframe on back, EYE_OFF=hidden).
 - [ ] **Extended multi-selection**: Current multi-selection is limited. Should support larger selections and more operations.
 - [ ] **Scroll wheel for camera dolly**: Use mouse scroll wheel for forward/backward camera movement (dolly) in addition to zoom.
 - [ ] **Shift+click for range select, Ctrl+click for toggle select**: Standard selection behavior - Shift extends selection range, Ctrl toggles individual items.
