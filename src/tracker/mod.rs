@@ -16,6 +16,7 @@ mod layout;
 mod psx_reverb;
 mod io;
 pub mod actions;
+mod song_browser;
 
 // Re-export public API
 // Some of these aren't used externally yet but are part of the intended public API
@@ -24,7 +25,10 @@ pub use state::TrackerState;
 pub use audio::{AudioEngine, OutputSampleRate};
 #[allow(unused_imports)]
 pub use pattern::*;
-pub use layout::draw_tracker;
+pub use layout::{draw_tracker, draw_song_browser};
+pub use song_browser::SongBrowserAction;
 #[allow(unused_imports)]
 pub use psx_reverb::{PsxReverb, ReverbType};
+// WASM async loading functions for song browser
+pub use song_browser::{load_song_list, load_song_async};
 // Actions used internally by layout.rs and state.rs

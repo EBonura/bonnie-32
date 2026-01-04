@@ -331,9 +331,8 @@ fn draw_orbit_preview(
         }
 
         // Scroll to zoom
-        let scroll = mouse_wheel().1;
-        if scroll != 0.0 {
-            browser.orbit_distance = (browser.orbit_distance - scroll * 100.0).clamp(500.0, 20000.0);
+        if ctx.mouse.scroll != 0.0 {
+            browser.orbit_distance = (browser.orbit_distance - ctx.mouse.scroll * 100.0).clamp(500.0, 20000.0);
         }
     } else {
         browser.dragging = false;

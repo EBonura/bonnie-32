@@ -13,16 +13,17 @@ use super::state::{TrackerState, TrackerView};
 use super::psx_reverb::ReverbType;
 use super::audio::OutputSampleRate;
 use super::actions::build_context;
+use super::song_browser::{SongBrowserAction, next_available_song_name};
 
 // Layout constants
 const ROW_HEIGHT: f32 = 18.0;
-const CHANNEL_WIDTH: f32 = 116.0; // Note + Vol + Fx + FxParam (no per-channel reverb)
+const CHANNEL_WIDTH: f32 = 124.0; // Note + Vol + Fx + FxParam (no per-channel reverb)
 const ROW_NUM_WIDTH: f32 = 30.0;
 const NOTE_WIDTH: f32 = 36.0;
 // Instrument column removed - instrument is now per-channel in the channel strip
-const VOL_WIDTH: f32 = 24.0;
+const VOL_WIDTH: f32 = 28.0;
 const FX_WIDTH: f32 = 16.0;
-const FXPARAM_WIDTH: f32 = 24.0;
+const FXPARAM_WIDTH: f32 = 28.0;
 const GLOBAL_REVERB_WIDTH: f32 = 24.0; // Single global reverb column (0-9)
 
 /// Status bar height
@@ -52,8 +53,84 @@ pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, i
     // Draw status bar at bottom
     draw_status_bar(status_rect, state);
 
-    // Handle input
-    handle_input(ctx, state);
+    // Handle input (but not if browser is open)
+    if !state.song_browser.open {
+        handle_input(ctx, state);
+    }
+}
+
+/// Draw song browser dialog and handle actions
+/// Call this separately from draw_tracker so modal input blocking works correctly
+pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_font: Option<&Font>) -> SongBrowserAction {
+    let screen_rect = Rect::new(0.0, 0.0, screen_width(), screen_height());
+    let browser_action = state.song_browser.draw(ctx, screen_rect, icon_font);
+
+    match browser_action {
+        SongBrowserAction::SelectPreview(idx) => {
+            // Stop any playing preview when selecting a new song
+            if state.song_browser.preview_playing {
+                state.stop_preview_playback();
+                state.song_browser.preview_playing = false;
+            }
+            let path = state.song_browser.songs.get(idx).map(|s| s.path.clone());
+            if let Some(path) = path {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Ok(song) = super::io::load_song(&path) {
+                        state.song_browser.set_preview(song);
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    state.song_browser.pending_load_path = Some(path);
+                }
+            }
+        }
+        SongBrowserAction::OpenSong => {
+            let path = state.song_browser.selected_index
+                .and_then(|idx| state.song_browser.songs.get(idx))
+                .map(|s| s.path.clone());
+            if let Some(path) = path {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Err(e) = state.load_from_file(&path) {
+                        state.set_status(&format!("Load failed: {}", e), 3.0);
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // TODO: WASM async load
+                    let _ = path;
+                    state.set_status("Loading...", 1.0);
+                }
+            }
+        }
+        SongBrowserAction::NewSong => {
+            state.new_song();
+        }
+        SongBrowserAction::TogglePreview => {
+            if state.song_browser.preview_playing {
+                // Stop preview
+                state.stop_preview_playback();
+                state.song_browser.preview_playing = false;
+            } else {
+                // Start preview - clone the preview song
+                if let Some(ref preview_song) = state.song_browser.preview_song {
+                    state.start_preview_playback(preview_song.clone());
+                    state.song_browser.preview_playing = true;
+                }
+            }
+        }
+        SongBrowserAction::Cancel | SongBrowserAction::None => {}
+    }
+
+    // Stop preview playback when browser closes
+    if !state.song_browser.open && state.song_browser.preview_playing {
+        state.stop_preview_playback();
+        state.song_browser.preview_playing = false;
+    }
+
+    browser_action
 }
 
 /// Draw the header with transport controls and song info
@@ -64,15 +141,18 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
     let toolbar_rect = Rect::new(rect.x, rect.y, rect.w, 36.0);
     let mut toolbar = Toolbar::new(toolbar_rect);
 
-    // File operations (native only - no file dialogs on WASM)
+    // File operations
+    if toolbar.icon_button(ctx, icon::FILE_PLUS, icon_font, "New Song (Ctrl+N)") {
+        state.new_song();
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if toolbar.icon_button(ctx, icon::FILE_PLUS, icon_font, "New Song (Ctrl+N)") {
-            state.new_song();
-        }
-        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Open Song (Ctrl+O)") {
+        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Open (Ctrl+O)") {
+            // Open file dialog to load .ron song file
             if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Bonnie Song", &["bsong"])
+                .add_filter("Song", &["ron"])
+                .set_directory("assets/songs")
                 .pick_file()
             {
                 if let Err(e) = state.load_from_file(&path) {
@@ -80,29 +160,55 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
                 }
             }
         }
-        // Save button - show dirty indicator
-        let save_icon = if state.dirty { icon::SAVE } else { icon::SAVE };
-        let save_tooltip = if state.current_file.is_some() { "Save (Ctrl+S)" } else { "Save As (Ctrl+S)" };
-        if toolbar.icon_button(ctx, save_icon, icon_font, save_tooltip) {
+        // Save button - save to current file or auto-generate name
+        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Save (Ctrl+S)") {
             if let Some(path) = state.current_file.clone() {
                 if let Err(e) = state.save_to_file(&path) {
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
             } else {
-                // No current file - prompt for location
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Bonnie Song", &["bsong"])
-                    .set_file_name("song.bsong")
-                    .save_file()
-                {
-                    if let Err(e) = state.save_to_file(&path) {
-                        state.set_status(&format!("Save failed: {}", e), 3.0);
-                    }
+                // No current file - use auto-generated name
+                let path = next_available_song_name();
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = state.save_to_file(&path) {
+                    state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
             }
         }
-        toolbar.separator();
+        if toolbar.icon_button(ctx, icon::SAVE_AS, icon_font, "Save As") {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Song", &["ron"])
+                .set_directory("assets/songs")
+                .set_file_name(&format!("{}.ron", state.song.name))
+                .save_file()
+            {
+                if let Err(e) = state.save_to_file(&path) {
+                    state.set_status(&format!("Save failed: {}", e), 3.0);
+                }
+            }
+        }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Upload") {
+            // TODO: Trigger file upload from JavaScript
+            state.set_status("Upload not implemented yet", 2.0);
+        }
+        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Download") {
+            // TODO: Trigger file download to JavaScript
+            state.set_status("Download not implemented yet", 2.0);
+        }
+    }
+
+    // Browse bundled songs (works on both native and WASM)
+    if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse") {
+        state.song_browser.open();
+    }
+
+    toolbar.separator();
 
     // View mode buttons
     let view_icons = [
@@ -139,13 +245,35 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
 
     toolbar.separator();
 
-    // BPM controls
+    // BPM controls (Shift+click for ±10, normal click for ±1)
+    let bpm_step = if is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) { 10 } else { 1 };
     toolbar.label(&format!("BPM:{:3}", state.song.bpm));
-    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease BPM") {
-        state.song.bpm = (state.song.bpm as i32 - 5).clamp(40, 300) as u16;
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease BPM (Shift+click for ±10)") {
+        state.song.bpm = (state.song.bpm as i32 - bpm_step).clamp(40, 300) as u16;
     }
-    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase BPM") {
-        state.song.bpm = (state.song.bpm as i32 + 5).clamp(40, 300) as u16;
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase BPM (Shift+click for ±10)") {
+        state.song.bpm = (state.song.bpm as i32 + bpm_step).clamp(40, 300) as u16;
+    }
+    if toolbar.text_button(ctx, "Tap", "Tap Tempo - click repeatedly to set BPM") {
+        if let Some(bpm) = state.tap_tempo() {
+            state.song.bpm = bpm;
+            state.set_status(&format!("BPM: {}", bpm), 1.0);
+        }
+    }
+
+    toolbar.separator();
+
+    // Master volume controls (Shift+click for ±10, normal click for ±5)
+    let vol_step = if is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) { 10 } else { 5 };
+    let current_vol = (state.audio.master_volume() * 100.0) as i32;
+    toolbar.label(&format!("Vol:{:3}%", current_vol));
+    if toolbar.icon_button(ctx, icon::MINUS, icon_font, "Decrease Volume (Shift for ±10)") {
+        let new_vol = (current_vol - vol_step).clamp(0, 200) as f32 / 100.0;
+        state.audio.set_master_volume(new_vol);
+    }
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Increase Volume (Shift for ±10)") {
+        let new_vol = (current_vol + vol_step).clamp(0, 200) as f32 / 100.0;
+        state.audio.set_master_volume(new_vol);
     }
 
     toolbar.separator();
@@ -310,7 +438,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         draw_rectangle(inst_minus_rect.x, inst_minus_rect.y, inst_minus_rect.w, inst_minus_rect.h,
             if inst_minus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
         draw_text("-", inst_minus_rect.x + 5.0, inst_minus_rect.y + 12.0, 12.0, TEXT_COLOR);
-        if inst_minus_hover && is_mouse_button_pressed(MouseButton::Left) {
+        if inst_minus_hover && ctx.mouse.left_pressed {
             let new_inst = inst.saturating_sub(1);
             channel_updates.push((ch, "inst", new_inst));
         }
@@ -329,7 +457,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         draw_rectangle(inst_plus_rect.x, inst_plus_rect.y, inst_plus_rect.w, inst_plus_rect.h,
             if inst_plus_hover { Color::new(0.3, 0.3, 0.35, 1.0) } else { Color::new(0.2, 0.2, 0.25, 1.0) });
         draw_text("+", inst_plus_rect.x + 4.0, inst_plus_rect.y + 12.0, 12.0, TEXT_COLOR);
-        if inst_plus_hover && is_mouse_button_pressed(MouseButton::Left) {
+        if inst_plus_hover && ctx.mouse.left_pressed {
             let new_inst = (inst + 1).min(127);
             channel_updates.push((ch, "inst", new_inst));
         }
@@ -362,7 +490,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
         let reset_text = "Reset";
         let reset_dims = measure_text(reset_text, None, 11, 1.0);
         draw_text(reset_text, reset_rect.x + (reset_rect.w - reset_dims.width) / 2.0, reset_y + 12.0, 11.0, TEXT_DIM);
-        if reset_hover && is_mouse_button_pressed(MouseButton::Left) {
+        if reset_hover && ctx.mouse.left_pressed {
             channel_updates.push((ch, "reset", 0));
         }
 
@@ -414,7 +542,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             draw_rectangle(ch_x, header_y, CHANNEL_WIDTH, ROW_HEIGHT, Color::new(0.25, 0.25, 0.3, 1.0));
 
             // Click to select channel
-            if is_mouse_button_pressed(MouseButton::Left) {
+            if ctx.mouse.left_pressed {
                 state.current_channel = ch;
             }
         }
@@ -440,16 +568,13 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
     let grid_rect = Rect::new(rect.x, grid_y_start, rect.w, rect.h - CHANNEL_STRIP_HEIGHT - ROW_HEIGHT);
 
     // Mouse wheel scrolling
-    if ctx.mouse.inside(&grid_rect) {
-        let scroll = mouse_wheel().1;
-        if scroll != 0.0 {
-            let scroll_amount = if scroll > 0.0 { -4 } else { 4 }; // Scroll 4 rows at a time
-            let new_scroll = (state.scroll_row as i32 + scroll_amount).max(0) as usize;
-            state.scroll_row = new_scroll.min(pattern_length.saturating_sub(state.visible_rows));
-        }
+    if ctx.mouse.inside(&grid_rect) && ctx.mouse.scroll != 0.0 {
+        let scroll_amount = if ctx.mouse.scroll > 0.0 { -4 } else { 4 }; // Scroll 4 rows at a time
+        let new_scroll = (state.scroll_row as i32 + scroll_amount).max(0) as usize;
+        state.scroll_row = new_scroll.min(pattern_length.saturating_sub(state.visible_rows));
     }
 
-    if ctx.mouse.inside(&grid_rect) && is_mouse_button_pressed(MouseButton::Left) {
+    if ctx.mouse.inside(&grid_rect) && ctx.mouse.left_pressed {
         let mouse_x = ctx.mouse.x;
         let mouse_y = ctx.mouse.y;
 
@@ -600,7 +725,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             draw_text(&note_str, x + 2.0, y + 14.0, 12.0, note_color);
 
             // Volume (instrument column removed - instrument is per-channel)
-            let vol_str = note.volume.map(|v| format!("{:02X}", v)).unwrap_or_else(|| "--".to_string());
+            let vol_str = note.volume.map(|v| format!("{:3}", v)).unwrap_or_else(|| "---".to_string());
             let vol_color = if note.volume.is_some() { VOL_COLOR } else { TEXT_DIM };
             draw_text(&vol_str, x + NOTE_WIDTH + 2.0, y + 14.0, 12.0, vol_color);
 
@@ -610,7 +735,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             draw_text(&fx_str, x + NOTE_WIDTH + VOL_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
 
             // Effect param
-            let fxp_str = note.effect_param.map(|p| format!("{:02X}", p)).unwrap_or_else(|| "--".to_string());
+            let fxp_str = note.effect_param.map(|p| format!("{:3}", p)).unwrap_or_else(|| "---".to_string());
             draw_text(&fxp_str, x + NOTE_WIDTH + VOL_WIDTH + FX_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
 
             x += CHANNEL_WIDTH;
@@ -699,11 +824,9 @@ fn draw_arrangement_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         }
 
         // Click to select
-        let mouse = mouse_position();
-        if mouse.0 >= bank_rect.x && mouse.0 <= bank_rect.x + bank_rect.w
-            && mouse.1 >= y && mouse.1 <= y + row_h - 2.0
-        {
-            if is_mouse_button_pressed(MouseButton::Left) {
+        let item_rect = Rect::new(bank_rect.x, y, bank_rect.w, row_h - 2.0);
+        if ctx.mouse.inside(&item_rect) {
+            if ctx.mouse.left_pressed {
                 unsafe {
                     PATTERN_BANK_SELECTION = i;
                     ARRANGEMENT_FOCUS = false;
@@ -711,7 +834,7 @@ fn draw_arrangement_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
             }
             // Double-click to add to arrangement
             // (We'd need double-click detection, for now use right-click)
-            if is_mouse_button_pressed(MouseButton::Right) {
+            if ctx.mouse.right_pressed {
                 bank_click_action = Some(i);
             }
         }
@@ -763,18 +886,16 @@ fn draw_arrangement_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         }
 
         // Click to select
-        let mouse = mouse_position();
-        if mouse.0 >= arr_rect.x && mouse.0 <= arr_rect.x + arr_rect.w
-            && mouse.1 >= y && mouse.1 <= y + row_h - 2.0
-        {
-            if is_mouse_button_pressed(MouseButton::Left) {
+        let item_rect = Rect::new(arr_rect.x, y, arr_rect.w, row_h - 2.0);
+        if ctx.mouse.inside(&item_rect) {
+            if ctx.mouse.left_pressed {
                 unsafe {
                     ARRANGEMENT_SELECTION = i;
                     ARRANGEMENT_FOCUS = true;
                 }
             }
             // Double-click (or Enter) to jump to that position
-            if is_mouse_button_pressed(MouseButton::Right) {
+            if ctx.mouse.right_pressed {
                 state.current_pattern_idx = i;
                 state.current_row = 0;
                 state.view = TrackerView::Pattern;
@@ -993,13 +1114,10 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
     // Handle mouse wheel scrolling over the instrument list
     let list_content_rect = Rect::new(list_rect.x, list_start_y, list_rect.w, list_height);
-    if ctx.mouse.inside(&list_content_rect) {
-        let scroll = mouse_wheel().1;
-        if scroll != 0.0 {
-            let scroll_amount = if scroll > 0.0 { -3 } else { 3 }; // Scroll 3 items at a time
-            let new_scroll = (state.instrument_scroll as i32 + scroll_amount).max(0) as usize;
-            state.instrument_scroll = new_scroll.min(max_scroll);
-        }
+    if ctx.mouse.inside(&list_content_rect) && ctx.mouse.scroll != 0.0 {
+        let scroll_amount = if ctx.mouse.scroll > 0.0 { -3 } else { 3 }; // Scroll 3 items at a time
+        let new_scroll = (state.instrument_scroll as i32 + scroll_amount).max(0) as usize;
+        state.instrument_scroll = new_scroll.min(max_scroll);
     }
 
     let current_inst = state.current_instrument();
@@ -1025,7 +1143,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, bg);
 
         // Click to select (sets the current channel's instrument)
-        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+        if is_hovered && ctx.mouse.left_pressed {
             state.set_current_instrument(*program);
         }
 
@@ -1082,7 +1200,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         let midi_note = state.octave * 12 + *semitone;
         let is_hovered = ctx.mouse.inside(&key_rect);
         let is_key_pressed = is_note_key_down(*semitone);
-        let is_mouse_pressed = is_hovered && is_mouse_button_down(MouseButton::Left);
+        let is_mouse_pressed = is_hovered && ctx.mouse.left_down;
 
         // Background - cyan highlight when key pressed (keyboard or mouse), gray when hovered
         let bg = if is_key_pressed || is_mouse_pressed {
@@ -1096,10 +1214,10 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         draw_rectangle(key_x + 1.0, piano_y + 1.0, white_key_w - 4.0, white_key_h - 2.0, bg);
 
         // Click to play
-        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+        if is_hovered && ctx.mouse.left_pressed {
             state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
         }
-        if is_hovered && is_mouse_button_released(MouseButton::Left) {
+        if is_hovered && ctx.mouse.left_released {
             state.audio.note_off(state.current_channel as i32, midi_note as i32);
         }
 
@@ -1125,7 +1243,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         let midi_note = state.octave * 12 + *semitone;
         let is_hovered = ctx.mouse.inside(&key_rect);
         let is_key_pressed = is_note_key_down(*semitone);
-        let is_mouse_pressed = is_hovered && is_mouse_button_down(MouseButton::Left);
+        let is_mouse_pressed = is_hovered && ctx.mouse.left_down;
 
         // Background - cyan highlight when key pressed (keyboard or mouse)
         let bg = if is_key_pressed || is_mouse_pressed {
@@ -1138,10 +1256,10 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         draw_rectangle(key_x, piano_y, black_key_w, black_key_h, bg);
 
         // Click to play
-        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+        if is_hovered && ctx.mouse.left_pressed {
             state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
         }
-        if is_hovered && is_mouse_button_released(MouseButton::Left) {
+        if is_hovered && ctx.mouse.left_released {
             state.audio.note_off(state.current_channel as i32, midi_note as i32);
         }
 
@@ -1191,7 +1309,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let off_text_color = if off_active { WHITE } else { TEXT_COLOR };
     draw_text("OFF", off_btn_x + 16.0, btn_y + 15.0, 12.0, off_text_color);
 
-    if off_hovered && is_mouse_button_pressed(MouseButton::Left) && spu_enabled {
+    if off_hovered && ctx.mouse.left_pressed && spu_enabled {
         state.audio.set_spu_resampling_enabled(false);
         state.set_status("SPU resampling disabled", 1.0);
     }
@@ -1218,7 +1336,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         let text_color = if is_active { WHITE } else { TEXT_COLOR };
         draw_text(rate.name(), btn_x + 12.0, btn_y + 15.0, 12.0, text_color);
 
-        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+        if is_hovered && ctx.mouse.left_pressed {
             // Enable SPU and set sample rate
             if !spu_enabled {
                 state.audio.set_spu_resampling_enabled(true);
@@ -1261,7 +1379,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         let text_color = if is_active { WHITE } else { TEXT_COLOR };
         draw_text(reverb_type.name(), btn_x + 5.0, btn_y + 15.0, 12.0, text_color);
 
-        if is_hovered && is_mouse_button_pressed(MouseButton::Left) {
+        if is_hovered && ctx.mouse.left_pressed {
             state.audio.set_reverb_preset(*reverb_type);
             state.set_status(&format!("Reverb: {}", reverb_type.name()), 1.0);
         }
@@ -1395,7 +1513,7 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         if reset_hovered { Color::new(0.25, 0.25, 0.3, 1.0) } else { Color::new(0.18, 0.18, 0.22, 1.0) });
     draw_text("Reset All", reset_rect.x + 22.0, reset_rect.y + 14.0, 12.0, TEXT_COLOR);
 
-    if reset_hovered && is_mouse_button_pressed(MouseButton::Left) {
+    if reset_hovered && ctx.mouse.left_pressed {
         state.reset_preview_effects();
         state.set_status("Effects reset to defaults", 1.0);
     }
@@ -1420,9 +1538,9 @@ fn draw_status_bar(rect: Rect, state: &TrackerState) {
             // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param, 4=Global Reverb
             match state.current_column {
                 0 => "Note: Z-/ Q-] piano keys | ` note-off | Del clear",
-                1 => "Volume: 00-7F (hex) | Del clear",
+                1 => "Volume: 0-127 | Del clear",
                 2 => "Effect: 0=Arp 1=SlideUp 2=SlideDown 3=Porta 4=Vib A=VolSlide C=Vol E=Expr M=Mod P=Pan",
-                3 => "Effect Param: 00-FF (hex) | Del clear",
+                3 => "Effect Param: 0-127 | Del clear",
                 _ => "Global Reverb (PS1 SPU): 0=Off 1=Room 2=StudioS 3=StudioM 4=StudioL 5=Hall 6=HalfEcho 7=SpaceEcho 8=Chaos 9=Delay",
             }
         }
@@ -1437,10 +1555,7 @@ fn draw_status_bar(rect: Rect, state: &TrackerState) {
     draw_text(column_help, rect.x + 10.0, rect.y + 15.0, 14.0, TEXT_COLOR);
 
     // Right side: Global shortcuts
-    #[cfg(not(target_arch = "wasm32"))]
     let shortcuts = "Ctrl+S: Save | Ctrl+O: Open | Ctrl+N: New | Space: Play/Pause";
-    #[cfg(target_arch = "wasm32")]
-    let shortcuts = "Space: Play/Pause | Esc: Stop | Numpad+/-: Octave";
 
     let shortcuts_width = shortcuts.len() as f32 * 6.5; // Approximate width
     draw_text(
@@ -1478,41 +1593,36 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
         || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper); // Cmd on macOS
 
-    // File operations (native only - Ctrl+S/O/N)
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        // Ctrl+N - New song
-        if ctrl_held && is_key_pressed(KeyCode::N) {
-            state.new_song();
-        }
-        // Ctrl+O - Open song
-        if ctrl_held && is_key_pressed(KeyCode::O) {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Bonnie Song", &["bsong"])
-                .pick_file()
-            {
-                if let Err(e) = state.load_from_file(&path) {
-                    state.set_status(&format!("Load failed: {}", e), 3.0);
-                }
+    // File operations (Ctrl+S/O/N)
+    // Ctrl+N - New song
+    if ctrl_held && is_key_pressed(KeyCode::N) {
+        state.new_song();
+    }
+    // Ctrl+O - Open song browser
+    if ctrl_held && is_key_pressed(KeyCode::O) {
+        state.song_browser.open();
+    }
+    // Ctrl+S - Save song (auto-name if new)
+    if ctrl_held && is_key_pressed(KeyCode::S) {
+        if let Some(path) = state.current_file.clone() {
+            if let Err(e) = state.save_to_file(&path) {
+                state.set_status(&format!("Save failed: {}", e), 3.0);
             }
-        }
-        // Ctrl+S - Save song
-        if ctrl_held && is_key_pressed(KeyCode::S) {
-            if let Some(path) = state.current_file.clone() {
+        } else {
+            // No current file - use auto-generated name
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = next_available_song_name();
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 if let Err(e) = state.save_to_file(&path) {
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
-            } else {
-                // No current file - prompt for location
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Bonnie Song", &["bsong"])
-                    .set_file_name("song.bsong")
-                    .save_file()
-                {
-                    if let Err(e) = state.save_to_file(&path) {
-                        state.set_status(&format!("Save failed: {}", e), 3.0);
-                    }
-                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                state.set_status("Save not available on web", 2.0);
             }
         }
     }
@@ -1705,6 +1815,31 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         }
     }
 
+    // Volume entry (in Pattern view, edit mode, volume column = 1)
+    // Type 3 digits for 0-127 (resets on each keypress, last 3 digits kept)
+    // Skip if Ctrl/Cmd is held
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 1 && !ctrl_held {
+        let digit_keys = [
+            (KeyCode::Key0, 0), (KeyCode::Key1, 1), (KeyCode::Key2, 2),
+            (KeyCode::Key3, 3), (KeyCode::Key4, 4), (KeyCode::Key5, 5),
+            (KeyCode::Key6, 6), (KeyCode::Key7, 7), (KeyCode::Key8, 8),
+            (KeyCode::Key9, 9),
+        ];
+
+        for (key, digit) in digit_keys {
+            if is_key_pressed(key) {
+                // Get current volume or 0
+                let current = state.current_pattern()
+                    .and_then(|p| p.get(state.current_channel, state.current_row))
+                    .and_then(|n| n.volume)
+                    .unwrap_or(0) as u16;
+                // Shift left and add new digit, keep last 3 digits, clamp to 127
+                let new_vol = ((current * 10 + digit as u16) % 1000).min(127) as u8;
+                state.set_volume(new_vol);
+            }
+        }
+    }
+
     // Effect entry (in Pattern view, edit mode, effect column = 2)
     // Skip if Ctrl/Cmd is held
     if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 2 && !ctrl_held {
@@ -1728,27 +1863,26 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     }
 
     // Effect parameter entry (in Pattern view, edit mode, fx_param column = 3)
+    // Type digits for 0-255 (shift left and add, keep last 3 digits)
     // Skip if Ctrl/Cmd is held
     if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 3 && !ctrl_held {
-        // Hex digits 0-9, A-F for parameter entry
-        let hex_keys = [
+        let digit_keys = [
             (KeyCode::Key0, 0), (KeyCode::Key1, 1), (KeyCode::Key2, 2),
             (KeyCode::Key3, 3), (KeyCode::Key4, 4), (KeyCode::Key5, 5),
             (KeyCode::Key6, 6), (KeyCode::Key7, 7), (KeyCode::Key8, 8),
             (KeyCode::Key9, 9),
-            (KeyCode::A, 10), (KeyCode::B, 11), (KeyCode::C, 12),
-            (KeyCode::D, 13), (KeyCode::E, 14), (KeyCode::F, 15),
         ];
 
-        for (key, nibble) in hex_keys {
+        for (key, digit) in digit_keys {
             if is_key_pressed(key) {
-                // Shift left and add new nibble (so you type XX as two keypresses)
-                state.set_effect_param_high(state.current_pattern()
+                // Get current param or 0
+                let current = state.current_pattern()
                     .and_then(|p| p.get(state.current_channel, state.current_row))
                     .and_then(|n| n.effect_param)
-                    .map(|p| p & 0x0F)
-                    .unwrap_or(0));
-                state.set_effect_param_low(nibble);
+                    .unwrap_or(0) as u16;
+                // Shift left and add new digit, keep last 3 digits, clamp to 127
+                let new_param = ((current * 10 + digit as u16) % 1000).min(127) as u8;
+                state.set_effect_param(new_param);
             }
         }
     }

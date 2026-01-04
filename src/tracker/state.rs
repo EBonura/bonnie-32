@@ -4,6 +4,7 @@ use super::audio::AudioEngine;
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
 use super::psx_reverb::ReverbType;
 use super::actions::create_tracker_actions;
+use super::song_browser::SongBrowser;
 use crate::ui::ActionRegistry;
 use std::path::PathBuf;
 
@@ -98,6 +99,15 @@ pub struct TrackerState {
     /// Clipboard for copy/paste (rows × channels of notes)
     /// Stored as [channel][row] to match pattern structure
     pub clipboard: Option<Vec<Vec<Note>>>,
+
+    /// Song browser dialog
+    pub song_browser: SongBrowser,
+
+    /// Preview song for browser playback (uses this instead of main song when Some)
+    preview_song: Option<Song>,
+
+    /// Tap tempo: timestamps of recent taps (for calculating BPM)
+    tap_times: Vec<f64>,
 }
 
 /// Soundfont filename
@@ -203,7 +213,48 @@ impl TrackerState {
             knob_edit_text: String::new(),
             actions: create_tracker_actions(),
             clipboard: None,
+            song_browser: SongBrowser::new(),
+            preview_song: None,
+            tap_times: Vec::new(),
         }
+    }
+
+    /// Record a tap for tap tempo calculation
+    /// Returns the calculated BPM if enough taps have been recorded
+    pub fn tap_tempo(&mut self) -> Option<u16> {
+        let now = macroquad::time::get_time();
+
+        // If last tap was more than 2 seconds ago, reset
+        if let Some(&last) = self.tap_times.last() {
+            if now - last > 2.0 {
+                self.tap_times.clear();
+            }
+        }
+
+        self.tap_times.push(now);
+
+        // Keep only last 8 taps
+        if self.tap_times.len() > 8 {
+            self.tap_times.remove(0);
+        }
+
+        // Need at least 2 taps to calculate BPM
+        if self.tap_times.len() < 2 {
+            return None;
+        }
+
+        // Calculate average interval between taps
+        let mut total_interval = 0.0;
+        for i in 1..self.tap_times.len() {
+            total_interval += self.tap_times[i] - self.tap_times[i - 1];
+        }
+        let avg_interval = total_interval / (self.tap_times.len() - 1) as f64;
+
+        // Convert interval to BPM (60 seconds / interval)
+        let bpm = (60.0 / avg_interval).round() as u16;
+
+        // Clamp to valid range
+        Some(bpm.clamp(40, 300))
     }
 
     /// Set status message
@@ -636,6 +687,19 @@ impl TrackerState {
         self.dirty = true;
     }
 
+    /// Set effect parameter at cursor (full value 0-127)
+    pub fn set_effect_param(&mut self, value: u8) {
+        let channel = self.current_channel;
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
+                note.effect_param = Some(value.min(127));
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Clear effect at cursor position
     pub fn clear_effect(&mut self) {
         let channel = self.current_channel;
@@ -645,6 +709,32 @@ impl TrackerState {
             if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
                 note.effect = None;
                 note.effect_param = None;
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Set volume at cursor position (0-127)
+    pub fn set_volume(&mut self, volume: u8) {
+        let channel = self.current_channel;
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
+                note.volume = Some(volume.min(127));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Clear volume at cursor position
+    pub fn clear_volume(&mut self) {
+        let channel = self.current_channel;
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
+                note.volume = None;
             }
         }
         self.dirty = true;
@@ -710,6 +800,33 @@ impl TrackerState {
         self.scroll_row = 0;
         self.audio.all_notes_off();
         self.last_played_notes = [None; MAX_CHANNELS];
+        self.preview_song = None;
+    }
+
+    /// Start preview playback of a song from the browser
+    pub fn start_preview_playback(&mut self, song: Song) {
+        self.audio.all_notes_off();
+        self.preview_song = Some(song);
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.playback_time = 0.0;
+        self.playing = true;
+        self.last_played_notes = [None; MAX_CHANNELS];
+    }
+
+    /// Stop preview playback
+    pub fn stop_preview_playback(&mut self) {
+        self.playing = false;
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.audio.all_notes_off();
+        self.last_played_notes = [None; MAX_CHANNELS];
+        self.preview_song = None;
+    }
+
+    /// Get the current song for playback (preview song if set, else main song)
+    fn playback_song(&self) -> &Song {
+        self.preview_song.as_ref().unwrap_or(&self.song)
     }
 
     /// Update playback (called each frame)
@@ -725,7 +842,7 @@ impl TrackerState {
         }
 
         self.playback_time += delta;
-        let tick_duration = self.song.tick_duration();
+        let tick_duration = self.playback_song().tick_duration();
 
         while self.playback_time >= tick_duration {
             self.playback_time -= tick_duration;
@@ -736,18 +853,19 @@ impl TrackerState {
 
     /// Play notes at current playback row
     fn play_current_row(&mut self) {
-        let pattern_num = match self.song.arrangement.get(self.playback_pattern_idx) {
+        let song = self.playback_song();
+        let pattern_num = match song.arrangement.get(self.playback_pattern_idx) {
             Some(&n) => n,
             None => return,
         };
 
-        let pattern = match self.song.patterns.get(pattern_num) {
+        let pattern = match song.patterns.get(pattern_num) {
             Some(p) => p,
             None => return,
         };
 
         // Collect note data first to avoid borrow issues
-        let num_channels = self.song.num_channels();
+        let num_channels = song.num_channels();
         let playback_row = self.playback_row;
         let mut notes_to_play: Vec<(usize, Option<u8>, Option<u8>, Option<u8>, Option<u8>)> = Vec::new();
         let mut effects_to_apply: Vec<(usize, Effect)> = Vec::new();
@@ -755,18 +873,39 @@ impl TrackerState {
         // Global reverb for this row (PS1 has single global reverb processor)
         let reverb_change = pattern.get_reverb(playback_row);
 
+        // Get channel instruments from the playback song
+        let channel_instruments: Vec<u8> = (0..num_channels)
+            .map(|ch| song.get_channel_instrument(ch))
+            .collect();
+
+        // Track channels with empty rows (to clear sustain state after loop)
+        let mut empty_channels: Vec<usize> = Vec::new();
+
         for channel in 0..num_channels {
             if let Some(note) = pattern.get(channel, playback_row) {
-                // Collect note data
-                let inst = note.instrument.unwrap_or_else(|| self.song.get_channel_instrument(channel));
-                notes_to_play.push((channel, note.pitch, Some(inst), note.volume, None));
+                if note.pitch.is_some() {
+                    // Has a note - collect note data
+                    let inst = note.instrument.unwrap_or(channel_instruments[channel]);
+                    notes_to_play.push((channel, note.pitch, Some(inst), note.volume, None));
 
-                // Collect effect
-                if let (Some(fx_char), Some(fx_param)) = (note.effect, note.effect_param) {
-                    let effect = Effect::from_char(fx_char, fx_param);
-                    effects_to_apply.push((channel, effect));
+                    // Collect effect
+                    if let (Some(fx_char), Some(fx_param)) = (note.effect, note.effect_param) {
+                        let effect = Effect::from_char(fx_char, fx_param);
+                        effects_to_apply.push((channel, effect));
+                    }
+                } else {
+                    // Empty row (pitch is None) - mark for clearing sustain state
+                    empty_channels.push(channel);
                 }
+            } else {
+                // No note data at all - mark for clearing sustain state
+                empty_channels.push(channel);
             }
+        }
+
+        // Clear sustain state for empty rows (so next identical note re-triggers)
+        for channel in empty_channels {
+            self.last_played_notes[channel] = None;
         }
 
         // Now process notes (pattern borrow is released)
@@ -876,7 +1015,8 @@ impl TrackerState {
 
     /// Advance playback to next row
     fn advance_playback(&mut self) {
-        let pattern_num = match self.song.arrangement.get(self.playback_pattern_idx) {
+        let song = self.playback_song();
+        let pattern_num = match song.arrangement.get(self.playback_pattern_idx) {
             Some(&n) => n,
             None => {
                 self.stop_playback();
@@ -884,7 +1024,7 @@ impl TrackerState {
             }
         };
 
-        let pattern_len = match self.song.patterns.get(pattern_num) {
+        let pattern_len = match song.patterns.get(pattern_num) {
             Some(p) => p.length,
             None => {
                 self.stop_playback();
@@ -892,20 +1032,24 @@ impl TrackerState {
             }
         };
 
+        let arrangement_len = song.arrangement.len();
+
         self.playback_row += 1;
         if self.playback_row >= pattern_len {
             self.playback_row = 0;
             self.playback_pattern_idx += 1;
-            if self.playback_pattern_idx >= self.song.arrangement.len() {
+            if self.playback_pattern_idx >= arrangement_len {
                 // Loop or stop
                 self.playback_pattern_idx = 0; // Loop for now
             }
         }
 
-        // Update view cursor to follow playback
-        self.current_row = self.playback_row;
-        self.current_pattern_idx = self.playback_pattern_idx;
-        self.ensure_row_visible();
+        // Update view cursor to follow playback (only for main song, not preview)
+        if self.preview_song.is_none() {
+            self.current_row = self.playback_row;
+            self.current_pattern_idx = self.playback_pattern_idx;
+            self.ensure_row_visible();
+        }
     }
 
     /// Convert keyboard key to MIDI note
@@ -1159,6 +1303,11 @@ impl Default for TrackerState {
 impl TrackerState {
     /// Save the current song to a file
     pub fn save_to_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        // Capture current audio settings from audio engine before saving
+        self.song.reverb.preset = self.audio.reverb_type().to_index();
+        self.song.reverb.wet = (self.audio.reverb_wet_level() * 127.0) as u8;
+        self.song.master_volume = (self.audio.master_volume() * 100.0) as u8;
+
         super::io::save_song(&self.song, path)?;
         self.current_file = Some(path.to_path_buf());
         self.dirty = false;
@@ -1189,6 +1338,14 @@ impl TrackerState {
             self.audio.set_program(ch as i32, inst as i32);
         }
         self.sync_all_channel_settings();
+
+        // Apply reverb settings from loaded song
+        let reverb_type = ReverbType::from_index(self.song.reverb.preset);
+        self.audio.set_reverb_preset(reverb_type);
+        self.audio.set_reverb_wet_level(self.song.reverb.wet as f32 / 127.0);
+
+        // Apply master volume from loaded song
+        self.audio.set_master_volume(self.song.master_volume as f32 / 100.0);
 
         self.set_status(&format!("Loaded: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
         Ok(())
