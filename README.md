@@ -336,7 +336,7 @@ For implementing authentic PS1 constraints:
 - [x] **Auto-detect controller type**: Detect whether the connected controller is Xbox, PlayStation, or other and map controls accordingly. PlayStation layout should be the default since the engine targets PS1 aesthetics.
 
 #### World Editor - UI/UX
-- [ ] **Remove play button from world editor toolbar**: The play button in the world editor toolbar is confusing. Use the Game tab instead for testing levels.
+- [x] **Remove play button from world editor toolbar**: The play button in the world editor toolbar is confusing. Use the Game tab instead for testing levels.
 - [ ] **Preserve existing textures when changing texture pack**: Currently switching texture packs deletes loaded textures. Should add new textures while keeping existing ones.
 - [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
 - [ ] **Fix texture selection visibility**: Textures that aren't fully visible in the browser can't be selected. Fix click detection for partially visible textures.
