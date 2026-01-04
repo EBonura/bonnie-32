@@ -797,18 +797,34 @@ impl TrackerState {
             .map(|ch| song.get_channel_instrument(ch))
             .collect();
 
+        // Track channels with empty rows (to clear sustain state after loop)
+        let mut empty_channels: Vec<usize> = Vec::new();
+
         for channel in 0..num_channels {
             if let Some(note) = pattern.get(channel, playback_row) {
-                // Collect note data
-                let inst = note.instrument.unwrap_or(channel_instruments[channel]);
-                notes_to_play.push((channel, note.pitch, Some(inst), note.volume, None));
+                if note.pitch.is_some() {
+                    // Has a note - collect note data
+                    let inst = note.instrument.unwrap_or(channel_instruments[channel]);
+                    notes_to_play.push((channel, note.pitch, Some(inst), note.volume, None));
 
-                // Collect effect
-                if let (Some(fx_char), Some(fx_param)) = (note.effect, note.effect_param) {
-                    let effect = Effect::from_char(fx_char, fx_param);
-                    effects_to_apply.push((channel, effect));
+                    // Collect effect
+                    if let (Some(fx_char), Some(fx_param)) = (note.effect, note.effect_param) {
+                        let effect = Effect::from_char(fx_char, fx_param);
+                        effects_to_apply.push((channel, effect));
+                    }
+                } else {
+                    // Empty row (pitch is None) - mark for clearing sustain state
+                    empty_channels.push(channel);
                 }
+            } else {
+                // No note data at all - mark for clearing sustain state
+                empty_channels.push(channel);
             }
+        }
+
+        // Clear sustain state for empty rows (so next identical note re-triggers)
+        for channel in empty_channels {
+            self.last_played_notes[channel] = None;
         }
 
         // Now process notes (pattern borrow is released)
