@@ -332,7 +332,7 @@ For implementing authentic PS1 constraints:
 - [ ] **Piano roll quick tool**: Add a piano roll that slides up from the bottom as a quick entry tool. Keep the pattern editor as the main detailed editing view.
 
 #### Controller Support
-- [ ] **Auto-detect controller type**: Detect whether the connected controller is Xbox, PlayStation, or other and map controls accordingly. PlayStation layout should be the default since the engine targets PS1 aesthetics.
+- [x] **Auto-detect controller type**: Detect whether the connected controller is Xbox, PlayStation, or other and map controls accordingly. PlayStation layout should be the default since the engine targets PS1 aesthetics.
 
 #### World Editor - UI/UX
 - [ ] **Remove play button from world editor toolbar**: The play button in the world editor toolbar is confusing. Use the Game tab instead for testing levels.

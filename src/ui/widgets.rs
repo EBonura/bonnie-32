@@ -359,6 +359,14 @@ impl Toolbar {
             false
         }
     }
+
+    /// Reserve space in the toolbar and return a Rect for custom drawing
+    pub fn reserve(&mut self, width: f32, height: f32) -> Rect {
+        let y = self.rect.y + (self.rect.h - height) * 0.5;
+        let rect = Rect::new(self.cursor_x.round(), y.round(), width, height);
+        self.cursor_x += width + self.spacing;
+        rect
+    }
 }
 
 /// Accent color (cyan like MuseScore)

@@ -1,22 +1,20 @@
 //! Tracker editor state
 
-use super::audio::AudioEngine;
+use super::audio::{AudioEngine, OutputSampleRate};
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
 use super::psx_reverb::ReverbType;
 use super::actions::create_tracker_actions;
 use super::song_browser::SongBrowser;
-use crate::ui::ActionRegistry;
+use crate::ui::{ActionRegistry, SplitPanel};
 use std::path::PathBuf;
 
 /// Tracker view mode
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrackerView {
-    /// Pattern editor (main view)
+    /// Pattern editor (main view) - includes instrument panel on right side
     Pattern,
     /// Song arrangement
     Arrangement,
-    /// Instrument selection
-    Instruments,
 }
 
 /// Tracker editor state
@@ -108,6 +106,9 @@ pub struct TrackerState {
 
     /// Tap tempo: timestamps of recent taps (for calculating BPM)
     tap_times: Vec<f64>,
+
+    /// Split panel for pattern editor / instrument panel (horizontal split)
+    pub pattern_split: SplitPanel,
 }
 
 /// Soundfont filename
@@ -216,6 +217,7 @@ impl TrackerState {
             song_browser: SongBrowser::new(),
             preview_song: None,
             tap_times: Vec::new(),
+            pattern_split: SplitPanel::horizontal(2000).with_ratio(0.6).with_min_size(200.0),
         }
     }
 
@@ -515,36 +517,28 @@ impl TrackerState {
 
     /// Move cursor left
     /// Columns within channel: 0=Note, 1=Volume, 2=Effect, 3=Effect param
-    /// Special column 4 = Global Reverb (not within a channel)
     pub fn cursor_left(&mut self) {
-        if self.current_column == 4 {
-            // From global reverb, go to last channel's last column
-            self.current_column = 3;
-            self.current_channel = self.num_channels() - 1;
-        } else if self.current_column > 0 {
+        if self.current_column > 0 {
             self.current_column -= 1;
         } else if self.current_channel > 0 {
             self.current_channel -= 1;
             self.current_column = 3; // fx param column (last column in channel)
+            // Apply the new channel's reverb settings
+            self.apply_current_channel_reverb();
         }
     }
 
     /// Move cursor right
     /// Columns within channel: 0=Note, 1=Volume, 2=Effect, 3=Effect param
-    /// Special column 4 = Global Reverb (not within a channel)
     pub fn cursor_right(&mut self) {
         let num_ch = self.num_channels();
-        if self.current_column == 4 {
-            // Already at global reverb, can't go further right
-            return;
-        } else if self.current_column < 3 {
+        if self.current_column < 3 {
             self.current_column += 1;
         } else if self.current_channel < num_ch - 1 {
             self.current_channel += 1;
             self.current_column = 0;
-        } else {
-            // At last channel's last column, go to global reverb
-            self.current_column = 4;
+            // Apply the new channel's reverb settings
+            self.apply_current_channel_reverb();
         }
     }
 
@@ -553,6 +547,7 @@ impl TrackerState {
         let num_ch = self.num_channels();
         if self.current_channel < num_ch - 1 {
             self.current_channel += 1;
+            self.apply_current_channel_reverb();
         }
     }
 
@@ -560,6 +555,7 @@ impl TrackerState {
     pub fn prev_channel(&mut self) {
         if self.current_channel > 0 {
             self.current_channel -= 1;
+            self.apply_current_channel_reverb();
         }
     }
 
@@ -1391,8 +1387,18 @@ impl TrackerState {
         self.audio.set_pan(ch, settings.pan as i32);
         self.audio.set_modulation(ch, settings.modulation as i32);
         self.audio.set_expression(ch, settings.expression as i32);
-        // Note: wet/reverb send would need per-channel support in the audio engine
-        // For now, wet is stored but the global reverb wet level applies to all
+    }
+
+    /// Apply the current channel's reverb and sample rate settings to the audio engine
+    /// Call this when switching channels to update the global audio settings to match
+    pub fn apply_current_channel_reverb(&self) {
+        let settings = self.song.get_channel_settings(self.current_channel);
+        // Apply reverb settings
+        let reverb_type = ReverbType::from_index(settings.reverb_type);
+        self.audio.set_reverb_preset(reverb_type);
+        self.audio.set_reverb_wet_level(settings.wet as f32 / 127.0);
+        // Apply sample rate settings
+        self.apply_current_channel_sample_rate();
     }
 
     /// Sync all channel settings to the audio engine
@@ -1424,6 +1430,67 @@ impl TrackerState {
             settings.expression = value;
             self.audio.set_expression(channel as i32, value as i32);
             self.dirty = true;
+        }
+    }
+
+    pub fn set_channel_reverb_type(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.reverb_type = value.min(9); // Clamp to valid range
+            self.dirty = true;
+            // Apply the reverb type for the current channel if it's being edited
+            if channel == self.current_channel {
+                let reverb_type = ReverbType::from_index(value);
+                self.audio.set_reverb_preset(reverb_type);
+            }
+        }
+    }
+
+    pub fn set_channel_wet(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.wet = value.min(127);
+            self.dirty = true;
+            // Apply the wet level for the current channel if it's being edited
+            if channel == self.current_channel {
+                self.audio.set_reverb_wet_level(value as f32 / 127.0);
+            }
+        }
+    }
+
+    pub fn set_channel_effect_amount(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.effect_amount = value.min(127);
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_channel_sample_rate(&mut self, channel: usize, value: u8) {
+        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
+            settings.sample_rate = value.min(4); // 0=OFF, 1-4 = rate presets
+            self.dirty = true;
+            // Apply the sample rate for the current channel if it's being edited
+            if channel == self.current_channel {
+                self.apply_current_channel_sample_rate();
+            }
+        }
+    }
+
+    /// Apply the current channel's sample rate settings to the audio engine
+    pub fn apply_current_channel_sample_rate(&self) {
+        let settings = self.song.get_channel_settings(self.current_channel);
+        if settings.sample_rate == 0 {
+            // OFF - disable SPU resampling
+            self.audio.set_spu_resampling_enabled(false);
+        } else {
+            // Enable SPU and set rate based on index (1=44k, 2=22k, 3=11k, 4=5k)
+            self.audio.set_spu_resampling_enabled(true);
+            let rate = match settings.sample_rate {
+                1 => OutputSampleRate::NATIVE,
+                2 => OutputSampleRate::PS1_22K,
+                3 => OutputSampleRate::PS1_11K,
+                4 => OutputSampleRate::PS1_5K,
+                _ => OutputSampleRate::NATIVE,
+            };
+            self.audio.set_output_sample_rate(rate);
         }
     }
 

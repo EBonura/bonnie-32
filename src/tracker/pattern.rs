@@ -13,6 +13,20 @@ pub struct ChannelSettings {
     pub modulation: u8,
     /// Expression (0-127)
     pub expression: u8,
+    /// Reverb type (PS1 SPU preset, 0-9)
+    /// 0=Off, 1=Room, 2=StudioS, 3=StudioM, 4=StudioL, 5=Hall, 6=HalfEcho, 7=SpaceEcho, 8=Chaos, 9=Delay
+    #[serde(default)]
+    pub reverb_type: u8,
+    /// Reverb wet/dry mix level (0-127, where 64 = 50%)
+    #[serde(default = "default_wet")]
+    pub wet: u8,
+    /// Effect amount (0-127) - default parameter value for inserted effects
+    #[serde(default = "default_effect_amount")]
+    pub effect_amount: u8,
+    /// SPU sample rate index (0=OFF/native, 1=44kHz, 2=22kHz, 3=11kHz, 4=5kHz)
+    /// 0 means SPU resampling disabled for this channel
+    #[serde(default)]
+    pub sample_rate: u8,
 }
 
 /// Global reverb settings (PS1 has a single global reverb processor)
@@ -25,12 +39,24 @@ pub struct ReverbSettings {
     pub wet: u8,
 }
 
+fn default_wet() -> u8 {
+    64 // 50% wet
+}
+
+fn default_effect_amount() -> u8 {
+    64 // 50% amount
+}
+
 impl Default for ChannelSettings {
     fn default() -> Self {
         Self {
-            pan: 64,          // Center
-            modulation: 0,    // No modulation
-            expression: 127,  // Full expression
+            pan: 64,           // Center
+            modulation: 0,     // No modulation
+            expression: 127,   // Full expression
+            reverb_type: 0,    // Off
+            wet: 64,           // 50% wet
+            effect_amount: 64, // 50% effect amount
+            sample_rate: 0,    // Off (native, no SPU resampling)
         }
     }
 }
