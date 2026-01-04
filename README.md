@@ -144,18 +144,20 @@ The editor features a MuseScore-inspired interface design:
 - **Right-click + drag**: Rotate camera
 - **Esc/Start**: Options menu
 
-### Music Editor
+### Music Tracker
 - **37-key piano** - 3 octaves with full keyboard mapping
 - **Z to /**: Piano keys (bottom row)
 - **Q to ]**: Piano keys (top row, continues seamlessly)
 - **Numpad +/-**: Octave up/down
 - **Space**: Play/Pause
 - **Esc**: Stop playback
-- **F9/F10**: Edit step down/up
 - **Apostrophe (`)**: Note off
 - **Arrow keys**: Navigate pattern
 - **Home/End**: Jump to start/end of pattern
-- **PS1 reverb knob** - 10 authentic PsyQ SDK presets with wet/dry mix control
+- **Per-channel audio settings** - Each channel has its own sample rate, reverb type, wet level, pan, mod, and expression
+- **PS1 SPU sample rates** - OFF, 44kHz, 22kHz, 11kHz, 5kHz per channel
+- **PS1 reverb presets** - 10 authentic PsyQ SDK presets per channel (Off, Room, StudioS, StudioM, StudioL, Hall, HalfEcho, SpaceEcho, Chaos, Delay)
+- **Effect buttons** - Quick insert effects (Arp, SlideUp, SlideDown, Porta, Vib, VolSlide, Vol, Expr, Mod, Pan) with configurable amount
 
 ## Building
 
@@ -230,20 +232,19 @@ This project uses the following free texture packs:
 
 ---
 
-### Music Editor
+### Music Tracker
 
 #### UI/UX
 - [ ] **Text too small**: Everything is very small text-wise. The world editor has better scaling - study that and make text bigger where it makes sense
-- [ ] **Reverb column missing**: Expected reverb type as a separate column on the far right to set the 10 reverb presets. Currently only implemented as `Rxx` effect command in Fx column. Should add a dedicated reverb column.
-- [ ] **Remove "In" (Instrument) column**: The pattern shows "Not In Vl Fx" for each track, but "In" is redundant since instrument is already set per-track in the channel strip
-- [ ] **Help bar at bottom**: Add a help/status bar at the bottom (like world editor). When clicking on a column, show available options there. Highlight the currently selected option.
-- [ ] **Remove global Fx from toolbar**: Since reverb has its own column, the global Fx control at top is redundant
-- [ ] **Per-track sample rate**: PS1 SPU supports per-voice pitch registers (sample rate). Currently Rate is a global lo-fi effect. Need to implement true per-channel pitch control (authentic PS1 behavior).
+- [x] **Reverb per-channel**: Reverb type is now per-channel in the instruments panel (no separate column needed)
+- [x] **Remove "In" (Instrument) column**: Instrument column removed - instrument is set per-channel in the channel strip
+- [x] **Help bar at bottom**: Status bar shows context-sensitive help for each column
+- [x] **Per-track sample rate**: Each channel has its own SPU sample rate (OFF, 44kHz, 22kHz, 11kHz, 5kHz)
+- [x] **Per-track reverb/wet**: Each channel has its own reverb type and wet level
+- [x] **Effect insertion buttons**: Quick-insert effects with configurable amount knob
 
 #### Remaining
-- [ ] Configurable pattern length: Currently hardcoded to 64 rows - should be adjustable
 - [ ] Per-note vs channel FX toggle
-- [ ] Bottom status bar with context-sensitive shortcuts
 
 #### Future
 - [ ] Custom instrument editor: Tab for building custom instruments beyond SF2 soundfonts
@@ -326,9 +327,9 @@ For implementing authentic PS1 constraints:
 
 ### Feedback Session (January 2026)
 
-#### Music Editor Layout
-- [ ] **Shared view between pattern editor and instruments**: Allow quick switching between pattern editing and instrument selection without changing tabs. Instrument panel should be accessible alongside the pattern editor.
-- [ ] **Move instrument panel to right side**: Remove the separate Instruments tab and place instrument selection on the right side of the pattern editor with a toggle button to show/hide it.
+#### Music Tracker Layout
+- [x] **Shared view between pattern editor and instruments**: Instrument panel is now integrated on the left side of the pattern editor with a draggable divider.
+- [x] **Simplified channel strip**: Channel strip now shows just "Ch1: Piano" labels - click to select channel and edit in left panel.
 - [ ] **Piano roll quick tool**: Add a piano roll that slides up from the bottom as a quick entry tool. Keep the pattern editor as the main detailed editing view.
 
 #### Controller Support
