@@ -8,7 +8,7 @@
       channels: [
         [
           (
-            pitch: Some(50),
+            pitch: Some(38),
             instrument: Some(0),
           ),
           (),
@@ -19,7 +19,7 @@
           (),
           (),
           (
-            pitch: Some(50),
+            pitch: Some(38),
             instrument: Some(0),
           ),
           (),
@@ -30,7 +30,7 @@
           (),
           (),
           (
-            pitch: Some(50),
+            pitch: Some(38),
             instrument: Some(0),
           ),
           (),
@@ -41,7 +41,7 @@
           (),
           (),
           (
-            pitch: Some(50),
+            pitch: Some(38),
             instrument: Some(0),
           ),
           (),
@@ -223,4 +223,9 @@
       expression: 127,
     ),
   ],
+  reverb: (
+    preset: 5,
+    wet: 64,
+  ),
+  master_volume: 100,
 )
