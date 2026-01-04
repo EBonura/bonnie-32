@@ -356,13 +356,6 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
-    // Play button
-    if toolbar.icon_button(ctx, icon::PLAY, icon_font, "Play") {
-        action = EditorAction::Play;
-    }
-
-    toolbar.separator();
-
     // Tool buttons (Portal removed - portals are now auto-generated)
     let tools = [
         (icon::MOVE, "Select", EditorTool::Select),
