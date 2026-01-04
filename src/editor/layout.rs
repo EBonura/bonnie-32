@@ -446,14 +446,16 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     }
 
     // Room boundaries toggle
-    if toolbar.icon_button_active(ctx, icon::BOX, icon_font, "Show Room Bounds", state.show_room_bounds) {
+    let room_bounds_tooltip = if state.show_room_bounds { "Room Bounds: ON" } else { "Room Bounds: OFF" };
+    if toolbar.icon_button_active(ctx, icon::BOX, icon_font, room_bounds_tooltip, state.show_room_bounds) {
         state.show_room_bounds = !state.show_room_bounds;
         let mode = if state.show_room_bounds { "visible" } else { "hidden" };
         state.set_status(&format!("Room boundaries: {}", mode), 2.0);
     }
 
     // Wireframe toggle
-    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe", state.raster_settings.wireframe_overlay) {
+    let wireframe_tooltip = if state.raster_settings.wireframe_overlay { "Wireframe: ON" } else { "Wireframe: OFF" };
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, wireframe_tooltip, state.raster_settings.wireframe_overlay) {
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "ON" } else { "OFF" };
         state.set_status(&format!("Wireframe: {}", mode), 2.0);
