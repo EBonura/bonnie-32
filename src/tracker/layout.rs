@@ -17,13 +17,13 @@ use super::song_browser::{SongBrowserAction, next_available_song_name};
 
 // Layout constants
 const ROW_HEIGHT: f32 = 18.0;
-const CHANNEL_WIDTH: f32 = 116.0; // Note + Vol + Fx + FxParam (no per-channel reverb)
+const CHANNEL_WIDTH: f32 = 124.0; // Note + Vol + Fx + FxParam (no per-channel reverb)
 const ROW_NUM_WIDTH: f32 = 30.0;
 const NOTE_WIDTH: f32 = 36.0;
 // Instrument column removed - instrument is now per-channel in the channel strip
-const VOL_WIDTH: f32 = 24.0;
+const VOL_WIDTH: f32 = 28.0;
 const FX_WIDTH: f32 = 16.0;
-const FXPARAM_WIDTH: f32 = 24.0;
+const FXPARAM_WIDTH: f32 = 28.0;
 const GLOBAL_REVERB_WIDTH: f32 = 24.0; // Single global reverb column (0-9)
 
 /// Status bar height
@@ -725,7 +725,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             draw_text(&note_str, x + 2.0, y + 14.0, 12.0, note_color);
 
             // Volume (instrument column removed - instrument is per-channel)
-            let vol_str = note.volume.map(|v| format!("{:02X}", v)).unwrap_or_else(|| "--".to_string());
+            let vol_str = note.volume.map(|v| format!("{:3}", v)).unwrap_or_else(|| "---".to_string());
             let vol_color = if note.volume.is_some() { VOL_COLOR } else { TEXT_DIM };
             draw_text(&vol_str, x + NOTE_WIDTH + 2.0, y + 14.0, 12.0, vol_color);
 
@@ -735,7 +735,7 @@ fn draw_pattern_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState) 
             draw_text(&fx_str, x + NOTE_WIDTH + VOL_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
 
             // Effect param
-            let fxp_str = note.effect_param.map(|p| format!("{:02X}", p)).unwrap_or_else(|| "--".to_string());
+            let fxp_str = note.effect_param.map(|p| format!("{:3}", p)).unwrap_or_else(|| "---".to_string());
             draw_text(&fxp_str, x + NOTE_WIDTH + VOL_WIDTH + FX_WIDTH + 2.0, y + 14.0, 12.0, fx_color);
 
             x += CHANNEL_WIDTH;
@@ -1538,9 +1538,9 @@ fn draw_status_bar(rect: Rect, state: &TrackerState) {
             // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param, 4=Global Reverb
             match state.current_column {
                 0 => "Note: Z-/ Q-] piano keys | ` note-off | Del clear",
-                1 => "Volume: 00-7F (hex) | Del clear",
+                1 => "Volume: 0-127 | Del clear",
                 2 => "Effect: 0=Arp 1=SlideUp 2=SlideDown 3=Porta 4=Vib A=VolSlide C=Vol E=Expr M=Mod P=Pan",
-                3 => "Effect Param: 00-FF (hex) | Del clear",
+                3 => "Effect Param: 0-127 | Del clear",
                 _ => "Global Reverb (PS1 SPU): 0=Off 1=Room 2=StudioS 3=StudioM 4=StudioL 5=Hall 6=HalfEcho 7=SpaceEcho 8=Chaos 9=Delay",
             }
         }
@@ -1815,6 +1815,31 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         }
     }
 
+    // Volume entry (in Pattern view, edit mode, volume column = 1)
+    // Type 3 digits for 0-127 (resets on each keypress, last 3 digits kept)
+    // Skip if Ctrl/Cmd is held
+    if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 1 && !ctrl_held {
+        let digit_keys = [
+            (KeyCode::Key0, 0), (KeyCode::Key1, 1), (KeyCode::Key2, 2),
+            (KeyCode::Key3, 3), (KeyCode::Key4, 4), (KeyCode::Key5, 5),
+            (KeyCode::Key6, 6), (KeyCode::Key7, 7), (KeyCode::Key8, 8),
+            (KeyCode::Key9, 9),
+        ];
+
+        for (key, digit) in digit_keys {
+            if is_key_pressed(key) {
+                // Get current volume or 0
+                let current = state.current_pattern()
+                    .and_then(|p| p.get(state.current_channel, state.current_row))
+                    .and_then(|n| n.volume)
+                    .unwrap_or(0) as u16;
+                // Shift left and add new digit, keep last 3 digits, clamp to 127
+                let new_vol = ((current * 10 + digit as u16) % 1000).min(127) as u8;
+                state.set_volume(new_vol);
+            }
+        }
+    }
+
     // Effect entry (in Pattern view, edit mode, effect column = 2)
     // Skip if Ctrl/Cmd is held
     if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 2 && !ctrl_held {
@@ -1838,27 +1863,26 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     }
 
     // Effect parameter entry (in Pattern view, edit mode, fx_param column = 3)
+    // Type digits for 0-255 (shift left and add, keep last 3 digits)
     // Skip if Ctrl/Cmd is held
     if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 3 && !ctrl_held {
-        // Hex digits 0-9, A-F for parameter entry
-        let hex_keys = [
+        let digit_keys = [
             (KeyCode::Key0, 0), (KeyCode::Key1, 1), (KeyCode::Key2, 2),
             (KeyCode::Key3, 3), (KeyCode::Key4, 4), (KeyCode::Key5, 5),
             (KeyCode::Key6, 6), (KeyCode::Key7, 7), (KeyCode::Key8, 8),
             (KeyCode::Key9, 9),
-            (KeyCode::A, 10), (KeyCode::B, 11), (KeyCode::C, 12),
-            (KeyCode::D, 13), (KeyCode::E, 14), (KeyCode::F, 15),
         ];
 
-        for (key, nibble) in hex_keys {
+        for (key, digit) in digit_keys {
             if is_key_pressed(key) {
-                // Shift left and add new nibble (so you type XX as two keypresses)
-                state.set_effect_param_high(state.current_pattern()
+                // Get current param or 0
+                let current = state.current_pattern()
                     .and_then(|p| p.get(state.current_channel, state.current_row))
                     .and_then(|n| n.effect_param)
-                    .map(|p| p & 0x0F)
-                    .unwrap_or(0));
-                state.set_effect_param_low(nibble);
+                    .unwrap_or(0) as u16;
+                // Shift left and add new digit, keep last 3 digits, clamp to 127
+                let new_param = ((current * 10 + digit as u16) % 1000).min(127) as u8;
+                state.set_effect_param(new_param);
             }
         }
     }

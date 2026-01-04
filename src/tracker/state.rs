@@ -687,6 +687,19 @@ impl TrackerState {
         self.dirty = true;
     }
 
+    /// Set effect parameter at cursor (full value 0-127)
+    pub fn set_effect_param(&mut self, value: u8) {
+        let channel = self.current_channel;
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
+                note.effect_param = Some(value.min(127));
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Clear effect at cursor position
     pub fn clear_effect(&mut self) {
         let channel = self.current_channel;
@@ -696,6 +709,32 @@ impl TrackerState {
             if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
                 note.effect = None;
                 note.effect_param = None;
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Set volume at cursor position (0-127)
+    pub fn set_volume(&mut self, volume: u8) {
+        let channel = self.current_channel;
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
+                note.volume = Some(volume.min(127));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Clear volume at cursor position
+    pub fn clear_volume(&mut self) {
+        let channel = self.current_channel;
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            if let Some(note) = pattern.channels.get_mut(channel).and_then(|ch| ch.get_mut(row)) {
+                note.volume = None;
             }
         }
         self.dirty = true;
