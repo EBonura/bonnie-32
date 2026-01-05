@@ -2289,6 +2289,145 @@ pub fn draw_viewport_3d(
         }
     }
 
+    // Draw subtle sector boundary highlight for wall placement
+    // Only show if on the drag line (same check as wall preview)
+    if let Some((grid_x, grid_z, dir, _, _)) = preview_wall {
+        // Check if this sector is on the drag line (if dragging)
+        let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
+            use crate::world::Direction;
+            // Convert preview world coords to grid coords
+            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            // Sector is on the line if direction matches AND the fixed axis matches
+            dir == start_dir && match start_dir {
+                Direction::North | Direction::South => preview_gz == start_gz,
+                Direction::East | Direction::West => preview_gx == start_gx,
+            }
+        } else {
+            true // Not dragging, always show
+        };
+
+        if on_drag_line {
+            let room_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
+
+            let floor_y = room_y;
+            let ceiling_y = room_y + super::CEILING_HEIGHT;
+
+            // Sector corners
+            let corners_floor = [
+                Vec3::new(grid_x, floor_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
+                Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
+            ];
+            let corners_ceiling = [
+                Vec3::new(grid_x, ceiling_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
+                Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
+            ];
+
+            let dim_color = RasterColor::new(50, 120, 110); // Dim teal
+
+            // Draw vertical boundary lines
+            for i in 0..4 {
+                draw_3d_line(fb, corners_floor[i], corners_ceiling[i], &state.camera_3d, dim_color);
+            }
+            // Draw floor boundary
+            for i in 0..4 {
+                draw_3d_line(fb, corners_floor[i], corners_floor[(i + 1) % 4], &state.camera_3d, dim_color);
+            }
+            // Draw ceiling boundary
+            for i in 0..4 {
+                draw_3d_line(fb, corners_ceiling[i], corners_ceiling[(i + 1) % 4], &state.camera_3d, dim_color);
+            }
+        }
+    }
+
+    // Draw subtle sector boundary highlight for diagonal wall placement
+    // Only show if on the drag line (same check as diagonal preview)
+    if let Some((grid_x, grid_z, is_nwse, _)) = preview_diagonal_wall {
+        // Check if this sector is on the drag line (if dragging)
+        let on_drag_line = if let Some((start_gx, start_gz, start_is_nwse)) = state.diagonal_drag_start {
+            // Convert preview world coords to grid coords
+            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            // Diagonal is on the line if type matches AND it's on the simple diagonal line
+            if let Some((end_gx, end_gz, _)) = state.diagonal_drag_current {
+                if is_nwse != start_is_nwse {
+                    false // Wrong diagonal type
+                } else {
+                    // Check if preview point is on the diagonal line from start to end
+                    let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+                    let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+                    let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+                    let mut found = false;
+                    for i in 0..=steps {
+                        let gx = start_gx + sx * i;
+                        let gz = start_gz + sz * i;
+                        if gx == preview_gx && gz == preview_gz {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                }
+            } else {
+                is_nwse == start_is_nwse
+            }
+        } else {
+            true // Not dragging, always show
+        };
+
+        if on_drag_line {
+            let room_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
+
+            let floor_y = room_y;
+            let ceiling_y = room_y + super::CEILING_HEIGHT;
+
+            // Sector corners
+            let corners_floor = [
+                Vec3::new(grid_x, floor_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
+                Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
+            ];
+            let corners_ceiling = [
+                Vec3::new(grid_x, ceiling_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
+                Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
+                Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
+            ];
+
+            let dim_color = RasterColor::new(50, 130, 130); // Dim cyan
+
+            // Draw vertical boundary lines
+            for i in 0..4 {
+                draw_3d_line(fb, corners_floor[i], corners_ceiling[i], &state.camera_3d, dim_color);
+            }
+            // Draw floor boundary
+            for i in 0..4 {
+                draw_3d_line(fb, corners_floor[i], corners_floor[(i + 1) % 4], &state.camera_3d, dim_color);
+            }
+            // Draw ceiling boundary
+            for i in 0..4 {
+                draw_3d_line(fb, corners_ceiling[i], corners_ceiling[(i + 1) % 4], &state.camera_3d, dim_color);
+            }
+        }
+    }
+
     // Draw wall preview when in DrawWall mode (after geometry so depth testing works)
     // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
     // corner_heights: [bottom-left, bottom-right, top-right, top-left] (room-relative)
@@ -2371,11 +2510,11 @@ pub fn draw_viewport_3d(
                 RasterColor::new(80, 200, 180) // Teal - new
             };
 
-            // Draw wall outline (quad with potentially sloped edges) with depth testing
-            draw_3d_line_depth(fb, p0, p1, &state.camera_3d, color);  // bottom edge
-            draw_3d_line_depth(fb, p1, p2, &state.camera_3d, color);  // right edge
-            draw_3d_line_depth(fb, p2, p3, &state.camera_3d, color);  // top edge
-            draw_3d_line_depth(fb, p3, p0, &state.camera_3d, color);  // left edge
+            // Draw wall outline (quad with potentially sloped edges) with depth testing and thickness
+            draw_3d_thick_line_depth(fb, p0, p1, &state.camera_3d, color, 3);  // bottom edge
+            draw_3d_thick_line_depth(fb, p1, p2, &state.camera_3d, color, 3);  // right edge
+            draw_3d_thick_line_depth(fb, p2, p3, &state.camera_3d, color, 3);  // top edge
+            draw_3d_thick_line_depth(fb, p3, p0, &state.camera_3d, color, 3);  // left edge
 
             // Draw vertex indicators at the 4 corners of the wall preview
             let vertex_color = RasterColor::new(255, 255, 255); // White
@@ -2470,13 +2609,13 @@ pub fn draw_viewport_3d(
         // Cyan color for diagonal wall preview
         let color = RasterColor::new(80, 220, 220);
 
-        // Draw diagonal wall outline (quad) with depth testing
-        draw_3d_line_depth(fb, p0, p1, &state.camera_3d, color);  // bottom diagonal edge
-        draw_3d_line_depth(fb, p1, p2, &state.camera_3d, color);  // right edge
-        draw_3d_line_depth(fb, p2, p3, &state.camera_3d, color);  // top diagonal edge
-        draw_3d_line_depth(fb, p3, p0, &state.camera_3d, color);  // left edge
+        // Draw diagonal wall outline (quad) with depth testing and thickness
+        draw_3d_thick_line_depth(fb, p0, p1, &state.camera_3d, color, 3);  // bottom diagonal edge
+        draw_3d_thick_line_depth(fb, p1, p2, &state.camera_3d, color, 3);  // right edge
+        draw_3d_thick_line_depth(fb, p2, p3, &state.camera_3d, color, 3);  // top diagonal edge
+        draw_3d_thick_line_depth(fb, p3, p0, &state.camera_3d, color, 3);  // left edge
         // Cross pattern to indicate diagonal
-        draw_3d_line_depth(fb, p0, p2, &state.camera_3d, color);  // diagonal
+        draw_3d_line_depth(fb, p0, p2, &state.camera_3d, color);  // diagonal (thin - just indicator)
 
         // Draw vertex indicators at the 4 corners of the diagonal wall preview
         let vertex_color = RasterColor::new(255, 255, 255); // White
@@ -3458,6 +3597,81 @@ fn draw_3d_line_depth(
     color: RasterColor,
 ) {
     draw_3d_line_impl(fb, p0, p1, camera, color, true);
+}
+
+/// Draw a thick 3D line with depth testing (for preview highlights)
+fn draw_3d_thick_line_depth(
+    fb: &mut Framebuffer,
+    p0: Vec3,
+    p1: Vec3,
+    camera: &crate::rasterizer::Camera,
+    color: RasterColor,
+    thickness: i32,
+) {
+    if thickness <= 1 {
+        draw_3d_line_impl(fb, p0, p1, camera, color, true);
+        return;
+    }
+
+    const NEAR_PLANE: f32 = 0.1;
+
+    // Transform to camera space
+    let rel0 = p0 - camera.position;
+    let rel1 = p1 - camera.position;
+
+    let z0 = rel0.dot(camera.basis_z);
+    let z1 = rel1.dot(camera.basis_z);
+
+    // Both behind camera - skip entirely
+    if z0 <= NEAR_PLANE && z1 <= NEAR_PLANE {
+        return;
+    }
+
+    // Clip line to near plane if needed
+    let (clipped_p0, clipped_p1) = if z0 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p0 = p0 + (p1 - p0) * t;
+        (new_p0, p1)
+    } else if z1 <= NEAR_PLANE {
+        let t = (NEAR_PLANE - z0) / (z1 - z0);
+        let new_p1 = p0 + (p1 - p0) * t;
+        (p0, new_p1)
+    } else {
+        (p0, p1)
+    };
+
+    // Project to screen
+    let s0 = world_to_screen_with_depth(clipped_p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    let s1 = world_to_screen_with_depth(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+
+    let (Some((x0f, y0f, depth0)), Some((x1f, y1f, depth1))) = (s0, s1) else {
+        return;
+    };
+
+    let x0 = x0f as i32;
+    let y0 = y0f as i32;
+    let x1 = x1f as i32;
+    let y1 = y1f as i32;
+
+    // Calculate perpendicular offset for thickness
+    let dx = (x1 - x0) as f32;
+    let dy = (y1 - y0) as f32;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.001 {
+        return;
+    }
+
+    let half = thickness as f32 * 0.5;
+    let px = -dy / len * half;
+    let py = dx / len * half;
+
+    // Draw multiple parallel lines for thickness
+    for i in 0..thickness {
+        let offset = i as f32 - half + 0.5;
+        let ox = (px * offset / half) as i32;
+        let oy = (py * offset / half) as i32;
+        fb.draw_line_3d_overlay(x0 + ox, y0 + oy, depth0, x1 + ox, y1 + oy, depth1, color);
+    }
 }
 
 fn draw_3d_line_impl(
