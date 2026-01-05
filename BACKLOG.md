@@ -33,17 +33,10 @@ This document tracks planned features, known issues, and future improvements.
 ### World Editor - UI/UX
 
 - [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
-- [ ] **Extended multi-selection**: Current multi-selection is limited. Should support larger selections and more operations.
-- [ ] **Shift+click for range select, Ctrl+click for toggle select**: Standard selection behavior - Shift extends selection range, Ctrl toggles individual items.
-- [ ] **Add deselect functionality**: Currently there's no way to deselect all. Add Escape or click-on-empty to deselect.
-- [ ] **Single click deselects multi-selection**: When you have multiple items selected, clicking on a single cell should deselect everything and select only that cell.
 - [ ] **Gradient fills across cells**: Support linear and spherical gradient fills across multiple selected cells for vertex colors.
 - [ ] **Auto-select room vs room lock**: Automatically select the room the cursor is in, rather than requiring manual room locking.
 - [ ] **Color slider lock**: Add a lock toggle to color sliders to prevent accidental changes.
-- [x] **Double-click reset for color sliders**: Double-click resets slider to default value (gray 16). Works for face colors and vertex colors.
-- [ ] **Fix vertex color removal**: The "remove color" option doesn't work properly for vertex colors.
-- [ ] **Load textures on new level**: When creating a new level, textures aren't loaded automatically. Should load default texture pack.
-- [ ] **Increase texture cache time**: Textures are being unloaded too quickly from cache. Increase the retention time to avoid reloading.
+- [ ] **Increase texture cache time**: Textures are being uwnloaded too quickly from cache. Increase the retention time to avoid reloading.
 
 ---
 
