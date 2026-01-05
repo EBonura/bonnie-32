@@ -96,6 +96,18 @@ pub fn draw_texture_palette(
     let selected_texture = &state.selected_texture;
     let texture_scroll = state.texture_scroll;
 
+    // Enable scissor clipping to content area for partial textures
+    let dpi = screen_dpi_scale();
+    gl_use_default_material();
+    unsafe {
+        get_internal_gl().quad_gl.scissor(Some((
+            (content_rect.x * dpi) as i32,
+            (content_rect.y * dpi) as i32,
+            (content_rect.w * dpi) as i32,
+            (content_rect.h * dpi) as i32,
+        )));
+    }
+
     // Draw texture grid by index to avoid borrowing issues
     for i in 0..texture_count {
         let col = i % cols;
@@ -104,17 +116,12 @@ pub fn draw_texture_palette(
         let x = content_rect.x + THUMB_PADDING + col as f32 * (THUMB_SIZE + THUMB_PADDING);
         let y = content_rect.y + THUMB_PADDING + row as f32 * (THUMB_SIZE + THUMB_PADDING) - texture_scroll;
 
-        // Skip if outside visible area
+        // Skip if completely outside visible area
         if y + THUMB_SIZE < content_rect.y || y > content_rect.bottom() {
             continue;
         }
 
         let thumb_rect = Rect::new(x, y, THUMB_SIZE, THUMB_SIZE);
-
-        // Clip drawing to content area
-        if y < content_rect.y {
-            continue; // Skip partial textures at top
-        }
 
         // Get texture and pack from state
         let (texture, pack_name) = match state.texture_packs.get(selected_pack) {
@@ -125,11 +132,15 @@ pub fn draw_texture_palette(
             None => continue,
         };
 
-        // Check for click (only if fully visible)
-        if y >= content_rect.y && y + THUMB_SIZE <= content_rect.bottom() {
-            if ctx.mouse.clicked(&thumb_rect) {
-                clicked_texture = Some(crate::world::TextureRef::new(pack_name.clone(), texture.name.clone()));
-            }
+        // Check for click - use intersection of thumb_rect with content_rect for partial visibility
+        let visible_rect = Rect::new(
+            thumb_rect.x,
+            thumb_rect.y.max(content_rect.y),
+            thumb_rect.w,
+            (thumb_rect.bottom().min(content_rect.bottom()) - thumb_rect.y.max(content_rect.y)).max(0.0),
+        );
+        if visible_rect.h > 0.0 && ctx.mouse.clicked(&visible_rect) {
+            clicked_texture = Some(crate::world::TextureRef::new(pack_name.clone(), texture.name.clone()));
         }
 
         // Draw texture thumbnail
@@ -162,8 +173,8 @@ pub fn draw_texture_palette(
             );
         }
 
-        // Hover highlight
-        if ctx.mouse.inside(&thumb_rect) && !is_selected {
+        // Hover highlight - check visible portion
+        if ctx.mouse.inside(&visible_rect) && !is_selected {
             draw_rectangle_lines(
                 x - 1.0,
                 y - 1.0,
@@ -174,14 +185,21 @@ pub fn draw_texture_palette(
             );
         }
 
-        // Texture index
-        draw_text(
-            &format!("{}", i),
-            (x + 2.0).floor(),
-            (y + THUMB_SIZE - 2.0).floor(),
-            12.0,
-            Color::from_rgba(255, 255, 255, 200),
-        );
+        // Texture index (only draw if visible)
+        if y + THUMB_SIZE - 2.0 >= content_rect.y && y + THUMB_SIZE - 2.0 <= content_rect.bottom() {
+            draw_text(
+                &format!("{}", i),
+                (x + 2.0).floor(),
+                (y + THUMB_SIZE - 2.0).floor(),
+                12.0,
+                Color::from_rgba(255, 255, 255, 200),
+            );
+        }
+    }
+
+    // Disable scissor clipping
+    unsafe {
+        get_internal_gl().quad_gl.scissor(None);
     }
 
     // Apply clicked texture after loop

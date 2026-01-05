@@ -26,6 +26,10 @@ pub enum EditorAction {
     Exit,           // Close/quit
 }
 
+/// Standard font sizes for consistent UI
+const FONT_SIZE_HEADER: f32 = 14.0;
+const FONT_SIZE_CONTENT: f32 = 12.0;
+const LINE_HEIGHT: f32 = 16.0;
 
 /// Editor layout state (split panel ratios)
 pub struct EditorLayout {
@@ -281,13 +285,18 @@ pub fn draw_editor(
         state.grid_view_mode = GridViewMode::Side;
     }
 
+    // Center 2D view on current room button (right-aligned)
+    if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center 2D view on current room") {
+        state.center_2d_on_current_room();
+    }
+
     draw_grid_view(ctx, grid_view_rect, state);
 
-    draw_panel(room_props_rect, Some("Room"), Color::from_rgba(35, 35, 40, 255));
+    draw_panel(room_props_rect, Some("Rooms"), Color::from_rgba(35, 35, 40, 255));
     draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);
 
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
-    draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input);
+    draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
 
     draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
     draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
@@ -356,19 +365,12 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
-    // Play button
-    if toolbar.icon_button(ctx, icon::PLAY, icon_font, "Play") {
-        action = EditorAction::Play;
-    }
-
-    toolbar.separator();
-
     // Tool buttons (Portal removed - portals are now auto-generated)
     let tools = [
         (icon::MOVE, "Select", EditorTool::Select),
         (icon::SQUARE, "Floor", EditorTool::DrawFloor),
-        (icon::BOX, "Wall", EditorTool::DrawWall),
-        (icon::SLASH, "Diagonal Wall", EditorTool::DrawDiagonalWall),
+        (icon::BRICK_WALL, "Wall", EditorTool::DrawWall),
+        (icon::DIAMOND, "Diagonal Wall", EditorTool::DrawDiagonalWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
         (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
@@ -435,35 +437,70 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
-    // Camera mode toggle
+    // Camera mode toggle (single button that cycles between modes)
     use super::CameraMode;
-    let is_free = state.camera_mode == CameraMode::Free;
-    let is_orbit = state.camera_mode == CameraMode::Orbit;
-
-    if toolbar.icon_button_active(ctx, icon::EYE, icon_font, "Free Camera (WASD)", is_free) {
-        state.camera_mode = CameraMode::Free;
-        state.set_status("Camera: Free (WASD + mouse)", 2.0);
-    }
-    if toolbar.icon_button_active(ctx, icon::ORBIT, icon_font, "Orbit Camera", is_orbit) {
-        state.camera_mode = CameraMode::Orbit;
-        // Update orbit target based on current selection
-        state.update_orbit_target();
-        state.sync_camera_from_orbit();
-        state.set_status("Camera: Orbit (drag to rotate)", 2.0);
+    let (camera_icon, camera_tooltip) = match state.camera_mode {
+        CameraMode::Free => (icon::EYE, "Camera: Free (WASD)"),
+        CameraMode::Orbit => (icon::ORBIT, "Camera: Orbit"),
+    };
+    if toolbar.icon_button(ctx, camera_icon, icon_font, camera_tooltip) {
+        match state.camera_mode {
+            CameraMode::Free => {
+                state.camera_mode = CameraMode::Orbit;
+                state.update_orbit_target();
+                state.sync_camera_from_orbit();
+                state.set_status("Camera: Orbit (drag to rotate)", 2.0);
+            }
+            CameraMode::Orbit => {
+                state.camera_mode = CameraMode::Free;
+                state.set_status("Camera: Free (WASD + mouse)", 2.0);
+            }
+        }
     }
 
     // Room boundaries toggle
-    if toolbar.icon_button_active(ctx, icon::BOX, icon_font, "Show Room Bounds", state.show_room_bounds) {
+    let room_bounds_tooltip = if state.show_room_bounds { "Room Bounds: ON" } else { "Room Bounds: OFF" };
+    if toolbar.icon_button_active(ctx, icon::BOX, icon_font, room_bounds_tooltip, state.show_room_bounds) {
         state.show_room_bounds = !state.show_room_bounds;
         let mode = if state.show_room_bounds { "visible" } else { "hidden" };
         state.set_status(&format!("Room boundaries: {}", mode), 2.0);
     }
 
     // Wireframe toggle
-    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Wireframe", state.raster_settings.wireframe_overlay) {
+    let wireframe_tooltip = if state.raster_settings.wireframe_overlay { "Wireframe: ON" } else { "Wireframe: OFF" };
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, wireframe_tooltip, state.raster_settings.wireframe_overlay) {
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "ON" } else { "OFF" };
         state.set_status(&format!("Wireframe: {}", mode), 2.0);
+    }
+
+    // Backface culling toggle (cycles through 3 states)
+    // State 0: Both sides visible (backface_cull=false)
+    // State 1: Wireframe on back (backface_cull=true, backface_wireframe=true) - default
+    // State 2: Hidden (backface_cull=true, backface_wireframe=false)
+    let (backface_icon, backface_tooltip) = if !state.raster_settings.backface_cull {
+        (icon::EYE, "Backfaces: Both Sides Visible")
+    } else if state.raster_settings.backface_wireframe {
+        (icon::SCAN, "Backfaces: Wireframe")
+    } else {
+        (icon::EYE_OFF, "Backfaces: Hidden")
+    };
+    if toolbar.icon_button(ctx, backface_icon, icon_font, backface_tooltip) {
+        // Cycle to next state
+        if !state.raster_settings.backface_cull {
+            // Was: both visible → Now: wireframe on back
+            state.raster_settings.backface_cull = true;
+            state.raster_settings.backface_wireframe = true;
+            state.set_status("Backfaces: Wireframe", 2.0);
+        } else if state.raster_settings.backface_wireframe {
+            // Was: wireframe → Now: hidden
+            state.raster_settings.backface_wireframe = false;
+            state.set_status("Backfaces: Hidden", 2.0);
+        } else {
+            // Was: hidden → Now: both visible
+            state.raster_settings.backface_cull = false;
+            state.set_status("Backfaces: Both Sides Visible", 2.0);
+        }
     }
 
     toolbar.separator();
@@ -1948,35 +1985,100 @@ fn draw_compact_rgb_sliders(
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
     let mut y = rect.y.floor();
     let x = rect.x.floor();
-    let line_height = 20.0;
+    let icon_btn_size = 14.0;
 
+    // Room list at the top
+    let num_rooms = state.level.rooms.len();
+    let max_visible_rooms = 6; // Show up to 6 rooms before scrolling would be needed
+    let rooms_to_show = num_rooms.min(max_visible_rooms);
+
+    for i in 0..num_rooms {
+        if i >= rooms_to_show {
+            // Show "... and N more" indicator
+            let remaining = num_rooms - rooms_to_show;
+            draw_text(&format!("... +{} more", remaining), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 100, 255));
+            y += LINE_HEIGHT;
+            break;
+        }
+
+        let room = &state.level.rooms[i];
+        let is_selected = i == state.current_room;
+        let is_hidden = state.hidden_rooms.contains(&i);
+
+        let text_color = if is_hidden {
+            Color::from_rgba(80, 80, 80, 255) // Dimmed when hidden
+        } else if is_selected {
+            Color::from_rgba(100, 200, 100, 255)
+        } else {
+            WHITE
+        };
+
+        // Visibility toggle button on the left
+        let vis_btn_rect = Rect::new(x, y + 1.0, icon_btn_size, icon_btn_size);
+        let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
+        let vis_tooltip = if is_hidden { "Show room" } else { "Hide room" };
+        if crate::ui::icon_button(ctx, vis_btn_rect, vis_icon, icon_font, vis_tooltip) {
+            if is_hidden {
+                state.hidden_rooms.remove(&i);
+            } else {
+                state.hidden_rooms.insert(i);
+            }
+        }
+
+        // Room row (clickable area to the right of visibility button)
+        let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size - 6.0, LINE_HEIGHT);
+        if ctx.mouse.clicked(&room_btn_rect) {
+            state.current_room = i;
+        }
+
+        if is_selected {
+            draw_rectangle(room_btn_rect.x.floor(), room_btn_rect.y.floor(), room_btn_rect.w, room_btn_rect.h, Color::from_rgba(60, 80, 60, 255));
+        }
+
+        let sector_count = room.iter_sectors().count();
+        draw_text(&format!("Room {} ({} sectors)", room.id, sector_count), (x + icon_btn_size + 4.0).floor(), (y + 11.0).floor(), FONT_SIZE_CONTENT, text_color);
+        y += LINE_HEIGHT;
+    }
+
+    if num_rooms == 0 {
+        draw_text("No rooms", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
+        y += LINE_HEIGHT;
+    }
+
+    // Separator line
+    y += 6.0;
+    draw_line(x, y, x + rect.w - 4.0, y, 1.0, Color::from_rgba(60, 60, 70, 255));
+    y += 10.0;
+
+    // Properties for selected room
     if let Some(room) = state.current_room() {
-        draw_text(&format!("ID: {}", room.id), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        // Section header
+        draw_text("Properties", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
+        y += LINE_HEIGHT;
 
         draw_text(
-            &format!("Pos: ({:.1}, {:.1}, {:.1})", room.position.x, room.position.y, room.position.z),
-            x, (y + 14.0).floor(), 16.0, WHITE,
+            &format!("Pos: ({:.0}, {:.0}, {:.0})", room.position.x, room.position.y, room.position.z),
+            x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE,
         );
-        y += line_height;
+        y += LINE_HEIGHT;
+
+        draw_text(&format!("Size: {}x{}", room.width, room.depth), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
         // Count sectors
         let sector_count = room.iter_sectors().count();
-        draw_text(&format!("Size: {}x{}", room.width, room.depth), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        draw_text(&format!("Sectors: {}", sector_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
-        draw_text(&format!("Sectors: {}", sector_count), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
-
-        draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
         // Count lights in this room from room objects
         let light_count = room.objects.iter()
             .filter(|obj| obj.is_light())
             .count();
-        draw_text(&format!("Lights: {}", light_count), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        draw_text(&format!("Lights: {}", light_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
         // Ambient light knob
         y += 8.0; // Extra space before knob
@@ -2008,62 +2110,8 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
                 }
             }
         }
-
-        y += knob_radius * 2.0 + 30.0; // Knob height + label + value box
-
-        // Room list
-        y += 10.0;
-        draw_text("Rooms:", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
-        y += line_height;
-
-        let icon_btn_size = 18.0;
-        let num_rooms = state.level.rooms.len();
-
-        for i in 0..num_rooms {
-            let room = &state.level.rooms[i];
-            let is_selected = i == state.current_room;
-            let is_hidden = state.hidden_rooms.contains(&i);
-
-            let text_color = if is_hidden {
-                Color::from_rgba(80, 80, 80, 255) // Dimmed when hidden
-            } else if is_selected {
-                Color::from_rgba(100, 200, 100, 255)
-            } else {
-                WHITE
-            };
-
-            // Visibility toggle button on the left
-            let vis_btn_rect = Rect::new(x, y + 1.0, icon_btn_size, icon_btn_size);
-            let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
-            let vis_tooltip = if is_hidden { "Show room" } else { "Hide room" };
-            if crate::ui::icon_button(ctx, vis_btn_rect, vis_icon, icon_font, vis_tooltip) {
-                if is_hidden {
-                    state.hidden_rooms.remove(&i);
-                } else {
-                    state.hidden_rooms.insert(i);
-                }
-            }
-
-            // Room row (clickable area to the right of visibility button)
-            let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size - 6.0, line_height);
-            if ctx.mouse.clicked(&room_btn_rect) {
-                state.current_room = i;
-            }
-
-            if is_selected {
-                draw_rectangle(room_btn_rect.x.floor(), room_btn_rect.y.floor(), room_btn_rect.w, room_btn_rect.h, Color::from_rgba(60, 80, 60, 255));
-            }
-
-            let sector_count = room.iter_sectors().count();
-            draw_text(&format!("Room {} ({} sectors)", room.id, sector_count), (x + icon_btn_size + 4.0).floor(), (y + 14.0).floor(), 16.0, text_color);
-            y += line_height;
-
-            if y > rect.bottom() - line_height {
-                break;
-            }
-        }
     } else {
-        draw_text("No room selected", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
+        draw_text("No room selected", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
     }
 }
 
@@ -2106,6 +2154,210 @@ fn draw_container_start(
 
     // Header text
     draw_text(header_text, (x + CONTAINER_PADDING).floor(), (y + 15.0).floor(), 14.0, header_color);
+}
+
+/// Apply normal mode to a face within a sector
+fn apply_normal_mode_to_face(
+    level: &mut crate::world::Level,
+    room: usize,
+    x: usize,
+    z: usize,
+    face: &SectorFace,
+    mode: crate::world::FaceNormalMode,
+) {
+    if let Some(r) = level.rooms.get_mut(room) {
+        if let Some(s) = r.get_sector_mut(x, z) {
+            match face {
+                SectorFace::Floor => {
+                    if let Some(f) = &mut s.floor {
+                        f.normal_mode = mode;
+                    }
+                }
+                SectorFace::Ceiling => {
+                    if let Some(c) = &mut s.ceiling {
+                        c.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallNorth(i) => {
+                    if let Some(w) = s.walls_north.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallEast(i) => {
+                    if let Some(w) = s.walls_east.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallSouth(i) => {
+                    if let Some(w) = s.walls_south.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallWest(i) => {
+                    if let Some(w) = s.walls_west.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallNwSe(i) => {
+                    if let Some(w) = s.walls_nwse.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallNeSw(i) => {
+                    if let Some(w) = s.walls_nesw.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply black_transparent to a face within a sector
+fn apply_black_transparent_to_face(
+    level: &mut crate::world::Level,
+    room: usize,
+    x: usize,
+    z: usize,
+    face: &SectorFace,
+    value: bool,
+) {
+    if let Some(r) = level.rooms.get_mut(room) {
+        if let Some(s) = r.get_sector_mut(x, z) {
+            match face {
+                SectorFace::Floor => {
+                    if let Some(f) = &mut s.floor {
+                        f.black_transparent = value;
+                    }
+                }
+                SectorFace::Ceiling => {
+                    if let Some(c) = &mut s.ceiling {
+                        c.black_transparent = value;
+                    }
+                }
+                SectorFace::WallNorth(i) => {
+                    if let Some(w) = s.walls_north.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallEast(i) => {
+                    if let Some(w) = s.walls_east.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallSouth(i) => {
+                    if let Some(w) = s.walls_south.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallWest(i) => {
+                    if let Some(w) = s.walls_west.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallNwSe(i) => {
+                    if let Some(w) = s.walls_nwse.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallNeSw(i) => {
+                    if let Some(w) = s.walls_nesw.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply vertex colors to a face within a sector
+fn apply_vertex_colors_to_face(
+    level: &mut crate::world::Level,
+    room: usize,
+    x: usize,
+    z: usize,
+    face: &SectorFace,
+    vertex_indices: &[usize],
+    color: crate::rasterizer::Color,
+) {
+    if let Some(r) = level.rooms.get_mut(room) {
+        if let Some(s) = r.get_sector_mut(x, z) {
+            match face {
+                SectorFace::Floor => {
+                    if let Some(f) = &mut s.floor {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                f.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::Ceiling => {
+                    if let Some(c) = &mut s.ceiling {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                c.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallNorth(i) => {
+                    if let Some(w) = s.walls_north.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallEast(i) => {
+                    if let Some(w) = s.walls_east.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallSouth(i) => {
+                    if let Some(w) = s.walls_south.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallWest(i) => {
+                    if let Some(w) = s.walls_west.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallNwSe(i) => {
+                    if let Some(w) = s.walls_nwse.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallNeSw(i) => {
+                    if let Some(w) = s.walls_nesw.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Calculate height needed for a horizontal face container
@@ -2504,27 +2756,26 @@ fn draw_horizontal_face_container(
     content_y += btn_size + 4.0;
 
     // Face vertex colors (PS1-style texture modulation)
-    // Show 4 vertex color swatches in a 2x2 grid matching the face corners
-    let swatch_size = 14.0;
+    // Layout: 2x2 vertex swatches on left, color picker on right
+    let swatch_size = 18.0;
     let swatch_spacing = 2.0;
+    let swatches_width = 2.0 * swatch_size + swatch_spacing; // Width of 2x2 grid
+    let picker_offset = swatches_width + 8.0; // Gap between swatches and picker
+
+    // Default to all vertices selected if none are selected
+    if state.selected_vertex_indices.is_empty() {
+        state.selected_vertex_indices = vec![0, 1, 2, 3];
+    }
 
     // Label
-    let is_uniform = face.has_uniform_color();
-    let color_text = if is_uniform {
-        let c = face.colors[0];
-        if c.r == 128 && c.g == 128 && c.b == 128 {
-            String::from("Tint: Neutral")
-        } else {
-            format!("Tint: ({}, {}, {})", c.r, c.g, c.b)
-        }
-    } else {
-        String::from("Tint: Per-vertex")
-    };
-    draw_text(&color_text, content_x.floor(), (content_y + 12.0).floor(), 12.0,
-        macroquad::color::Color::from_rgba(180, 180, 180, 255));
+    draw_text("Vertex Colour", content_x.floor(), (content_y + 12.0).floor(), 12.0,
+        macroquad::color::Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let section_start_y = content_y; // Remember where this section starts
 
     // Draw 4 vertex color swatches in 2x2 grid (NW, NE / SW, SE layout)
-    let grid_x = content_x + 90.0;
+    let grid_x = content_x;
     let vertex_labels = ["NW", "NE", "SW", "SE"];
     let grid_positions = [(0, 0), (1, 0), (0, 1), (1, 1)]; // (col, row)
     let vertex_indices = [0, 1, 3, 2]; // Map grid to corner indices: NW=0, NE=1, SE=2, SW=3
@@ -2533,7 +2784,7 @@ fn draw_horizontal_face_container(
         let vert_idx = vertex_indices[grid_idx];
         let vert_color = face.colors[vert_idx];
         let sx = grid_x + (col as f32) * (swatch_size + swatch_spacing);
-        let sy = content_y + (row as f32) * (swatch_size + swatch_spacing);
+        let sy = section_start_y + (row as f32) * (swatch_size + swatch_spacing);
         let swatch_rect = Rect::new(sx, sy, swatch_size, swatch_size);
 
         // Draw swatch
@@ -2558,10 +2809,13 @@ fn draw_horizontal_face_container(
         draw_rectangle_lines(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
             if is_selected { 2.0 } else { 1.0 }, border_color);
 
-        // Handle click - toggle selection of this vertex
+        // Handle click - toggle selection of this vertex (but don't allow deselecting the last one)
         if hovered && ctx.mouse.left_pressed {
             if is_selected {
-                state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                // Only deselect if there's more than one selected
+                if state.selected_vertex_indices.len() > 1 {
+                    state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                }
             } else {
                 state.selected_vertex_indices.push(vert_idx);
             }
@@ -2578,135 +2832,58 @@ fn draw_horizontal_face_container(
         }
     }
 
-    // Color preset buttons (apply to all vertices)
-    let preset_x = grid_x + 2.0 * (swatch_size + swatch_spacing) + 8.0;
-    let preset_size = 14.0;
-    let preset_spacing = 2.0;
+    // Vertical separator between swatches and picker
+    let separator_x = content_x + swatches_width + 4.0;
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    draw_line(separator_x, section_start_y, separator_x, section_start_y + swatches_height, 1.0,
+        macroquad::color::Color::from_rgba(60, 60, 65, 255));
 
-    // Preset colors: Neutral, Red tint, Blue tint, Green tint, Warm, Cool
-    let presets: [(crate::rasterizer::Color, &str); 6] = [
-        (crate::rasterizer::Color::NEUTRAL, "Neutral (no tint)"),
-        (crate::rasterizer::Color::new(160, 120, 120), "Red tint"),
-        (crate::rasterizer::Color::new(120, 120, 160), "Blue tint"),
-        (crate::rasterizer::Color::new(120, 160, 120), "Green tint"),
-        (crate::rasterizer::Color::new(150, 130, 110), "Warm tint"),
-        (crate::rasterizer::Color::new(110, 130, 150), "Cool tint"),
-    ];
+    // PS1 color picker to the right of vertex swatches
+    let picker_x = content_x + picker_offset;
+    let picker_width = width - CONTAINER_PADDING * 2.0 - picker_offset;
 
-    for (i, (preset_color, tooltip)) in presets.iter().enumerate() {
-        let px = preset_x + (i as f32) * (preset_size + preset_spacing);
-        let preset_rect = Rect::new(px, content_y + 8.0, preset_size, preset_size);
-
-        // Draw preset swatch
-        draw_rectangle(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h,
-            macroquad::color::Color::new(
-                preset_color.r as f32 / 255.0,
-                preset_color.g as f32 / 255.0,
-                preset_color.b as f32 / 255.0,
-                1.0
-            ));
-
-        // Highlight if hovered or all vertices match
-        let all_match = is_uniform && face.colors[0].r == preset_color.r &&
-            face.colors[0].g == preset_color.g && face.colors[0].b == preset_color.b;
-        let hovered = ctx.mouse.inside(&preset_rect);
-        let border_color = if all_match {
-            macroquad::color::Color::from_rgba(0, 200, 200, 255)
-        } else if hovered {
-            macroquad::color::Color::from_rgba(200, 200, 200, 255)
-        } else {
-            macroquad::color::Color::from_rgba(80, 80, 80, 255)
-        };
-        draw_rectangle_lines(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h, 1.0, border_color);
-
-        // Handle click - apply to selected vertices (or all if none selected)
-        if hovered && ctx.mouse.left_pressed {
-            state.save_undo();
-            if let Some(r) = state.level.rooms.get_mut(room_idx) {
-                if let Some(s) = r.get_sector_mut(gx, gz) {
-                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                    if let Some(f) = face_ref {
-                        if state.selected_vertex_indices.is_empty() {
-                            // No vertices selected - apply to all
-                            f.set_uniform_color(*preset_color);
-                        } else {
-                            // Apply only to selected vertices
-                            for &idx in &state.selected_vertex_indices {
-                                if idx < 4 {
-                                    f.colors[idx] = *preset_color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tooltip
-        let target = if state.selected_vertex_indices.is_empty() {
-            "all vertices"
-        } else {
-            "selected vertices"
-        };
-        if hovered {
-            ctx.tooltip = Some(crate::ui::PendingTooltip {
-                text: format!("{} (apply to {})", tooltip, target),
-                x: ctx.mouse.x,
-                y: ctx.mouse.y,
-            });
-        }
-    }
-
-    // PS1 color picker below swatches (for custom colors)
-    content_y += 36.0;
-    let picker_label = if state.selected_vertex_indices.is_empty() {
-        "Custom (all)"
-    } else {
-        "Custom (selected)"
-    };
-
-    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
-    let display_color = if !state.selected_vertex_indices.is_empty() {
+    // Get current color to display in picker (use first selected vertex)
+    let display_color = {
         let idx = state.selected_vertex_indices[0].min(3);
         face.colors[idx]
-    } else {
-        face.colors[0]
     };
 
     let picker_result = draw_ps1_color_picker(
         ctx,
-        content_x,
-        content_y + 14.0,
-        width - CONTAINER_PADDING * 2.0,
+        picker_x,
+        section_start_y,
+        picker_width,
         display_color,
-        picker_label,
+        RasterColor::from_ps1(16, 16, 16),
+        "",
         &mut state.vertex_color_slider,
     );
 
     if let Some(new_color) = picker_result.color {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                if let Some(f) = face_ref {
-                    if state.selected_vertex_indices.is_empty() {
-                        // No vertices selected - apply to all
-                        f.set_uniform_color(new_color);
-                    } else {
-                        // Apply only to selected vertices
-                        for &idx in &state.selected_vertex_indices {
-                            if idx < 4 {
-                                f.colors[idx] = new_color;
-                            }
-                        }
-                    }
+        let vertex_indices = state.selected_vertex_indices.clone();
+        // Apply to primary selection
+        let primary_face = if is_floor { SectorFace::Floor } else { SectorFace::Ceiling };
+        apply_vertex_colors_to_face(&mut state.level, room_idx, gx, gz, &primary_face, &vertex_indices, new_color);
+        // Apply to multi-selection (only matching face types: floors or ceilings)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                let is_matching = match (&face, is_floor) {
+                    (SectorFace::Floor, true) | (SectorFace::Ceiling, false) => true,
+                    _ => false,
+                };
+                if is_matching {
+                    apply_vertex_colors_to_face(&mut state.level, room, x, z, &face, &vertex_indices, new_color);
                 }
             }
         }
     }
 
+    // Advance content_y by the taller of: swatches (2 rows) or picker
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    content_y += swatches_height.max(ps1_color_picker_height()) + 8.0;
+
     // Normal mode 3-way toggle
-    content_y += ps1_color_picker_height() + 14.0 + 8.0;
     draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
     content_y += 16.0;
 
@@ -2718,15 +2895,23 @@ fn draw_horizontal_face_container(
     };
     if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                if let Some(f) = face_ref {
-                    f.normal_mode = match new_mode {
-                        0 => crate::world::FaceNormalMode::Front,
-                        1 => crate::world::FaceNormalMode::Both,
-                        _ => crate::world::FaceNormalMode::Back,
-                    };
+        let mode = match new_mode {
+            0 => crate::world::FaceNormalMode::Front,
+            1 => crate::world::FaceNormalMode::Both,
+            _ => crate::world::FaceNormalMode::Back,
+        };
+        // Apply to primary selection
+        let primary_face = if is_floor { SectorFace::Floor } else { SectorFace::Ceiling };
+        apply_normal_mode_to_face(&mut state.level, room_idx, gx, gz, &primary_face, mode);
+        // Apply to multi-selection (only matching face types: floors or ceilings)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                let is_matching = match (&face, is_floor) {
+                    (SectorFace::Floor, true) | (SectorFace::Ceiling, false) => true,
+                    _ => false,
+                };
+                if is_matching {
+                    apply_normal_mode_to_face(&mut state.level, room, x, z, &face, mode);
                 }
             }
         }
@@ -2744,11 +2929,19 @@ fn draw_horizontal_face_container(
 
     if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                if let Some(f) = face_ref {
-                    f.black_transparent = !f.black_transparent;
+        let new_value = !face.black_transparent;
+        // Apply to primary selection
+        let primary_face = if is_floor { SectorFace::Floor } else { SectorFace::Ceiling };
+        apply_black_transparent_to_face(&mut state.level, room_idx, gx, gz, &primary_face, new_value);
+        // Apply to multi-selection (only matching face types: floors or ceilings)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                let is_matching = match (&face, is_floor) {
+                    (SectorFace::Floor, true) | (SectorFace::Ceiling, false) => true,
+                    _ => false,
+                };
+                if is_matching {
+                    apply_black_transparent_to_face(&mut state.level, room, x, z, &face, new_value);
                 }
             }
         }
@@ -3334,27 +3527,26 @@ fn draw_wall_face_container(
     content_y += btn_size + 4.0;
 
     // Wall vertex colors (PS1-style texture modulation)
-    // Show 4 vertex color swatches in a 2x2 grid (BL, BR / TL, TR layout)
-    let swatch_size = 14.0;
+    // Layout: 2x2 vertex swatches on left, color picker on right
+    let swatch_size = 18.0;
     let swatch_spacing = 2.0;
+    let swatches_width = 2.0 * swatch_size + swatch_spacing; // Width of 2x2 grid
+    let picker_offset = swatches_width + 8.0; // Gap between swatches and picker
+
+    // Default to all vertices selected if none are selected
+    if state.selected_vertex_indices.is_empty() {
+        state.selected_vertex_indices = vec![0, 1, 2, 3];
+    }
 
     // Label
-    let is_uniform = wall.has_uniform_color();
-    let color_text = if is_uniform {
-        let c = wall.colors[0];
-        if c.r == 128 && c.g == 128 && c.b == 128 {
-            String::from("Tint: Neutral")
-        } else {
-            format!("Tint: ({}, {}, {})", c.r, c.g, c.b)
-        }
-    } else {
-        String::from("Tint: Per-vertex")
-    };
-    draw_text(&color_text, content_x.floor(), (content_y + 12.0).floor(), 12.0,
-        macroquad::color::Color::from_rgba(180, 180, 180, 255));
+    draw_text("Vertex Colour", content_x.floor(), (content_y + 12.0).floor(), 12.0,
+        macroquad::color::Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let section_start_y = content_y; // Remember where this section starts
 
     // Draw 4 vertex color swatches in 2x2 grid (TL, TR / BL, BR layout - visual matches wall)
-    let grid_x = content_x + 90.0;
+    let grid_x = content_x;
     let vertex_labels = ["TL", "TR", "BL", "BR"];
     let grid_positions = [(0, 0), (1, 0), (0, 1), (1, 1)]; // (col, row)
     let vertex_indices = [3, 2, 0, 1]; // Map grid to corner indices: BL=0, BR=1, TR=2, TL=3
@@ -3363,7 +3555,7 @@ fn draw_wall_face_container(
         let vert_idx = vertex_indices[grid_idx];
         let vert_color = wall.colors[vert_idx];
         let sx = grid_x + (col as f32) * (swatch_size + swatch_spacing);
-        let sy = content_y + (row as f32) * (swatch_size + swatch_spacing);
+        let sy = section_start_y + (row as f32) * (swatch_size + swatch_spacing);
         let swatch_rect = Rect::new(sx, sy, swatch_size, swatch_size);
 
         // Draw swatch
@@ -3388,10 +3580,13 @@ fn draw_wall_face_container(
         draw_rectangle_lines(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
             if is_selected { 2.0 } else { 1.0 }, border_color);
 
-        // Handle click - toggle selection of this vertex
+        // Handle click - toggle selection of this vertex (but don't allow deselecting the last one)
         if hovered && ctx.mouse.left_pressed {
             if is_selected {
-                state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                // Only deselect if there's more than one selected
+                if state.selected_vertex_indices.len() > 1 {
+                    state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                }
             } else {
                 state.selected_vertex_indices.push(vert_idx);
             }
@@ -3408,133 +3603,59 @@ fn draw_wall_face_container(
         }
     }
 
-    // Color preset buttons (apply to selected vertices or all)
-    let preset_x = grid_x + 2.0 * (swatch_size + swatch_spacing) + 8.0;
-    let preset_size = 14.0;
-    let preset_spacing = 2.0;
+    // Vertical separator between swatches and picker
+    let separator_x = content_x + swatches_width + 4.0;
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    draw_line(separator_x, section_start_y, separator_x, section_start_y + swatches_height, 1.0,
+        macroquad::color::Color::from_rgba(60, 60, 65, 255));
 
-    // Preset colors: Neutral, Red tint, Blue tint, Green tint, Warm, Cool
-    let presets: [(crate::rasterizer::Color, &str); 6] = [
-        (crate::rasterizer::Color::NEUTRAL, "Neutral (no tint)"),
-        (crate::rasterizer::Color::new(160, 120, 120), "Red tint"),
-        (crate::rasterizer::Color::new(120, 120, 160), "Blue tint"),
-        (crate::rasterizer::Color::new(120, 160, 120), "Green tint"),
-        (crate::rasterizer::Color::new(150, 130, 110), "Warm tint"),
-        (crate::rasterizer::Color::new(110, 130, 150), "Cool tint"),
-    ];
+    // PS1 color picker to the right of vertex swatches
+    let picker_x = content_x + picker_offset;
+    let picker_width = width - CONTAINER_PADDING * 2.0 - picker_offset;
 
-    for (i, (preset_color, tooltip)) in presets.iter().enumerate() {
-        let px = preset_x + (i as f32) * (preset_size + preset_spacing);
-        let preset_rect = Rect::new(px, content_y + 8.0, preset_size, preset_size);
-
-        // Draw preset swatch
-        draw_rectangle(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h,
-            macroquad::color::Color::new(
-                preset_color.r as f32 / 255.0,
-                preset_color.g as f32 / 255.0,
-                preset_color.b as f32 / 255.0,
-                1.0
-            ));
-
-        // Highlight if hovered or all vertices match
-        let all_match = is_uniform && wall.colors[0].r == preset_color.r &&
-            wall.colors[0].g == preset_color.g && wall.colors[0].b == preset_color.b;
-        let hovered = ctx.mouse.inside(&preset_rect);
-        let border_color = if all_match {
-            macroquad::color::Color::from_rgba(0, 200, 200, 255)
-        } else if hovered {
-            macroquad::color::Color::from_rgba(200, 200, 200, 255)
-        } else {
-            macroquad::color::Color::from_rgba(80, 80, 80, 255)
-        };
-        draw_rectangle_lines(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h, 1.0, border_color);
-
-        // Handle click - apply to selected vertices (or all if none selected)
-        if hovered && ctx.mouse.left_pressed {
-            state.save_undo();
-            if let Some(r) = state.level.rooms.get_mut(room_idx) {
-                if let Some(s) = r.get_sector_mut(gx, gz) {
-                    if let Some(w) = get_wall_mut(s, &wall_face) {
-                        if state.selected_vertex_indices.is_empty() {
-                            // No vertices selected - apply to all
-                            w.set_uniform_color(*preset_color);
-                        } else {
-                            // Apply only to selected vertices
-                            for &idx in &state.selected_vertex_indices {
-                                if idx < 4 {
-                                    w.colors[idx] = *preset_color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tooltip
-        let target = if state.selected_vertex_indices.is_empty() {
-            "all vertices"
-        } else {
-            "selected vertices"
-        };
-        if hovered {
-            ctx.tooltip = Some(crate::ui::PendingTooltip {
-                text: format!("{} (apply to {})", tooltip, target),
-                x: ctx.mouse.x,
-                y: ctx.mouse.y,
-            });
-        }
-    }
-
-    // PS1 color picker below swatches (for custom colors)
-    content_y += 36.0;
-    let picker_label = if state.selected_vertex_indices.is_empty() {
-        "Custom (all)"
-    } else {
-        "Custom (selected)"
-    };
-
-    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
-    let display_color = if !state.selected_vertex_indices.is_empty() {
+    // Get current color to display in picker (use first selected vertex)
+    let display_color = {
         let idx = state.selected_vertex_indices[0].min(3);
         wall.colors[idx]
-    } else {
-        wall.colors[0]
     };
 
     let picker_result = draw_ps1_color_picker(
         ctx,
-        content_x,
-        content_y + 14.0,
-        width - CONTAINER_PADDING * 2.0,
+        picker_x,
+        section_start_y,
+        picker_width,
         display_color,
-        picker_label,
+        RasterColor::from_ps1(16, 16, 16),
+        "",
         &mut state.vertex_color_slider,
     );
 
     if let Some(new_color) = picker_result.color {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = get_wall_mut(s, &wall_face) {
-                    if state.selected_vertex_indices.is_empty() {
-                        // No vertices selected - apply to all
-                        w.set_uniform_color(new_color);
-                    } else {
-                        // Apply only to selected vertices
-                        for &idx in &state.selected_vertex_indices {
-                            if idx < 4 {
-                                w.colors[idx] = new_color;
-                            }
-                        }
-                    }
+        let vertex_indices = state.selected_vertex_indices.clone();
+        // Apply to primary selection
+        apply_vertex_colors_to_face(&mut state.level, room_idx, gx, gz, &wall_face, &vertex_indices, new_color);
+        // Apply to multi-selection (only wall faces)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                // Check if it's a wall face (any type)
+                let is_wall = matches!(face,
+                    SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+                    SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+                    SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+                );
+                if is_wall {
+                    apply_vertex_colors_to_face(&mut state.level, room, x, z, &face, &vertex_indices, new_color);
                 }
             }
         }
     }
 
+    // Advance content_y by the taller of: swatches (2 rows) or picker
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    content_y += swatches_height.max(ps1_color_picker_height()) + 8.0;
+
     // Normal mode 3-way toggle
-    content_y += ps1_color_picker_height() + 14.0 + 8.0;
     draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
     content_y += 16.0;
 
@@ -3546,14 +3667,24 @@ fn draw_wall_face_container(
     };
     if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = get_wall_mut(s, &wall_face) {
-                    w.normal_mode = match new_mode {
-                        0 => crate::world::FaceNormalMode::Front,
-                        1 => crate::world::FaceNormalMode::Both,
-                        _ => crate::world::FaceNormalMode::Back,
-                    };
+        let mode = match new_mode {
+            0 => crate::world::FaceNormalMode::Front,
+            1 => crate::world::FaceNormalMode::Both,
+            _ => crate::world::FaceNormalMode::Back,
+        };
+        // Apply to primary selection
+        apply_normal_mode_to_face(&mut state.level, room_idx, gx, gz, &wall_face, mode);
+        // Apply to multi-selection (only wall faces)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                // Check if it's a wall face (any type)
+                let is_wall = matches!(face,
+                    SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+                    SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+                    SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+                );
+                if is_wall {
+                    apply_normal_mode_to_face(&mut state.level, room, x, z, &face, mode);
                 }
             }
         }
@@ -3571,10 +3702,20 @@ fn draw_wall_face_container(
 
     if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = get_wall_mut(s, &wall_face) {
-                    w.black_transparent = !w.black_transparent;
+        let new_value = !wall.black_transparent;
+        // Apply to primary selection
+        apply_black_transparent_to_face(&mut state.level, room_idx, gx, gz, &wall_face, new_value);
+        // Apply to multi-selection (only wall faces)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                // Check if it's a wall face (any type)
+                let is_wall = matches!(face,
+                    SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+                    SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+                    SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+                );
+                if is_wall {
+                    apply_black_transparent_to_face(&mut state.level, room, x, z, &face, new_value);
                 }
             }
         }
@@ -3620,14 +3761,14 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
     match &selection {
         super::Selection::None => {
-            draw_text("Nothing selected", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
+            draw_text("Nothing selected", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
         }
         super::Selection::Room(idx) => {
-            draw_text(&format!("Room {}", idx), x, (y + 14.0).floor(), 16.0, WHITE);
+            draw_text(&format!("Room {}", idx), x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
         }
         super::Selection::SectorFace { room, x: gx, z: gz, face } => {
             // Single face selected (from 3D view click)
-            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 14.0).floor(), 14.0, Color::from_rgba(150, 150, 150, 255));
+            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
             y += 24.0;
 
             // Get sector data
@@ -3646,7 +3787,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             );
                             let _ = h + CONTAINER_MARGIN; // Layout positioning for potential future faces
                         } else {
-                            draw_text("(no floor)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
+                            draw_text("(no floor)", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 100, 255));
                         }
                     }
                     super::SectorFace::Ceiling => {
@@ -3658,7 +3799,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             );
                             let _ = h + CONTAINER_MARGIN;
                         } else {
-                            draw_text("(no ceiling)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
+                            draw_text("(no ceiling)", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 100, 255));
                         }
                     }
                     super::SectorFace::WallNorth(i) => {
@@ -3726,10 +3867,102 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
             }
         }
+        super::Selection::Vertex { room, x: gx, z: gz, face, corner_idx } => {
+            // Single vertex selected - show face properties with this vertex highlighted
+            draw_text(&format!("Vertex {} of Sector ({}, {})", corner_idx, gx, gz), x, (y + 14.0).floor(), 14.0, Color::from_rgba(150, 150, 150, 255));
+            y += 24.0;
+
+            // Get sector data
+            let sector_data = state.level.rooms.get(*room)
+                .and_then(|r| r.get_sector(*gx, *gz))
+                .cloned();
+
+            if let Some(sector) = sector_data {
+                // Show the face this vertex belongs to
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(floor) = &sector.floor {
+                            let h = draw_horizontal_face_container(
+                                ctx, x, y, container_width, floor, "Floor",
+                                Color::from_rgba(150, 200, 255, 255),
+                                *room, *gx, *gz, true, state, icon_font
+                            );
+                            let _ = h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(ceiling) = &sector.ceiling {
+                            let h = draw_horizontal_face_container(
+                                ctx, x, y, container_width, ceiling, "Ceiling",
+                                Color::from_rgba(200, 150, 255, 255),
+                                *room, *gx, *gz, false, state, icon_font
+                            );
+                            let _ = h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(wall) = sector.walls_north.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (North)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNorth(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(wall) = sector.walls_east.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (East)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallEast(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(wall) = sector.walls_south.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (South)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallSouth(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(wall) = sector.walls_west.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (West)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallWest(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(wall) = sector.walls_nwse.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (NW-SE)",
+                                Color::from_rgba(255, 200, 150, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNwSe(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(wall) = sector.walls_nesw.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (NE-SW)",
+                                Color::from_rgba(255, 200, 150, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNeSw(*i), state, icon_font
+                            );
+                        }
+                    }
+                }
+            } else {
+                draw_text("Sector not found", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(255, 100, 100, 255));
+            }
+        }
         super::Selection::Sector { room, x: gx, z: gz } => {
             // Whole sector selected (from 2D view click) - show all faces in containers
-            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 14.0).floor(), 16.0, Color::from_rgba(255, 200, 80, 255));
-            y += 24.0;
+            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(255, 200, 80, 255));
+            y += 20.0;
 
             // Get sector data
             let sector_data = state.level.rooms.get(*room)
@@ -3812,11 +4045,11 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     y += h + CONTAINER_MARGIN;
                 }
             } else {
-                draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+                draw_text("Sector not found", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(255, 100, 100, 255));
             }
         }
         super::Selection::Portal { room, portal } => {
-            draw_text(&format!("Portal {} in Room {}", portal, room), x, (y + 14.0).floor(), 16.0, WHITE);
+            draw_text(&format!("Portal {} in Room {}", portal, room), x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
         }
         super::Selection::Edge { room, x: gx, z: gz, face_idx, edge_idx, wall_face } => {
             // Determine face name based on type
@@ -3856,8 +4089,8 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     _ => "West",
                 }
             };
-            draw_text(&format!("{} Edge ({})", face_name, edge_name), x, (y + 14.0).floor(), 16.0, WHITE);
-            y += 24.0;
+            draw_text(&format!("{} Edge ({})", face_name, edge_name), x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
+            y += 20.0;
 
             // Get vertex coordinates
             if let Some(room_data) = state.level.rooms.get(*room) {
@@ -3937,20 +4170,20 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
             if let Some(obj) = obj_opt {
                 let obj_name = obj.object_type.display_name();
-                draw_text(obj_name, x, (y + 14.0).floor(), 16.0, WHITE);
-                y += 24.0;
+                draw_text(obj_name, x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
+                y += 20.0;
 
                 // Location
-                draw_text("Location:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
-                y += 18.0;
+                draw_text("Location:", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
+                y += LINE_HEIGHT;
                 draw_text(&format!("  Room: {}  Sector: ({}, {})",
                     obj_room_idx, obj.sector_x, obj.sector_z),
-                    x, (y + 12.0).floor(), 13.0, WHITE);
-                y += 18.0;
+                    x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+                y += LINE_HEIGHT;
                 draw_text(&format!("  Height: {:.0}  Facing: {:.1}°",
                     obj.height, obj.facing.to_degrees()),
-                    x, (y + 12.0).floor(), 13.0, WHITE);
-                y += 24.0;
+                    x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+                y += 20.0;
 
                 // Type-specific properties
                 match &obj.object_type {
@@ -3963,6 +4196,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             y,
                             container_width - 8.0,
                             *color,
+                            RasterColor::from_ps1(16, 16, 16),
                             "Color",
                             &mut state.light_color_slider,
                         );
@@ -4251,6 +4485,60 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
         super::Selection::None | super::Selection::Room(_) | super::Selection::Portal { .. } => 30.0,
 
         super::Selection::Edge { .. } => 120.0, // Edge header + 2 vertex coords
+
+        super::Selection::Vertex { room, x: gx, z: gz, face, .. } => {
+            // Same as SectorFace - we show the face this vertex belongs to
+            let sector_data = state.level.rooms.get(*room)
+                .and_then(|r| r.get_sector(*gx, *gz));
+
+            let mut height = header_height;
+
+            if let Some(sector) = sector_data {
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(floor) = &sector.floor {
+                            height += horizontal_face_container_height(floor, true) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(ceiling) = &sector.ceiling {
+                            height += horizontal_face_container_height(ceiling, false) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(wall) = sector.walls_north.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(wall) = sector.walls_east.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(wall) = sector.walls_south.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(wall) = sector.walls_west.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(wall) = sector.walls_nwse.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(wall) = sector.walls_nesw.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                }
+            }
+            height
+        }
 
         super::Selection::SectorFace { room, x: gx, z: gz, face } => {
             let sector_data = state.level.rooms.get(*room)

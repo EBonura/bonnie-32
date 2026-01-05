@@ -1,271 +1,92 @@
 # Bonnie Engine
 
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg)]()
 
-**Created by [Emanuele Bonura](https://bonnie-games.itch.io/)**
+A PS1-style game engine and level editor created with the goal of answering: **"How would a Souls-like have looked on a PS1?"**
 
-**Live Demo:** [https://ebonura.github.io/bonnie-engine](https://ebonura.github.io/bonnie-engine)
+**[Live Demo](https://ebonura.github.io/bonnie-engine)** | **[itch.io](https://bonnie-games.itch.io/)** | **[Buy Me a Coffee](https://buymeacoffee.com/bonniegames)**
 
-[GitHub](https://github.com/EBonura/bonnie-engine) | [itch.io](https://bonnie-games.itch.io/) | [Buy Me a Coffee](https://buymeacoffee.com/bonniegames)
+## Description
 
----
+Bonnie Engine is a unified development environment for creating games with authentic PlayStation 1 aesthetics. It includes a software rasterizer that faithfully recreates PS1 hardware limitations, a TR1-style level editor, a music tracker with PS1 SPU reverb emulation, and runs both natively and in the browser via WebAssembly.
 
-## Mission
+### Key Features
 
-Answer the question: **"How would a Souls-like have looked on a PS1?"**
+- **Authentic PS1 Rendering** - Affine texture mapping, vertex snapping, Gouraud shading, 320x240 resolution, no perspective correction
+- **Room-Based Level Editor** - TR1-style sector grid with dual 2D/3D viewports, texture painting, and portal culling
+- **Music Tracker** - 8-channel tracker with 37-key piano, SF2 soundfont support, and 10 authentic PsyQ SDK reverb presets
+- **Cross-Platform** - Runs natively on Windows/macOS/Linux and in browsers via WASM
+- **Gamepad Support** - Full controller support with Elden Ring-style Souls-like controls
 
-## Core Pillars
+## Installation
 
-1. **Unified Development Environment** - Every tool needed to create the game lives alongside the game itself. The editor, renderer, and game logic are one integrated package.
+### Requirements
 
-2. **Cross-Platform First** - Everything runs both in the browser (live demo) and locally (for planned Steam distribution). No compromises on either platform.
+- Rust 1.70+ (for building from source)
+- Cargo
 
-3. **Authentic PS1 Aesthetics** - Every feature serves the goal of recreating genuine PlayStation 1 hardware limitations and visual characteristics.
-
-## Features
-
-### Authentic PS1 Rendering
-- **Affine texture mapping** - Characteristic warpy textures
-- **Vertex snapping** - Jittery vertices at low precision
-- **Gouraud shading** - Smooth per-vertex lighting interpolation
-- **Per-vertex colors** - PS1-style texture modulation (Wipeout track tinting)
-- **Low resolution** - Native 320x240 rendering (toggleable)
-- **No perspective correction** - True to PS1 hardware limitations
-- **Z-sorted room boundaries** - Depth-tested wireframe overlays
-- **PS1 SPU reverb** - Authentic reverb emulation with 10 PsyQ SDK presets (Room, Studio, Hall, Space, Echo, etc.)
-- **Aspect ratio toggle** - Switch between 4:3 and stretch-to-fill viewport
-
-### TR1-Style Level System
-- **Room-based architecture** - Levels divided into connected rooms
-- **Portal culling** - Only render visible rooms through portals
-- **TRLE sector grid** - 1024-unit sectors for precise alignment
-- **Textured geometry** - Multiple texture pack support
-
-### Controller Support
-- **Gamepad input** - Full controller support (gilrs on native, Web Gamepad API on WASM)
-- **Elden Ring controls** - Familiar Souls-like button layout
-- **Unified input** - Seamlessly switch between keyboard and controller
-
-### Modern Editor UI
-
-The editor features a MuseScore-inspired interface design:
-
-- **Tab-based navigation** - Fixed tabs for World Editor, Sound Designer, Tracker, and Game preview
-- **Flat icon buttons** - Clean, minimal toolbar with [Lucide](https://lucide.dev/) icons
-- **Cyan accent color** - Active state highlighting inspired by MuseScore 4
-- **Unified toolbar** - All tools accessible in a single row
-- **Tooltips** - Hover hints for all buttons
-
-#### Dual Viewport System
-- **3D Viewport** - Real-time preview with authentic PS1 rendering
-  - Free camera (WASD + Q/E for height)
-  - Orbit camera mode for focused editing
-  - Vertex height editing (Y-axis only)
-  - Face/edge/vertex selection with hover feedback
-
-- **2D Grid View** - Top-down editing for precise layout
-  - Sector-aligned floor/ceiling placement
-  - Vertex position editing (X/Z plane)
-  - Pan and zoom navigation
-
-#### Editing Tools
-- **Select Mode** - Pick and manipulate vertices, edges, and faces
-- **Multi-select** - Shift+click to select multiple faces, edges, or vertices
-- **Floor Tool** - Place 1024x1024 floor sectors with Shift+drag height adjustment
-- **Ceiling Tool** - Place ceiling sectors with Shift+drag height adjustment
-- **Wall Tool** - Click sector edges to create walls (auto-faces camera)
-- **Edge Dragging** - Select and drag edges on floors, ceilings, and walls to adjust heights
-- **Texture Painting** - Click faces to apply selected texture (applies to all multi-selected faces)
-- **Vertex Linking** - Move coincident vertices together or independently
-- **Face Deletion** - Delete/Backspace removes selected floors, ceilings, and walls
-- **UV Mapping Controls** - Offset, scale, and rotation controls for texture alignment
-
-#### Texture Management
-- Browse multiple texture packs with chevron navigation
-- ~800 textures across 4 included packs
-- Auto-apply textures to new geometry
-- Texture reference system (pack + name)
-- WASM support via build-time manifest generation
-
-#### Workflow Features
-- **Undo/Redo** - Full history for all edits
-- **Cross-platform save/load**
-  - Desktop: Native file dialogs
-  - Browser: Import/Export via download/upload
-- **Level browser** - Browse and load example levels with modal overlay
-- **Live preview** - Test levels with Play button
-- **Status messages** - Contextual feedback for all operations
-
-## Controls
-
-### Editor Mode
-- **Play button**: Test level in game mode
-- **File menu**: Save, Load, Import, Export
-
-#### 3D Viewport
-- Right-click + drag: Rotate camera
-- WASD: Move horizontally
-- Q/E: Move up/down
-- Left-click: Select geometry / Place walls on edges
-- Shift + left-click: Add to multi-selection
-- Drag vertices/edges: Adjust heights (floors, ceilings, walls)
-- Shift + drag: Adjust placement height (Floor/Ceiling/Wall modes)
-- Delete/Backspace: Remove selected face
-
-#### 2D Grid View
-- Left-click: Place floors/ceilings or select geometry
-- Shift + left-click: Add sectors to multi-selection
-- Right-click + drag: Pan view
-- Scroll wheel: Zoom in/out
-- Drag vertices: Reposition on X/Z plane
-
-#### Toolbar
-- **Select**: Choose and drag geometry
-- **Floor**: Place floor sectors (Shift+drag to adjust height)
-- **Wall**: Create walls on sector edges (faces toward camera)
-- **Ceil**: Place ceiling sectors (Shift+drag to adjust height)
-- **Link ON/OFF**: Toggle vertex linking mode
-- **Delete/Backspace**: Remove selected faces
-
-### Game Mode
-
-#### Controller (Elden Ring style)
-- **Left Stick**: Move (relative to camera)
-- **Right Stick**: Rotate camera
-- **A**: Jump
-- **B (hold)**: Sprint
-- **Start**: Options menu
-
-#### Keyboard/Mouse
-- **WASD**: Move
-- **Space**: Jump
-- **Shift (hold)**: Sprint
-- **Right-click + drag**: Rotate camera
-- **Esc/Start**: Options menu
-
-### Music Editor
-- **37-key piano** - 3 octaves with full keyboard mapping
-- **Z to /**: Piano keys (bottom row)
-- **Q to ]**: Piano keys (top row, continues seamlessly)
-- **Numpad +/-**: Octave up/down
-- **Space**: Play/Pause
-- **Esc**: Stop playback
-- **F9/F10**: Edit step down/up
-- **Apostrophe (`)**: Note off
-- **Arrow keys**: Navigate pattern
-- **Home/End**: Jump to start/end of pattern
-- **PS1 reverb knob** - 10 authentic PsyQ SDK presets with wet/dry mix control
-
-## Building
+### Build from Source
 
 ```bash
+git clone https://github.com/EBonura/bonnie-engine.git
+cd bonnie-engine
 cargo run --release
 ```
 
-## Web Build
+### Web Build
 
 ```bash
-# Build for web
 cargo build --release --target wasm32-unknown-unknown
-
-# Serve locally
 python3 -m http.server 8000
+# Open http://localhost:8000 in your browser
 ```
 
-## Texture Credits
+### Pre-built Binaries
 
-This project uses the following free texture packs:
+Download from [itch.io](https://bonnie-games.itch.io/) or the [GitHub Releases](https://github.com/EBonura/bonnie-engine/releases) page.
 
-- **Retro Texture Pack** by Little Martian
-  https://little-martian.itch.io/retro-textures-pack
+## Usage
 
-- **Low Poly 64x64 Textures** by PhobicPaul
-  https://phobicpaul.itch.io/low-poly-64x64-textures
+The engine is organized into tabs accessible from the top bar:
 
-- **Quake-Like Texture Pack** by Level Eleven Games
-  https://level-eleven-games.itch.io/quake-like-texture-pack
+### Home
+Introduction page with FAQ, motivation, and links. Explains the project's goals and how to get started with each tool.
 
-- **Dark Fantasy Townhouse 64x64 Texture Pack** by Level Eleven Games
-  https://level-eleven-games.itch.io/dark-fantasy-townhouse-64x64-texture-pack
+### World Editor
+TRLE-inspired room-based level editor with a sector grid system (1024 world units per sector, 256 units per height click). Features:
+- **2D Grid View**: Top-down, front, or side projection for precise editing
+- **3D Viewport**: Software-rendered preview with free camera or orbit mode
+- **Tools**: Select, Draw Floor, Draw Wall, Draw Diagonal Wall, Draw Ceiling, Place Object
+- **Panels**: Texture palette for painting faces, properties panel for vertex colors and face settings
+- **Portals**: Connect rooms together for seamless traversal
 
-- **Tiny Texture Pack 1, 2, 3** by Screaming Brain Studios
-  https://screamingbrainstudios.itch.io/tiny-texture-pack
-  https://screamingbrainstudios.itch.io/tiny-texture-pack-2
-  https://screamingbrainstudios.itch.io/tiny-texture-pack-3
+### Assets
+PicoCAD-inspired low-poly mesh modeler with a 4-panel viewport layout. Features:
+- **Viewports**: Perspective, Top, Front, Side views (Space to toggle fullscreen)
+- **Selection Modes**: Vertex (1), Edge (2), Face (3)
+- **Transform Tools**: Move (G), Rotate (R), Scale (T) with Blender-style modal editing
+- **Operations**: Extrude faces, OBJ import, shared texture atlas
+- **View Modes**: Build mode for geometry, Texture mode (V) for UV editing
 
-## Backlog
+### Music Tracker
+Pattern-based music tracker inspired by Picotron's design. Features:
+- **8 Channels**: Each with instrument, pan, modulation, and expression controls
+- **Pattern Editor**: Note, volume, and effect columns with keyboard input
+- **Arrangement View**: Sequence patterns into a full song
+- **SF2 Soundfonts**: Load and preview instruments via piano keyboard
+- **PS1 SPU Reverb**: 10 authentic PsyQ SDK reverb presets (Room, Studio, Hall, etc.)
+- **SPU Resampling**: Optional sample rate reduction for authentic lo-fi sound
 
-### Rendering / PS1 Authenticity
- - Controls page should have the "joystick" icon, currently there's just a sad face
-- [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
-- [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face
-- [ ] **Face normal flipping**: In properties panel, allow swapping/flipping face normals
+### Game
+Test your level in real-time with ECS-based game systems. Features:
+- **Camera Modes**: Third-person character follow or free-fly spectator
+- **Controls**: Keyboard/mouse or gamepad with auto-detection (Xbox/PlayStation layouts)
+- **Debug Overlay**: Performance timings, player stats, render breakdown
+- **FPS Limit**: 30 FPS (authentic), 60 FPS, or unlocked
 
----
-
-### World Editor - Geometry
-
-- [ ] Smarter floor/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
-- [ ] We need a way to place rooms on top of each other, maybe the top view can be toggled with a side view?
-- [ ] bigger effort: Tomb raider 3 introduced diagonals which are indeed supported by Open Lara, we'll need those as well
-
----
-
-### Overall / Meta
-
-- [ ] Remove AI/Claude mentions from git history (use `git filter-branch` or BFG Repo Cleaner - backup first!)
-
----
-
-### Rendering Pipeline
-
-- [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights
-
----
-
-### World Editor - 3D Viewport
-
-- [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
-
----
-
-### Music Editor
-
-#### UI/UX
-- [ ] **Text too small**: Everything is very small text-wise. The world editor has better scaling - study that and make text bigger where it makes sense
-- [ ] **Reverb column missing**: Expected reverb type as a separate column on the far right to set the 10 reverb presets. Currently only implemented as `Rxx` effect command in Fx column. Should add a dedicated reverb column.
-- [ ] **Remove "In" (Instrument) column**: The pattern shows "Not In Vl Fx" for each track, but "In" is redundant since instrument is already set per-track in the channel strip
-- [ ] **Help bar at bottom**: Add a help/status bar at the bottom (like world editor). When clicking on a column, show available options there. Highlight the currently selected option.
-- [ ] **Remove global Fx from toolbar**: Since reverb has its own column, the global Fx control at top is redundant
-- [ ] **Per-track sample rate**: PS1 SPU supports per-voice pitch registers (sample rate). Currently Rate is a global lo-fi effect. Need to implement true per-channel pitch control (authentic PS1 behavior).
-
-#### Remaining
-- [ ] Configurable pattern length: Currently hardcoded to 64 rows - should be adjustable
-- [ ] Per-note vs channel FX toggle
-- [ ] Bottom status bar with context-sensitive shortcuts
-
-#### Future
-- [ ] Custom instrument editor: Tab for building custom instruments beyond SF2 soundfonts
-- [ ] **Waveform visualizer**: Add a waveform visualizer somewhere in the UI for visual feedback during playback
-
----
-
-### Assets (Modeler)
-
-#### Known Issues
-- [ ] Drag-to-select box only works in 3D view (not in 2D view)
-- [ ] Selection box overflows from 2D view into 3D viewport when dragging near boundary
-- [ ] Scale and Rotate transform modes not implemented - need to add Move mode first with proper gizmos for each mode
-- [ ] Overview panel is still a stub
-- [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
-
-#### Future
-- [ ] VRAM usage counter: Display usage with warning when exceeded
-
----
-
-### PS1 Technical Reference
+## PS1 Technical Reference
 
 For implementing authentic PS1 constraints:
 
@@ -284,98 +105,46 @@ For implementing authentic PS1 constraints:
 15/16   7/16  13/16   5/16
 ```
 
----
+## CI/CD
 
-## Roadmap
+The project uses GitHub Actions for continuous integration and deployment:
 
-### Priority: Map Creation & Basic Gameplay
-- [ ] Fix 2D grid placement precision (sectors not aligning to clicks)
-- [ ] Slope/ramp tools
+- **Web Deploy**: Every push to `main` automatically builds the WASM version and deploys to [GitHub Pages](https://ebonura.github.io/bonnie-engine) and [itch.io](https://bonnie-games.itch.io/bonnie-engine)
+- **Releases**: When the version in `Cargo.toml` changes, a new GitHub Release is created with pre-built binaries for all platforms (Linux, Windows, macOS Intel/ARM, WASM)
 
-### UI & Settings
-- [ ] Options menu in-game (resolution, PS1 effects toggles)
-- [ ] Resolution selector (240p, 480p, native)
-- [ ] HUD system (health, stamina bars)
+To create a release, simply bump the version in `Cargo.toml` and merge to main.
 
-### Rendering & Effects
-- [ ] Sprite/billboard rendering (classic PS1 technique for enemies, items)
-- [ ] Particle system (dust, sparks, blood splatter)
-- [ ] Fog system (distance-based fade)
+## Support
 
-### Core Systems
-- [ ] Inventory system
-- [ ] Save/load game state
+- **Issues**: [GitHub Issues](https://github.com/EBonura/bonnie-engine/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/EBonura/bonnie-engine/discussions)
 
-### Souls-like Mechanics
-- [ ] Lock-on targeting
-- [ ] Stamina-based combat (attacks, dodges, blocks)
-- [ ] Bonfire checkpoints (rest, respawn, level up)
-- [ ] Death/corpse run mechanics
-- [ ] Boss arenas and encounters
-- [ ] Weapon system (durability, movesets)
-- [ ] Estus flask / healing system
+## Contributing
 
-### Editor QoL
-- [ ] Copy/paste sectors
-- [ ] Grid snapping toggles
-- [ ] Vertex welding/merging tool
-- [ ] Face splitting/subdividing
-- [ ] Selection box (drag to select multiple)
+Contributions are welcome! Please open an issue first to discuss what you'd like to change.
 
-### Level Design Features
-- [ ] Water/liquid volumes (with different rendering)
-- [ ] Trigger volumes (for events, cutscenes)
-- [ ] Ladder/climbing surfaces
-- [ ] Moving platforms
-- [ ] Destructible geometry
-- [ ] Skyboxes (PS1-style low-poly or texture-based)
+## Authors and Acknowledgments
 
-### Enemy/NPC Systems
-- [ ] AI pathfinding
-- [ ] Aggro/detection radius
-- [ ] Attack patterns
-- [ ] Animation state machine
+**Created by [Emanuele Bonura](https://bonnie-games.itch.io/)**
 
-### Performance
-- [ ] Frustum culling optimization
-- [ ] Occlusion culling (beyond portals)
-- [ ] Level streaming for large worlds
+The software rasterizer is based on [tipsy](https://github.com/nkanaev/tipsy) by nkanaev.
 
-### Future Tools (Maybe)
-- [ ] Texture editor integration
-- [ ] Animation tool (for entities/bosses)
-- [ ] Cutscene editor
+### Texture Credits
 
-## Technical Details
-
-- **Engine**: Custom software rasterizer in Rust
-- **UI Framework**: Macroquad for windowing and input
-- **Audio**: rustysynth for SF2 soundfont playback, cpal for native audio output
-- **Icon Font**: [Lucide](https://lucide.dev/) for toolbar icons
-- **Level Format**: RON (Rust Object Notation)
-- **Resolution**: 320x240 (4:3 aspect ratio) or stretch-to-fill
-- **Coordinate System**: Y-up, right-handed
-- **Sector Size**: 1024 units (TRLE standard)
-- **Reverb**: PS1 SPU emulation based on nocash PSX specifications
-
-### WASM Texture Loading
-
-Since WebAssembly can't enumerate directories at runtime, textures are loaded via a manifest system:
-
-1. `build.rs` scans `assets/textures/` at compile time
-2. Generates `assets/textures/manifest.txt` listing all packs and files
-3. WASM runtime loads textures async from the manifest
-4. Native builds still use direct filesystem enumeration
-
-## Acknowledgments
-
-The software rasterizer is based on [tipsy](https://github.com/nkanaev/tipsy), a minimal PS1-style software renderer written in C99 by nkanaev.
+- [Retro Texture Pack](https://little-martian.itch.io/retro-textures-pack) by Little Martian
+- [Low Poly 64x64 Textures](https://phobicpaul.itch.io/low-poly-64x64-textures) by PhobicPaul
+- [Quake-Like Texture Pack](https://level-eleven-games.itch.io/quake-like-texture-pack) by Level Eleven Games
+- [Dark Fantasy Townhouse](https://level-eleven-games.itch.io/dark-fantasy-townhouse-64x64-texture-pack) by Level Eleven Games
+- [Tiny Texture Pack 1](https://screamingbrainstudios.itch.io/tiny-texture-pack), [2](https://screamingbrainstudios.itch.io/tiny-texture-pack-2), [3](https://screamingbrainstudios.itch.io/tiny-texture-pack-3) by Screaming Brain Studios
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
+## Future
 
+- **CPU Usage Counter**: Display PS1 CPU budget usage to help creators stay within authentic hardware limits
 
+## Project Status
 
-
+**Active Development** - This project is under active development. Expect breaking changes between versions.

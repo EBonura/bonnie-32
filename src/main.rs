@@ -804,7 +804,7 @@ async fn main() {
 
             Tool::InputTest => {
                 // Draw controller debug view
-                input::draw_controller_debug(content_rect, &app.input);
+                input::draw_controller_debug(content_rect, &mut app.input);
             }
         }
 

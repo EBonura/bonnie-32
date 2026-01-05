@@ -71,6 +71,10 @@ pub enum Selection {
     Sector { room: usize, x: usize, z: usize },
     /// Specific face within a sector
     SectorFace { room: usize, x: usize, z: usize, face: SectorFace },
+    /// Single vertex of a face
+    /// corner_idx: 0=NW, 1=NE, 2=SE, 3=SW for horizontal faces
+    /// For walls: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
+    Vertex { room: usize, x: usize, z: usize, face: SectorFace, corner_idx: usize },
     /// Edge of a face (two vertices)
     /// face_idx: 0=floor, 1=ceiling, 2=wall
     /// edge_idx: 0-3 for floor/ceiling (north, east, south, west)
@@ -134,6 +138,7 @@ impl Selection {
         match self {
             Selection::Sector { room, x, z } => *room == room_idx && *x == sx && *z == sz,
             Selection::SectorFace { room, x, z, .. } => *room == room_idx && *x == sx && *z == sz,
+            Selection::Vertex { room, x, z, .. } => *room == room_idx && *x == sx && *z == sz,
             _ => false,
         }
     }
@@ -143,6 +148,7 @@ impl Selection {
         match self {
             Selection::Sector { room, x, z } => Some((*room, *x, *z)),
             Selection::SectorFace { room, x, z, .. } => Some((*room, *x, *z)),
+            Selection::Vertex { room, x, z, .. } => Some((*room, *x, *z)),
             _ => None,
         }
     }
@@ -155,6 +161,27 @@ impl Selection {
             // Face selection only matches exact face
             Selection::SectorFace { room, x, z, face: f } => {
                 *room == room_idx && *x == sx && *z == sz && *f == face
+            }
+            // Vertex selection includes its parent face
+            Selection::Vertex { room, x, z, face: f, .. } => {
+                *room == room_idx && *x == sx && *z == sz && *f == face
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if this selection includes a specific vertex
+    pub fn includes_vertex(&self, room_idx: usize, sx: usize, sz: usize, face: SectorFace, corner: usize) -> bool {
+        match self {
+            // Whole sector selection includes all vertices
+            Selection::Sector { room, x, z } => *room == room_idx && *x == sx && *z == sz,
+            // Face selection includes all its vertices
+            Selection::SectorFace { room, x, z, face: f } => {
+                *room == room_idx && *x == sx && *z == sz && *f == face
+            }
+            // Vertex selection matches exact vertex
+            Selection::Vertex { room, x, z, face: f, corner_idx } => {
+                *room == room_idx && *x == sx && *z == sz && *f == face && *corner_idx == corner
             }
             _ => false,
         }
@@ -301,6 +328,24 @@ pub struct EditorState {
     pub height_adjust_start_mouse_y: f32,  // Mouse Y when height adjust started
     pub height_adjust_start_y: f32,        // placement_target_y when height adjust started
     pub height_adjust_locked_pos: Option<(f32, f32)>, // Locked (x, z) position when adjusting
+
+    /// Drag-to-place state (for DrawFloor/DrawCeiling modes)
+    /// Start grid position when drag began (gx, gz)
+    pub placement_drag_start: Option<(i32, i32)>,
+    /// Current grid position during drag (gx, gz)
+    pub placement_drag_current: Option<(i32, i32)>,
+
+    /// Wall drag-to-place state (for DrawWall mode)
+    /// Start position: (grid_x, grid_z, direction)
+    pub wall_drag_start: Option<(i32, i32, crate::world::Direction)>,
+    /// Current position during drag: (grid_x, grid_z, direction)
+    pub wall_drag_current: Option<(i32, i32, crate::world::Direction)>,
+
+    /// Diagonal wall drag-to-place state (for DrawDiagonalWall mode)
+    /// Start position: (grid_x, grid_z, is_nwse)
+    pub diagonal_drag_start: Option<(i32, i32, bool)>,
+    /// Current position during drag: (grid_x, grid_z, is_nwse)
+    pub diagonal_drag_current: Option<(i32, i32, bool)>,
 
     /// Rasterizer settings (PS1 effects)
     pub raster_settings: RasterSettings,
@@ -457,6 +502,12 @@ impl EditorState {
             height_adjust_start_mouse_y: 0.0,
             height_adjust_start_y: 0.0,
             height_adjust_locked_pos: None,
+            placement_drag_start: None,
+            placement_drag_current: None,
+            wall_drag_start: None,
+            wall_drag_current: None,
+            diagonal_drag_start: None,
+            diagonal_drag_current: None,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
             selected_vertex_indices: Vec::new(),
             light_color_slider: None,
@@ -702,7 +753,7 @@ impl EditorState {
                     Vec3::new(center_x, center_y, center_z)
                 })
             }
-            Selection::Sector { room, x, z } | Selection::SectorFace { room, x, z, .. } => {
+            Selection::Sector { room, x, z } | Selection::SectorFace { room, x, z, .. } | Selection::Vertex { room, x, z, .. } => {
                 self.level.rooms.get(*room).and_then(|r| {
                     r.get_sector(*x, *z).map(|sector| {
                         let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;
@@ -805,6 +856,78 @@ impl EditorState {
                     self.texture_scroll = row_y;
                 }
             }
+        }
+    }
+
+    /// Center the 2D grid view on the current room
+    pub fn center_2d_on_current_room(&mut self) {
+        use crate::world::SECTOR_SIZE;
+
+        if let Some(room) = self.level.rooms.get(self.current_room) {
+            // Calculate room center in world coordinates based on view mode
+            let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = room.position.y + (room.bounds.max.y + room.bounds.min.y) / 2.0;
+
+            // The grid view uses: screen_x = center_x + world_a * scale
+            // where center_x = rect.x + rect.w * 0.5 + grid_offset_x
+            // To center on room, we need: screen_center = world_room_center * scale + (rect.center + offset)
+            // So offset = -world_room_center * scale (to put room center at screen center)
+            // But since scale is applied later, we just need offset = -world_room_center * scale
+            // Actually simpler: offset makes the world origin appear at (rect.center + offset)
+            // To center on room at (room_x, room_z), we need offset = -room_center * scale
+
+            let (room_a, room_b) = match self.grid_view_mode {
+                GridViewMode::Top => (center_x, center_z),
+                GridViewMode::Front => (center_x, center_y),
+                GridViewMode::Side => (center_z, center_y),
+            };
+
+            // Set offset to center the room (negative because we want room center at origin)
+            self.grid_offset_x = -room_a * self.grid_zoom;
+            self.grid_offset_y = room_b * self.grid_zoom; // Positive because screen Y is inverted
+        }
+    }
+
+    /// Center the 3D camera on the current room
+    pub fn center_3d_on_current_room(&mut self) {
+        use crate::world::SECTOR_SIZE;
+        use crate::rasterizer::Vec3;
+
+        if let Some(room) = self.level.rooms.get(self.current_room) {
+            // Calculate room center
+            let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = room.position.y + (room.bounds.max.y + room.bounds.min.y) / 2.0;
+
+            // Calculate room size to determine camera distance
+            let room_size_x = room.width as f32 * SECTOR_SIZE;
+            let room_size_z = room.depth as f32 * SECTOR_SIZE;
+            let room_size = room_size_x.max(room_size_z);
+
+            // Position camera above and behind the room center, looking at it
+            let distance = room_size * 1.5;
+            self.camera_3d.position = Vec3::new(
+                center_x,
+                center_y + distance * 0.5,
+                center_z - distance,
+            );
+
+            // Look at room center (calculate rotation angles)
+            let dx = center_x - self.camera_3d.position.x;
+            let dy = center_y - self.camera_3d.position.y;
+            let dz = center_z - self.camera_3d.position.z;
+            let horizontal_dist = (dx * dx + dz * dz).sqrt();
+
+            self.camera_3d.rotation_y = dx.atan2(dz);
+            self.camera_3d.rotation_x = (-dy).atan2(horizontal_dist);
+
+            // Update orbit parameters if in orbit mode
+            self.orbit_target = Vec3::new(center_x, center_y, center_z);
+            self.orbit_distance = distance;
+            self.orbit_azimuth = 0.0;
+            self.orbit_elevation = 0.3; // Slight downward angle
+            self.sync_camera_from_orbit();
         }
     }
 }

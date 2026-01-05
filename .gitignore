@@ -9,3 +9,9 @@ docs/textures/
 
 # Copyrighted PS1 model references (not for distribution)
 assets/meshes/ps1-reference/
+
+# macOS
+.DS_Store
+
+# Personal notes
+notes

@@ -4,20 +4,17 @@
 //! a unified action-based API.
 
 use macroquad::prelude::*;
-use super::{Action, Gamepad, button};
+use super::{Action, Gamepad, button, ControllerType, ButtonLabels};
 
 /// Unified input state that handles both keyboard/mouse and gamepad
 pub struct InputState {
     gamepad: Gamepad,
-    /// Analog stick deadzone (0.0-1.0)
-    pub stick_deadzone: f32,
 }
 
 impl InputState {
     pub fn new() -> Self {
         Self {
             gamepad: Gamepad::new(),
-            stick_deadzone: 0.15,
         }
     }
 
@@ -171,6 +168,31 @@ impl InputState {
     /// Check if any gamepad is connected
     pub fn has_gamepad(&self) -> bool {
         self.gamepad.has_gamepad()
+    }
+
+    /// Get the name of the connected gamepad (empty string if none)
+    pub fn gamepad_name(&self) -> String {
+        self.gamepad.gamepad_name()
+    }
+
+    /// Get the detected controller type based on gamepad name
+    pub fn controller_type(&self) -> ControllerType {
+        ControllerType::from_name(&self.gamepad_name())
+    }
+
+    /// Get button labels for the connected controller
+    pub fn button_labels(&self) -> ButtonLabels {
+        ButtonLabels::new(self.controller_type())
+    }
+
+    /// Get the current stick deadzone (0.0-0.5)
+    pub fn deadzone(&self) -> f32 {
+        self.gamepad.deadzone()
+    }
+
+    /// Set the stick deadzone (clamped to 0.0-0.5)
+    pub fn set_deadzone(&mut self, deadzone: f32) {
+        self.gamepad.set_deadzone(deadzone);
     }
 }
 

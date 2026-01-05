@@ -42,6 +42,7 @@ pub mod icon {
 
     // Editor tools
     pub const BOX: char = '\u{e061}';
+    pub const BRICK_WALL: char = '\u{e581}';      // brick-wall (wall tool)
     pub const LAYERS: char = '\u{e529}';
     pub const GRID: char = '\u{e0e9}';
     pub const DOOR_CLOSED: char = '\u{e09a}';  // Portal (doorway between rooms)
@@ -87,18 +88,19 @@ pub mod icon {
     pub const BOOK_OPEN: char = '\u{e05f}';       // Examples browser
 
     // Level objects
-    pub const MAP_PIN: char = '\u{e110}';         // Object placement (map-pin)
+    pub const MAP_PIN: char = '\u{e111}';         // Object placement (map-pin)
 
     // UV editing
-    pub const FLIP_HORIZONTAL: char = '\u{e219}'; // flip-horizontal-2
-    pub const FLIP_VERTICAL: char = '\u{e21a}';   // flip-vertical-2
-    pub const ROTATE_CW: char = '\u{e147}';       // rotate-cw
+    pub const FLIP_HORIZONTAL: char = '\u{e35d}'; // flip-horizontal
+    pub const FLIP_VERTICAL: char = '\u{e35f}';   // flip-vertical
+    pub const ROTATE_CW: char = '\u{e149}';       // rotate-cw
     pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
     pub const RATIO: char = '\u{e4e8}';           // ratio (1:1 texel mapping)
 
     // Geometry operations
     pub const UNFOLD_VERTICAL: char = '\u{e1a0}'; // unfold-vertical (extrude)
-    pub const SLASH: char = '\u{e261}';           // slash (diagonal wall)
+    pub const SLASH: char = '\u{e261}';           // slash
+    pub const DIAMOND: char = '\u{e2d2}';         // diamond (diagonal wall)
 
     // Camera modes
     pub const EYE: char = '\u{e0ba}';             // Free camera (eye)
@@ -111,6 +113,13 @@ pub mod icon {
 
     // Input / Controller
     pub const GAMEPAD_2: char = '\u{e0df}';       // Gamepad controller
+
+    // View / Focus
+    pub const FOCUS: char = '\u{e29e}';           // Focus / crosshair target
+    pub const SQUARE_SQUARE: char = '\u{e60e}';   // Nested squares / center on selection
+
+    // Close / Cancel
+    pub const CIRCLE_X: char = '\u{e084}';        // Circle with X (close button)
 }
 
 /// Draw a Lucide icon centered in a rect
