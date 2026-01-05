@@ -365,8 +365,8 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     let tools = [
         (icon::MOVE, "Select", EditorTool::Select),
         (icon::SQUARE, "Floor", EditorTool::DrawFloor),
-        (icon::BOX, "Wall", EditorTool::DrawWall),
-        (icon::SLASH, "Diagonal Wall", EditorTool::DrawDiagonalWall),
+        (icon::BRICK_WALL, "Wall", EditorTool::DrawWall),
+        (icon::DIAMOND, "Diagonal Wall", EditorTool::DrawDiagonalWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
         (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
@@ -3852,6 +3852,98 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
             }
         }
+        super::Selection::Vertex { room, x: gx, z: gz, face, corner_idx } => {
+            // Single vertex selected - show face properties with this vertex highlighted
+            draw_text(&format!("Vertex {} of Sector ({}, {})", corner_idx, gx, gz), x, (y + 14.0).floor(), 14.0, Color::from_rgba(150, 150, 150, 255));
+            y += 24.0;
+
+            // Get sector data
+            let sector_data = state.level.rooms.get(*room)
+                .and_then(|r| r.get_sector(*gx, *gz))
+                .cloned();
+
+            if let Some(sector) = sector_data {
+                // Show the face this vertex belongs to
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(floor) = &sector.floor {
+                            let h = draw_horizontal_face_container(
+                                ctx, x, y, container_width, floor, "Floor",
+                                Color::from_rgba(150, 200, 255, 255),
+                                *room, *gx, *gz, true, state, icon_font
+                            );
+                            let _ = h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(ceiling) = &sector.ceiling {
+                            let h = draw_horizontal_face_container(
+                                ctx, x, y, container_width, ceiling, "Ceiling",
+                                Color::from_rgba(200, 150, 255, 255),
+                                *room, *gx, *gz, false, state, icon_font
+                            );
+                            let _ = h + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(wall) = sector.walls_north.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (North)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNorth(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(wall) = sector.walls_east.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (East)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallEast(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(wall) = sector.walls_south.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (South)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallSouth(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(wall) = sector.walls_west.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (West)",
+                                Color::from_rgba(255, 180, 120, 255),
+                                *room, *gx, *gz, super::SectorFace::WallWest(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(wall) = sector.walls_nwse.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (NW-SE)",
+                                Color::from_rgba(255, 200, 150, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNwSe(*i), state, icon_font
+                            );
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(wall) = sector.walls_nesw.get(*i) {
+                            let _ = draw_wall_face_container(
+                                ctx, x, y, container_width, wall, "Wall (NE-SW)",
+                                Color::from_rgba(255, 200, 150, 255),
+                                *room, *gx, *gz, super::SectorFace::WallNeSw(*i), state, icon_font
+                            );
+                        }
+                    }
+                }
+            } else {
+                draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+            }
+        }
         super::Selection::Sector { room, x: gx, z: gz } => {
             // Whole sector selected (from 2D view click) - show all faces in containers
             draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 14.0).floor(), 16.0, Color::from_rgba(255, 200, 80, 255));
@@ -4378,6 +4470,60 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
         super::Selection::None | super::Selection::Room(_) | super::Selection::Portal { .. } => 30.0,
 
         super::Selection::Edge { .. } => 120.0, // Edge header + 2 vertex coords
+
+        super::Selection::Vertex { room, x: gx, z: gz, face, .. } => {
+            // Same as SectorFace - we show the face this vertex belongs to
+            let sector_data = state.level.rooms.get(*room)
+                .and_then(|r| r.get_sector(*gx, *gz));
+
+            let mut height = header_height;
+
+            if let Some(sector) = sector_data {
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(floor) = &sector.floor {
+                            height += horizontal_face_container_height(floor, true) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(ceiling) = &sector.ceiling {
+                            height += horizontal_face_container_height(ceiling, false) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(wall) = sector.walls_north.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(wall) = sector.walls_east.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(wall) = sector.walls_south.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(wall) = sector.walls_west.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(wall) = sector.walls_nwse.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(wall) = sector.walls_nesw.get(*i) {
+                            height += wall_face_container_height(wall) + CONTAINER_MARGIN;
+                        }
+                    }
+                }
+            }
+            height
+        }
 
         super::Selection::SectorFace { room, x: gx, z: gz, face } => {
             let sector_data = state.level.rooms.get(*room)

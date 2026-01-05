@@ -71,6 +71,10 @@ pub enum Selection {
     Sector { room: usize, x: usize, z: usize },
     /// Specific face within a sector
     SectorFace { room: usize, x: usize, z: usize, face: SectorFace },
+    /// Single vertex of a face
+    /// corner_idx: 0=NW, 1=NE, 2=SE, 3=SW for horizontal faces
+    /// For walls: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
+    Vertex { room: usize, x: usize, z: usize, face: SectorFace, corner_idx: usize },
     /// Edge of a face (two vertices)
     /// face_idx: 0=floor, 1=ceiling, 2=wall
     /// edge_idx: 0-3 for floor/ceiling (north, east, south, west)
@@ -134,6 +138,7 @@ impl Selection {
         match self {
             Selection::Sector { room, x, z } => *room == room_idx && *x == sx && *z == sz,
             Selection::SectorFace { room, x, z, .. } => *room == room_idx && *x == sx && *z == sz,
+            Selection::Vertex { room, x, z, .. } => *room == room_idx && *x == sx && *z == sz,
             _ => false,
         }
     }
@@ -143,6 +148,7 @@ impl Selection {
         match self {
             Selection::Sector { room, x, z } => Some((*room, *x, *z)),
             Selection::SectorFace { room, x, z, .. } => Some((*room, *x, *z)),
+            Selection::Vertex { room, x, z, .. } => Some((*room, *x, *z)),
             _ => None,
         }
     }
@@ -155,6 +161,27 @@ impl Selection {
             // Face selection only matches exact face
             Selection::SectorFace { room, x, z, face: f } => {
                 *room == room_idx && *x == sx && *z == sz && *f == face
+            }
+            // Vertex selection includes its parent face
+            Selection::Vertex { room, x, z, face: f, .. } => {
+                *room == room_idx && *x == sx && *z == sz && *f == face
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if this selection includes a specific vertex
+    pub fn includes_vertex(&self, room_idx: usize, sx: usize, sz: usize, face: SectorFace, corner: usize) -> bool {
+        match self {
+            // Whole sector selection includes all vertices
+            Selection::Sector { room, x, z } => *room == room_idx && *x == sx && *z == sz,
+            // Face selection includes all its vertices
+            Selection::SectorFace { room, x, z, face: f } => {
+                *room == room_idx && *x == sx && *z == sz && *f == face
+            }
+            // Vertex selection matches exact vertex
+            Selection::Vertex { room, x, z, face: f, corner_idx } => {
+                *room == room_idx && *x == sx && *z == sz && *f == face && *corner_idx == corner
             }
             _ => false,
         }
@@ -726,7 +753,7 @@ impl EditorState {
                     Vec3::new(center_x, center_y, center_z)
                 })
             }
-            Selection::Sector { room, x, z } | Selection::SectorFace { room, x, z, .. } => {
+            Selection::Sector { room, x, z } | Selection::SectorFace { room, x, z, .. } | Selection::Vertex { room, x, z, .. } => {
                 self.level.rooms.get(*room).and_then(|r| {
                     r.get_sector(*x, *z).map(|sector| {
                         let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;

@@ -42,6 +42,7 @@ pub mod icon {
 
     // Editor tools
     pub const BOX: char = '\u{e061}';
+    pub const BRICK_WALL: char = '\u{e581}';      // brick-wall (wall tool)
     pub const LAYERS: char = '\u{e529}';
     pub const GRID: char = '\u{e0e9}';
     pub const DOOR_CLOSED: char = '\u{e09a}';  // Portal (doorway between rooms)
@@ -87,7 +88,7 @@ pub mod icon {
     pub const BOOK_OPEN: char = '\u{e05f}';       // Examples browser
 
     // Level objects
-    pub const MAP_PIN: char = '\u{e110}';         // Object placement (map-pin)
+    pub const MAP_PIN: char = '\u{e111}';         // Object placement (map-pin)
 
     // UV editing
     pub const FLIP_HORIZONTAL: char = '\u{e35d}'; // flip-horizontal
@@ -98,7 +99,8 @@ pub mod icon {
 
     // Geometry operations
     pub const UNFOLD_VERTICAL: char = '\u{e1a0}'; // unfold-vertical (extrude)
-    pub const SLASH: char = '\u{e261}';           // slash (diagonal wall)
+    pub const SLASH: char = '\u{e261}';           // slash
+    pub const DIAMOND: char = '\u{e2d2}';         // diamond (diagonal wall)
 
     // Camera modes
     pub const EYE: char = '\u{e0ba}';             // Free camera (eye)

@@ -351,13 +351,10 @@ pub fn draw_viewport_3d(
 
             let is_floor = state.tool == EditorTool::DrawFloor;
 
-            // Use placement_target_y, but initialize to sensible default if zero
-            let target_y = if state.placement_target_y == 0.0 && !state.height_adjust_mode {
-                // Default: floor at 0, ceiling at CEILING_HEIGHT
-                if is_floor { 0.0 } else { CEILING_HEIGHT }
-            } else {
-                state.placement_target_y
-            };
+            // For sector detection, always use floor level (0.0) so clicking on the floor
+            // selects the sector where you want to place geometry.
+            // This is more intuitive - you click on the floor to place a ceiling above it.
+            let detection_y = 0.0;
 
             // Find closest sector to mouse cursor (only when not in height adjust mode)
             let (snapped_x, snapped_z) = if let Some((locked_x, locked_z)) = state.height_adjust_locked_pos {
@@ -376,7 +373,7 @@ pub fn draw_viewport_3d(
                     for iz in 0..(search_radius * 2) {
                         let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
                         let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                        let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, target_y, grid_z + SECTOR_SIZE / 2.0);
+                        let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, detection_y, grid_z + SECTOR_SIZE / 2.0);
 
                         if let Some((sx, sy)) = world_to_screen(test_pos, state.camera_3d.position,
                             state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
@@ -784,14 +781,14 @@ pub fn draw_viewport_3d(
             if state.tool == EditorTool::Select {
                 // Priority: vertex > edge > face
                 if let Some((room_idx, gx, gz, corner_idx, face, _)) = hovered_vertex {
-                    // Set selection to the face this vertex belongs to (shows properties panel)
-                    let new_selection = Selection::SectorFace { room: room_idx, x: gx, z: gz, face: face.clone() };
+                    // Create vertex selection (allows proper vertex multi-selection)
+                    let new_selection = Selection::Vertex { room: room_idx, x: gx, z: gz, face: face.clone(), corner_idx };
                     if shift_down {
                         state.toggle_multi_selection(new_selection.clone());
                     } else {
                         state.clear_multi_selection();
                     }
-                    // Save selection for undo, but use direct assignment to preserve vertex index selection
+                    // Save selection for undo
                     state.save_selection_undo();
                     state.selection = new_selection;
 
@@ -814,64 +811,89 @@ pub fn draw_viewport_3d(
                         state.scroll_to_texture(&tex);
                     }
 
-                    // Select this vertex index for color editing (keeps selection, just changes vertex)
+                    // Also update selected_vertex_indices for legacy compatibility
                     state.selected_vertex_indices.clear();
                     state.selected_vertex_indices.push(corner_idx);
 
-                    // Start dragging vertex
+                    // Start dragging vertex (and all multi-selected vertices)
                     state.dragging_sector_vertices.clear();
                     state.drag_initial_heights.clear();
                     state.viewport_drag_started = false;
 
-                    // Store the vertex to drag
-                    state.dragging_sector_vertices.push((room_idx, gx, gz, face, corner_idx));
-
-                    // Get initial height
-                    if let Some(room) = state.level.rooms.get(room_idx) {
-                        if let Some(sector) = room.get_sector(gx, gz) {
-                            let height = match face {
-                                SectorFace::Floor => sector.floor.as_ref().map(|f| f.heights[corner_idx]),
-                                SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.heights[corner_idx]),
-                                SectorFace::WallNorth(i) => sector.walls_north.get(i).map(|w| w.heights[corner_idx]),
-                                SectorFace::WallEast(i) => sector.walls_east.get(i).map(|w| w.heights[corner_idx]),
-                                SectorFace::WallSouth(i) => sector.walls_south.get(i).map(|w| w.heights[corner_idx]),
-                                SectorFace::WallWest(i) => sector.walls_west.get(i).map(|w| w.heights[corner_idx]),
-                                SectorFace::WallNwSe(i) => sector.walls_nwse.get(i).map(|w| w.heights[corner_idx]),
-                                SectorFace::WallNeSw(i) => sector.walls_nesw.get(i).map(|w| w.heights[corner_idx]),
-                            };
-                            if let Some(h) = height {
-                                state.drag_initial_heights.push(h);
-                                state.viewport_drag_plane_y = h;
+                    // Helper to add a vertex to drag list with its initial height
+                    let mut add_vertex_to_drag = |ri: usize, vgx: usize, vgz: usize, vface: SectorFace, ci: usize, level: &crate::world::Level| {
+                        let key = (ri, vgx, vgz, vface.clone(), ci);
+                        if state.dragging_sector_vertices.contains(&key) {
+                            return;
+                        }
+                        if let Some(room) = level.rooms.get(ri) {
+                            if let Some(sector) = room.get_sector(vgx, vgz) {
+                                let height = match &vface {
+                                    SectorFace::Floor => sector.floor.as_ref().map(|f| f.heights[ci]),
+                                    SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.heights[ci]),
+                                    SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.heights[ci]),
+                                    SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.heights[ci]),
+                                    SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.heights[ci]),
+                                    SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.heights[ci]),
+                                    SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).map(|w| w.heights[ci]),
+                                    SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).map(|w| w.heights[ci]),
+                                };
+                                if let Some(h) = height {
+                                    state.dragging_sector_vertices.push(key);
+                                    state.drag_initial_heights.push(h);
+                                }
                             }
                         }
+                    };
+
+                    // Add clicked vertex
+                    add_vertex_to_drag(room_idx, gx, gz, face.clone(), corner_idx, &state.level);
+
+                    // Add all multi-selected vertices
+                    for sel in &state.multi_selection {
+                        if let Selection::Vertex { room, x, z, face: f, corner_idx: ci } = sel {
+                            add_vertex_to_drag(*room, *x, *z, f.clone(), *ci, &state.level);
+                        }
+                    }
+
+                    // Set initial drag plane Y
+                    if !state.drag_initial_heights.is_empty() {
+                        state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
+                            / state.drag_initial_heights.len() as f32;
                     }
 
                     // If linking mode is on, find coincident vertices across ALL rooms
                     if state.link_coincident_vertices {
-                        // Get position of clicked vertex
-                        if let Some((world_pos, _, _, _, _, _)) = all_vertices.iter()
-                            .find(|(_, ri, vgx, vgz, ci, f)| *ri == room_idx && *vgx == gx && *vgz == gz && *ci == corner_idx && *f == face)
-                        {
-                            const EPSILON: f32 = 0.1;
-                            // Search ALL rooms for coincident vertices (cross-room boundary linking)
-                            let all_room_vertices = collect_all_room_vertices(state);
-                            for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
-                                if (pos.x - world_pos.x).abs() < EPSILON &&
-                                   (pos.y - world_pos.y).abs() < EPSILON &&
-                                   (pos.z - world_pos.z).abs() < EPSILON {
+                        let all_room_vertices = collect_all_room_vertices(state);
+                        const EPSILON: f32 = 0.1;
+
+                        // Collect world positions of all currently dragged vertices
+                        let dragged_positions: Vec<Vec3> = state.dragging_sector_vertices.iter()
+                            .filter_map(|(ri, vgx, vgz, vface, ci)| {
+                                all_room_vertices.iter()
+                                    .find(|(_, r, x, z, c, f)| *r == *ri && *x == *vgx && *z == *vgz && *c == *ci && f == vface)
+                                    .map(|(pos, _, _, _, _, _)| *pos)
+                            })
+                            .collect();
+
+                        // Find all coincident vertices
+                        for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
+                            for dragged_pos in &dragged_positions {
+                                if (pos.x - dragged_pos.x).abs() < EPSILON &&
+                                   (pos.y - dragged_pos.y).abs() < EPSILON &&
+                                   (pos.z - dragged_pos.z).abs() < EPSILON {
                                     let key = (*ri, *vgx, *vgz, *vface, *ci);
                                     if !state.dragging_sector_vertices.contains(&key) {
                                         state.dragging_sector_vertices.push(key);
-                                        // Store room-relative height (pos.y is world-space)
                                         let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.y).unwrap_or(0.0);
                                         state.drag_initial_heights.push(pos.y - linked_room_y);
                                     }
+                                    break;
                                 }
                             }
                         }
 
-                        // After finding all linked vertices, set viewport_drag_plane_y to average
-                        // This ensures no jump on first frame when linked vertices have different room-relative heights
+                        // Update drag plane Y with all vertices
                         if !state.drag_initial_heights.is_empty() {
                             state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
                                 / state.drag_initial_heights.len() as f32;
@@ -883,18 +905,14 @@ pub fn draw_viewport_3d(
                     state.drag_initial_heights.clear();
                     state.viewport_drag_started = false;
 
-                    // Convert edge to face selection so properties panel shows face with edge vertices selected
-                    // face_idx: 0=floor, 1=ceiling, 2=wall
-                    let face_for_selection = match face_idx {
-                        0 => SectorFace::Floor,
-                        1 => SectorFace::Ceiling,
-                        _ => wall_face.clone().unwrap_or(SectorFace::Floor),
-                    };
-                    let new_selection = Selection::SectorFace {
+                    // Use Selection::Edge for proper edge multi-selection
+                    let new_selection = Selection::Edge {
                         room: room_idx,
                         x: gx,
                         z: gz,
-                        face: face_for_selection,
+                        face_idx,
+                        edge_idx,
+                        wall_face: wall_face.clone(),
                     };
 
                     if shift_down {
@@ -906,14 +924,19 @@ pub fn draw_viewport_3d(
                             state.clear_multi_selection();
                         }
                     }
-                    // Save selection for undo, but use direct assignment to preserve vertex selection
+                    // Save selection for undo
                     state.save_selection_undo();
                     state.selection = new_selection;
 
                     // Scroll texture palette to show this face's texture
+                    let face_for_texture = match face_idx {
+                        0 => SectorFace::Floor,
+                        1 => SectorFace::Ceiling,
+                        _ => wall_face.clone().unwrap_or(SectorFace::Floor),
+                    };
                     let tex_to_scroll = state.level.rooms.get(room_idx).and_then(|room| {
                         room.get_sector(gx, gz).and_then(|sector| {
-                            match &face_for_selection {
+                            match &face_for_texture {
                                 SectorFace::Floor => sector.floor.as_ref().map(|f| f.texture.clone()),
                                 SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| c.texture.clone()),
                                 SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.texture.clone()),
@@ -943,11 +966,21 @@ pub fn draw_viewport_3d(
                     state.selected_vertex_indices.push(v1);
                     state.selected_vertex_indices.push(v2);
 
-                    // Collect all edges to drag: start with the clicked edge
-                    let mut edges_to_drag: Vec<(usize, usize, usize, usize, usize, Option<SectorFace>)> = Vec::new(); // (room, gx, gz, face_idx, edge_idx, wall_face)
+                    // Collect all edges to drag: start with clicked edge + multi-selected edges
+                    let mut edges_to_drag: Vec<(usize, usize, usize, usize, usize, Option<SectorFace>)> = Vec::new();
 
                     // Add the clicked edge
                     edges_to_drag.push((room_idx, gx, gz, face_idx, edge_idx, wall_face.clone()));
+
+                    // Add all multi-selected edges
+                    for sel in &state.multi_selection {
+                        if let Selection::Edge { room, x, z, face_idx: fi, edge_idx: ei, wall_face: wf } = sel {
+                            let key = (*room, *x, *z, *fi, *ei, wf.clone());
+                            if !edges_to_drag.contains(&key) {
+                                edges_to_drag.push(key);
+                            }
+                        }
+                    }
 
                     // Add vertices for all edges to drag
                     for (r_idx, gx, gz, face_idx, edge_idx, wf) in &edges_to_drag {
@@ -3155,12 +3188,118 @@ pub fn draw_viewport_3d(
                 let is_hovered = hovered_vertex.map_or(false, |(hr, hgx, hgz, hci, hface, _)|
                     hr == *room_idx && hgx == *gx && hgz == *gz && hci == *corner_idx && hface == *face);
 
-                // Only draw vertex dot when hovered (no gray dots for unselected vertices)
-                if is_hovered {
-                    let color = RasterColor::new(255, 200, 150); // Orange when hovered
-                    fb.draw_circle(fb_x as i32, fb_y as i32, 4, color);
+                // Check if this vertex is selected (primary selection)
+                let is_primary_selected = matches!(&state.selection,
+                    Selection::Vertex { room, x, z, face: f, corner_idx: ci }
+                    if *room == *room_idx && *x == *gx && *z == *gz && f == face && *ci == *corner_idx
+                );
+
+                // Check if this vertex is in multi-selection
+                let is_multi_selected = state.multi_selection.iter().any(|sel| {
+                    matches!(sel,
+                        Selection::Vertex { room, x, z, face: f, corner_idx: ci }
+                        if *room == *room_idx && *x == *gx && *z == *gz && f == face && *ci == *corner_idx
+                    )
+                });
+
+                // Determine color based on state
+                let color = if is_primary_selected || is_multi_selected {
+                    RasterColor::new(100, 255, 100) // Green for selected
+                } else if is_hovered {
+                    RasterColor::new(255, 200, 150) // Orange when hovered
+                } else {
+                    continue; // Skip unselected, unhovered vertices
+                };
+
+                let radius = if is_primary_selected { 5 } else if is_multi_selected { 4 } else { 4 };
+                fb.draw_circle(fb_x as i32, fb_y as i32, radius, color);
+            }
+        }
+    }
+
+    // Draw selected edges (primary and multi-selection)
+    // Helper closure to draw an edge
+    let draw_edge_highlight = |fb: &mut Framebuffer, state: &EditorState, room_idx: usize, gx: usize, gz: usize, face_idx: usize, edge_idx: usize, wall_face_opt: &Option<SectorFace>, color: RasterColor| {
+        if let Some(room) = state.level.rooms.get(room_idx) {
+            if let Some(sector) = room.get_sector(gx, gz) {
+                let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+                let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+                let room_y = room.position.y;
+
+                let corners: Option<[Vec3; 4]> = match face_idx {
+                    0 => sector.floor.as_ref().map(|f| [
+                        Vec3::new(base_x, room_y + f.heights[0], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, room_y + f.heights[1], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, room_y + f.heights[2], base_z + SECTOR_SIZE),
+                        Vec3::new(base_x, room_y + f.heights[3], base_z + SECTOR_SIZE),
+                    ]),
+                    1 => sector.ceiling.as_ref().map(|c| [
+                        Vec3::new(base_x, room_y + c.heights[0], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, room_y + c.heights[1], base_z),
+                        Vec3::new(base_x + SECTOR_SIZE, room_y + c.heights[2], base_z + SECTOR_SIZE),
+                        Vec3::new(base_x, room_y + c.heights[3], base_z + SECTOR_SIZE),
+                    ]),
+                    2 => {
+                        if let Some(wf) = wall_face_opt {
+                            let (x0, z0, x1, z1) = match wf {
+                                SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
+                                SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE),
+                                SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE, base_x, base_z),
+                                SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
+                                _ => (0.0, 0.0, 0.0, 0.0),
+                            };
+                            let wall_heights = match wf {
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.heights),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.heights),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.heights),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.heights),
+                                SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).map(|w| w.heights),
+                                SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).map(|w| w.heights),
+                                _ => None,
+                            };
+                            wall_heights.map(|h| [
+                                Vec3::new(x0, room_y + h[0], z0),
+                                Vec3::new(x1, room_y + h[1], z1),
+                                Vec3::new(x1, room_y + h[2], z1),
+                                Vec3::new(x0, room_y + h[3], z0),
+                            ])
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(corners) = corners {
+                    let v0 = corners[edge_idx];
+                    let v1 = corners[(edge_idx + 1) % 4];
+
+                    if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
+                        world_to_screen(v0, state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
+                        world_to_screen(v1, state.camera_3d.position, state.camera_3d.basis_x,
+                            state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height)
+                    ) {
+                        fb.draw_thick_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, 3, color);
+                    }
                 }
             }
+        }
+    };
+
+    // Draw primary selected edge
+    if let Selection::Edge { room, x, z, face_idx, edge_idx, wall_face } = &state.selection {
+        let selected_color = RasterColor::new(100, 255, 100); // Green for selected
+        draw_edge_highlight(fb, state, *room, *x, *z, *face_idx, *edge_idx, wall_face, selected_color);
+    }
+
+    // Draw multi-selected edges
+    for sel in &state.multi_selection {
+        if let Selection::Edge { room, x, z, face_idx, edge_idx, wall_face } = sel {
+            let selected_color = RasterColor::new(100, 255, 100); // Green for selected
+            draw_edge_highlight(fb, state, *room, *x, *z, *face_idx, *edge_idx, wall_face, selected_color);
         }
     }
 
