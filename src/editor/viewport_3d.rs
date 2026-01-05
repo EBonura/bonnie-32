@@ -40,6 +40,132 @@ fn point_to_line_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f
     ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
 }
 
+/// Check if a SectorFace is a wall type (cardinal or diagonal)
+fn is_wall_face(face: &SectorFace) -> bool {
+    matches!(face,
+        SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+        SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+        SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+    )
+}
+
+/// Get the two grid corner endpoints for a wall face
+/// Returns ((x1, z1), (x2, z2)) in grid coordinates (fractional, where corners are at 0 and 1 within sector)
+fn get_wall_endpoints(gx: usize, gz: usize, face: &SectorFace) -> ((i32, i32), (i32, i32)) {
+    // Grid corners for sector (gx, gz):
+    // NW = (gx, gz), NE = (gx+1, gz), SE = (gx+1, gz+1), SW = (gx, gz+1)
+    let gx = gx as i32;
+    let gz = gz as i32;
+    match face {
+        SectorFace::WallNorth(_) => ((gx, gz), (gx + 1, gz)),       // NW to NE
+        SectorFace::WallEast(_) => ((gx + 1, gz), (gx + 1, gz + 1)), // NE to SE
+        SectorFace::WallSouth(_) => ((gx + 1, gz + 1), (gx, gz + 1)), // SE to SW
+        SectorFace::WallWest(_) => ((gx, gz + 1), (gx, gz)),         // SW to NW
+        SectorFace::WallNwSe(_) => ((gx, gz), (gx + 1, gz + 1)),     // NW to SE
+        SectorFace::WallNeSw(_) => ((gx + 1, gz), (gx, gz + 1)),     // NE to SW
+        _ => ((0, 0), (0, 0)), // Not a wall
+    }
+}
+
+/// Find a connected path of walls/diagonals between two wall faces using BFS
+/// Returns the path including start and end, or None if not connected
+fn find_wall_path(
+    room: &crate::world::Room,
+    start_x: usize, start_z: usize, start_face: &SectorFace,
+    end_x: usize, end_z: usize, end_face: &SectorFace
+) -> Option<Vec<(usize, usize, SectorFace)>> {
+    use std::collections::{VecDeque, HashSet, HashMap};
+
+    // Get all walls in the room as (x, z, face, endpoints)
+    let mut all_walls: Vec<(usize, usize, SectorFace, ((i32, i32), (i32, i32)))> = Vec::new();
+
+    for gz in 0..room.depth {
+        for gx in 0..room.width {
+            if let Some(sector) = room.get_sector(gx, gz) {
+                // Cardinal walls
+                for (i, _) in sector.walls_north.iter().enumerate() {
+                    let face = SectorFace::WallNorth(i);
+                    all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                }
+                for (i, _) in sector.walls_east.iter().enumerate() {
+                    let face = SectorFace::WallEast(i);
+                    all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                }
+                for (i, _) in sector.walls_south.iter().enumerate() {
+                    let face = SectorFace::WallSouth(i);
+                    all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                }
+                for (i, _) in sector.walls_west.iter().enumerate() {
+                    let face = SectorFace::WallWest(i);
+                    all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                }
+                // Diagonal walls
+                for (i, _) in sector.walls_nwse.iter().enumerate() {
+                    let face = SectorFace::WallNwSe(i);
+                    all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                }
+                for (i, _) in sector.walls_nesw.iter().enumerate() {
+                    let face = SectorFace::WallNeSw(i);
+                    all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                }
+            }
+        }
+    }
+
+    // Find indices of start and end walls
+    let start_idx = all_walls.iter().position(|(x, z, f, _)| *x == start_x && *z == start_z && *f == *start_face)?;
+    let end_idx = all_walls.iter().position(|(x, z, f, _)| *x == end_x && *z == end_z && *f == *end_face)?;
+
+    if start_idx == end_idx {
+        // Same wall
+        return Some(vec![(start_x, start_z, *start_face)]);
+    }
+
+    // Check if two walls share an endpoint (are connected)
+    let walls_connected = |a: &((i32, i32), (i32, i32)), b: &((i32, i32), (i32, i32))| -> bool {
+        a.0 == b.0 || a.0 == b.1 || a.1 == b.0 || a.1 == b.1
+    };
+
+    // BFS to find shortest path
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut parent: HashMap<usize, usize> = HashMap::new();
+    let mut queue: VecDeque<usize> = VecDeque::new();
+
+    visited.insert(start_idx);
+    queue.push_back(start_idx);
+
+    while let Some(current) = queue.pop_front() {
+        if current == end_idx {
+            // Found path, reconstruct it
+            let mut path = Vec::new();
+            let mut node = end_idx;
+            while node != start_idx {
+                let (x, z, f, _) = &all_walls[node];
+                path.push((*x, *z, *f));
+                node = *parent.get(&node).unwrap();
+            }
+            let (x, z, f, _) = &all_walls[start_idx];
+            path.push((*x, *z, *f));
+            path.reverse();
+            return Some(path);
+        }
+
+        let current_endpoints = &all_walls[current].3;
+
+        // Find all connected walls
+        for (i, (_, _, _, endpoints)) in all_walls.iter().enumerate() {
+            if !visited.contains(&i) && walls_connected(current_endpoints, endpoints) {
+                visited.insert(i);
+                parent.insert(i, current);
+                queue.push_back(i);
+            }
+        }
+    }
+
+    // No path found
+    None
+}
+
 /// Draw the 3D viewport using the software rasterizer
 pub fn draw_viewport_3d(
     ctx: &mut UiContext,
@@ -110,9 +236,10 @@ pub fn draw_viewport_3d(
     }
 
     // Clear selection with Escape key
-    if inside_viewport && is_key_pressed(KeyCode::Escape) && state.selection != Selection::None {
+    if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty()) {
         state.save_selection_undo();
         state.set_selection(Selection::None);
+        state.clear_multi_selection();
         state.set_status("Selection cleared", 0.5);
     }
 
@@ -648,8 +775,9 @@ pub fn draw_viewport_3d(
 
     // Handle clicks and dragging in 3D viewport
     if inside_viewport && !ctx.mouse.right_down {
-        // Detect Shift key for multi-select
+        // Detect modifier keys for selection
         let shift_down = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+        let ctrl_down = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl);
 
         // Start dragging or select on left press
         if ctx.mouse.left_pressed {
@@ -1018,21 +1146,194 @@ pub fn draw_viewport_3d(
                     let new_selection = Selection::SectorFace { room: room_idx, x: gx, z: gz, face };
 
                     if shift_down {
-                        // Shift-click always changes something (toggle)
+                        // Shift-click: rectangular selection for floors and ceilings
                         state.save_selection_undo();
-                        state.toggle_multi_selection(new_selection.clone());
-                        state.set_selection(new_selection.clone());
-                    } else {
-                        // If clicking on something already selected, keep multi-selection for dragging
-                        let clicking_selected = state.selection == new_selection ||
+
+                        // Check if clicking on a floor or ceiling
+                        let is_floor = matches!(face, SectorFace::Floor);
+                        let is_ceiling = matches!(face, SectorFace::Ceiling);
+
+                        if is_floor || is_ceiling {
+                            // Collect all currently selected faces of the same type in the same room
+                            let mut selected_faces: Vec<(usize, usize)> = Vec::new();
+
+                            // Check primary selection
+                            if let Selection::SectorFace { room, x, z, face: sel_face } = &state.selection {
+                                let matches_type = (is_floor && matches!(sel_face, SectorFace::Floor))
+                                    || (is_ceiling && matches!(sel_face, SectorFace::Ceiling));
+                                if *room == room_idx && matches_type {
+                                    selected_faces.push((*x, *z));
+                                }
+                            }
+
+                            // Check multi-selection
+                            for sel in &state.multi_selection {
+                                if let Selection::SectorFace { room, x, z, face: sel_face } = sel {
+                                    let matches_type = (is_floor && matches!(sel_face, SectorFace::Floor))
+                                        || (is_ceiling && matches!(sel_face, SectorFace::Ceiling));
+                                    if *room == room_idx && matches_type && !selected_faces.contains(&(*x, *z)) {
+                                        selected_faces.push((*x, *z));
+                                    }
+                                }
+                            }
+
+                            if !selected_faces.is_empty() {
+                                // Calculate bounding rectangle including the new click
+                                let mut min_x = gx;
+                                let mut max_x = gx;
+                                let mut min_z = gz;
+                                let mut max_z = gz;
+
+                                for (sx, sz) in &selected_faces {
+                                    min_x = min_x.min(*sx);
+                                    max_x = max_x.max(*sx);
+                                    min_z = min_z.min(*sz);
+                                    max_z = max_z.max(*sz);
+                                }
+
+                                // Collect all faces of this type in the rectangle that actually exist
+                                let mut faces_to_select: Vec<(usize, usize)> = Vec::new();
+                                if let Some(room) = state.level.rooms.get(room_idx) {
+                                    for rx in min_x..=max_x {
+                                        for rz in min_z..=max_z {
+                                            if let Some(sector) = room.get_sector(rx, rz) {
+                                                let has_face = if is_floor {
+                                                    sector.floor.is_some()
+                                                } else {
+                                                    sector.ceiling.is_some()
+                                                };
+                                                if has_face {
+                                                    faces_to_select.push((rx, rz));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Clear existing selection and apply new selections
+                                state.clear_multi_selection();
+                                let target_face = if is_floor { SectorFace::Floor } else { SectorFace::Ceiling };
+                                for (i, (rx, rz)) in faces_to_select.into_iter().enumerate() {
+                                    let sel = Selection::SectorFace {
+                                        room: room_idx,
+                                        x: rx,
+                                        z: rz,
+                                        face: target_face
+                                    };
+                                    if i == 0 {
+                                        state.set_selection(sel);
+                                    } else {
+                                        state.multi_selection.push(sel);
+                                    }
+                                }
+                            } else {
+                                // No existing selection of this type, just select this face
+                                state.toggle_multi_selection(new_selection.clone());
+                                state.set_selection(new_selection.clone());
+                            }
+                        } else {
+                            // Check if clicking on any wall type (cardinal or diagonal)
+                            let is_wall = matches!(face,
+                                SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+                                SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+                                SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+                            );
+
+                            if is_wall {
+                                // Find any existing wall/diagonal selection in the same room
+                                let mut existing_wall: Option<(usize, usize, SectorFace)> = None;
+
+                                // Check primary selection
+                                if let Selection::SectorFace { room, x, z, face: sel_face } = &state.selection {
+                                    if *room == room_idx && is_wall_face(sel_face) {
+                                        existing_wall = Some((*x, *z, *sel_face));
+                                    }
+                                }
+
+                                // Check multi-selection if no primary wall found
+                                if existing_wall.is_none() {
+                                    for sel in &state.multi_selection {
+                                        if let Selection::SectorFace { room, x, z, face: sel_face } = sel {
+                                            if *room == room_idx && is_wall_face(sel_face) {
+                                                existing_wall = Some((*x, *z, *sel_face));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some((start_x, start_z, start_face)) = existing_wall {
+                                    // Use BFS to find connected path
+                                    let path = if let Some(room) = state.level.rooms.get(room_idx) {
+                                        find_wall_path(room, start_x, start_z, &start_face, gx, gz, &face)
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(walls_on_path) = path {
+                                        // Clear existing selection and select all walls on path
+                                        state.clear_multi_selection();
+                                        for (i, (wx, wz, wface)) in walls_on_path.into_iter().enumerate() {
+                                            let sel = Selection::SectorFace {
+                                                room: room_idx,
+                                                x: wx,
+                                                z: wz,
+                                                face: wface
+                                            };
+                                            if i == 0 {
+                                                state.set_selection(sel);
+                                            } else {
+                                                state.multi_selection.push(sel);
+                                            }
+                                        }
+                                    } else {
+                                        // No connected path found, just toggle this wall
+                                        state.toggle_multi_selection(new_selection.clone());
+                                        state.set_selection(new_selection.clone());
+                                    }
+                                } else {
+                                    // No existing wall selection, just select this wall
+                                    state.toggle_multi_selection(new_selection.clone());
+                                    state.set_selection(new_selection.clone());
+                                }
+                            } else {
+                                // Not a floor, ceiling, or wall - use standard toggle behavior
+                                state.toggle_multi_selection(new_selection.clone());
+                                state.set_selection(new_selection.clone());
+                            }
+                        }
+                    } else if ctrl_down {
+                        // Ctrl+click: Toggle individual item in multi-selection
+                        state.save_selection_undo();
+
+                        // Check if item was already selected (will be removed)
+                        let was_selected = state.selection == new_selection ||
                             state.multi_selection.contains(&new_selection);
-                        if !clicking_selected {
-                            // Selection will change - save undo first
+
+                        state.toggle_multi_selection(new_selection.clone());
+
+                        if was_selected {
+                            // Item was removed - pick a new primary selection from remaining
+                            if state.selection == new_selection {
+                                if let Some(first) = state.multi_selection.first().cloned() {
+                                    state.selection = first;
+                                } else {
+                                    state.selection = Selection::None;
+                                }
+                            }
+                            // If primary selection is still valid, keep it
+                        } else {
+                            // Item was added - make it the primary selection
+                            state.set_selection(new_selection.clone());
+                        }
+                    } else {
+                        // Regular click: Deselect all, select just this one
+                        // Only save undo if something actually changes
+                        if state.selection != new_selection || !state.multi_selection.is_empty() {
                             state.save_selection_undo();
                             state.clear_multi_selection();
                             state.set_selection(new_selection.clone());
                         }
-                        // If already selected, don't save undo (nothing changes)
                     }
 
                     // Scroll texture palette to show this face's texture
