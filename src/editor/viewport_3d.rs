@@ -4404,6 +4404,13 @@ fn handle_camera_input(
                     state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * gamepad_speed;
                 }
             }
+
+            // Mouse wheel: move forward/backward (like W/S)
+            if inside_viewport && ctx.mouse.scroll != 0.0 {
+                let scroll_speed = if shift_held { 400.0 } else { 100.0 };
+                let direction = if ctx.mouse.scroll > 0.0 { 1.0 } else { -1.0 };
+                state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * direction * scroll_speed;
+            }
         }
 
         CameraMode::Orbit => {
