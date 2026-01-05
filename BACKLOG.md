@@ -22,12 +22,6 @@ This document tracks planned features, known issues, and future improvements.
 
 ---
 
-### Overall / Meta
-
-- [ ] Remove AI/Claude mentions from git history (use `git filter-branch` or BFG Repo Cleaner - backup first!)
-
----
-
 ### Rendering Pipeline
 
 - [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights

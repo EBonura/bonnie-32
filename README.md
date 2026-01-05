@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg)]()
 
-A PS1-style game engine and level editor that answers the question: **"How would a Souls-like have looked on a PS1?"**
+A PS1-style game engine and level editor created with the goal of answering: **"How would a Souls-like have looked on a PS1?"**
 
 **[Live Demo](https://ebonura.github.io/bonnie-engine)** | **[itch.io](https://bonnie-games.itch.io/)** | **[Buy Me a Coffee](https://buymeacoffee.com/bonniegames)**
 
@@ -19,12 +19,6 @@ Bonnie Engine is a unified development environment for creating games with authe
 - **Music Tracker** - 8-channel tracker with 37-key piano, SF2 soundfont support, and 10 authentic PsyQ SDK reverb presets
 - **Cross-Platform** - Runs natively on Windows/macOS/Linux and in browsers via WASM
 - **Gamepad Support** - Full controller support with Elden Ring-style Souls-like controls
-
-## Visuals
-
-![Editor Screenshot](https://img.itch.zone/aW1nLzE4NjM0NTk4LnBuZw==/original/8QWKZW.png)
-
-*World Editor with 3D viewport and texture browser*
 
 ## Installation
 
@@ -55,35 +49,42 @@ Download from [itch.io](https://bonnie-games.itch.io/) or the [GitHub Releases](
 
 ## Usage
 
+The engine is organized into tabs accessible from the top bar:
+
+### Home
+Introduction page with FAQ, motivation, and links. Explains the project's goals and how to get started with each tool.
+
 ### World Editor
+TRLE-inspired room-based level editor with a sector grid system (1024 world units per sector, 256 units per height click). Features:
+- **2D Grid View**: Top-down, front, or side projection for precise editing
+- **3D Viewport**: Software-rendered preview with free camera or orbit mode
+- **Tools**: Select, Draw Floor, Draw Wall, Draw Diagonal Wall, Draw Ceiling, Place Object
+- **Panels**: Texture palette for painting faces, properties panel for vertex colors and face settings
+- **Portals**: Connect rooms together for seamless traversal
 
-| Input | Action |
-|-------|--------|
-| WASD | Move camera |
-| Q/E | Camera up/down |
-| Right-click + drag | Rotate camera |
-| Left-click | Select / Place geometry |
-| Shift + click | Multi-select |
-| Delete | Remove selected |
-
-### Game Mode
-
-| Input | Controller | Action |
-|-------|------------|--------|
-| WASD | Left Stick | Move |
-| Space | A / Cross | Jump |
-| Shift | B / Circle | Sprint |
-| Mouse | Right Stick | Camera |
+### Assets
+PicoCAD-inspired low-poly mesh modeler with a 4-panel viewport layout. Features:
+- **Viewports**: Perspective, Top, Front, Side views (Space to toggle fullscreen)
+- **Selection Modes**: Vertex (1), Edge (2), Face (3)
+- **Transform Tools**: Move (G), Rotate (R), Scale (T) with Blender-style modal editing
+- **Operations**: Extrude faces, OBJ import, shared texture atlas
+- **View Modes**: Build mode for geometry, Texture mode (V) for UV editing
 
 ### Music Tracker
+Pattern-based music tracker inspired by Picotron's design. Features:
+- **8 Channels**: Each with instrument, pan, modulation, and expression controls
+- **Pattern Editor**: Note, volume, and effect columns with keyboard input
+- **Arrangement View**: Sequence patterns into a full song
+- **SF2 Soundfonts**: Load and preview instruments via piano keyboard
+- **PS1 SPU Reverb**: 10 authentic PsyQ SDK reverb presets (Room, Studio, Hall, etc.)
+- **SPU Resampling**: Optional sample rate reduction for authentic lo-fi sound
 
-| Input | Action |
-|-------|--------|
-| Z to / | Piano keys (lower octave) |
-| Q to ] | Piano keys (upper octaves) |
-| Space | Play/Pause |
-| Arrow keys | Navigate pattern |
-| Numpad +/- | Octave up/down |
+### Game
+Test your level in real-time with ECS-based game systems. Features:
+- **Camera Modes**: Third-person character follow or free-fly spectator
+- **Controls**: Keyboard/mouse or gamepad with auto-detection (Xbox/PlayStation layouts)
+- **Debug Overlay**: Performance timings, player stats, render breakdown
+- **FPS Limit**: 30 FPS (authentic), 60 FPS, or unlocked
 
 ## Roadmap
 
