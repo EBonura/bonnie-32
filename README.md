@@ -105,6 +105,15 @@ For implementing authentic PS1 constraints:
 15/16   7/16  13/16   5/16
 ```
 
+## CI/CD
+
+The project uses GitHub Actions for continuous integration and deployment:
+
+- **Web Deploy**: Every push to `main` automatically builds the WASM version and deploys to [GitHub Pages](https://ebonura.github.io/bonnie-engine) and [itch.io](https://bonnie-games.itch.io/bonnie-engine)
+- **Releases**: When the version in `Cargo.toml` changes, a new GitHub Release is created with pre-built binaries for all platforms (Linux, Windows, macOS Intel/ARM, WASM)
+
+To create a release, simply bump the version in `Cargo.toml` and merge to main.
+
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/EBonura/bonnie-engine/issues)
