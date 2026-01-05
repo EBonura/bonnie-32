@@ -428,21 +428,25 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
-    // Camera mode toggle
+    // Camera mode toggle (single button that cycles between modes)
     use super::CameraMode;
-    let is_free = state.camera_mode == CameraMode::Free;
-    let is_orbit = state.camera_mode == CameraMode::Orbit;
-
-    if toolbar.icon_button_active(ctx, icon::EYE, icon_font, "Free Camera (WASD)", is_free) {
-        state.camera_mode = CameraMode::Free;
-        state.set_status("Camera: Free (WASD + mouse)", 2.0);
-    }
-    if toolbar.icon_button_active(ctx, icon::ORBIT, icon_font, "Orbit Camera", is_orbit) {
-        state.camera_mode = CameraMode::Orbit;
-        // Update orbit target based on current selection
-        state.update_orbit_target();
-        state.sync_camera_from_orbit();
-        state.set_status("Camera: Orbit (drag to rotate)", 2.0);
+    let (camera_icon, camera_tooltip) = match state.camera_mode {
+        CameraMode::Free => (icon::EYE, "Camera: Free (WASD)"),
+        CameraMode::Orbit => (icon::ORBIT, "Camera: Orbit"),
+    };
+    if toolbar.icon_button(ctx, camera_icon, icon_font, camera_tooltip) {
+        match state.camera_mode {
+            CameraMode::Free => {
+                state.camera_mode = CameraMode::Orbit;
+                state.update_orbit_target();
+                state.sync_camera_from_orbit();
+                state.set_status("Camera: Orbit (drag to rotate)", 2.0);
+            }
+            CameraMode::Orbit => {
+                state.camera_mode = CameraMode::Free;
+                state.set_status("Camera: Free (WASD + mouse)", 2.0);
+            }
+        }
     }
 
     // Room boundaries toggle
