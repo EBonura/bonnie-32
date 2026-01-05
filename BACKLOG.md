@@ -34,7 +34,6 @@ This document tracks planned features, known issues, and future improvements.
 
 - [ ] **Preserve existing textures when changing texture pack**: Currently switching texture packs deletes loaded textures. Should add new textures while keeping existing ones.
 - [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
-- [ ] **Fix texture selection visibility**: Textures that aren't fully visible in the browser can't be selected. Fix click detection for partially visible textures.
 - [ ] **2D view auto-center on current room**: The 2D grid view should center on the currently selected room. Also auto-center in 3D editor when switching rooms.
 - [ ] **Extended multi-selection**: Current multi-selection is limited. Should support larger selections and more operations.
 - [ ] **Shift+click for range select, Ctrl+click for toggle select**: Standard selection behavior - Shift extends selection range, Ctrl toggles individual items.
