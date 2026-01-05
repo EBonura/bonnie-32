@@ -944,12 +944,12 @@ fn get_key_label(offset: u8) -> Option<&'static str> {
         10 => Some("J"), 11 => Some("M"), 12 => Some(","), 13 => Some("L"), 14 => Some("."),
         15 => Some(";"), 16 => Some("/"),
         // Top row: Q to ] (semitones 17-36: F to C)
-        // Pattern:  2  3  4     5  6  7     8  9  0
+        // Pattern:  2  3  4     6  7     9  0  -
         //          Q  W  E  R  T  Y  U  I  O  P  [  ]
         17 => Some("Q"), 18 => Some("2"), 19 => Some("W"), 20 => Some("3"), 21 => Some("E"),
-        22 => Some("4"), 23 => Some("R"), 24 => Some("T"), 25 => Some("5"), 26 => Some("Y"),
-        27 => Some("6"), 28 => Some("U"), 29 => Some("I"), 30 => Some("8"), 31 => Some("O"),
-        32 => Some("9"), 33 => Some("P"), 34 => Some("0"), 35 => Some("["), 36 => Some("]"),
+        22 => Some("4"), 23 => Some("R"), 24 => Some("T"), 25 => Some("6"), 26 => Some("Y"),
+        27 => Some("7"), 28 => Some("U"), 29 => Some("I"), 30 => Some("9"), 31 => Some("O"),
+        32 => Some("0"), 33 => Some("P"), 34 => Some("-"), 35 => Some("["), 36 => Some("]"),
         _ => None,
     }
 }
@@ -967,9 +967,9 @@ fn is_note_key_down(offset: u8) -> bool {
         // Top row: Q to ] (semitones 17-36)
         17 => Some(KeyCode::Q), 18 => Some(KeyCode::Key2), 19 => Some(KeyCode::W), 20 => Some(KeyCode::Key3),
         21 => Some(KeyCode::E), 22 => Some(KeyCode::Key4), 23 => Some(KeyCode::R), 24 => Some(KeyCode::T),
-        25 => Some(KeyCode::Key5), 26 => Some(KeyCode::Y), 27 => Some(KeyCode::Key6), 28 => Some(KeyCode::U),
-        29 => Some(KeyCode::I), 30 => Some(KeyCode::Key8), 31 => Some(KeyCode::O), 32 => Some(KeyCode::Key9),
-        33 => Some(KeyCode::P), 34 => Some(KeyCode::Key0), 35 => Some(KeyCode::LeftBracket),
+        25 => Some(KeyCode::Key6), 26 => Some(KeyCode::Y), 27 => Some(KeyCode::Key7), 28 => Some(KeyCode::U),
+        29 => Some(KeyCode::I), 30 => Some(KeyCode::Key9), 31 => Some(KeyCode::O), 32 => Some(KeyCode::Key0),
+        33 => Some(KeyCode::P), 34 => Some(KeyCode::Minus), 35 => Some(KeyCode::LeftBracket),
         36 => Some(KeyCode::RightBracket),
         _ => None,
     };
@@ -1692,11 +1692,11 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
             KeyCode::V, KeyCode::G, KeyCode::B, KeyCode::H, KeyCode::N,
             KeyCode::J, KeyCode::M, KeyCode::Comma, KeyCode::L, KeyCode::Period,
             KeyCode::Semicolon, KeyCode::Slash,
-            // Top row: Q 2 W 3 E 4 R T 5 Y 6 U I 8 O 9 P 0 [ ]
+            // Top row: Q 2 W 3 E 4 R T 6 Y 7 U I 9 O 0 P - [ ]
             KeyCode::Q, KeyCode::Key2, KeyCode::W, KeyCode::Key3, KeyCode::E,
-            KeyCode::Key4, KeyCode::R, KeyCode::T, KeyCode::Key5, KeyCode::Y,
-            KeyCode::Key6, KeyCode::U, KeyCode::I, KeyCode::Key8, KeyCode::O,
-            KeyCode::Key9, KeyCode::P, KeyCode::Key0, KeyCode::LeftBracket,
+            KeyCode::Key4, KeyCode::R, KeyCode::T, KeyCode::Key6, KeyCode::Y,
+            KeyCode::Key7, KeyCode::U, KeyCode::I, KeyCode::Key9, KeyCode::O,
+            KeyCode::Key0, KeyCode::P, KeyCode::Minus, KeyCode::LeftBracket,
             KeyCode::RightBracket,
         ];
 
@@ -1705,6 +1705,12 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
                 if let Some(pitch) = TrackerState::key_to_note(key, state.octave) {
                     state.enter_note(pitch);
                     state.clear_selection(); // Clear selection after filling
+                }
+            }
+            // Stop note preview when key is released
+            if is_key_released(key) {
+                if let Some(pitch) = TrackerState::key_to_note(key, state.octave) {
+                    state.audio.note_off(state.current_channel as i32, pitch as i32);
                 }
             }
         }

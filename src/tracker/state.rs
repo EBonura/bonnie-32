@@ -1077,7 +1077,7 @@ impl TrackerState {
             KeyCode::Semicolon => Some(15), // D#+1
             KeyCode::Slash => Some(16), // E+1
 
-            // Top row (semitones 17-36)
+            // Top row (semitones 17-37)
             KeyCode::Q => Some(17), // F+1
             KeyCode::Key2 => Some(18), // F#+1
             KeyCode::W => Some(19), // G+1
@@ -1086,18 +1086,18 @@ impl TrackerState {
             KeyCode::Key4 => Some(22), // A#+1
             KeyCode::R => Some(23), // B+1
             KeyCode::T => Some(24), // C+2
-            KeyCode::Key5 => Some(25), // C#+2
-            KeyCode::Y => Some(26), // G+2
-            KeyCode::Key6 => Some(27), // G#+2
-            KeyCode::U => Some(28), // A+2
-            KeyCode::I => Some(29), // A#+2
-            KeyCode::Key8 => Some(30), // B+2
-            KeyCode::O => Some(31), // C+3
-            KeyCode::Key9 => Some(32), // C#+3
-            KeyCode::P => Some(33), // D+3
-            KeyCode::Key0 => Some(34), // D#+3
-            KeyCode::LeftBracket => Some(35), // E+3
-            KeyCode::RightBracket => Some(36), // F+3
+            KeyCode::Key6 => Some(25), // C#+2
+            KeyCode::Y => Some(26), // D+2
+            KeyCode::Key7 => Some(27), // D#+2
+            KeyCode::U => Some(28), // E+2
+            KeyCode::I => Some(29), // F+2
+            KeyCode::Key9 => Some(30), // F#+2
+            KeyCode::O => Some(31), // G+2
+            KeyCode::Key0 => Some(32), // G#+2
+            KeyCode::P => Some(33), // A+2
+            KeyCode::Minus => Some(34), // A#+2
+            KeyCode::LeftBracket => Some(35), // B+2
+            KeyCode::RightBracket => Some(36), // C+3
 
             _ => None,
         };
