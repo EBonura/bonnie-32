@@ -807,4 +807,34 @@ impl EditorState {
             }
         }
     }
+
+    /// Center the 2D grid view on the current room
+    pub fn center_on_current_room(&mut self) {
+        use crate::world::SECTOR_SIZE;
+
+        if let Some(room) = self.level.rooms.get(self.current_room) {
+            // Calculate room center in world coordinates based on view mode
+            let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = room.position.y + (room.bounds.max.y + room.bounds.min.y) / 2.0;
+
+            // The grid view uses: screen_x = center_x + world_a * scale
+            // where center_x = rect.x + rect.w * 0.5 + grid_offset_x
+            // To center on room, we need: screen_center = world_room_center * scale + (rect.center + offset)
+            // So offset = -world_room_center * scale (to put room center at screen center)
+            // But since scale is applied later, we just need offset = -world_room_center * scale
+            // Actually simpler: offset makes the world origin appear at (rect.center + offset)
+            // To center on room at (room_x, room_z), we need offset = -room_center * scale
+
+            let (room_a, room_b) = match self.grid_view_mode {
+                GridViewMode::Top => (center_x, center_z),
+                GridViewMode::Front => (center_x, center_y),
+                GridViewMode::Side => (center_z, center_y),
+            };
+
+            // Set offset to center the room (negative because we want room center at origin)
+            self.grid_offset_x = -room_a * self.grid_zoom;
+            self.grid_offset_y = room_b * self.grid_zoom; // Positive because screen Y is inverted
+        }
+    }
 }

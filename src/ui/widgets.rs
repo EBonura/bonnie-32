@@ -367,6 +367,14 @@ impl Toolbar {
         self.cursor_x += width + self.spacing;
         rect
     }
+
+    /// Add an icon button aligned to the right side of the toolbar
+    pub fn icon_button_right(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str) -> bool {
+        let size = (self.rect.h - 4.0).round();
+        let x = self.rect.right() - size - 4.0;
+        let btn_rect = Rect::new(x.round(), (self.rect.y + 2.0).round(), size, size);
+        icon_button(ctx, btn_rect, icon, icon_font, tooltip)
+    }
 }
 
 /// Accent color (cyan like MuseScore)

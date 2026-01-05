@@ -111,6 +111,10 @@ pub mod icon {
 
     // Input / Controller
     pub const GAMEPAD_2: char = '\u{e0df}';       // Gamepad controller
+
+    // View / Focus
+    pub const FOCUS: char = '\u{e29e}';           // Focus / crosshair target
+    pub const SQUARE_SQUARE: char = '\u{e60e}';   // Nested squares / center on selection
 }
 
 /// Draw a Lucide icon centered in a rect

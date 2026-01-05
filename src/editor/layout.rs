@@ -281,6 +281,11 @@ pub fn draw_editor(
         state.grid_view_mode = GridViewMode::Side;
     }
 
+    // Center on current room button (right-aligned)
+    if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center on current room") {
+        state.center_on_current_room();
+    }
+
     draw_grid_view(ctx, grid_view_rect, state);
 
     draw_panel(room_props_rect, Some("Room"), Color::from_rgba(35, 35, 40, 255));
