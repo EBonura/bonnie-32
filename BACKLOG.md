@@ -38,14 +38,6 @@ This document tracks planned features, known issues, and future improvements.
 
 #### UI/UX
 - [ ] **Text too small**: Everything is very small text-wise. The world editor has better scaling - study that and make text bigger where it makes sense
-- [x] **Reverb per-channel**: Reverb type is now per-channel in the instruments panel (no separate column needed)
-- [x] **Remove "In" (Instrument) column**: Instrument column removed - instrument is set per-channel in the channel strip
-- [x] **Help bar at bottom**: Status bar shows context-sensitive help for each column
-- [x] **Per-track sample rate**: Each channel has its own SPU sample rate (OFF, 44kHz, 22kHz, 11kHz, 5kHz)
-- [x] **Per-track reverb/wet**: Each channel has its own reverb type and wet level
-- [x] **Effect insertion buttons**: Quick-insert effects with configurable amount knob
-
-#### Remaining
 - [ ] Per-note vs channel FX toggle
 
 #### Future
@@ -130,21 +122,14 @@ For implementing authentic PS1 constraints:
 ### Feedback Session (January 2026)
 
 #### Music Tracker Layout
-- [x] **Shared view between pattern editor and instruments**: Instrument panel is now integrated on the left side of the pattern editor with a draggable divider.
-- [x] **Simplified channel strip**: Channel strip now shows just "Ch1: Piano" labels - click to select channel and edit in left panel.
 - [ ] **Piano roll quick tool**: Add a piano roll that slides up from the bottom as a quick entry tool. Keep the pattern editor as the main detailed editing view.
 
-#### Controller Support
-- [x] **Auto-detect controller type**: Detect whether the connected controller is Xbox, PlayStation, or other and map controls accordingly. PlayStation layout should be the default since the engine targets PS1 aesthetics.
-
 #### World Editor - UI/UX
-- [x] **Remove play button from world editor toolbar**: The play button in the world editor toolbar is confusing. Use the Game tab instead for testing levels.
 - [ ] **Preserve existing textures when changing texture pack**: Currently switching texture packs deletes loaded textures. Should add new textures while keeping existing ones.
 - [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
 - [ ] **Fix texture selection visibility**: Textures that aren't fully visible in the browser can't be selected. Fix click detection for partially visible textures.
 - [ ] **Camera floor limit**: Add a minimum camera height so users can't accidentally go below the floor level. Should be slightly below the camera's current position.
 - [ ] **2D view auto-center on current room**: The 2D grid view should center on the currently selected room. Also auto-center in 3D editor when switching rooms.
-- [x] **Backface culling toggle**: Cycle button in toolbar (EYE=both sides, SCAN=wireframe on back, EYE_OFF=hidden).
 - [ ] **Extended multi-selection**: Current multi-selection is limited. Should support larger selections and more operations.
 - [ ] **Scroll wheel for camera dolly**: Use mouse scroll wheel for forward/backward camera movement (dolly) in addition to zoom.
 - [ ] **Shift+click for range select, Ctrl+click for toggle select**: Standard selection behavior - Shift extends selection range, Ctrl toggles individual items.
