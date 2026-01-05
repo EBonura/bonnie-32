@@ -809,7 +809,7 @@ impl EditorState {
     }
 
     /// Center the 2D grid view on the current room
-    pub fn center_on_current_room(&mut self) {
+    pub fn center_2d_on_current_room(&mut self) {
         use crate::world::SECTOR_SIZE;
 
         if let Some(room) = self.level.rooms.get(self.current_room) {
@@ -835,6 +835,48 @@ impl EditorState {
             // Set offset to center the room (negative because we want room center at origin)
             self.grid_offset_x = -room_a * self.grid_zoom;
             self.grid_offset_y = room_b * self.grid_zoom; // Positive because screen Y is inverted
+        }
+    }
+
+    /// Center the 3D camera on the current room
+    pub fn center_3d_on_current_room(&mut self) {
+        use crate::world::SECTOR_SIZE;
+        use crate::rasterizer::Vec3;
+
+        if let Some(room) = self.level.rooms.get(self.current_room) {
+            // Calculate room center
+            let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = room.position.y + (room.bounds.max.y + room.bounds.min.y) / 2.0;
+
+            // Calculate room size to determine camera distance
+            let room_size_x = room.width as f32 * SECTOR_SIZE;
+            let room_size_z = room.depth as f32 * SECTOR_SIZE;
+            let room_size = room_size_x.max(room_size_z);
+
+            // Position camera above and behind the room center, looking at it
+            let distance = room_size * 1.5;
+            self.camera_3d.position = Vec3::new(
+                center_x,
+                center_y + distance * 0.5,
+                center_z - distance,
+            );
+
+            // Look at room center (calculate rotation angles)
+            let dx = center_x - self.camera_3d.position.x;
+            let dy = center_y - self.camera_3d.position.y;
+            let dz = center_z - self.camera_3d.position.z;
+            let horizontal_dist = (dx * dx + dz * dz).sqrt();
+
+            self.camera_3d.rotation_y = dx.atan2(dz);
+            self.camera_3d.rotation_x = (-dy).atan2(horizontal_dist);
+
+            // Update orbit parameters if in orbit mode
+            self.orbit_target = Vec3::new(center_x, center_y, center_z);
+            self.orbit_distance = distance;
+            self.orbit_azimuth = 0.0;
+            self.orbit_elevation = 0.3; // Slight downward angle
+            self.sync_camera_from_orbit();
         }
     }
 }

@@ -484,8 +484,8 @@ fn draw_close_button(ctx: &mut UiContext, rect: Rect, icon_font: Option<&Font>) 
         draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(80, 40, 40, 255));
     }
 
-    let x_char = '\u{e1c9}'; // Lucide X icon
-    draw_icon_centered(icon_font, x_char, &rect, 16.0, WHITE);
+    // Draw circle-X icon
+    draw_icon_centered(icon_font, crate::ui::icon::CIRCLE_X, &rect, 16.0, WHITE);
 
     clicked
 }

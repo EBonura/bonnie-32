@@ -115,6 +115,9 @@ pub mod icon {
     // View / Focus
     pub const FOCUS: char = '\u{e29e}';           // Focus / crosshair target
     pub const SQUARE_SQUARE: char = '\u{e60e}';   // Nested squares / center on selection
+
+    // Close / Cancel
+    pub const CIRCLE_X: char = '\u{e084}';        // Circle with X (close button)
 }
 
 /// Draw a Lucide icon centered in a rect

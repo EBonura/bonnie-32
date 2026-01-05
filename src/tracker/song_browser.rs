@@ -8,8 +8,8 @@ use crate::ui::{
 use macroquad::prelude::*;
 use super::pattern::Song;
 
-/// Close button X icon (Lucide)
-const CLOSE_ICON: char = '\u{e1c9}';
+/// Close button icon (Lucide circle-x)
+const CLOSE_ICON: char = '\u{e084}';
 
 // Button colors matching other browsers
 const BTN_BG: Color = Color::new(0.235, 0.235, 0.275, 1.0); // rgba(60, 60, 70, 255)

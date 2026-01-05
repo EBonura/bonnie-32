@@ -281,9 +281,9 @@ pub fn draw_editor(
         state.grid_view_mode = GridViewMode::Side;
     }
 
-    // Center on current room button (right-aligned)
-    if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center on current room") {
-        state.center_on_current_room();
+    // Center 2D view on current room button (right-aligned)
+    if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center 2D view on current room") {
+        state.center_2d_on_current_room();
     }
 
     draw_grid_view(ctx, grid_view_rect, state);
@@ -292,7 +292,7 @@ pub fn draw_editor(
     draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);
 
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
-    draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input);
+    draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
 
     draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
     draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);

@@ -48,6 +48,7 @@ pub fn draw_viewport_3d(
     textures: &[RasterTexture],
     fb: &mut Framebuffer,
     input: &InputState,
+    icon_font: Option<&Font>,
 ) {
     // Resize framebuffer based on resolution setting
     let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
@@ -2839,7 +2840,7 @@ pub fn draw_viewport_3d(
     // Draw viewport border
     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, Color::from_rgba(60, 60, 60, 255));
 
-    // Draw camera info (position and rotation)
+    // Draw camera info (position and rotation) - top left
     draw_text(
         &format!(
             "Cam: ({:.0}, {:.0}, {:.0}) | Rot: ({:.2}, {:.2})",
@@ -2850,10 +2851,22 @@ pub fn draw_viewport_3d(
             state.camera_3d.rotation_y
         ),
         rect.x + 5.0,
-        rect.bottom() - 5.0,
+        rect.y + 14.0,
         14.0,
         Color::from_rgba(200, 200, 200, 255),
     );
+
+    // Center 3D camera on current room button - top right
+    let btn_size = 24.0;
+    let btn_rect = crate::ui::Rect::new(
+        rect.right() - btn_size - 4.0,
+        rect.y + 4.0,
+        btn_size,
+        btn_size,
+    );
+    if crate::ui::icon_button(ctx, btn_rect, crate::ui::icon::SQUARE_SQUARE, icon_font, "Center 3D camera on current room") {
+        state.center_3d_on_current_room();
+    }
 }
 
 /// Delete a single face from a sector, returns true if something was deleted
