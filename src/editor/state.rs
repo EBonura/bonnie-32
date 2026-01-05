@@ -302,6 +302,24 @@ pub struct EditorState {
     pub height_adjust_start_y: f32,        // placement_target_y when height adjust started
     pub height_adjust_locked_pos: Option<(f32, f32)>, // Locked (x, z) position when adjusting
 
+    /// Drag-to-place state (for DrawFloor/DrawCeiling modes)
+    /// Start grid position when drag began (gx, gz)
+    pub placement_drag_start: Option<(i32, i32)>,
+    /// Current grid position during drag (gx, gz)
+    pub placement_drag_current: Option<(i32, i32)>,
+
+    /// Wall drag-to-place state (for DrawWall mode)
+    /// Start position: (grid_x, grid_z, direction)
+    pub wall_drag_start: Option<(i32, i32, crate::world::Direction)>,
+    /// Current position during drag: (grid_x, grid_z, direction)
+    pub wall_drag_current: Option<(i32, i32, crate::world::Direction)>,
+
+    /// Diagonal wall drag-to-place state (for DrawDiagonalWall mode)
+    /// Start position: (grid_x, grid_z, is_nwse)
+    pub diagonal_drag_start: Option<(i32, i32, bool)>,
+    /// Current position during drag: (grid_x, grid_z, is_nwse)
+    pub diagonal_drag_current: Option<(i32, i32, bool)>,
+
     /// Rasterizer settings (PS1 effects)
     pub raster_settings: RasterSettings,
 
@@ -457,6 +475,12 @@ impl EditorState {
             height_adjust_start_mouse_y: 0.0,
             height_adjust_start_y: 0.0,
             height_adjust_locked_pos: None,
+            placement_drag_start: None,
+            placement_drag_current: None,
+            wall_drag_start: None,
+            wall_drag_current: None,
+            diagonal_drag_start: None,
+            diagonal_drag_current: None,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
             selected_vertex_indices: Vec::new(),
             light_color_slider: None,

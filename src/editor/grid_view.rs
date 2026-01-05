@@ -5,8 +5,39 @@
 use macroquad::prelude::*;
 use crate::rasterizer::Vec3;
 use crate::ui::{Rect, UiContext};
-use crate::world::{SplitDirection, SECTOR_SIZE};
+use crate::world::{Direction, SplitDirection, SECTOR_SIZE};
 use super::{EditorState, Selection, GridViewMode, CEILING_HEIGHT, CLICK_HEIGHT};
+
+/// Determine which edge of a sector the mouse is closest to (in Top view mode)
+/// Returns the direction of the closest edge based on position within the sector
+fn closest_edge_top_view(local_x: f32, local_z: f32) -> Direction {
+    // Get position within the sector (0.0 to 1.0)
+    let fx = (local_x / SECTOR_SIZE).fract();
+    let fz = (local_z / SECTOR_SIZE).fract();
+
+    // Handle negative fractions
+    let fx = if fx < 0.0 { fx + 1.0 } else { fx };
+    let fz = if fz < 0.0 { fz + 1.0 } else { fz };
+
+    // Calculate distances to each edge
+    let dist_north = fz;           // Distance to -Z edge (top in screen coords)
+    let dist_south = 1.0 - fz;     // Distance to +Z edge (bottom in screen coords)
+    let dist_west = fx;            // Distance to -X edge (left)
+    let dist_east = 1.0 - fx;      // Distance to +X edge (right)
+
+    // Find minimum distance
+    let min_dist = dist_north.min(dist_south).min(dist_west).min(dist_east);
+
+    if min_dist == dist_north {
+        Direction::North
+    } else if min_dist == dist_south {
+        Direction::South
+    } else if min_dist == dist_west {
+        Direction::West
+    } else {
+        Direction::East
+    }
+}
 
 /// Draw the 2D grid view (top-down view of current room)
 pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
@@ -153,8 +184,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     // Store room index
     let current_room_idx = state.current_room;
 
-    // Find hovered sector (only for current room)
+    // Find hovered sector and edge (only for current room)
     let mut hovered_sector: Option<(usize, usize)> = None;
+    let mut hovered_edge: Option<Direction> = None;
     if inside {
         let (wx, wz) = screen_to_world(mouse_pos.0, mouse_pos.1);
         // Convert to grid coords relative to room position
@@ -166,6 +198,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             if gx < room.width && gz < room.depth {
                 if room.get_sector(gx, gz).is_some() {
                     hovered_sector = Some((gx, gz));
+                    // Determine closest edge (only relevant for wall mode in Top view)
+                    if view_mode == GridViewMode::Top {
+                        hovered_edge = Some(closest_edge_top_view(local_x, local_z));
+                    }
                 }
             }
         }
@@ -400,15 +436,27 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
 
         // Draw sector edges
-        let edge_color = if is_selected || is_multi_selected || is_hovered {
+        let is_highlighted = is_selected || is_multi_selected || is_hovered;
+        let edge_color = if is_highlighted {
             Color::from_rgba(200, 200, 220, 255)
         } else {
             Color::from_rgba(100, 100, 110, 255)
         };
-        draw_line(sx0, sy0, sx1, sy1, 1.0, edge_color);
-        draw_line(sx1, sy1, sx2, sy2, 1.0, edge_color);
-        draw_line(sx2, sy2, sx3, sy3, 1.0, edge_color);
-        draw_line(sx3, sy3, sx0, sy0, 1.0, edge_color);
+        let edge_thickness = if is_highlighted { 2.0 } else { 1.0 };
+        draw_line(sx0, sy0, sx1, sy1, edge_thickness, edge_color);
+        draw_line(sx1, sy1, sx2, sy2, edge_thickness, edge_color);
+        draw_line(sx2, sy2, sx3, sy3, edge_thickness, edge_color);
+        draw_line(sx3, sy3, sx0, sy0, edge_thickness, edge_color);
+
+        // Draw vertex indicators for highlighted sectors
+        if is_highlighted {
+            let vertex_color = Color::from_rgba(255, 255, 255, 200);
+            let vertex_radius = 3.0;
+            draw_circle(sx0, sy0, vertex_radius, vertex_color);
+            draw_circle(sx1, sy1, vertex_radius, vertex_color);
+            draw_circle(sx2, sy2, vertex_radius, vertex_color);
+            draw_circle(sx3, sy3, vertex_radius, vertex_color);
+        }
 
         // Draw wall indicators on edges that have walls
         let wall_color = Color::from_rgba(200, 150, 100, 255);
@@ -434,6 +482,36 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         if !sector.walls_nesw.is_empty() {
             // NE-SW diagonal: from NE corner (sx1) to SW corner (sx3)
             draw_line(sx1, sy1, sx3, sy3, 3.0, diag_wall_color);
+        }
+    }
+
+    // Draw wall edge highlight when in wall mode with hovered sector (Top view only)
+    if view_mode == GridViewMode::Top && state.tool == super::EditorTool::DrawWall {
+        if let (Some((gx, gz)), Some(edge_dir)) = (hovered_sector, hovered_edge) {
+            let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
+            let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+
+            // Get screen coords for sector corners
+            let (sx0, sy0) = world_to_screen(base_x, base_z);                          // NW
+            let (sx1, sy1) = world_to_screen(base_x + SECTOR_SIZE, base_z);            // NE
+            let (sx2, sy2) = world_to_screen(base_x + SECTOR_SIZE, base_z + SECTOR_SIZE); // SE
+            let (sx3, sy3) = world_to_screen(base_x, base_z + SECTOR_SIZE);            // SW
+
+            // Determine which edge to highlight based on direction
+            let (edge_start, edge_end) = match edge_dir {
+                Direction::North => ((sx0, sy0), (sx1, sy1)), // NW to NE
+                Direction::East  => ((sx1, sy1), (sx2, sy2)), // NE to SE
+                Direction::South => ((sx2, sy2), (sx3, sy3)), // SE to SW
+                Direction::West  => ((sx3, sy3), (sx0, sy0)), // SW to NW
+            };
+
+            // Draw highlighted edge (bright cyan, thick line)
+            let edge_color = Color::from_rgba(100, 255, 255, 255);
+            draw_line(edge_start.0, edge_start.1, edge_end.0, edge_end.1, 4.0, edge_color);
+
+            // Draw vertex indicators at edge endpoints
+            draw_circle(edge_start.0, edge_start.1, 5.0, edge_color);
+            draw_circle(edge_end.0, edge_end.1, 5.0, edge_color);
         }
     }
 
@@ -1317,7 +1395,42 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 }
 
                 EditorTool::DrawWall => {
-                    state.set_status("Wall tool: not yet implemented", 3.0);
+                    // Wall placement only works in Top view mode
+                    if view_mode != GridViewMode::Top {
+                        state.set_status("Wall tool: switch to Top view", 2.0);
+                    } else if let (Some((gx, gz)), Some(edge_dir)) = (hovered_sector, hovered_edge) {
+                        // Check if wall already exists on this edge
+                        let has_wall = state.level.rooms.get(current_room_idx).map(|r| {
+                            r.get_sector(gx, gz).map(|s| {
+                                match edge_dir {
+                                    Direction::North => !s.walls_north.is_empty(),
+                                    Direction::East => !s.walls_east.is_empty(),
+                                    Direction::South => !s.walls_south.is_empty(),
+                                    Direction::West => !s.walls_west.is_empty(),
+                                }
+                            }).unwrap_or(false)
+                        }).unwrap_or(false);
+
+                        if has_wall {
+                            state.set_status("Wall already exists on this edge", 1.5);
+                        } else {
+                            state.save_undo();
+                            if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
+                                room.add_wall(gx, gz, edge_dir, 0.0, CEILING_HEIGHT, state.selected_texture.clone());
+                                room.recalculate_bounds();
+                                state.mark_portals_dirty();
+                                let dir_name = match edge_dir {
+                                    Direction::North => "north",
+                                    Direction::East => "east",
+                                    Direction::South => "south",
+                                    Direction::West => "west",
+                                };
+                                state.set_status(&format!("Created {} wall", dir_name), 1.5);
+                            }
+                        }
+                    } else {
+                        state.set_status("Hover over a sector edge to place wall", 2.0);
+                    }
                 }
 
                 EditorTool::PlaceObject => {

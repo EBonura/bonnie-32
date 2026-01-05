@@ -1172,246 +1172,51 @@ pub fn draw_viewport_3d(
                     }
                 }
             }
-            // Drawing modes - place floor/ceiling
+            // Drawing modes - start drag for floor/ceiling placement
             else if state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling {
-                if let Some((snapped_x, snapped_z, target_y, occupied)) = preview_sector {
-                    let is_floor = state.tool == EditorTool::DrawFloor;
-
-                    if occupied {
-                        let type_name = if is_floor { "floor" } else { "ceiling" };
-                        state.set_status(&format!("Sector already has a {}", type_name), 2.0);
-                    } else {
-                        state.save_undo();
-
-                        // Get texture and room position before borrowing mutably
-                        let texture = state.selected_texture.clone();
-                        let room_pos = state.level.rooms.get(state.current_room)
-                            .map(|r| r.position)
-                            .unwrap_or_default();
-
-                        if let Some(room) = state.level.rooms.get_mut(state.current_room) {
-                            // Convert world coords to local coords (can be negative)
-                            let local_x = snapped_x - room_pos.x;
-                            let local_z = snapped_z - room_pos.z;
-
-                            // Calculate grid coords, handling negative values
-                            let mut gx = (local_x / SECTOR_SIZE).floor() as i32;
-                            let mut gz = (local_z / SECTOR_SIZE).floor() as i32;
-
-                            // Expand grid in negative X direction if needed
-                            while gx < 0 {
-                                // Shift room position by one sector in -X
-                                room.position.x -= SECTOR_SIZE;
-                                // Insert new column at front
-                                room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
-                                room.width += 1;
-                                gx += 1; // Grid index shifts up
-                            }
-
-                            // Expand grid in negative Z direction if needed
-                            while gz < 0 {
-                                // Shift room position by one sector in -Z
-                                room.position.z -= SECTOR_SIZE;
-                                // Insert new row at front of each column
-                                for col in &mut room.sectors {
-                                    col.insert(0, None);
-                                }
-                                room.depth += 1;
-                                gz += 1; // Grid index shifts up
-                            }
-
-                            // Now gx and gz are guaranteed >= 0, convert to usize
-                            let gx = gx as usize;
-                            let gz = gz as usize;
-
-                            // Expand room grid in positive direction if needed
-                            while gx >= room.width {
-                                room.width += 1;
-                                room.sectors.push((0..room.depth).map(|_| None).collect());
-                            }
-                            while gz >= room.depth {
-                                room.depth += 1;
-                                for col in &mut room.sectors {
-                                    col.push(None);
-                                }
-                            }
-
-                            if is_floor {
-                                room.set_floor(gx, gz, target_y, texture);
-                            } else {
-                                room.set_ceiling(gx, gz, target_y, texture);
-                            }
-                            room.recalculate_bounds();
-                        }
-
-                        state.mark_portals_dirty();
-                        let status = if is_floor { "Created floor sector" } else { "Created ceiling sector" };
-                        state.set_status(status, 2.0);
+                if let Some((snapped_x, snapped_z, _target_y, _occupied)) = preview_sector {
+                    // Convert world coords to grid coords for drag start
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let local_x = snapped_x - room.position.x;
+                        let local_z = snapped_z - room.position.z;
+                        let gx = (local_x / SECTOR_SIZE).floor() as i32;
+                        let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                        state.placement_drag_start = Some((gx, gz));
+                        state.placement_drag_current = Some((gx, gz));
                     }
                 }
             }
-            // DrawWall mode - place wall on sector edge (fills gaps between existing walls)
+            // DrawWall mode - start drag for wall placement
             else if state.tool == EditorTool::DrawWall {
-                if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
-                    use crate::world::{Direction, VerticalFace};
-
-                    // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
-                    if wall_state == 2 {
-                        state.set_status("Edge is fully covered", 2.0);
-                    } else {
-                        state.save_undo();
-
-                        let texture = state.selected_texture.clone();
-                        let room_pos = state.level.rooms.get(state.current_room)
-                            .map(|r| r.position)
-                            .unwrap_or_default();
-
-                        if let Some(room) = state.level.rooms.get_mut(state.current_room) {
-                            // Convert world coords to local coords (can be negative)
-                            let local_x = grid_x - room_pos.x;
-                            let local_z = grid_z - room_pos.z;
-
-                            // Calculate grid coords, handling negative values
-                            let mut gx = (local_x / SECTOR_SIZE).floor() as i32;
-                            let mut gz = (local_z / SECTOR_SIZE).floor() as i32;
-
-                            // Expand grid in negative X direction if needed
-                            while gx < 0 {
-                                room.position.x -= SECTOR_SIZE;
-                                room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
-                                room.width += 1;
-                                gx += 1;
-                            }
-
-                            // Expand grid in negative Z direction if needed
-                            while gz < 0 {
-                                room.position.z -= SECTOR_SIZE;
-                                for col in &mut room.sectors {
-                                    col.insert(0, None);
-                                }
-                                room.depth += 1;
-                                gz += 1;
-                            }
-
-                            // Expand in positive direction if needed
-                            let gx = gx as usize;
-                            let gz = gz as usize;
-                            while gx >= room.width {
-                                room.width += 1;
-                                room.sectors.push((0..room.depth).map(|_| None).collect());
-                            }
-                            while gz >= room.depth {
-                                room.depth += 1;
-                                for col in &mut room.sectors {
-                                    col.push(None);
-                                }
-                            }
-
-                            // Create the wall with sloped corners (fills gap, matching existing wall slant)
-                            // corner_heights: [bottom-left, bottom-right, top-right, top-left]
-                            let wall = VerticalFace::new_sloped(
-                                corner_heights[0], corner_heights[1],
-                                corner_heights[2], corner_heights[3],
-                                texture,
-                            );
-
-                            // Ensure sector exists and add wall
-                            let sector = room.ensure_sector(gx, gz);
-                            match dir {
-                                Direction::North => sector.walls_north.push(wall),
-                                Direction::East => sector.walls_east.push(wall),
-                                Direction::South => sector.walls_south.push(wall),
-                                Direction::West => sector.walls_west.push(wall),
-                            }
-                            room.recalculate_bounds();
+                if let Some((grid_x, grid_z, dir, _corner_heights, wall_state)) = preview_wall {
+                    // Only start drag if not fully covered
+                    if wall_state != 2 {
+                        // Convert world coords to grid coords
+                        if let Some(room) = state.level.rooms.get(state.current_room) {
+                            let local_x = grid_x - room.position.x;
+                            let local_z = grid_z - room.position.z;
+                            let gx = (local_x / SECTOR_SIZE).floor() as i32;
+                            let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                            state.wall_drag_start = Some((gx, gz, dir));
+                            state.wall_drag_current = Some((gx, gz, dir));
                         }
-
-                        state.mark_portals_dirty();
-                        let dir_name = match dir {
-                            Direction::North => "north",
-                            Direction::East => "east",
-                            Direction::South => "south",
-                            Direction::West => "west",
-                        };
-                        let action = if wall_state == 1 { "Filled gap in" } else { "Created" };
-                        state.set_status(&format!("{} {} wall", action, dir_name), 2.0);
+                    } else {
+                        state.set_status("Edge is fully covered", 2.0);
                     }
                 }
             }
-            // DrawDiagonalWall mode - place diagonal wall on sector diagonal
+            // DrawDiagonalWall mode - start drag for diagonal wall placement
             else if state.tool == EditorTool::DrawDiagonalWall {
-                if let Some((grid_x, grid_z, is_nwse, corner_heights)) = preview_diagonal_wall {
-                    use crate::world::VerticalFace;
-
-                    state.save_undo();
-
-                    let texture = state.selected_texture.clone();
-                    let room_pos = state.level.rooms.get(state.current_room)
-                        .map(|r| r.position)
-                        .unwrap_or_default();
-
-                    if let Some(room) = state.level.rooms.get_mut(state.current_room) {
-                        // Convert world coords to local coords (can be negative)
-                        let local_x = grid_x - room_pos.x;
-                        let local_z = grid_z - room_pos.z;
-
-                        // Calculate grid coords, handling negative values
-                        let mut gx = (local_x / SECTOR_SIZE).floor() as i32;
-                        let mut gz = (local_z / SECTOR_SIZE).floor() as i32;
-
-                        // Expand grid in negative X direction if needed
-                        while gx < 0 {
-                            room.position.x -= SECTOR_SIZE;
-                            room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
-                            room.width += 1;
-                            gx += 1;
-                        }
-
-                        // Expand grid in negative Z direction if needed
-                        while gz < 0 {
-                            room.position.z -= SECTOR_SIZE;
-                            for col in &mut room.sectors {
-                                col.insert(0, None);
-                            }
-                            room.depth += 1;
-                            gz += 1;
-                        }
-
-                        // Expand in positive direction if needed
-                        let gx = gx as usize;
-                        let gz = gz as usize;
-                        while gx >= room.width {
-                            room.width += 1;
-                            room.sectors.push((0..room.depth).map(|_| None).collect());
-                        }
-                        while gz >= room.depth {
-                            room.depth += 1;
-                            for col in &mut room.sectors {
-                                col.push(None);
-                            }
-                        }
-
-                        // Create the diagonal wall
-                        // corner_heights: [corner1_bot, corner2_bot, corner2_top, corner1_top]
-                        let wall = VerticalFace::new_sloped(
-                            corner_heights[0], corner_heights[1],
-                            corner_heights[2], corner_heights[3],
-                            texture,
-                        );
-
-                        // Ensure sector exists and add diagonal wall
-                        let sector = room.ensure_sector(gx, gz);
-                        if is_nwse {
-                            sector.walls_nwse.push(wall);
-                        } else {
-                            sector.walls_nesw.push(wall);
-                        }
-                        room.recalculate_bounds();
+                if let Some((grid_x, grid_z, is_nwse, _corner_heights)) = preview_diagonal_wall {
+                    // Convert world coords to grid coords
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let local_x = grid_x - room.position.x;
+                        let local_z = grid_z - room.position.z;
+                        let gx = (local_x / SECTOR_SIZE).floor() as i32;
+                        let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                        state.diagonal_drag_start = Some((gx, gz, is_nwse));
+                        state.diagonal_drag_current = Some((gx, gz, is_nwse));
                     }
-
-                    state.mark_portals_dirty();
-                    let diag_name = if is_nwse { "NW-SE" } else { "NE-SW" };
-                    state.set_status(&format!("Created {} diagonal wall", diag_name), 2.0);
                 }
             }
             // PlaceObject mode - select existing objects in 3D (placement is in 2D grid view)
@@ -1540,8 +1345,422 @@ pub fn draw_viewport_3d(
             }
         }
 
+        // Continue placement drag (update current grid position)
+        if ctx.mouse.left_down && state.placement_drag_start.is_some() {
+            if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+                if let Some(room) = state.level.rooms.get(state.current_room) {
+                    let local_x = snapped_x - room.position.x;
+                    let local_z = snapped_z - room.position.z;
+                    let gx = (local_x / SECTOR_SIZE).floor() as i32;
+                    let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                    state.placement_drag_current = Some((gx, gz));
+                }
+            }
+        }
+
+        // Continue wall drag (update current grid position based on mouse, locked to start direction)
+        if ctx.mouse.left_down {
+            if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
+                use crate::world::Direction;
+
+                // Get mouse grid position from preview_wall or preview_sector
+                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _)) = preview_wall {
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let local_x = grid_x - room.position.x;
+                        let local_z = grid_z - room.position.z;
+                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                    } else { None }
+                } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let local_x = snapped_x - room.position.x;
+                        let local_z = snapped_z - room.position.z;
+                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                    } else { None }
+                } else { None };
+
+                if let Some((gx, gz)) = mouse_grid_pos {
+                    // Lock to the axis based on wall direction
+                    // North/South walls extend along X axis (fixed Z)
+                    // East/West walls extend along Z axis (fixed X)
+                    let (final_gx, final_gz) = match start_dir {
+                        Direction::North | Direction::South => (gx, start_gz),
+                        Direction::East | Direction::West => (start_gx, gz),
+                    };
+                    state.wall_drag_current = Some((final_gx, final_gz, start_dir));
+                }
+            }
+        }
+
+        // Continue diagonal wall drag (update current grid position, locked to diagonal movement)
+        if ctx.mouse.left_down {
+            if let Some((start_gx, start_gz, start_is_nwse)) = state.diagonal_drag_start {
+                // Get mouse grid position from preview_diagonal_wall or preview_sector
+                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _)) = preview_diagonal_wall {
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let local_x = grid_x - room.position.x;
+                        let local_z = grid_z - room.position.z;
+                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                    } else { None }
+                } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let local_x = snapped_x - room.position.x;
+                        let local_z = snapped_z - room.position.z;
+                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                    } else { None }
+                } else { None };
+
+                if let Some((mouse_gx, mouse_gz)) = mouse_grid_pos {
+                    // Lock to diagonal movement: both X and Z must change together
+                    // Use the axis with the larger delta to determine the diagonal length
+                    let dx = mouse_gx - start_gx;
+                    let dz = mouse_gz - start_gz;
+
+                    // NW-SE diagonal: +X goes with +Z, -X goes with -Z
+                    // NE-SW diagonal: +X goes with -Z, -X goes with +Z
+                    let diag_len = dx.abs().max(dz.abs());
+
+                    // Determine the diagonal direction based on which quadrant the mouse is in
+                    let (final_gx, final_gz) = if start_is_nwse {
+                        // NW-SE: X and Z move in same direction
+                        // Use the primary movement direction (larger delta)
+                        if dx.abs() >= dz.abs() {
+                            // X is primary
+                            let sign = if dx >= 0 { 1 } else { -1 };
+                            (start_gx + sign * diag_len, start_gz + sign * diag_len)
+                        } else {
+                            // Z is primary
+                            let sign = if dz >= 0 { 1 } else { -1 };
+                            (start_gx + sign * diag_len, start_gz + sign * diag_len)
+                        }
+                    } else {
+                        // NE-SW: X and Z move in opposite directions
+                        if dx.abs() >= dz.abs() {
+                            // X is primary
+                            let sign = if dx >= 0 { 1 } else { -1 };
+                            (start_gx + sign * diag_len, start_gz - sign * diag_len)
+                        } else {
+                            // Z is primary
+                            let sign = if dz >= 0 { 1 } else { -1 };
+                            (start_gx - sign * diag_len, start_gz + sign * diag_len)
+                        }
+                    };
+
+                    state.diagonal_drag_current = Some((final_gx, final_gz, start_is_nwse));
+                }
+            }
+        }
+
         // End dragging on release
         if ctx.mouse.left_released {
+            // Handle placement drag completion (floor/ceiling)
+            if let (Some((start_gx, start_gz)), Some((end_gx, end_gz))) = (state.placement_drag_start, state.placement_drag_current) {
+                if state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling {
+                    let is_floor = state.tool == EditorTool::DrawFloor;
+
+                    // Calculate rectangle bounds
+                    let min_gx = start_gx.min(end_gx);
+                    let max_gx = start_gx.max(end_gx);
+                    let min_gz = start_gz.min(end_gz);
+                    let max_gz = start_gz.max(end_gz);
+
+                    // Get target Y and texture
+                    let target_y = if state.placement_target_y == 0.0 && !state.height_adjust_mode {
+                        if is_floor { 0.0 } else { super::CEILING_HEIGHT }
+                    } else {
+                        state.placement_target_y
+                    };
+                    let texture = state.selected_texture.clone();
+
+                    state.save_undo();
+
+                    // Place all sectors in the rectangle
+                    let mut placed_count = 0;
+                    if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                        // First, expand the room grid to accommodate all sectors
+                        // Handle negative coordinates by expanding the grid
+                        let mut offset_x = 0i32;
+                        let mut offset_z = 0i32;
+
+                        // Expand in negative X direction
+                        while min_gx + offset_x < 0 {
+                            room.position.x -= SECTOR_SIZE;
+                            room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+                            room.width += 1;
+                            offset_x += 1;
+                        }
+
+                        // Expand in negative Z direction
+                        while min_gz + offset_z < 0 {
+                            room.position.z -= SECTOR_SIZE;
+                            for col in &mut room.sectors {
+                                col.insert(0, None);
+                            }
+                            room.depth += 1;
+                            offset_z += 1;
+                        }
+
+                        // Expand in positive X direction
+                        while (max_gx + offset_x) as usize >= room.width {
+                            room.width += 1;
+                            room.sectors.push((0..room.depth).map(|_| None).collect());
+                        }
+
+                        // Expand in positive Z direction
+                        while (max_gz + offset_z) as usize >= room.depth {
+                            room.depth += 1;
+                            for col in &mut room.sectors {
+                                col.push(None);
+                            }
+                        }
+
+                        // Now place all sectors (with adjusted coordinates)
+                        for gx in min_gx..=max_gx {
+                            for gz in min_gz..=max_gz {
+                                let adjusted_gx = (gx + offset_x) as usize;
+                                let adjusted_gz = (gz + offset_z) as usize;
+
+                                // Check if already occupied
+                                let occupied = room.get_sector(adjusted_gx, adjusted_gz)
+                                    .map(|s| if is_floor { s.floor.is_some() } else { s.ceiling.is_some() })
+                                    .unwrap_or(false);
+
+                                if !occupied {
+                                    if is_floor {
+                                        room.set_floor(adjusted_gx, adjusted_gz, target_y, texture.clone());
+                                    } else {
+                                        room.set_ceiling(adjusted_gx, adjusted_gz, target_y, texture.clone());
+                                    }
+                                    placed_count += 1;
+                                }
+                            }
+                        }
+                        room.recalculate_bounds();
+                    }
+
+                    state.mark_portals_dirty();
+                    if placed_count > 0 {
+                        let type_name = if is_floor { "floor" } else { "ceiling" };
+                        state.set_status(&format!("Created {} {} sectors", placed_count, type_name), 2.0);
+                    }
+                }
+
+                // Clear drag state
+                state.placement_drag_start = None;
+                state.placement_drag_current = None;
+            }
+
+            // Handle wall drag completion
+            if let (Some((start_gx, start_gz, dir)), Some((end_gx, end_gz, _))) = (state.wall_drag_start, state.wall_drag_current) {
+                use crate::world::Direction;
+                use super::CEILING_HEIGHT;
+
+                // Calculate the line of walls to place based on direction
+                let (iter_axis_start, iter_axis_end, fixed_axis) = match dir {
+                    Direction::North | Direction::South => {
+                        // Horizontal wall - iterate along X axis
+                        (start_gx, end_gx, start_gz)
+                    }
+                    Direction::East | Direction::West => {
+                        // Vertical wall - iterate along Z axis
+                        (start_gz, end_gz, start_gx)
+                    }
+                };
+
+                let min_iter = iter_axis_start.min(iter_axis_end);
+                let max_iter = iter_axis_start.max(iter_axis_end);
+
+                state.save_undo();
+                let mut placed_count = 0;
+
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    let texture = state.selected_texture.clone();
+
+                    // Calculate min/max grid coordinates for all walls
+                    let (min_gx, max_gx, min_gz, max_gz) = match dir {
+                        Direction::North | Direction::South => {
+                            (min_iter, max_iter, fixed_axis, fixed_axis)
+                        }
+                        Direction::East | Direction::West => {
+                            (fixed_axis, fixed_axis, min_iter, max_iter)
+                        }
+                    };
+
+                    // Expand the room grid to accommodate all walls (like floor/ceiling does)
+                    let mut offset_x = 0i32;
+                    let mut offset_z = 0i32;
+
+                    // Expand in negative X direction
+                    while min_gx + offset_x < 0 {
+                        room.position.x -= SECTOR_SIZE;
+                        room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+                        room.width += 1;
+                        offset_x += 1;
+                    }
+
+                    // Expand in negative Z direction
+                    while min_gz + offset_z < 0 {
+                        room.position.z -= SECTOR_SIZE;
+                        for col in &mut room.sectors {
+                            col.insert(0, None);
+                        }
+                        room.depth += 1;
+                        offset_z += 1;
+                    }
+
+                    // Expand in positive X direction
+                    while (max_gx + offset_x) as usize >= room.width {
+                        room.width += 1;
+                        room.sectors.push((0..room.depth).map(|_| None).collect());
+                    }
+
+                    // Expand in positive Z direction
+                    while (max_gz + offset_z) as usize >= room.depth {
+                        room.depth += 1;
+                        for col in &mut room.sectors {
+                            col.push(None);
+                        }
+                    }
+
+                    // Now place all walls (with adjusted coordinates)
+                    for i in min_iter..=max_iter {
+                        let (gx, gz) = match dir {
+                            Direction::North | Direction::South => (i, fixed_axis),
+                            Direction::East | Direction::West => (fixed_axis, i),
+                        };
+
+                        let adjusted_gx = (gx + offset_x) as usize;
+                        let adjusted_gz = (gz + offset_z) as usize;
+
+                        // Check if there's already a wall here
+                        let has_wall = room.get_sector(adjusted_gx, adjusted_gz)
+                            .map(|s| !s.walls(dir).is_empty())
+                            .unwrap_or(false);
+
+                        if !has_wall {
+                            room.ensure_sector(adjusted_gx, adjusted_gz);
+                            room.add_wall(adjusted_gx, adjusted_gz, dir, 0.0, CEILING_HEIGHT, texture.clone());
+                            placed_count += 1;
+                        }
+                    }
+                    room.recalculate_bounds();
+                }
+
+                state.mark_portals_dirty();
+                if placed_count > 0 {
+                    let dir_name = match dir {
+                        Direction::North => "north",
+                        Direction::East => "east",
+                        Direction::South => "south",
+                        Direction::West => "west",
+                    };
+                    state.set_status(&format!("Created {} {} walls", placed_count, dir_name), 2.0);
+                }
+
+                // Clear wall drag state
+                state.wall_drag_start = None;
+                state.wall_drag_current = None;
+            }
+
+            // Handle diagonal wall drag completion
+            if let (Some((start_gx, start_gz, is_nwse)), Some((end_gx, end_gz, _))) = (state.diagonal_drag_start, state.diagonal_drag_current) {
+                use crate::world::VerticalFace;
+                use super::CEILING_HEIGHT;
+
+                // Calculate the diagonal line of walls to place
+                // Diagonals follow a diagonal line from start to end
+                let min_gx = start_gx.min(end_gx);
+                let max_gx = start_gx.max(end_gx);
+                let min_gz = start_gz.min(end_gz);
+                let max_gz = start_gz.max(end_gz);
+
+                state.save_undo();
+                let mut placed_count = 0;
+
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    let texture = state.selected_texture.clone();
+
+                    // Expand the room grid to accommodate all diagonals (like floor/ceiling does)
+                    let mut offset_x = 0i32;
+                    let mut offset_z = 0i32;
+
+                    // Expand in negative X direction
+                    while min_gx + offset_x < 0 {
+                        room.position.x -= SECTOR_SIZE;
+                        room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+                        room.width += 1;
+                        offset_x += 1;
+                    }
+
+                    // Expand in negative Z direction
+                    while min_gz + offset_z < 0 {
+                        room.position.z -= SECTOR_SIZE;
+                        for col in &mut room.sectors {
+                            col.insert(0, None);
+                        }
+                        room.depth += 1;
+                        offset_z += 1;
+                    }
+
+                    // Expand in positive X direction
+                    while (max_gx + offset_x) as usize >= room.width {
+                        room.width += 1;
+                        room.sectors.push((0..room.depth).map(|_| None).collect());
+                    }
+
+                    // Expand in positive Z direction
+                    while (max_gz + offset_z) as usize >= room.depth {
+                        room.depth += 1;
+                        for col in &mut room.sectors {
+                            col.push(None);
+                        }
+                    }
+
+                    // Place diagonal walls along a true diagonal LINE
+                    // Both X and Z step together at the same rate (45-degree grid diagonal)
+                    let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+                    let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+                    let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+
+                    for i in 0..=steps {
+                        let gx = start_gx + sx * i;
+                        let gz = start_gz + sz * i;
+
+                        let adjusted_gx = (gx + offset_x) as usize;
+                        let adjusted_gz = (gz + offset_z) as usize;
+
+                        // Check if there's already a diagonal wall here
+                        let has_diagonal = room.get_sector(adjusted_gx, adjusted_gz)
+                            .map(|s| {
+                                if is_nwse { !s.walls_nwse.is_empty() } else { !s.walls_nesw.is_empty() }
+                            })
+                            .unwrap_or(false);
+
+                        if !has_diagonal {
+                            // Use ensure_sector to create sector if needed, then add diagonal
+                            let sector = room.ensure_sector(adjusted_gx, adjusted_gz);
+                            let wall = VerticalFace::new(0.0, CEILING_HEIGHT, texture.clone());
+                            if is_nwse {
+                                sector.walls_nwse.push(wall);
+                            } else {
+                                sector.walls_nesw.push(wall);
+                            }
+                            placed_count += 1;
+                        }
+                    }
+                    room.recalculate_bounds();
+                }
+
+                state.mark_portals_dirty();
+                if placed_count > 0 {
+                    let type_name = if is_nwse { "NW-SE" } else { "NE-SW" };
+                    state.set_status(&format!("Created {} {} diagonal walls", placed_count, type_name), 2.0);
+                }
+
+                // Clear diagonal drag state
+                state.diagonal_drag_start = None;
+                state.diagonal_drag_current = None;
+            }
+
             // If we actually dragged geometry, recalculate room bounds
             if state.viewport_drag_started {
                 if let Some(room) = state.level.rooms.get_mut(state.current_room) {
@@ -1705,6 +1924,15 @@ pub fn draw_viewport_3d(
                     color,
                 );
             }
+
+            // Draw vertex indicators at the 4 corners of the hovered sector
+            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
         }
     }
 
@@ -1756,7 +1984,241 @@ pub fn draw_viewport_3d(
                     color,
                 );
             }
+
+            // Draw vertex indicators at the 4 corners of the hovered sector
+            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
         }
+    }
+
+    // Draw drag rectangle preview for floor/ceiling placement
+    if let (Some((start_gx, start_gz)), Some((end_gx, end_gz))) = (state.placement_drag_start, state.placement_drag_current) {
+        if state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling {
+            let is_floor = state.tool == EditorTool::DrawFloor;
+
+            // Get room position and calculate Y height
+            let room_pos = state.level.rooms.get(state.current_room)
+                .map(|r| r.position)
+                .unwrap_or_default();
+
+            let target_y = if state.placement_target_y == 0.0 && !state.height_adjust_mode {
+                if is_floor { 0.0 } else { super::CEILING_HEIGHT }
+            } else {
+                state.placement_target_y
+            };
+            let grid_y = room_pos.y + target_y;
+
+            // Calculate rectangle bounds in world space
+            let min_gx = start_gx.min(end_gx);
+            let max_gx = start_gx.max(end_gx);
+            let min_gz = start_gz.min(end_gz);
+            let max_gz = start_gz.max(end_gz);
+
+            let world_min_x = room_pos.x + (min_gx as f32) * SECTOR_SIZE;
+            let world_max_x = room_pos.x + ((max_gx + 1) as f32) * SECTOR_SIZE;
+            let world_min_z = room_pos.z + (min_gz as f32) * SECTOR_SIZE;
+            let world_max_z = room_pos.z + ((max_gz + 1) as f32) * SECTOR_SIZE;
+
+            // Choose color based on floor vs ceiling
+            let rect_color = if is_floor {
+                RasterColor::new(100, 255, 200) // Bright teal for floor
+            } else {
+                RasterColor::new(180, 140, 255) // Bright purple for ceiling
+            };
+
+            // Draw rectangle outline
+            draw_3d_line(fb, Vec3::new(world_min_x, grid_y, world_min_z), Vec3::new(world_max_x, grid_y, world_min_z), &state.camera_3d, rect_color);
+            draw_3d_line(fb, Vec3::new(world_max_x, grid_y, world_min_z), Vec3::new(world_max_x, grid_y, world_max_z), &state.camera_3d, rect_color);
+            draw_3d_line(fb, Vec3::new(world_max_x, grid_y, world_max_z), Vec3::new(world_min_x, grid_y, world_max_z), &state.camera_3d, rect_color);
+            draw_3d_line(fb, Vec3::new(world_min_x, grid_y, world_max_z), Vec3::new(world_min_x, grid_y, world_min_z), &state.camera_3d, rect_color);
+
+            // Draw internal grid lines
+            for gx in min_gx..=max_gx {
+                let x = room_pos.x + ((gx + 1) as f32) * SECTOR_SIZE;
+                if gx < max_gx {
+                    draw_3d_line(fb, Vec3::new(x, grid_y, world_min_z), Vec3::new(x, grid_y, world_max_z), &state.camera_3d, rect_color);
+                }
+            }
+            for gz in min_gz..=max_gz {
+                let z = room_pos.z + ((gz + 1) as f32) * SECTOR_SIZE;
+                if gz < max_gz {
+                    draw_3d_line(fb, Vec3::new(world_min_x, grid_y, z), Vec3::new(world_max_x, grid_y, z), &state.camera_3d, rect_color);
+                }
+            }
+
+            // Draw vertex indicators at the 4 corners of the rectangle
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, Vec3::new(world_min_x, grid_y, world_min_z), &state.camera_3d, 4, vertex_color);
+            draw_3d_point(fb, Vec3::new(world_max_x, grid_y, world_min_z), &state.camera_3d, 4, vertex_color);
+            draw_3d_point(fb, Vec3::new(world_max_x, grid_y, world_max_z), &state.camera_3d, 4, vertex_color);
+            draw_3d_point(fb, Vec3::new(world_min_x, grid_y, world_max_z), &state.camera_3d, 4, vertex_color);
+
+            // Show sector count in status
+            let width = (max_gx - min_gx + 1) as usize;
+            let depth = (max_gz - min_gz + 1) as usize;
+            let type_name = if is_floor { "floor" } else { "ceiling" };
+            state.set_status(&format!("Drag to place {} ({}x{} = {} sectors)", type_name, width, depth, width * depth), 0.1);
+        }
+    }
+
+    // Draw wall drag preview
+    if let (Some((start_gx, start_gz, dir)), Some((end_gx, end_gz, _))) = (state.wall_drag_start, state.wall_drag_current) {
+        use crate::world::Direction;
+
+        // Get room position
+        let room_pos = state.level.rooms.get(state.current_room)
+            .map(|r| r.position)
+            .unwrap_or_default();
+
+        // Calculate the line of walls based on direction
+        let (iter_axis_start, iter_axis_end, fixed_axis) = match dir {
+            Direction::North | Direction::South => (start_gx, end_gx, start_gz),
+            Direction::East | Direction::West => (start_gz, end_gz, start_gx),
+        };
+
+        let min_iter = iter_axis_start.min(iter_axis_end);
+        let max_iter = iter_axis_start.max(iter_axis_end);
+
+        let wall_color = RasterColor::new(80, 200, 180); // Teal
+        let vertex_color = RasterColor::new(255, 255, 255); // White
+
+        for i in min_iter..=max_iter {
+            let (gx, gz) = match dir {
+                Direction::North | Direction::South => (i, fixed_axis),
+                Direction::East | Direction::West => (fixed_axis, i),
+            };
+
+            // Calculate world position for this grid cell
+            let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
+            let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
+
+            // Use default heights (0 to CEILING_HEIGHT)
+            let floor_y = room_pos.y;
+            let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
+
+            // Wall corners based on direction
+            let (p0, p1, p2, p3) = match dir {
+                Direction::North => (
+                    Vec3::new(grid_x, floor_y, grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
+                    Vec3::new(grid_x, ceiling_y, grid_z),
+                ),
+                Direction::East => (
+                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
+                ),
+                Direction::South => (
+                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
+                ),
+                Direction::West => (
+                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, floor_y, grid_z),
+                    Vec3::new(grid_x, ceiling_y, grid_z),
+                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
+                ),
+            };
+
+            // Draw wall outline
+            draw_3d_line(fb, p0, p1, &state.camera_3d, wall_color);
+            draw_3d_line(fb, p1, p2, &state.camera_3d, wall_color);
+            draw_3d_line(fb, p2, p3, &state.camera_3d, wall_color);
+            draw_3d_line(fb, p3, p0, &state.camera_3d, wall_color);
+
+            // Draw vertex indicators
+            draw_3d_point(fb, p0, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+        }
+
+        // Show wall count in status
+        let wall_count = (max_iter - min_iter + 1) as usize;
+        let dir_name = match dir {
+            Direction::North => "north",
+            Direction::East => "east",
+            Direction::South => "south",
+            Direction::West => "west",
+        };
+        state.set_status(&format!("Drag to place {} {} walls", wall_count, dir_name), 0.1);
+    }
+
+    // Draw diagonal wall drag preview
+    if let (Some((start_gx, start_gz, is_nwse)), Some((end_gx, end_gz, _))) = (state.diagonal_drag_start, state.diagonal_drag_current) {
+        // Get room position
+        let room_pos = state.level.rooms.get(state.current_room)
+            .map(|r| r.position)
+            .unwrap_or_default();
+
+        let diag_color = RasterColor::new(80, 220, 220); // Cyan
+        let vertex_color = RasterColor::new(255, 255, 255); // White
+
+        // Simple diagonal line: both X and Z step together at the same rate
+        let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+        let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+        let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+
+        for i in 0..=steps {
+            let gx = start_gx + sx * i;
+            let gz = start_gz + sz * i;
+
+            // Calculate world position for this grid cell
+            let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
+            let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
+
+            // Use default heights (0 to CEILING_HEIGHT)
+            let floor_y = room_pos.y;
+            let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
+
+            // Diagonal wall corners
+            let (p0, p1, p2, p3) = if is_nwse {
+                // NW-SE diagonal: from NW corner to SE corner
+                (
+                    Vec3::new(grid_x, floor_y, grid_z),                               // NW bottom
+                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),   // SE bottom
+                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE), // SE top
+                    Vec3::new(grid_x, ceiling_y, grid_z),                             // NW top
+                )
+            } else {
+                // NE-SW diagonal: from NE corner to SW corner
+                (
+                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),                 // NE bottom
+                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),                 // SW bottom
+                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),               // SW top
+                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),               // NE top
+                )
+            };
+
+            // Draw diagonal wall outline
+            draw_3d_line(fb, p0, p1, &state.camera_3d, diag_color);
+            draw_3d_line(fb, p1, p2, &state.camera_3d, diag_color);
+            draw_3d_line(fb, p2, p3, &state.camera_3d, diag_color);
+            draw_3d_line(fb, p3, p0, &state.camera_3d, diag_color);
+            // Cross pattern to indicate diagonal
+            draw_3d_line(fb, p0, p2, &state.camera_3d, diag_color);
+
+            // Draw vertex indicators
+            draw_3d_point(fb, p0, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+        }
+
+        let diag_count = steps + 1;
+
+        // Show diagonal count in status
+        let type_name = if is_nwse { "NW-SE" } else { "NE-SW" };
+        state.set_status(&format!("Drag to place {} {} diagonal walls", diag_count, type_name), 0.1);
     }
 
     // Build texture map from texture packs
@@ -1830,7 +2292,27 @@ pub fn draw_viewport_3d(
     // Draw wall preview when in DrawWall mode (after geometry so depth testing works)
     // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
     // corner_heights: [bottom-left, bottom-right, top-right, top-left] (room-relative)
+    // Skip single wall preview if it's not on the drag line
     if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
+        // Check if this preview is on the drag line (if dragging)
+        let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
+            use crate::world::Direction;
+            // Convert preview world coords to grid coords
+            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            // Wall is on the line if direction matches AND the fixed axis matches
+            dir == start_dir && match start_dir {
+                Direction::North | Direction::South => preview_gz == start_gz,
+                Direction::East | Direction::West => preview_gx == start_gx,
+            }
+        } else {
+            true // Not dragging, always show preview
+        };
+        if on_drag_line {
         use crate::world::Direction;
 
         // Get room Y offset for world-space rendering
@@ -1895,6 +2377,13 @@ pub fn draw_viewport_3d(
             draw_3d_line_depth(fb, p2, p3, &state.camera_3d, color);  // top edge
             draw_3d_line_depth(fb, p3, p0, &state.camera_3d, color);  // left edge
 
+            // Draw vertex indicators at the 4 corners of the wall preview
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, p0, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+
             // Draw + through it if filling gap to indicate addition
             if wall_state == 1 {
                 // Vertical line (center)
@@ -1910,10 +2399,49 @@ pub fn draw_viewport_3d(
                 draw_3d_line_depth(fb, left, right, &state.camera_3d, color);
             }
         }
+        } // end if on_drag_line
     }
 
     // Draw diagonal wall preview when in DrawDiagonalWall mode
+    // Skip single diagonal preview if it's not on the drag line
     if let Some((grid_x, grid_z, is_nwse, corner_heights)) = preview_diagonal_wall {
+        // Check if this preview is on the drag line (if dragging)
+        let on_drag_line = if let Some((start_gx, start_gz, start_is_nwse)) = state.diagonal_drag_start {
+            // Convert preview world coords to grid coords
+            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+            } else { 0 };
+            // Diagonal is on the line if type matches AND it's on the simple diagonal line
+            if let Some((end_gx, end_gz, _)) = state.diagonal_drag_current {
+                if is_nwse != start_is_nwse {
+                    false // Wrong diagonal type
+                } else {
+                    // Check if preview point is on the diagonal line from start to end
+                    // Simple check: both X and Z step together at the same rate
+                    let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+                    let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+                    let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+                    let mut found = false;
+                    for i in 0..=steps {
+                        let gx = start_gx + sx * i;
+                        let gz = start_gz + sz * i;
+                        if gx == preview_gx && gz == preview_gz {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                }
+            } else {
+                is_nwse == start_is_nwse
+            }
+        } else {
+            true // Not dragging, always show preview
+        };
+        if on_drag_line {
         // Get room Y offset for world-space rendering
         let room_y = state.level.rooms.get(state.current_room)
             .map(|r| r.position.y)
@@ -1949,6 +2477,14 @@ pub fn draw_viewport_3d(
         draw_3d_line_depth(fb, p3, p0, &state.camera_3d, color);  // left edge
         // Cross pattern to indicate diagonal
         draw_3d_line_depth(fb, p0, p2, &state.camera_3d, color);  // diagonal
+
+        // Draw vertex indicators at the 4 corners of the diagonal wall preview
+        let vertex_color = RasterColor::new(255, 255, 255); // White
+        draw_3d_point(fb, p0, &state.camera_3d, 3, vertex_color);
+        draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
+        draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
+        draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+        }
     }
 
     // Draw room boundary wireframes for all rooms
@@ -3012,6 +3548,27 @@ fn draw_3d_line_impl(
                 y0 += sy;
             }
         }
+    }
+}
+
+/// Draw a 3D point (filled circle) at a world position
+fn draw_3d_point(
+    fb: &mut Framebuffer,
+    pos: Vec3,
+    camera: &crate::rasterizer::Camera,
+    radius: i32,
+    color: RasterColor,
+) {
+    if let Some((sx, sy)) = world_to_screen(
+        pos,
+        camera.position,
+        camera.basis_x,
+        camera.basis_y,
+        camera.basis_z,
+        fb.width,
+        fb.height,
+    ) {
+        fb.draw_circle(sx as i32, sy as i32, radius, color);
     }
 }
 
