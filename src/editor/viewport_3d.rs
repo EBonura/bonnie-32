@@ -4597,8 +4597,8 @@ fn find_hovered_elements(
     let mut result = HoverResult::default();
     let (mouse_fb_x, mouse_fb_y) = mouse_fb;
 
-    const VERTEX_THRESHOLD: f32 = 10.0;
-    const EDGE_THRESHOLD: f32 = 8.0;
+    const VERTEX_THRESHOLD: f32 = 6.0;
+    const EDGE_THRESHOLD: f32 = 4.0;
 
     // Track which type wins: 0=vertex, 1=edge, 2=face
     let mut best_type: usize = 0;

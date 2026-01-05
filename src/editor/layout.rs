@@ -2141,6 +2141,210 @@ fn draw_container_start(
     draw_text(header_text, (x + CONTAINER_PADDING).floor(), (y + 15.0).floor(), 14.0, header_color);
 }
 
+/// Apply normal mode to a face within a sector
+fn apply_normal_mode_to_face(
+    level: &mut crate::world::Level,
+    room: usize,
+    x: usize,
+    z: usize,
+    face: &SectorFace,
+    mode: crate::world::FaceNormalMode,
+) {
+    if let Some(r) = level.rooms.get_mut(room) {
+        if let Some(s) = r.get_sector_mut(x, z) {
+            match face {
+                SectorFace::Floor => {
+                    if let Some(f) = &mut s.floor {
+                        f.normal_mode = mode;
+                    }
+                }
+                SectorFace::Ceiling => {
+                    if let Some(c) = &mut s.ceiling {
+                        c.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallNorth(i) => {
+                    if let Some(w) = s.walls_north.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallEast(i) => {
+                    if let Some(w) = s.walls_east.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallSouth(i) => {
+                    if let Some(w) = s.walls_south.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallWest(i) => {
+                    if let Some(w) = s.walls_west.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallNwSe(i) => {
+                    if let Some(w) = s.walls_nwse.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+                SectorFace::WallNeSw(i) => {
+                    if let Some(w) = s.walls_nesw.get_mut(*i) {
+                        w.normal_mode = mode;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply black_transparent to a face within a sector
+fn apply_black_transparent_to_face(
+    level: &mut crate::world::Level,
+    room: usize,
+    x: usize,
+    z: usize,
+    face: &SectorFace,
+    value: bool,
+) {
+    if let Some(r) = level.rooms.get_mut(room) {
+        if let Some(s) = r.get_sector_mut(x, z) {
+            match face {
+                SectorFace::Floor => {
+                    if let Some(f) = &mut s.floor {
+                        f.black_transparent = value;
+                    }
+                }
+                SectorFace::Ceiling => {
+                    if let Some(c) = &mut s.ceiling {
+                        c.black_transparent = value;
+                    }
+                }
+                SectorFace::WallNorth(i) => {
+                    if let Some(w) = s.walls_north.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallEast(i) => {
+                    if let Some(w) = s.walls_east.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallSouth(i) => {
+                    if let Some(w) = s.walls_south.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallWest(i) => {
+                    if let Some(w) = s.walls_west.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallNwSe(i) => {
+                    if let Some(w) = s.walls_nwse.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+                SectorFace::WallNeSw(i) => {
+                    if let Some(w) = s.walls_nesw.get_mut(*i) {
+                        w.black_transparent = value;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply vertex colors to a face within a sector
+fn apply_vertex_colors_to_face(
+    level: &mut crate::world::Level,
+    room: usize,
+    x: usize,
+    z: usize,
+    face: &SectorFace,
+    vertex_indices: &[usize],
+    color: crate::rasterizer::Color,
+) {
+    if let Some(r) = level.rooms.get_mut(room) {
+        if let Some(s) = r.get_sector_mut(x, z) {
+            match face {
+                SectorFace::Floor => {
+                    if let Some(f) = &mut s.floor {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                f.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::Ceiling => {
+                    if let Some(c) = &mut s.ceiling {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                c.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallNorth(i) => {
+                    if let Some(w) = s.walls_north.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallEast(i) => {
+                    if let Some(w) = s.walls_east.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallSouth(i) => {
+                    if let Some(w) = s.walls_south.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallWest(i) => {
+                    if let Some(w) = s.walls_west.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallNwSe(i) => {
+                    if let Some(w) = s.walls_nwse.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+                SectorFace::WallNeSw(i) => {
+                    if let Some(w) = s.walls_nesw.get_mut(*i) {
+                        for &idx in vertex_indices {
+                            if idx < 4 {
+                                w.colors[idx] = color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Calculate height needed for a horizontal face container
 fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floor: bool) -> f32 {
     let line_height = 18.0;
@@ -2642,16 +2846,19 @@ fn draw_horizontal_face_container(
 
     if let Some(new_color) = picker_result.color {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                if let Some(f) = face_ref {
-                    // Apply to selected vertices
-                    for &idx in &state.selected_vertex_indices {
-                        if idx < 4 {
-                            f.colors[idx] = new_color;
-                        }
-                    }
+        let vertex_indices = state.selected_vertex_indices.clone();
+        // Apply to primary selection
+        let primary_face = if is_floor { SectorFace::Floor } else { SectorFace::Ceiling };
+        apply_vertex_colors_to_face(&mut state.level, room_idx, gx, gz, &primary_face, &vertex_indices, new_color);
+        // Apply to multi-selection (only matching face types: floors or ceilings)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                let is_matching = match (&face, is_floor) {
+                    (SectorFace::Floor, true) | (SectorFace::Ceiling, false) => true,
+                    _ => false,
+                };
+                if is_matching {
+                    apply_vertex_colors_to_face(&mut state.level, room, x, z, &face, &vertex_indices, new_color);
                 }
             }
         }
@@ -2673,15 +2880,23 @@ fn draw_horizontal_face_container(
     };
     if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                if let Some(f) = face_ref {
-                    f.normal_mode = match new_mode {
-                        0 => crate::world::FaceNormalMode::Front,
-                        1 => crate::world::FaceNormalMode::Both,
-                        _ => crate::world::FaceNormalMode::Back,
-                    };
+        let mode = match new_mode {
+            0 => crate::world::FaceNormalMode::Front,
+            1 => crate::world::FaceNormalMode::Both,
+            _ => crate::world::FaceNormalMode::Back,
+        };
+        // Apply to primary selection
+        let primary_face = if is_floor { SectorFace::Floor } else { SectorFace::Ceiling };
+        apply_normal_mode_to_face(&mut state.level, room_idx, gx, gz, &primary_face, mode);
+        // Apply to multi-selection (only matching face types: floors or ceilings)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                let is_matching = match (&face, is_floor) {
+                    (SectorFace::Floor, true) | (SectorFace::Ceiling, false) => true,
+                    _ => false,
+                };
+                if is_matching {
+                    apply_normal_mode_to_face(&mut state.level, room, x, z, &face, mode);
                 }
             }
         }
@@ -2699,11 +2914,19 @@ fn draw_horizontal_face_container(
 
     if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                if let Some(f) = face_ref {
-                    f.black_transparent = !f.black_transparent;
+        let new_value = !face.black_transparent;
+        // Apply to primary selection
+        let primary_face = if is_floor { SectorFace::Floor } else { SectorFace::Ceiling };
+        apply_black_transparent_to_face(&mut state.level, room_idx, gx, gz, &primary_face, new_value);
+        // Apply to multi-selection (only matching face types: floors or ceilings)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                let is_matching = match (&face, is_floor) {
+                    (SectorFace::Floor, true) | (SectorFace::Ceiling, false) => true,
+                    _ => false,
+                };
+                if is_matching {
+                    apply_black_transparent_to_face(&mut state.level, room, x, z, &face, new_value);
                 }
             }
         }
@@ -3394,15 +3617,20 @@ fn draw_wall_face_container(
 
     if let Some(new_color) = picker_result.color {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = get_wall_mut(s, &wall_face) {
-                    // Apply to selected vertices
-                    for &idx in &state.selected_vertex_indices {
-                        if idx < 4 {
-                            w.colors[idx] = new_color;
-                        }
-                    }
+        let vertex_indices = state.selected_vertex_indices.clone();
+        // Apply to primary selection
+        apply_vertex_colors_to_face(&mut state.level, room_idx, gx, gz, &wall_face, &vertex_indices, new_color);
+        // Apply to multi-selection (only wall faces)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                // Check if it's a wall face (any type)
+                let is_wall = matches!(face,
+                    SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+                    SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+                    SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+                );
+                if is_wall {
+                    apply_vertex_colors_to_face(&mut state.level, room, x, z, &face, &vertex_indices, new_color);
                 }
             }
         }
@@ -3424,14 +3652,24 @@ fn draw_wall_face_container(
     };
     if let Some(new_mode) = crate::ui::draw_three_way_toggle(ctx, toggle_rect, ["Front", "Both", "Back"], current_mode) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = get_wall_mut(s, &wall_face) {
-                    w.normal_mode = match new_mode {
-                        0 => crate::world::FaceNormalMode::Front,
-                        1 => crate::world::FaceNormalMode::Both,
-                        _ => crate::world::FaceNormalMode::Back,
-                    };
+        let mode = match new_mode {
+            0 => crate::world::FaceNormalMode::Front,
+            1 => crate::world::FaceNormalMode::Both,
+            _ => crate::world::FaceNormalMode::Back,
+        };
+        // Apply to primary selection
+        apply_normal_mode_to_face(&mut state.level, room_idx, gx, gz, &wall_face, mode);
+        // Apply to multi-selection (only wall faces)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                // Check if it's a wall face (any type)
+                let is_wall = matches!(face,
+                    SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+                    SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+                    SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+                );
+                if is_wall {
+                    apply_normal_mode_to_face(&mut state.level, room, x, z, &face, mode);
                 }
             }
         }
@@ -3449,10 +3687,20 @@ fn draw_wall_face_container(
 
     if crate::ui::icon_button(ctx, btn_rect, icon_char, icon_font, tooltip) {
         state.save_undo();
-        if let Some(r) = state.level.rooms.get_mut(room_idx) {
-            if let Some(s) = r.get_sector_mut(gx, gz) {
-                if let Some(w) = get_wall_mut(s, &wall_face) {
-                    w.black_transparent = !w.black_transparent;
+        let new_value = !wall.black_transparent;
+        // Apply to primary selection
+        apply_black_transparent_to_face(&mut state.level, room_idx, gx, gz, &wall_face, new_value);
+        // Apply to multi-selection (only wall faces)
+        for sel in state.multi_selection.clone() {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                // Check if it's a wall face (any type)
+                let is_wall = matches!(face,
+                    SectorFace::WallNorth(_) | SectorFace::WallEast(_) |
+                    SectorFace::WallSouth(_) | SectorFace::WallWest(_) |
+                    SectorFace::WallNwSe(_) | SectorFace::WallNeSw(_)
+                );
+                if is_wall {
+                    apply_black_transparent_to_face(&mut state.level, room, x, z, &face, new_value);
                 }
             }
         }

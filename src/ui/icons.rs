@@ -90,9 +90,9 @@ pub mod icon {
     pub const MAP_PIN: char = '\u{e110}';         // Object placement (map-pin)
 
     // UV editing
-    pub const FLIP_HORIZONTAL: char = '\u{e219}'; // flip-horizontal-2
-    pub const FLIP_VERTICAL: char = '\u{e21a}';   // flip-vertical-2
-    pub const ROTATE_CW: char = '\u{e147}';       // rotate-cw
+    pub const FLIP_HORIZONTAL: char = '\u{e35d}'; // flip-horizontal
+    pub const FLIP_VERTICAL: char = '\u{e35f}';   // flip-vertical
+    pub const ROTATE_CW: char = '\u{e149}';       // rotate-cw
     pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
     pub const RATIO: char = '\u{e4e8}';           // ratio (1:1 texel mapping)
 
