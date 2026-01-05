@@ -141,6 +141,10 @@ The software rasterizer is based on [tipsy](https://github.com/nkanaev/tipsy) by
 
 [MIT](LICENSE)
 
+## Future
+
+- **CPU Usage Counter**: Display PS1 CPU budget usage to help creators stay within authentic hardware limits
+
 ## Project Status
 
 **Active Development** - This project is under active development. Expect breaking changes between versions.
