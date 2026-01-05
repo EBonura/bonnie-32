@@ -26,6 +26,10 @@ pub enum EditorAction {
     Exit,           // Close/quit
 }
 
+/// Standard font sizes for consistent UI
+const FONT_SIZE_HEADER: f32 = 14.0;
+const FONT_SIZE_CONTENT: f32 = 12.0;
+const LINE_HEIGHT: f32 = 16.0;
 
 /// Editor layout state (split panel ratios)
 pub struct EditorLayout {
@@ -288,7 +292,7 @@ pub fn draw_editor(
 
     draw_grid_view(ctx, grid_view_rect, state);
 
-    draw_panel(room_props_rect, Some("Room"), Color::from_rgba(35, 35, 40, 255));
+    draw_panel(room_props_rect, Some("Rooms"), Color::from_rgba(35, 35, 40, 255));
     draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);
 
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
@@ -1981,35 +1985,100 @@ fn draw_compact_rgb_sliders(
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
     let mut y = rect.y.floor();
     let x = rect.x.floor();
-    let line_height = 20.0;
+    let icon_btn_size = 14.0;
 
+    // Room list at the top
+    let num_rooms = state.level.rooms.len();
+    let max_visible_rooms = 6; // Show up to 6 rooms before scrolling would be needed
+    let rooms_to_show = num_rooms.min(max_visible_rooms);
+
+    for i in 0..num_rooms {
+        if i >= rooms_to_show {
+            // Show "... and N more" indicator
+            let remaining = num_rooms - rooms_to_show;
+            draw_text(&format!("... +{} more", remaining), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 100, 255));
+            y += LINE_HEIGHT;
+            break;
+        }
+
+        let room = &state.level.rooms[i];
+        let is_selected = i == state.current_room;
+        let is_hidden = state.hidden_rooms.contains(&i);
+
+        let text_color = if is_hidden {
+            Color::from_rgba(80, 80, 80, 255) // Dimmed when hidden
+        } else if is_selected {
+            Color::from_rgba(100, 200, 100, 255)
+        } else {
+            WHITE
+        };
+
+        // Visibility toggle button on the left
+        let vis_btn_rect = Rect::new(x, y + 1.0, icon_btn_size, icon_btn_size);
+        let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
+        let vis_tooltip = if is_hidden { "Show room" } else { "Hide room" };
+        if crate::ui::icon_button(ctx, vis_btn_rect, vis_icon, icon_font, vis_tooltip) {
+            if is_hidden {
+                state.hidden_rooms.remove(&i);
+            } else {
+                state.hidden_rooms.insert(i);
+            }
+        }
+
+        // Room row (clickable area to the right of visibility button)
+        let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size - 6.0, LINE_HEIGHT);
+        if ctx.mouse.clicked(&room_btn_rect) {
+            state.current_room = i;
+        }
+
+        if is_selected {
+            draw_rectangle(room_btn_rect.x.floor(), room_btn_rect.y.floor(), room_btn_rect.w, room_btn_rect.h, Color::from_rgba(60, 80, 60, 255));
+        }
+
+        let sector_count = room.iter_sectors().count();
+        draw_text(&format!("Room {} ({} sectors)", room.id, sector_count), (x + icon_btn_size + 4.0).floor(), (y + 11.0).floor(), FONT_SIZE_CONTENT, text_color);
+        y += LINE_HEIGHT;
+    }
+
+    if num_rooms == 0 {
+        draw_text("No rooms", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
+        y += LINE_HEIGHT;
+    }
+
+    // Separator line
+    y += 6.0;
+    draw_line(x, y, x + rect.w - 4.0, y, 1.0, Color::from_rgba(60, 60, 70, 255));
+    y += 10.0;
+
+    // Properties for selected room
     if let Some(room) = state.current_room() {
-        draw_text(&format!("ID: {}", room.id), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        // Section header
+        draw_text("Properties", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
+        y += LINE_HEIGHT;
 
         draw_text(
-            &format!("Pos: ({:.1}, {:.1}, {:.1})", room.position.x, room.position.y, room.position.z),
-            x, (y + 14.0).floor(), 16.0, WHITE,
+            &format!("Pos: ({:.0}, {:.0}, {:.0})", room.position.x, room.position.y, room.position.z),
+            x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE,
         );
-        y += line_height;
+        y += LINE_HEIGHT;
+
+        draw_text(&format!("Size: {}x{}", room.width, room.depth), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
         // Count sectors
         let sector_count = room.iter_sectors().count();
-        draw_text(&format!("Size: {}x{}", room.width, room.depth), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        draw_text(&format!("Sectors: {}", sector_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
-        draw_text(&format!("Sectors: {}", sector_count), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
-
-        draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
         // Count lights in this room from room objects
         let light_count = room.objects.iter()
             .filter(|obj| obj.is_light())
             .count();
-        draw_text(&format!("Lights: {}", light_count), x, (y + 14.0).floor(), 16.0, WHITE);
-        y += line_height;
+        draw_text(&format!("Lights: {}", light_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
 
         // Ambient light knob
         y += 8.0; // Extra space before knob
@@ -2041,62 +2110,8 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
                 }
             }
         }
-
-        y += knob_radius * 2.0 + 30.0; // Knob height + label + value box
-
-        // Room list
-        y += 10.0;
-        draw_text("Rooms:", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
-        y += line_height;
-
-        let icon_btn_size = 18.0;
-        let num_rooms = state.level.rooms.len();
-
-        for i in 0..num_rooms {
-            let room = &state.level.rooms[i];
-            let is_selected = i == state.current_room;
-            let is_hidden = state.hidden_rooms.contains(&i);
-
-            let text_color = if is_hidden {
-                Color::from_rgba(80, 80, 80, 255) // Dimmed when hidden
-            } else if is_selected {
-                Color::from_rgba(100, 200, 100, 255)
-            } else {
-                WHITE
-            };
-
-            // Visibility toggle button on the left
-            let vis_btn_rect = Rect::new(x, y + 1.0, icon_btn_size, icon_btn_size);
-            let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
-            let vis_tooltip = if is_hidden { "Show room" } else { "Hide room" };
-            if crate::ui::icon_button(ctx, vis_btn_rect, vis_icon, icon_font, vis_tooltip) {
-                if is_hidden {
-                    state.hidden_rooms.remove(&i);
-                } else {
-                    state.hidden_rooms.insert(i);
-                }
-            }
-
-            // Room row (clickable area to the right of visibility button)
-            let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size - 6.0, line_height);
-            if ctx.mouse.clicked(&room_btn_rect) {
-                state.current_room = i;
-            }
-
-            if is_selected {
-                draw_rectangle(room_btn_rect.x.floor(), room_btn_rect.y.floor(), room_btn_rect.w, room_btn_rect.h, Color::from_rgba(60, 80, 60, 255));
-            }
-
-            let sector_count = room.iter_sectors().count();
-            draw_text(&format!("Room {} ({} sectors)", room.id, sector_count), (x + icon_btn_size + 4.0).floor(), (y + 14.0).floor(), 16.0, text_color);
-            y += line_height;
-
-            if y > rect.bottom() - line_height {
-                break;
-            }
-        }
     } else {
-        draw_text("No room selected", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
+        draw_text("No room selected", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
     }
 }
 
@@ -3746,14 +3761,14 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
     match &selection {
         super::Selection::None => {
-            draw_text("Nothing selected", x, (y + 14.0).floor(), 16.0, Color::from_rgba(150, 150, 150, 255));
+            draw_text("Nothing selected", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
         }
         super::Selection::Room(idx) => {
-            draw_text(&format!("Room {}", idx), x, (y + 14.0).floor(), 16.0, WHITE);
+            draw_text(&format!("Room {}", idx), x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
         }
         super::Selection::SectorFace { room, x: gx, z: gz, face } => {
             // Single face selected (from 3D view click)
-            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 14.0).floor(), 14.0, Color::from_rgba(150, 150, 150, 255));
+            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
             y += 24.0;
 
             // Get sector data
@@ -3772,7 +3787,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             );
                             let _ = h + CONTAINER_MARGIN; // Layout positioning for potential future faces
                         } else {
-                            draw_text("(no floor)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
+                            draw_text("(no floor)", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 100, 255));
                         }
                     }
                     super::SectorFace::Ceiling => {
@@ -3784,7 +3799,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             );
                             let _ = h + CONTAINER_MARGIN;
                         } else {
-                            draw_text("(no ceiling)", x, (y + 14.0).floor(), 14.0, Color::from_rgba(100, 100, 100, 255));
+                            draw_text("(no ceiling)", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 100, 255));
                         }
                     }
                     super::SectorFace::WallNorth(i) => {
@@ -3941,13 +3956,13 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     }
                 }
             } else {
-                draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+                draw_text("Sector not found", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(255, 100, 100, 255));
             }
         }
         super::Selection::Sector { room, x: gx, z: gz } => {
             // Whole sector selected (from 2D view click) - show all faces in containers
-            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 14.0).floor(), 16.0, Color::from_rgba(255, 200, 80, 255));
-            y += 24.0;
+            draw_text(&format!("Sector ({}, {})", gx, gz), x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(255, 200, 80, 255));
+            y += 20.0;
 
             // Get sector data
             let sector_data = state.level.rooms.get(*room)
@@ -4030,11 +4045,11 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     y += h + CONTAINER_MARGIN;
                 }
             } else {
-                draw_text("Sector not found", x, (y + 14.0).floor(), 14.0, Color::from_rgba(255, 100, 100, 255));
+                draw_text("Sector not found", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(255, 100, 100, 255));
             }
         }
         super::Selection::Portal { room, portal } => {
-            draw_text(&format!("Portal {} in Room {}", portal, room), x, (y + 14.0).floor(), 16.0, WHITE);
+            draw_text(&format!("Portal {} in Room {}", portal, room), x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
         }
         super::Selection::Edge { room, x: gx, z: gz, face_idx, edge_idx, wall_face } => {
             // Determine face name based on type
@@ -4074,8 +4089,8 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     _ => "West",
                 }
             };
-            draw_text(&format!("{} Edge ({})", face_name, edge_name), x, (y + 14.0).floor(), 16.0, WHITE);
-            y += 24.0;
+            draw_text(&format!("{} Edge ({})", face_name, edge_name), x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
+            y += 20.0;
 
             // Get vertex coordinates
             if let Some(room_data) = state.level.rooms.get(*room) {
@@ -4155,20 +4170,20 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
 
             if let Some(obj) = obj_opt {
                 let obj_name = obj.object_type.display_name();
-                draw_text(obj_name, x, (y + 14.0).floor(), 16.0, WHITE);
-                y += 24.0;
+                draw_text(obj_name, x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
+                y += 20.0;
 
                 // Location
-                draw_text("Location:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
-                y += 18.0;
+                draw_text("Location:", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
+                y += LINE_HEIGHT;
                 draw_text(&format!("  Room: {}  Sector: ({}, {})",
                     obj_room_idx, obj.sector_x, obj.sector_z),
-                    x, (y + 12.0).floor(), 13.0, WHITE);
-                y += 18.0;
+                    x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+                y += LINE_HEIGHT;
                 draw_text(&format!("  Height: {:.0}  Facing: {:.1}°",
                     obj.height, obj.facing.to_degrees()),
-                    x, (y + 12.0).floor(), 13.0, WHITE);
-                y += 24.0;
+                    x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+                y += 20.0;
 
                 // Type-specific properties
                 match &obj.object_type {

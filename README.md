@@ -1,6 +1,6 @@
 # Bonnie Engine
 
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg)]()
 
