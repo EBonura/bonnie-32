@@ -1,4 +1,4 @@
-# Bonnie Engine Backlog & Roadmap
+# Bonnie Engine Backlog
 
 This document tracks planned features, known issues, and future improvements.
 
@@ -7,10 +7,8 @@ This document tracks planned features, known issues, and future improvements.
 ## Backlog
 
 ### Rendering / PS1 Authenticity
-- Controls page should have the "joystick" icon, currently there's just a sad face
 - [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
 - [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face
-- [ ] **Face normal flipping**: In properties panel, allow swapping/flipping face normals
 
 ---
 
@@ -18,13 +16,6 @@ This document tracks planned features, known issues, and future improvements.
 
 - [ ] Smarter floor/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
 - [ ] We need a way to place rooms on top of each other, maybe the top view can be toggled with a side view?
-- [ ] bigger effort: Tomb raider 3 introduced diagonals which are indeed supported by Open Lara, we'll need those as well
-
----
-
-### Rendering Pipeline
-
-- [ ] **Dynamic lighting support**: Recalculate affected vertex colors per frame for point lights
 
 ---
 
@@ -37,7 +28,6 @@ This document tracks planned features, known issues, and future improvements.
 ### Music Tracker
 
 #### UI/UX
-- [ ] **Text too small**: Everything is very small text-wise. The world editor has better scaling - study that and make text bigger where it makes sense
 - [ ] Per-note vs channel FX toggle
 
 #### Future
@@ -57,65 +47,6 @@ This document tracks planned features, known issues, and future improvements.
 
 #### Future
 - [ ] VRAM usage counter: Display usage with warning when exceeded
-
----
-
-### PS1 Technical Reference
-
-For implementing authentic PS1 constraints:
-
-**VRAM:**
-- Total: 1MB (1,048,576 bytes)
-- Screen buffer (320x240x16bit): ~153,600 bytes
-- Double buffer: ~307,200 bytes
-- Available for textures: ~700-900KB
-- Textures typically 4-bit or 8-bit indexed with CLUTs
-
-**Dithering (Bayer 4x4 matrix):**
-```
- 0/16   8/16   2/16  10/16
-12/16   4/16  14/16   6/16
- 3/16  11/16   1/16   9/16
-15/16   7/16  13/16   5/16
-```
-
----
-
-## Roadmap
-
-### Priority: Map Creation & Basic Gameplay
-- [ ] Fix 2D grid placement precision (sectors not aligning to clicks)
-- [ ] Slope/ramp tools
-
-### UI & Settings
-- [ ] Options menu in-game (resolution, PS1 effects toggles)
-- [ ] Resolution selector (240p, 480p, native)
-- [ ] HUD system (health, stamina bars)
-
-### Rendering & Effects
-- [ ] Sprite/billboard rendering (classic PS1 technique for enemies, items)
-- [ ] Particle system (dust, sparks, blood splatter)
-- [ ] Fog system (distance-based fade)
-
-### Core Systems
-- [ ] Inventory system
-- [ ] Save/load game state
-
-### Souls-like Mechanics
-- [ ] Lock-on targeting
-- [ ] Stamina-based combat (attacks, dodges, blocks)
-- [ ] Bonfire checkpoints (rest, respawn, level up)
-- [ ] Death/corpse run mechanics
-- [ ] Boss arenas and encounters
-- [ ] Weapon system (durability, movesets)
-- [ ] Estus flask / healing system
-
-### Editor QoL
-- [ ] Copy/paste sectors
-- [ ] Grid snapping toggles
-- [ ] Vertex welding/merging tool
-- [ ] Face splitting/subdividing
-- [ ] Selection box (drag to select multiple)
 
 ---
 
@@ -144,27 +75,3 @@ For implementing authentic PS1 constraints:
 - [ ] **Batch slope/height editing**: When multiple faces are selected, changing slope or height should apply to all selected faces proportionally.
 - [ ] **Better floor placement highlight**: Improve the visual feedback when placing floors to make it clearer where the floor will be placed.
 - [ ] **Increase texture cache time**: Textures are being unloaded too quickly from cache. Increase the retention time to avoid reloading.
-
-### Level Design Features
-- [ ] Water/liquid volumes (with different rendering)
-- [ ] Trigger volumes (for events, cutscenes)
-- [ ] Ladder/climbing surfaces
-- [ ] Moving platforms
-- [ ] Destructible geometry
-- [ ] Skyboxes (PS1-style low-poly or texture-based)
-
-### Enemy/NPC Systems
-- [ ] AI pathfinding
-- [ ] Aggro/detection radius
-- [ ] Attack patterns
-- [ ] Animation state machine
-
-### Performance
-- [ ] Frustum culling optimization
-- [ ] Occlusion culling (beyond portals)
-- [ ] Level streaming for large worlds
-
-### Future Tools (Maybe)
-- [ ] Texture editor integration
-- [ ] Animation tool (for entities/bosses)
-- [ ] Cutscene editor

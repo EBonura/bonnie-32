@@ -86,9 +86,24 @@ Test your level in real-time with ECS-based game systems. Features:
 - **Debug Overlay**: Performance timings, player stats, render breakdown
 - **FPS Limit**: 30 FPS (authentic), 60 FPS, or unlocked
 
-## Roadmap
+## PS1 Technical Reference
 
-See [BACKLOG.md](BACKLOG.md) for planned features, known issues, and development priorities.
+For implementing authentic PS1 constraints:
+
+**VRAM:**
+- Total: 1MB (1,048,576 bytes)
+- Screen buffer (320x240x16bit): ~153,600 bytes
+- Double buffer: ~307,200 bytes
+- Available for textures: ~700-900KB
+- Textures typically 4-bit or 8-bit indexed with CLUTs
+
+**Dithering (Bayer 4x4 matrix):**
+```
+ 0/16   8/16   2/16  10/16
+12/16   4/16  14/16   6/16
+ 3/16  11/16   1/16   9/16
+15/16   7/16  13/16   5/16
+```
 
 ## Support
 
