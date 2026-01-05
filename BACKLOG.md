@@ -33,7 +33,6 @@ This document tracks planned features, known issues, and future improvements.
 ### World Editor - UI/UX
 
 - [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
-- [ ] **2D view auto-center on current room**: The 2D grid view should center on the currently selected room. Also auto-center in 3D editor when switching rooms.
 - [ ] **Extended multi-selection**: Current multi-selection is limited. Should support larger selections and more operations.
 - [ ] **Shift+click for range select, Ctrl+click for toggle select**: Standard selection behavior - Shift extends selection range, Ctrl toggles individual items.
 - [ ] **Add deselect functionality**: Currently there's no way to deselect all. Add Escape or click-on-empty to deselect.
