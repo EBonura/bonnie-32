@@ -1983,6 +1983,7 @@ fn draw_texture_uv_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             tools_y,
             rect.w - 8.0,
             state.paint_color,
+            RasterColor::from_ps1(16, 16, 16),
             state.paint_blend_mode,
             "Paint Color (PS1 15-bit)",
             &mut state.color_picker_slider,

@@ -39,7 +39,8 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Single click deselects multi-selection**: When you have multiple items selected, clicking on a single cell should deselect everything and select only that cell.
 - [ ] **Gradient fills across cells**: Support linear and spherical gradient fills across multiple selected cells for vertex colors.
 - [ ] **Auto-select room vs room lock**: Automatically select the room the cursor is in, rather than requiring manual room locking.
-- [ ] **Color slider lock + double-click reset**: Add a lock toggle to color sliders to prevent accidental changes. Double-click should reset to default value. Should work for both face colors and single vertex colors.
+- [ ] **Color slider lock**: Add a lock toggle to color sliders to prevent accidental changes.
+- [x] **Double-click reset for color sliders**: Double-click resets slider to default value (gray 16). Works for face colors and vertex colors.
 - [ ] **Fix vertex color removal**: The "remove color" option doesn't work properly for vertex colors.
 - [ ] **Load textures on new level**: When creating a new level, textures aren't loaded automatically. Should load default texture pack.
 - [ ] **Increase texture cache time**: Textures are being unloaded too quickly from cache. Increase the retention time to avoid reloading.

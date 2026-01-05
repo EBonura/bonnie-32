@@ -1100,6 +1100,7 @@ pub fn draw_ps1_color_picker(
     y: f32,
     width: f32,
     current_color: RasterColor,
+    default_color: RasterColor,
     label: &str,
     active_slider: &mut Option<usize>, // 0=R, 1=G, 2=B
 ) -> ColorPickerResult {
@@ -1182,23 +1183,35 @@ pub fn draw_ps1_color_picker(
         // Handle slider interaction
         let hovered = ctx.mouse.inside(&track_rect);
 
-        // Start dragging
-        if hovered && ctx.mouse.left_pressed {
-            *active_slider = Some(i);
-        }
-
-        // Continue dragging (even outside the rect)
-        if *active_slider == Some(i) && ctx.mouse.left_down {
-            result.active = true;
-            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
-            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+        // Double-click to reset to default (skip dragging on double-click)
+        if hovered && ctx.mouse.double_clicked {
             match i {
-                0 => r5 = new_val,
-                1 => g5 = new_val,
-                2 => b5 = new_val,
+                0 => r5 = default_color.r5(),
+                1 => g5 = default_color.g5(),
+                2 => b5 = default_color.b5(),
                 _ => {}
             }
             result.color = Some(RasterColor::from_ps1(r5, g5, b5));
+            *active_slider = None; // Clear any drag state
+        } else {
+            // Start dragging (only on single click, not double-click)
+            if hovered && ctx.mouse.left_pressed {
+                *active_slider = Some(i);
+            }
+
+            // Continue dragging (even outside the rect)
+            if *active_slider == Some(i) && ctx.mouse.left_down {
+                result.active = true;
+                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+                let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+                match i {
+                    0 => r5 = new_val,
+                    1 => g5 = new_val,
+                    2 => b5 = new_val,
+                    _ => {}
+                }
+                result.color = Some(RasterColor::from_ps1(r5, g5, b5));
+            }
         }
 
         // End dragging
@@ -1207,13 +1220,23 @@ pub fn draw_ps1_color_picker(
         }
     }
 
-    // Draw preset row below sliders
+    // Draw preset row below sliders with label
     let preset_y = y + swatch_size + 6.0;
     let preset_size = 14.0;
     let preset_spacing = 2.0;
+    let label_width = 42.0; // Width for "Presets" label
+
+    // Draw "Presets" label
+    draw_text(
+        "Presets",
+        x.floor(),
+        (preset_y + 11.0).floor(),
+        12.0,
+        Color::from_rgba(150, 150, 150, 255),
+    );
 
     for (i, (pr, pg, pb)) in PS1_PRESETS.iter().enumerate() {
-        let preset_x = x + (i as f32) * (preset_size + preset_spacing);
+        let preset_x = x + label_width + (i as f32) * (preset_size + preset_spacing);
         let preset_rect = Rect::new(preset_x, preset_y, preset_size, preset_size);
 
         // Border
@@ -1261,6 +1284,7 @@ pub fn draw_ps1_color_picker_with_alpha(
     y: f32,
     width: f32,
     current_color: RasterColor,
+    default_color: RasterColor,
     label: &str,
     active_slider: &mut Option<usize>, // 0=R, 1=G, 2=B, 3=A
 ) -> ColorPickerResult {
@@ -1386,37 +1410,16 @@ pub fn draw_ps1_color_picker_with_alpha(
         // Handle slider interaction
         let hovered = ctx.mouse.inside(&track_rect);
 
-        // Start dragging
-        if hovered && ctx.mouse.left_pressed {
-            *active_slider = Some(i);
-        }
-
-        // Continue dragging (even outside the rect)
-        if *active_slider == Some(i) && ctx.mouse.left_down {
-            result.active = true;
-            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
-            let new_val = ((rel_x / slider_width) * *max_val as f32).round() as u8;
+        // Double-click to reset to default (skip dragging on double-click)
+        if hovered && ctx.mouse.double_clicked {
             match i {
-                0 => r5 = new_val,
-                1 => g5 = new_val,
-                2 => b5 = new_val,
-                3 => blend_idx = new_val,
+                0 => r5 = default_color.r5(),
+                1 => g5 = default_color.g5(),
+                2 => b5 = default_color.b5(),
+                3 => blend_idx = 255, // Reset alpha to opaque
                 _ => {}
             }
-            // Map slider value back to BlendMode
-            let blend = if blend_idx < 48 {
-                crate::rasterizer::BlendMode::Erase
-            } else if blend_idx < 112 {
-                crate::rasterizer::BlendMode::AddQuarter
-            } else if blend_idx < 144 {
-                crate::rasterizer::BlendMode::Subtract
-            } else if blend_idx < 176 {
-                crate::rasterizer::BlendMode::Add
-            } else if blend_idx < 224 {
-                crate::rasterizer::BlendMode::Average
-            } else {
-                crate::rasterizer::BlendMode::Opaque
-            };
+            let blend = if i == 3 { default_color.blend } else { current_color.blend };
             let color = RasterColor::with_blend(
                 (r5.min(31)) << 3,
                 (g5.min(31)) << 3,
@@ -1424,6 +1427,47 @@ pub fn draw_ps1_color_picker_with_alpha(
                 blend,
             );
             result.color = Some(color);
+            *active_slider = None; // Clear any drag state
+        } else {
+            // Start dragging (only on single click, not double-click)
+            if hovered && ctx.mouse.left_pressed {
+                *active_slider = Some(i);
+            }
+
+            // Continue dragging (even outside the rect)
+            if *active_slider == Some(i) && ctx.mouse.left_down {
+                result.active = true;
+                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+                let new_val = ((rel_x / slider_width) * *max_val as f32).round() as u8;
+                match i {
+                    0 => r5 = new_val,
+                    1 => g5 = new_val,
+                    2 => b5 = new_val,
+                    3 => blend_idx = new_val,
+                    _ => {}
+                }
+                // Map slider value back to BlendMode
+                let blend = if blend_idx < 48 {
+                    crate::rasterizer::BlendMode::Erase
+                } else if blend_idx < 112 {
+                    crate::rasterizer::BlendMode::AddQuarter
+                } else if blend_idx < 144 {
+                    crate::rasterizer::BlendMode::Subtract
+                } else if blend_idx < 176 {
+                    crate::rasterizer::BlendMode::Add
+                } else if blend_idx < 224 {
+                    crate::rasterizer::BlendMode::Average
+                } else {
+                    crate::rasterizer::BlendMode::Opaque
+                };
+                let color = RasterColor::with_blend(
+                    (r5.min(31)) << 3,
+                    (g5.min(31)) << 3,
+                    (b5.min(31)) << 3,
+                    blend,
+                );
+                result.color = Some(color);
+            }
         }
 
         // End dragging
@@ -1432,13 +1476,23 @@ pub fn draw_ps1_color_picker_with_alpha(
         }
     }
 
-    // Draw preset row below sliders
+    // Draw preset row below sliders with label
     let preset_y = y + swatch_size + 6.0;
     let preset_size = 14.0;
     let preset_spacing = 2.0;
+    let label_width = 42.0; // Width for "Presets" label
+
+    // Draw "Presets" label
+    draw_text(
+        "Presets",
+        x.floor(),
+        (preset_y + 11.0).floor(),
+        12.0,
+        Color::from_rgba(150, 150, 150, 255),
+    );
 
     for (i, (pr, pg, pb)) in PS1_PRESETS.iter().enumerate() {
-        let preset_x = x + (i as f32) * (preset_size + preset_spacing);
+        let preset_x = x + label_width + (i as f32) * (preset_size + preset_spacing);
         let preset_rect = Rect::new(preset_x, preset_y, preset_size, preset_size);
 
         // Border
@@ -1498,6 +1552,7 @@ pub fn draw_ps1_color_picker_with_blend_mode(
     y: f32,
     width: f32,
     current_color: RasterColor,
+    default_color: RasterColor,
     current_blend: BlendMode,
     label: &str,
     active_slider: &mut Option<usize>, // 0=R, 1=G, 2=B
@@ -1582,23 +1637,35 @@ pub fn draw_ps1_color_picker_with_blend_mode(
         // Handle slider interaction
         let hovered = ctx.mouse.inside(&track_rect);
 
-        // Start dragging
-        if hovered && ctx.mouse.left_pressed {
-            *active_slider = Some(i);
-        }
-
-        // Continue dragging
-        if *active_slider == Some(i) && ctx.mouse.left_down {
-            result.active = true;
-            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
-            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+        // Double-click to reset to default (skip dragging on double-click)
+        if hovered && ctx.mouse.double_clicked {
             match i {
-                0 => r5 = new_val,
-                1 => g5 = new_val,
-                2 => b5 = new_val,
+                0 => r5 = default_color.r5(),
+                1 => g5 = default_color.g5(),
+                2 => b5 = default_color.b5(),
                 _ => {}
             }
             result.color = Some(RasterColor::from_ps1(r5, g5, b5));
+            *active_slider = None; // Clear any drag state
+        } else {
+            // Start dragging (only on single click, not double-click)
+            if hovered && ctx.mouse.left_pressed {
+                *active_slider = Some(i);
+            }
+
+            // Continue dragging
+            if *active_slider == Some(i) && ctx.mouse.left_down {
+                result.active = true;
+                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+                let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+                match i {
+                    0 => r5 = new_val,
+                    1 => g5 = new_val,
+                    2 => b5 = new_val,
+                    _ => {}
+                }
+                result.color = Some(RasterColor::from_ps1(r5, g5, b5));
+            }
         }
 
         // End dragging
@@ -1669,13 +1736,23 @@ pub fn draw_ps1_color_picker_with_blend_mode(
         }
     }
 
-    // Draw preset row below blend mode
+    // Draw preset row below blend mode with label
     let preset_y = blend_y + blend_btn_size + 4.0;
     let preset_size = 14.0;
     let preset_spacing = 2.0;
+    let label_width = 42.0; // Width for "Presets" label
+
+    // Draw "Presets" label
+    draw_text(
+        "Presets",
+        x.floor(),
+        (preset_y + 11.0).floor(),
+        12.0,
+        Color::from_rgba(150, 150, 150, 255),
+    );
 
     for (i, (pr, pg, pb)) in PS1_PRESETS.iter().enumerate() {
-        let preset_x = x + (i as f32) * (preset_size + preset_spacing);
+        let preset_x = x + label_width + (i as f32) * (preset_size + preset_spacing);
         let preset_rect = Rect::new(preset_x, preset_y, preset_size, preset_size);
 
         // Border

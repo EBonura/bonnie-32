@@ -2537,27 +2537,26 @@ fn draw_horizontal_face_container(
     content_y += btn_size + 4.0;
 
     // Face vertex colors (PS1-style texture modulation)
-    // Show 4 vertex color swatches in a 2x2 grid matching the face corners
-    let swatch_size = 14.0;
+    // Layout: 2x2 vertex swatches on left, color picker on right
+    let swatch_size = 18.0;
     let swatch_spacing = 2.0;
+    let swatches_width = 2.0 * swatch_size + swatch_spacing; // Width of 2x2 grid
+    let picker_offset = swatches_width + 8.0; // Gap between swatches and picker
+
+    // Default to all vertices selected if none are selected
+    if state.selected_vertex_indices.is_empty() {
+        state.selected_vertex_indices = vec![0, 1, 2, 3];
+    }
 
     // Label
-    let is_uniform = face.has_uniform_color();
-    let color_text = if is_uniform {
-        let c = face.colors[0];
-        if c.r == 128 && c.g == 128 && c.b == 128 {
-            String::from("Tint: Neutral")
-        } else {
-            format!("Tint: ({}, {}, {})", c.r, c.g, c.b)
-        }
-    } else {
-        String::from("Tint: Per-vertex")
-    };
-    draw_text(&color_text, content_x.floor(), (content_y + 12.0).floor(), 12.0,
-        macroquad::color::Color::from_rgba(180, 180, 180, 255));
+    draw_text("Vertex Colour", content_x.floor(), (content_y + 12.0).floor(), 12.0,
+        macroquad::color::Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let section_start_y = content_y; // Remember where this section starts
 
     // Draw 4 vertex color swatches in 2x2 grid (NW, NE / SW, SE layout)
-    let grid_x = content_x + 90.0;
+    let grid_x = content_x;
     let vertex_labels = ["NW", "NE", "SW", "SE"];
     let grid_positions = [(0, 0), (1, 0), (0, 1), (1, 1)]; // (col, row)
     let vertex_indices = [0, 1, 3, 2]; // Map grid to corner indices: NW=0, NE=1, SE=2, SW=3
@@ -2566,7 +2565,7 @@ fn draw_horizontal_face_container(
         let vert_idx = vertex_indices[grid_idx];
         let vert_color = face.colors[vert_idx];
         let sx = grid_x + (col as f32) * (swatch_size + swatch_spacing);
-        let sy = content_y + (row as f32) * (swatch_size + swatch_spacing);
+        let sy = section_start_y + (row as f32) * (swatch_size + swatch_spacing);
         let swatch_rect = Rect::new(sx, sy, swatch_size, swatch_size);
 
         // Draw swatch
@@ -2591,10 +2590,13 @@ fn draw_horizontal_face_container(
         draw_rectangle_lines(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
             if is_selected { 2.0 } else { 1.0 }, border_color);
 
-        // Handle click - toggle selection of this vertex
+        // Handle click - toggle selection of this vertex (but don't allow deselecting the last one)
         if hovered && ctx.mouse.left_pressed {
             if is_selected {
-                state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                // Only deselect if there's more than one selected
+                if state.selected_vertex_indices.len() > 1 {
+                    state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                }
             } else {
                 state.selected_vertex_indices.push(vert_idx);
             }
@@ -2611,108 +2613,30 @@ fn draw_horizontal_face_container(
         }
     }
 
-    // Color preset buttons (apply to all vertices)
-    let preset_x = grid_x + 2.0 * (swatch_size + swatch_spacing) + 8.0;
-    let preset_size = 14.0;
-    let preset_spacing = 2.0;
+    // Vertical separator between swatches and picker
+    let separator_x = content_x + swatches_width + 4.0;
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    draw_line(separator_x, section_start_y, separator_x, section_start_y + swatches_height, 1.0,
+        macroquad::color::Color::from_rgba(60, 60, 65, 255));
 
-    // Preset colors: Neutral, Red tint, Blue tint, Green tint, Warm, Cool
-    let presets: [(crate::rasterizer::Color, &str); 6] = [
-        (crate::rasterizer::Color::NEUTRAL, "Neutral (no tint)"),
-        (crate::rasterizer::Color::new(160, 120, 120), "Red tint"),
-        (crate::rasterizer::Color::new(120, 120, 160), "Blue tint"),
-        (crate::rasterizer::Color::new(120, 160, 120), "Green tint"),
-        (crate::rasterizer::Color::new(150, 130, 110), "Warm tint"),
-        (crate::rasterizer::Color::new(110, 130, 150), "Cool tint"),
-    ];
+    // PS1 color picker to the right of vertex swatches
+    let picker_x = content_x + picker_offset;
+    let picker_width = width - CONTAINER_PADDING * 2.0 - picker_offset;
 
-    for (i, (preset_color, tooltip)) in presets.iter().enumerate() {
-        let px = preset_x + (i as f32) * (preset_size + preset_spacing);
-        let preset_rect = Rect::new(px, content_y + 8.0, preset_size, preset_size);
-
-        // Draw preset swatch
-        draw_rectangle(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h,
-            macroquad::color::Color::new(
-                preset_color.r as f32 / 255.0,
-                preset_color.g as f32 / 255.0,
-                preset_color.b as f32 / 255.0,
-                1.0
-            ));
-
-        // Highlight if hovered or all vertices match
-        let all_match = is_uniform && face.colors[0].r == preset_color.r &&
-            face.colors[0].g == preset_color.g && face.colors[0].b == preset_color.b;
-        let hovered = ctx.mouse.inside(&preset_rect);
-        let border_color = if all_match {
-            macroquad::color::Color::from_rgba(0, 200, 200, 255)
-        } else if hovered {
-            macroquad::color::Color::from_rgba(200, 200, 200, 255)
-        } else {
-            macroquad::color::Color::from_rgba(80, 80, 80, 255)
-        };
-        draw_rectangle_lines(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h, 1.0, border_color);
-
-        // Handle click - apply to selected vertices (or all if none selected)
-        if hovered && ctx.mouse.left_pressed {
-            state.save_undo();
-            if let Some(r) = state.level.rooms.get_mut(room_idx) {
-                if let Some(s) = r.get_sector_mut(gx, gz) {
-                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
-                    if let Some(f) = face_ref {
-                        if state.selected_vertex_indices.is_empty() {
-                            // No vertices selected - apply to all
-                            f.set_uniform_color(*preset_color);
-                        } else {
-                            // Apply only to selected vertices
-                            for &idx in &state.selected_vertex_indices {
-                                if idx < 4 {
-                                    f.colors[idx] = *preset_color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tooltip
-        let target = if state.selected_vertex_indices.is_empty() {
-            "all vertices"
-        } else {
-            "selected vertices"
-        };
-        if hovered {
-            ctx.tooltip = Some(crate::ui::PendingTooltip {
-                text: format!("{} (apply to {})", tooltip, target),
-                x: ctx.mouse.x,
-                y: ctx.mouse.y,
-            });
-        }
-    }
-
-    // PS1 color picker below swatches (for custom colors)
-    content_y += 36.0;
-    let picker_label = if state.selected_vertex_indices.is_empty() {
-        "Custom (all)"
-    } else {
-        "Custom (selected)"
-    };
-
-    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
-    let display_color = if !state.selected_vertex_indices.is_empty() {
+    // Get current color to display in picker (use first selected vertex)
+    let display_color = {
         let idx = state.selected_vertex_indices[0].min(3);
         face.colors[idx]
-    } else {
-        face.colors[0]
     };
 
     let picker_result = draw_ps1_color_picker(
         ctx,
-        content_x,
-        content_y + 14.0,
-        width - CONTAINER_PADDING * 2.0,
+        picker_x,
+        section_start_y,
+        picker_width,
         display_color,
-        picker_label,
+        RasterColor::from_ps1(16, 16, 16),
+        "",
         &mut state.vertex_color_slider,
     );
 
@@ -2722,15 +2646,10 @@ fn draw_horizontal_face_container(
             if let Some(s) = r.get_sector_mut(gx, gz) {
                 let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
                 if let Some(f) = face_ref {
-                    if state.selected_vertex_indices.is_empty() {
-                        // No vertices selected - apply to all
-                        f.set_uniform_color(new_color);
-                    } else {
-                        // Apply only to selected vertices
-                        for &idx in &state.selected_vertex_indices {
-                            if idx < 4 {
-                                f.colors[idx] = new_color;
-                            }
+                    // Apply to selected vertices
+                    for &idx in &state.selected_vertex_indices {
+                        if idx < 4 {
+                            f.colors[idx] = new_color;
                         }
                     }
                 }
@@ -2738,8 +2657,11 @@ fn draw_horizontal_face_container(
         }
     }
 
+    // Advance content_y by the taller of: swatches (2 rows) or picker
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    content_y += swatches_height.max(ps1_color_picker_height()) + 8.0;
+
     // Normal mode 3-way toggle
-    content_y += ps1_color_picker_height() + 14.0 + 8.0;
     draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
     content_y += 16.0;
 
@@ -3367,27 +3289,26 @@ fn draw_wall_face_container(
     content_y += btn_size + 4.0;
 
     // Wall vertex colors (PS1-style texture modulation)
-    // Show 4 vertex color swatches in a 2x2 grid (BL, BR / TL, TR layout)
-    let swatch_size = 14.0;
+    // Layout: 2x2 vertex swatches on left, color picker on right
+    let swatch_size = 18.0;
     let swatch_spacing = 2.0;
+    let swatches_width = 2.0 * swatch_size + swatch_spacing; // Width of 2x2 grid
+    let picker_offset = swatches_width + 8.0; // Gap between swatches and picker
+
+    // Default to all vertices selected if none are selected
+    if state.selected_vertex_indices.is_empty() {
+        state.selected_vertex_indices = vec![0, 1, 2, 3];
+    }
 
     // Label
-    let is_uniform = wall.has_uniform_color();
-    let color_text = if is_uniform {
-        let c = wall.colors[0];
-        if c.r == 128 && c.g == 128 && c.b == 128 {
-            String::from("Tint: Neutral")
-        } else {
-            format!("Tint: ({}, {}, {})", c.r, c.g, c.b)
-        }
-    } else {
-        String::from("Tint: Per-vertex")
-    };
-    draw_text(&color_text, content_x.floor(), (content_y + 12.0).floor(), 12.0,
-        macroquad::color::Color::from_rgba(180, 180, 180, 255));
+    draw_text("Vertex Colour", content_x.floor(), (content_y + 12.0).floor(), 12.0,
+        macroquad::color::Color::from_rgba(150, 150, 150, 255));
+    content_y += 16.0;
+
+    let section_start_y = content_y; // Remember where this section starts
 
     // Draw 4 vertex color swatches in 2x2 grid (TL, TR / BL, BR layout - visual matches wall)
-    let grid_x = content_x + 90.0;
+    let grid_x = content_x;
     let vertex_labels = ["TL", "TR", "BL", "BR"];
     let grid_positions = [(0, 0), (1, 0), (0, 1), (1, 1)]; // (col, row)
     let vertex_indices = [3, 2, 0, 1]; // Map grid to corner indices: BL=0, BR=1, TR=2, TL=3
@@ -3396,7 +3317,7 @@ fn draw_wall_face_container(
         let vert_idx = vertex_indices[grid_idx];
         let vert_color = wall.colors[vert_idx];
         let sx = grid_x + (col as f32) * (swatch_size + swatch_spacing);
-        let sy = content_y + (row as f32) * (swatch_size + swatch_spacing);
+        let sy = section_start_y + (row as f32) * (swatch_size + swatch_spacing);
         let swatch_rect = Rect::new(sx, sy, swatch_size, swatch_size);
 
         // Draw swatch
@@ -3421,10 +3342,13 @@ fn draw_wall_face_container(
         draw_rectangle_lines(swatch_rect.x, swatch_rect.y, swatch_rect.w, swatch_rect.h,
             if is_selected { 2.0 } else { 1.0 }, border_color);
 
-        // Handle click - toggle selection of this vertex
+        // Handle click - toggle selection of this vertex (but don't allow deselecting the last one)
         if hovered && ctx.mouse.left_pressed {
             if is_selected {
-                state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                // Only deselect if there's more than one selected
+                if state.selected_vertex_indices.len() > 1 {
+                    state.selected_vertex_indices.retain(|&v| v != vert_idx);
+                }
             } else {
                 state.selected_vertex_indices.push(vert_idx);
             }
@@ -3441,107 +3365,30 @@ fn draw_wall_face_container(
         }
     }
 
-    // Color preset buttons (apply to selected vertices or all)
-    let preset_x = grid_x + 2.0 * (swatch_size + swatch_spacing) + 8.0;
-    let preset_size = 14.0;
-    let preset_spacing = 2.0;
+    // Vertical separator between swatches and picker
+    let separator_x = content_x + swatches_width + 4.0;
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    draw_line(separator_x, section_start_y, separator_x, section_start_y + swatches_height, 1.0,
+        macroquad::color::Color::from_rgba(60, 60, 65, 255));
 
-    // Preset colors: Neutral, Red tint, Blue tint, Green tint, Warm, Cool
-    let presets: [(crate::rasterizer::Color, &str); 6] = [
-        (crate::rasterizer::Color::NEUTRAL, "Neutral (no tint)"),
-        (crate::rasterizer::Color::new(160, 120, 120), "Red tint"),
-        (crate::rasterizer::Color::new(120, 120, 160), "Blue tint"),
-        (crate::rasterizer::Color::new(120, 160, 120), "Green tint"),
-        (crate::rasterizer::Color::new(150, 130, 110), "Warm tint"),
-        (crate::rasterizer::Color::new(110, 130, 150), "Cool tint"),
-    ];
+    // PS1 color picker to the right of vertex swatches
+    let picker_x = content_x + picker_offset;
+    let picker_width = width - CONTAINER_PADDING * 2.0 - picker_offset;
 
-    for (i, (preset_color, tooltip)) in presets.iter().enumerate() {
-        let px = preset_x + (i as f32) * (preset_size + preset_spacing);
-        let preset_rect = Rect::new(px, content_y + 8.0, preset_size, preset_size);
-
-        // Draw preset swatch
-        draw_rectangle(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h,
-            macroquad::color::Color::new(
-                preset_color.r as f32 / 255.0,
-                preset_color.g as f32 / 255.0,
-                preset_color.b as f32 / 255.0,
-                1.0
-            ));
-
-        // Highlight if hovered or all vertices match
-        let all_match = is_uniform && wall.colors[0].r == preset_color.r &&
-            wall.colors[0].g == preset_color.g && wall.colors[0].b == preset_color.b;
-        let hovered = ctx.mouse.inside(&preset_rect);
-        let border_color = if all_match {
-            macroquad::color::Color::from_rgba(0, 200, 200, 255)
-        } else if hovered {
-            macroquad::color::Color::from_rgba(200, 200, 200, 255)
-        } else {
-            macroquad::color::Color::from_rgba(80, 80, 80, 255)
-        };
-        draw_rectangle_lines(preset_rect.x, preset_rect.y, preset_rect.w, preset_rect.h, 1.0, border_color);
-
-        // Handle click - apply to selected vertices (or all if none selected)
-        if hovered && ctx.mouse.left_pressed {
-            state.save_undo();
-            if let Some(r) = state.level.rooms.get_mut(room_idx) {
-                if let Some(s) = r.get_sector_mut(gx, gz) {
-                    if let Some(w) = get_wall_mut(s, &wall_face) {
-                        if state.selected_vertex_indices.is_empty() {
-                            // No vertices selected - apply to all
-                            w.set_uniform_color(*preset_color);
-                        } else {
-                            // Apply only to selected vertices
-                            for &idx in &state.selected_vertex_indices {
-                                if idx < 4 {
-                                    w.colors[idx] = *preset_color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tooltip
-        let target = if state.selected_vertex_indices.is_empty() {
-            "all vertices"
-        } else {
-            "selected vertices"
-        };
-        if hovered {
-            ctx.tooltip = Some(crate::ui::PendingTooltip {
-                text: format!("{} (apply to {})", tooltip, target),
-                x: ctx.mouse.x,
-                y: ctx.mouse.y,
-            });
-        }
-    }
-
-    // PS1 color picker below swatches (for custom colors)
-    content_y += 36.0;
-    let picker_label = if state.selected_vertex_indices.is_empty() {
-        "Custom (all)"
-    } else {
-        "Custom (selected)"
-    };
-
-    // Get current color to display in picker (use first selected vertex, or first vertex if none selected)
-    let display_color = if !state.selected_vertex_indices.is_empty() {
+    // Get current color to display in picker (use first selected vertex)
+    let display_color = {
         let idx = state.selected_vertex_indices[0].min(3);
         wall.colors[idx]
-    } else {
-        wall.colors[0]
     };
 
     let picker_result = draw_ps1_color_picker(
         ctx,
-        content_x,
-        content_y + 14.0,
-        width - CONTAINER_PADDING * 2.0,
+        picker_x,
+        section_start_y,
+        picker_width,
         display_color,
-        picker_label,
+        RasterColor::from_ps1(16, 16, 16),
+        "",
         &mut state.vertex_color_slider,
     );
 
@@ -3550,15 +3397,10 @@ fn draw_wall_face_container(
         if let Some(r) = state.level.rooms.get_mut(room_idx) {
             if let Some(s) = r.get_sector_mut(gx, gz) {
                 if let Some(w) = get_wall_mut(s, &wall_face) {
-                    if state.selected_vertex_indices.is_empty() {
-                        // No vertices selected - apply to all
-                        w.set_uniform_color(new_color);
-                    } else {
-                        // Apply only to selected vertices
-                        for &idx in &state.selected_vertex_indices {
-                            if idx < 4 {
-                                w.colors[idx] = new_color;
-                            }
+                    // Apply to selected vertices
+                    for &idx in &state.selected_vertex_indices {
+                        if idx < 4 {
+                            w.colors[idx] = new_color;
                         }
                     }
                 }
@@ -3566,8 +3408,11 @@ fn draw_wall_face_container(
         }
     }
 
+    // Advance content_y by the taller of: swatches (2 rows) or picker
+    let swatches_height = 2.0 * swatch_size + swatch_spacing;
+    content_y += swatches_height.max(ps1_color_picker_height()) + 8.0;
+
     // Normal mode 3-way toggle
-    content_y += ps1_color_picker_height() + 14.0 + 8.0;
     draw_text("Normal", content_x.floor(), (content_y + 12.0).floor(), 12.0, Color::from_rgba(150, 150, 150, 255));
     content_y += 16.0;
 
@@ -3996,6 +3841,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             y,
                             container_width - 8.0,
                             *color,
+                            RasterColor::from_ps1(16, 16, 16),
                             "Color",
                             &mut state.light_color_slider,
                         );
