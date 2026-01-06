@@ -324,9 +324,9 @@ pub fn draw_viewport_3d(
     // Find hovered elements using 2D screen-space projection
     // Priority: vertex > edge > face
     let mut preview_sector: Option<(f32, f32, f32, bool)> = None; // (x, z, target_y, is_occupied)
-    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state)
+    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state, mouse_y_room_relative)
     // state: 0 = new wall, 1 = filling gap, 2 = fully covered
-    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [f32; 4], u8)> = None;
+    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [f32; 4], u8, Option<f32>)> = None;
     // Diagonal wall preview: (x, z, is_nwse, corner_heights [corner1_bot, corner2_bot, corner2_top, corner1_top])
     let mut preview_diagonal_wall: Option<(f32, f32, bool, [f32; 4])> = None;
 
@@ -633,7 +633,7 @@ pub fn draw_viewport_3d(
                     };
 
                     if let Some((corner_heights, wall_state)) = wall_info {
-                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state));
+                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
                     }
                 }
             }
@@ -1522,7 +1522,7 @@ pub fn draw_viewport_3d(
             }
             // DrawWall mode - start drag for wall placement
             else if state.tool == EditorTool::DrawWall {
-                if let Some((grid_x, grid_z, dir, _corner_heights, wall_state)) = preview_wall {
+                if let Some((grid_x, grid_z, dir, _corner_heights, wall_state, mouse_y)) = preview_wall {
                     // Only start drag if not fully covered
                     if wall_state != 2 {
                         // Convert world coords to grid coords
@@ -1533,6 +1533,8 @@ pub fn draw_viewport_3d(
                             let gz = (local_z / SECTOR_SIZE).floor() as i32;
                             state.wall_drag_start = Some((gx, gz, dir));
                             state.wall_drag_current = Some((gx, gz, dir));
+                            // Capture mouse Y for consistent gap selection during drag
+                            state.wall_drag_mouse_y = mouse_y;
                         }
                     } else {
                         state.set_status("Edge is fully covered", 2.0);
@@ -1698,7 +1700,7 @@ pub fn draw_viewport_3d(
                 use crate::world::Direction;
 
                 // Get mouse grid position from preview_wall or preview_sector
-                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _)) = preview_wall {
+                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _, _)) = preview_wall {
                     if let Some(room) = state.level.rooms.get(state.current_room) {
                         let local_x = grid_x - room.position.x;
                         let local_z = grid_z - room.position.z;
@@ -1966,9 +1968,10 @@ pub fn draw_viewport_3d(
                         let adjusted_gz = (gz + offset_z) as usize;
 
                         // Check if there's a gap to fill (handles both empty edges and gaps between walls)
+                        // Use the stored mouse_y from drag start for consistent gap selection
                         room.ensure_sector(adjusted_gx, adjusted_gz);
                         if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
-                            if let Some(heights) = sector.next_wall_position(dir, 0.0, CEILING_HEIGHT, None) {
+                            if let Some(heights) = sector.next_wall_position(dir, 0.0, CEILING_HEIGHT, state.wall_drag_mouse_y) {
                                 // There's a gap - add wall with computed heights
                                 if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
                                     sector_mut.walls_mut(dir).push(
@@ -1999,6 +2002,7 @@ pub fn draw_viewport_3d(
                 // Clear wall drag state
                 state.wall_drag_start = None;
                 state.wall_drag_current = None;
+                state.wall_drag_mouse_y = None;
             }
 
             // Handle diagonal wall drag completion
@@ -2444,8 +2448,9 @@ pub fn draw_viewport_3d(
                 if let Some(room) = state.level.rooms.get(state.current_room) {
                     if let Some(sector) = room.get_sector(gx as usize, gz as usize) {
                         // Check if edge has walls and find the gap
+                        // Use the stored mouse_y from drag start for consistent gap selection
                         let has_walls = !sector.walls(dir).is_empty();
-                        if let Some(heights) = sector.next_wall_position(dir, 0.0, super::CEILING_HEIGHT, None) {
+                        if let Some(heights) = sector.next_wall_position(dir, 0.0, super::CEILING_HEIGHT, state.wall_drag_mouse_y) {
                             (heights, has_walls)
                         } else {
                             // Fully covered - skip this segment
@@ -2671,7 +2676,7 @@ pub fn draw_viewport_3d(
 
     // Draw subtle sector boundary highlight for wall placement
     // Only show if on the drag line (same check as wall preview)
-    if let Some((grid_x, grid_z, dir, _, _)) = preview_wall {
+    if let Some((grid_x, grid_z, dir, _, _, _)) = preview_wall {
         // Check if this sector is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;
@@ -2812,7 +2817,7 @@ pub fn draw_viewport_3d(
     // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
     // corner_heights: [bottom-left, bottom-right, top-right, top-left] (room-relative)
     // Skip single wall preview if it's not on the drag line
-    if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
+    if let Some((grid_x, grid_z, dir, corner_heights, wall_state, _mouse_y)) = preview_wall {
         // Check if this preview is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;

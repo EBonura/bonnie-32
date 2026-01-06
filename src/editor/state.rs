@@ -340,6 +340,8 @@ pub struct EditorState {
     pub wall_drag_start: Option<(i32, i32, crate::world::Direction)>,
     /// Current position during drag: (grid_x, grid_z, direction)
     pub wall_drag_current: Option<(i32, i32, crate::world::Direction)>,
+    /// Room-relative Y position when wall drag started (for consistent gap selection)
+    pub wall_drag_mouse_y: Option<f32>,
 
     /// Diagonal wall drag-to-place state (for DrawDiagonalWall mode)
     /// Start position: (grid_x, grid_z, is_nwse)
@@ -506,6 +508,7 @@ impl EditorState {
             placement_drag_current: None,
             wall_drag_start: None,
             wall_drag_current: None,
+            wall_drag_mouse_y: None,
             diagonal_drag_start: None,
             diagonal_drag_current: None,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
