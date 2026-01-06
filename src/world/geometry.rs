@@ -1268,6 +1268,9 @@ impl HorizontalFace {
             Direction::East => (self.heights[1], self.heights[2]),  // NE, SE (looking at +X edge)
             Direction::South => (self.heights[3], self.heights[2]), // SW, SE (looking at +Z edge)
             Direction::West => (self.heights[0], self.heights[3]),  // NW, SW (looking at -X edge)
+            // For diagonals, return the two corners that form the diagonal
+            Direction::NwSe => (self.heights[0], self.heights[2]),  // NW, SE
+            Direction::NeSw => (self.heights[1], self.heights[3]),  // NE, SW
         }
     }
 
@@ -1488,23 +1491,27 @@ impl Sector {
             || !self.walls_nesw.is_empty()
     }
 
-    /// Get all walls on a given edge
+    /// Get all walls on a given edge (or diagonal)
     pub fn walls(&self, direction: Direction) -> &Vec<VerticalFace> {
         match direction {
             Direction::North => &self.walls_north,
             Direction::East => &self.walls_east,
             Direction::South => &self.walls_south,
             Direction::West => &self.walls_west,
+            Direction::NwSe => &self.walls_nwse,
+            Direction::NeSw => &self.walls_nesw,
         }
     }
 
-    /// Get mutable walls on a given edge
+    /// Get mutable walls on a given edge (or diagonal)
     pub fn walls_mut(&mut self, direction: Direction) -> &mut Vec<VerticalFace> {
         match direction {
             Direction::North => &mut self.walls_north,
             Direction::East => &mut self.walls_east,
             Direction::South => &mut self.walls_south,
             Direction::West => &mut self.walls_west,
+            Direction::NwSe => &mut self.walls_nwse,
+            Direction::NeSw => &mut self.walls_nesw,
         }
     }
 
@@ -1601,11 +1608,24 @@ impl Sector {
         let right_gap = lowest.heights[1] - floor_right; // BR corner gap
         let bottom_gap_size = left_gap.max(right_gap);
         if bottom_gap_size > MIN_GAP {
+            // For triangular gaps: if one side has no gap, collapse both vertices to same point
+            let (bl, tl) = if left_gap > MIN_GAP {
+                (floor_left, lowest.heights[0])
+            } else {
+                // No gap on left - collapse to floor height
+                (floor_left, floor_left)
+            };
+            let (br, tr) = if right_gap > MIN_GAP {
+                (floor_right, lowest.heights[1])
+            } else {
+                // No gap on right - collapse to floor height
+                (floor_right, floor_right)
+            };
             // Use average Y for selection purposes
-            let avg_bottom = (floor_left + floor_right) / 2.0;
-            let avg_top = (lowest.heights[0] + lowest.heights[1]) / 2.0;
+            let avg_bottom = (bl + br) / 2.0;
+            let avg_top = (tl + tr) / 2.0;
             gaps.push((
-                [floor_left, floor_right, lowest.heights[1], lowest.heights[0]],
+                [bl, br, tr, tl],
                 avg_bottom,
                 avg_top
             ));
@@ -1639,11 +1659,24 @@ impl Sector {
         let right_gap = ceiling_right - highest.heights[2]; // TR corner gap
         let top_gap_size = left_gap.max(right_gap);
         if top_gap_size > MIN_GAP {
+            // For triangular gaps: if one side has no gap, collapse both vertices to same point
+            let (bl, tl) = if left_gap > MIN_GAP {
+                (highest.heights[3], ceiling_left)
+            } else {
+                // No gap on left - collapse to ceiling height
+                (ceiling_left, ceiling_left)
+            };
+            let (br, tr) = if right_gap > MIN_GAP {
+                (highest.heights[2], ceiling_right)
+            } else {
+                // No gap on right - collapse to ceiling height
+                (ceiling_right, ceiling_right)
+            };
             // Use average Y for selection purposes
-            let avg_bottom = (highest.heights[2] + highest.heights[3]) / 2.0;
-            let avg_top = (ceiling_left + ceiling_right) / 2.0;
+            let avg_bottom = (bl + br) / 2.0;
+            let avg_top = (tl + tr) / 2.0;
             gaps.push((
-                [highest.heights[3], highest.heights[2], ceiling_right, ceiling_left],
+                [bl, br, tr, tl],
                 avg_bottom,
                 avg_top
             ));
@@ -1865,13 +1898,16 @@ impl Sector {
     }
 }
 
-/// Cardinal direction for sector edges
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Cardinal and diagonal directions for walls
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum Direction {
+    #[default]
     North,  // -Z
     East,   // +X
     South,  // +Z
     West,   // -X
+    NwSe,   // Diagonal from NW to SE corner
+    NeSw,   // Diagonal from NE to SW corner
 }
 
 impl Direction {
@@ -1882,16 +1918,48 @@ impl Direction {
             Direction::East => Direction::West,
             Direction::South => Direction::North,
             Direction::West => Direction::East,
+            Direction::NwSe => Direction::NwSe, // Diagonals are their own opposite
+            Direction::NeSw => Direction::NeSw,
         }
     }
 
-    /// Get offset in grid coordinates
+    /// Get offset in grid coordinates (only for cardinal directions)
     pub fn offset(self) -> (i32, i32) {
         match self {
             Direction::North => (0, -1),
             Direction::East => (1, 0),
             Direction::South => (0, 1),
             Direction::West => (-1, 0),
+            Direction::NwSe | Direction::NeSw => (0, 0), // No offset for diagonals
+        }
+    }
+
+    /// Check if this is a diagonal direction
+    pub fn is_diagonal(self) -> bool {
+        matches!(self, Direction::NwSe | Direction::NeSw)
+    }
+
+    /// Rotate clockwise through all 6 directions: N -> E -> S -> W -> NwSe -> NeSw -> N
+    pub fn rotate_cw(self) -> Self {
+        match self {
+            Direction::North => Direction::East,
+            Direction::East => Direction::South,
+            Direction::South => Direction::West,
+            Direction::West => Direction::NwSe,
+            Direction::NwSe => Direction::NeSw,
+            Direction::NeSw => Direction::North,
+        }
+    }
+
+    /// Get display name for status messages
+    pub fn name(self) -> &'static str {
+        match self {
+            Direction::North => "North",
+            Direction::East => "East",
+            Direction::South => "South",
+            Direction::West => "West",
+            Direction::NwSe => "Diagonal NW-SE",
+            Direction::NeSw => "Diagonal NE-SW",
         }
     }
 }
@@ -2804,6 +2872,34 @@ impl Room {
                 ];
                 (corners, Vec3::new(1.0, 0.0, 0.0))
             }
+            Direction::NwSe => {
+                // Diagonal wall from NW to SE corner
+                // NW = (base_x, base_z), SE = (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE)
+                // Normal faces NE-SW direction (perpendicular to NW-SE)
+                let corners = [
+                    Vec3::new(base_x, y_offset + wall.heights[0], base_z),                                 // NW bottom
+                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[1], base_z + SECTOR_SIZE),     // SE bottom
+                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[2], base_z + SECTOR_SIZE),     // SE top
+                    Vec3::new(base_x, y_offset + wall.heights[3], base_z),                                 // NW top
+                ];
+                // Normal perpendicular to NW-SE line, normalized: (1, 0, -1) / sqrt(2)
+                let n = 1.0 / 2.0_f32.sqrt();
+                (corners, Vec3::new(n, 0.0, -n))
+            }
+            Direction::NeSw => {
+                // Diagonal wall from NE to SW corner
+                // NE = (base_x + SECTOR_SIZE, base_z), SW = (base_x, base_z + SECTOR_SIZE)
+                // Normal faces NW-SE direction (perpendicular to NE-SW)
+                let corners = [
+                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[0], base_z),                   // NE bottom
+                    Vec3::new(base_x, y_offset + wall.heights[1], base_z + SECTOR_SIZE),                   // SW bottom
+                    Vec3::new(base_x, y_offset + wall.heights[2], base_z + SECTOR_SIZE),                   // SW top
+                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[3], base_z),                   // NE top
+                ];
+                // Normal perpendicular to NE-SW line, normalized: (-1, 0, -1) / sqrt(2)
+                let n = 1.0 / 2.0_f32.sqrt();
+                (corners, Vec3::new(-n, 0.0, -n))
+            }
         };
 
         // Calculate UVs based on projection mode
@@ -3371,11 +3467,13 @@ impl Level {
                     let world_z_a = pos_a.z + (gz_a as f32) * SECTOR_SIZE;
 
                     // World position of the adjacent sector (on the edge in direction `dir`)
+                    // Note: This function only checks cardinal directions for portal detection
                     let (adj_world_x, adj_world_z) = match dir {
                         Direction::North => (world_x_a, world_z_a - SECTOR_SIZE),
                         Direction::East => (world_x_a + SECTOR_SIZE, world_z_a),
                         Direction::South => (world_x_a, world_z_a + SECTOR_SIZE),
                         Direction::West => (world_x_a - SECTOR_SIZE, world_z_a),
+                        Direction::NwSe | Direction::NeSw => continue, // Diagonals not checked for portals
                     };
 
                     // Check if this adjacent position falls within room B's grid
@@ -3513,6 +3611,7 @@ impl Level {
                                 Vec3::new(-1.0, 0.0, 0.0), // Normal points into room A (toward -X)
                             )
                         }
+                        Direction::NwSe | Direction::NeSw => continue, // Diagonals not checked for portals
                     };
 
                     // Convert to room-relative coordinates and add portals to both rooms

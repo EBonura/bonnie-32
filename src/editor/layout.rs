@@ -366,11 +366,11 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     toolbar.separator();
 
     // Tool buttons (Portal removed - portals are now auto-generated)
+    // Wall tool handles all 6 directions (N, E, S, W, NW-SE, NE-SW) - use R to rotate
     let tools = [
         (icon::MOVE, "Select", EditorTool::Select),
         (icon::SQUARE, "Floor", EditorTool::DrawFloor),
         (icon::BRICK_WALL, "Wall", EditorTool::DrawWall),
-        (icon::DIAMOND, "Diagonal Wall", EditorTool::DrawDiagonalWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
         (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
@@ -381,13 +381,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             state.tool = tool;
             // Show direction hint when selecting wall tool
             if tool == EditorTool::DrawWall {
-                let dir_name = match state.wall_direction {
-                    crate::world::Direction::North => "North",
-                    crate::world::Direction::East => "East",
-                    crate::world::Direction::South => "South",
-                    crate::world::Direction::West => "West",
-                };
-                state.set_status(&format!("Wall direction: {} (R to rotate)", dir_name), 2.0);
+                state.set_status(&format!("Wall direction: {} (R to rotate, F for gap)", state.wall_direction.name()), 2.0);
             }
         }
     }
@@ -4676,6 +4670,8 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
             crate::world::Direction::East => "E",
             crate::world::Direction::South => "S",
             crate::world::Direction::West => "W",
+            crate::world::Direction::NwSe => "NW-SE",
+            crate::world::Direction::NeSw => "NE-SW",
         };
         let gap = if state.wall_prefer_high { "High" } else { "Low" };
         format!("R: Rotate ({}) | F: Gap ({}) | Ctrl+S: Save", dir, gap)

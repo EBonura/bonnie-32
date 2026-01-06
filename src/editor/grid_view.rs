@@ -503,6 +503,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 Direction::East  => ((sx1, sy1), (sx2, sy2)), // NE to SE
                 Direction::South => ((sx2, sy2), (sx3, sy3)), // SE to SW
                 Direction::West  => ((sx3, sy3), (sx0, sy0)), // SW to NW
+                Direction::NwSe  => ((sx0, sy0), (sx2, sy2)), // NW to SE diagonal
+                Direction::NeSw  => ((sx1, sy1), (sx3, sy3)), // NE to SW diagonal
             };
 
             // Draw highlighted edge (bright cyan, thick line)
@@ -1395,8 +1397,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 }
 
                 EditorTool::DrawWall => {
-                    // Wall placement only works in Top view mode
-                    if view_mode != GridViewMode::Top {
+                    // Diagonal walls must be placed in 3D viewport
+                    if state.wall_direction.is_diagonal() {
+                        state.set_status("Diagonal walls: use 3D viewport (R to change direction)", 2.0);
+                    } else if view_mode != GridViewMode::Top {
+                        // Wall placement only works in Top view mode
                         state.set_status("Wall tool: switch to Top view", 2.0);
                     } else if let (Some((gx, gz)), Some(edge_dir)) = (hovered_sector, hovered_edge) {
                         // Check if wall already exists on this edge
@@ -1407,6 +1412,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                     Direction::East => !s.walls_east.is_empty(),
                                     Direction::South => !s.walls_south.is_empty(),
                                     Direction::West => !s.walls_west.is_empty(),
+                                    Direction::NwSe | Direction::NeSw => false, // Can't detect in 2D
                                 }
                             }).unwrap_or(false)
                         }).unwrap_or(false);
@@ -1419,13 +1425,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 room.add_wall(gx, gz, edge_dir, 0.0, CEILING_HEIGHT, state.selected_texture.clone());
                                 room.recalculate_bounds();
                                 state.mark_portals_dirty();
-                                let dir_name = match edge_dir {
-                                    Direction::North => "north",
-                                    Direction::East => "east",
-                                    Direction::South => "south",
-                                    Direction::West => "west",
-                                };
-                                state.set_status(&format!("Created {} wall", dir_name), 1.5);
+                                state.set_status(&format!("Created {} wall", edge_dir.name().to_lowercase()), 1.5);
                             }
                         }
                     } else {
@@ -1485,11 +1485,6 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     } else {
                         state.set_status("Click on a sector to place object", 2.0);
                     }
-                }
-
-                EditorTool::DrawDiagonalWall => {
-                    // Diagonal walls are placed in 3D viewport where edge detection is possible
-                    state.set_status("Diagonal wall tool: use 3D viewport", 3.0);
                 }
             }
         }

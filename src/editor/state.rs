@@ -25,8 +25,7 @@ pub enum CameraMode {
 pub enum EditorTool {
     Select,
     DrawFloor,
-    DrawWall,
-    DrawDiagonalWall,
+    DrawWall,      // Handles all 6 directions (N, E, S, W, NW-SE, NE-SW)
     DrawCeiling,
     PlaceObject,
 }
@@ -347,12 +346,6 @@ pub struct EditorState {
     /// Prefer high gap when placing walls (toggled with F key)
     pub wall_prefer_high: bool,
 
-    /// Diagonal wall drag-to-place state (for DrawDiagonalWall mode)
-    /// Start position: (grid_x, grid_z, is_nwse)
-    pub diagonal_drag_start: Option<(i32, i32, bool)>,
-    /// Current position during drag: (grid_x, grid_z, is_nwse)
-    pub diagonal_drag_current: Option<(i32, i32, bool)>,
-
     /// Rasterizer settings (PS1 effects)
     pub raster_settings: RasterSettings,
 
@@ -515,8 +508,6 @@ impl EditorState {
             wall_drag_mouse_y: None,
             wall_direction: crate::world::Direction::North,
             wall_prefer_high: false,
-            diagonal_drag_start: None,
-            diagonal_drag_current: None,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
             selected_vertex_indices: Vec::new(),
             light_color_slider: None,
