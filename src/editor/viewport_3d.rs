@@ -3095,13 +3095,11 @@ pub fn draw_viewport_3d(
     // === TEXTURE CONVERSION PHASE ===
     let texconv_start = EditorFrameTimings::start();
 
-    // Convert textures to RGB555 if enabled
+    // Convert textures to RGB555 if enabled (lazy cache: only convert when texture count changes)
     let use_rgb555 = state.raster_settings.use_rgb555;
-    let textures_15: Vec<_> = if use_rgb555 {
-        textures.iter().map(|t| t.to_15()).collect()
-    } else {
-        Vec::new()
-    };
+    if use_rgb555 && state.textures_15_cache.len() != textures.len() {
+        state.textures_15_cache = textures.iter().map(|t| t.to_15()).collect();
+    }
 
     let vp_texconv_ms = EditorFrameTimings::elapsed_ms(texconv_start);
 
@@ -3130,7 +3128,7 @@ pub fn draw_viewport_3d(
         // Time rasterization
         let raster_start = EditorFrameTimings::start();
         if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &state.camera_3d, &render_settings);
+            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, None, &state.camera_3d, &render_settings);
         } else {
             render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
         }
@@ -5015,11 +5013,20 @@ fn draw_3d_line_impl(
             return;
         };
 
+        // Clip line to screen bounds using Cohen-Sutherland algorithm
+        // This prevents Bresenham from iterating over thousands of off-screen pixels
+        let w = fb.width as f32;
+        let h = fb.height as f32;
+
+        let Some((cx0, cy0, cx1, cy1)) = clip_line_to_rect(x0f, y0f, x1f, y1f, 0.0, 0.0, w, h) else {
+            return; // Line entirely outside viewport
+        };
+
         // Convert to integers for Bresenham
-        let mut x0 = x0f as i32;
-        let mut y0 = y0f as i32;
-        let x1 = x1f as i32;
-        let y1 = y1f as i32;
+        let mut x0 = cx0 as i32;
+        let mut y0 = cy0 as i32;
+        let x1 = cx1 as i32;
+        let y1 = cy1 as i32;
 
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -5027,11 +5034,12 @@ fn draw_3d_line_impl(
         let sy = if y0 < y1 { 1 } else { -1 };
         let mut err = dx + dy;
 
-        let w = fb.width as i32;
-        let h = fb.height as i32;
+        let wi = fb.width as i32;
+        let hi = fb.height as i32;
 
         loop {
-            if x0 >= 0 && x0 < w && y0 >= 0 && y0 < h {
+            // Safety check (should be redundant after clipping, but just in case)
+            if x0 >= 0 && x0 < wi && y0 >= 0 && y0 < hi {
                 fb.set_pixel(x0 as usize, y0 as usize, color);
             }
 
@@ -5048,6 +5056,75 @@ fn draw_3d_line_impl(
                 err += dx;
                 y0 += sy;
             }
+        }
+    }
+}
+
+/// Cohen-Sutherland line clipping to a rectangle.
+/// Returns None if line is entirely outside, otherwise returns clipped endpoints.
+fn clip_line_to_rect(
+    mut x0: f32, mut y0: f32,
+    mut x1: f32, mut y1: f32,
+    xmin: f32, ymin: f32,
+    xmax: f32, ymax: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    // Outcode bits
+    const INSIDE: u8 = 0;
+    const LEFT: u8 = 1;
+    const RIGHT: u8 = 2;
+    const BOTTOM: u8 = 4;
+    const TOP: u8 = 8;
+
+    let outcode = |x: f32, y: f32| -> u8 {
+        let mut code = INSIDE;
+        if x < xmin { code |= LEFT; }
+        else if x >= xmax { code |= RIGHT; }
+        if y < ymin { code |= TOP; }
+        else if y >= ymax { code |= BOTTOM; }
+        code
+    };
+
+    let mut code0 = outcode(x0, y0);
+    let mut code1 = outcode(x1, y1);
+
+    loop {
+        if (code0 | code1) == 0 {
+            // Both inside
+            return Some((x0, y0, x1, y1));
+        }
+        if (code0 & code1) != 0 {
+            // Both outside same edge - reject
+            return None;
+        }
+
+        // Pick the point outside
+        let code_out = if code0 != 0 { code0 } else { code1 };
+
+        // Find intersection
+        let (x, y);
+        if (code_out & BOTTOM) != 0 {
+            x = x0 + (x1 - x0) * (ymax - 1.0 - y0) / (y1 - y0);
+            y = ymax - 1.0;
+        } else if (code_out & TOP) != 0 {
+            x = x0 + (x1 - x0) * (ymin - y0) / (y1 - y0);
+            y = ymin;
+        } else if (code_out & RIGHT) != 0 {
+            y = y0 + (y1 - y0) * (xmax - 1.0 - x0) / (x1 - x0);
+            x = xmax - 1.0;
+        } else {
+            // LEFT
+            y = y0 + (y1 - y0) * (xmin - x0) / (x1 - x0);
+            x = xmin;
+        }
+
+        if code_out == code0 {
+            x0 = x;
+            y0 = y;
+            code0 = outcode(x0, y0);
+        } else {
+            x1 = x;
+            y1 = y;
+            code1 = outcode(x1, y1);
         }
     }
 }

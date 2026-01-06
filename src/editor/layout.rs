@@ -2618,6 +2618,7 @@ fn draw_debug_panel(_ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
         let value_w = value_str.len() as f32 * 6.0;
         draw_text(&value_str, x + bar_w - value_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
         y += LINE_HEIGHT;
+
     }
 }
 

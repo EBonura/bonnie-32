@@ -6,6 +6,12 @@ This document tracks planned features, known issues, and future improvements.
 
 ## Backlog
 
+### Architecture
+
+- [ ] **Unified render pipeline**: Game and editor currently have separate render paths with duplicated code. Should create a shared scene renderer that both use, with hooks for editor-specific overlays (grid, selection, gizmos) and game-specific features (player, particles). This becomes critical as we add meshes, skeletal animation, particle systems, etc. Benefits: any optimization applies to both, WYSIWYG editing, single source of truth for rendering.
+
+---
+
 ### Rendering / PS1 Authenticity
 - [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
 - [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face

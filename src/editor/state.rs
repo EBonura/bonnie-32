@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
-use crate::rasterizer::{Camera, Vec3, Vec2, Texture, RasterSettings, Color, BlendMode};
+use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode};
 use super::texture_pack::TexturePack;
 
 /// Frame timing breakdown for editor performance debugging
@@ -26,7 +26,7 @@ pub struct EditorFrameTimings {
     pub vp_input_ms: f32,
     /// Clear/skybox rendering
     pub vp_clear_ms: f32,
-    /// Grid line drawing
+    /// Grid line drawing (total)
     pub vp_grid_ms: f32,
     /// Light collection
     pub vp_lights_ms: f32,
@@ -540,6 +540,9 @@ pub struct EditorState {
 
     /// Frame timing breakdown for debug panel
     pub frame_timings: EditorFrameTimings,
+
+    /// Cached RGB555 textures (lazy-populated, invalidated when texture count changes)
+    pub textures_15_cache: Vec<Texture15>,
 }
 
 impl EditorState {
@@ -671,6 +674,7 @@ impl EditorState {
             face_clipboard: None,
             geometry_clipboard: None,
             frame_timings: EditorFrameTimings::default(),
+            textures_15_cache: Vec::new(),
         }
     }
 
