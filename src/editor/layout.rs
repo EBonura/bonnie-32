@@ -2371,7 +2371,7 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floo
     let header_height = 22.0;
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
-    let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let uv_controls_height = 80.0; // X offset + Y offset + scale row + angle row (4 rows × 20px)
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
     let split_diagram_height = 50.0; // Mini split diagram with toggle
@@ -2392,7 +2392,7 @@ fn wall_face_container_height(_wall: &crate::world::VerticalFace) -> f32 {
     let header_height = 22.0;
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
-    let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let uv_controls_height = 80.0; // X offset + Y offset + scale row + angle row (4 rows × 20px)
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
     let lines = 3; // texture, y range, blend
@@ -2697,7 +2697,7 @@ fn draw_horizontal_face_container(
             }
         }
     }
-    content_y += 54.0; // Height of UV controls (3 rows * 18px)
+    content_y += 80.0; // Height of UV controls (4 rows × 20px: X offset, Y offset, Scale, Angle)
 
     // UV manipulation buttons
     let btn_size = 20.0;
@@ -3201,66 +3201,122 @@ fn draw_uv_controls(
     state: &mut EditorState,
     icon_font: Option<&Font>,
 ) -> Option<[crate::rasterizer::Vec2; 4]> {
-    use crate::ui::{draw_drag_value_compact_editable, icon_button_active, Rect, icon};
+    use crate::ui::{draw_drag_value_compact_editable, icon_button, Rect, icon};
 
     let mut params = extract_uv_params(uv);
     let mut changed = false;
-    let row_height = 18.0;
-    let link_btn_size = 16.0;
-    let label_width = 42.0;
-    let value_width = (width - label_width - link_btn_size - 12.0) / 2.0;
+    let row_height = 20.0;
     let label_color = Color::from_rgba(150, 150, 150, 255);
 
     let mut current_y = y;
 
-    // Row 1: Offset - [Link] Label [X] [Y]
-    let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
-    let link_icon = if state.uv_offset_linked { icon::LINK } else { icon::LINK_OFF };
-    if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_offset_linked) {
-        state.uv_offset_linked = !state.uv_offset_linked;
+    // UV Offset in pixels (0-63, wraps at 64)
+    // Conversion: offset_blocks * 32 = pixels (since 1 block = 32 texels)
+    // Full texture = 64 pixels = 2 blocks
+    let x_pixels = ((params.x_offset * 32.0).round() as i32).rem_euclid(64);
+    let y_pixels = ((params.y_offset * 32.0).round() as i32).rem_euclid(64);
+
+    // Row 1: X offset with pixel buttons
+    // Layout: X: [◄◄] [◄]  value  [►] [►►]
+    draw_text("X:", x, current_y + 12.0, 11.0, label_color);
+
+    let btn_size = 16.0;
+    let btn_spacing = 2.0;
+    let value_width = 28.0;
+    let btn_start = x + 18.0;
+
+    // Coarse left (−32 pixels)
+    let coarse_left_rect = Rect::new(btn_start, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_left_rect, icon::SKIP_BACK, icon_font, "−32 pixels") {
+        params.x_offset -= 1.0; // 1 block = 32 pixels
+        changed = true;
     }
 
-    draw_text("Offset", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
-    let value_start = x + link_btn_size + 4.0 + label_width;
-    let ox_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
-    let result = draw_drag_value_compact_editable(
-        ctx, ox_rect, params.x_offset, 0.1, 2001,
-        &mut state.uv_drag_active[0], &mut state.uv_drag_start_value[0], &mut state.uv_drag_start_x[0],
-        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 0)),
-    );
-    if let Some(v) = result.value {
-        let delta = v - params.x_offset;
-        params.x_offset = v;
-        if state.uv_offset_linked {
-            params.y_offset += delta;
-        }
+    // Fine left (−1 pixel)
+    let fine_left_rect = Rect::new(btn_start + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_left_rect, icon::CHEVRON_LEFT, icon_font, "−1 pixel") {
+        params.x_offset -= 1.0 / 32.0;
         changed = true;
     }
-    let oy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
-    let result = draw_drag_value_compact_editable(
-        ctx, oy_rect, params.y_offset, 0.1, 2002,
-        &mut state.uv_drag_active[1], &mut state.uv_drag_start_value[1], &mut state.uv_drag_start_x[1],
-        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 1)),
-    );
-    if let Some(v) = result.value {
-        let delta = v - params.y_offset;
-        params.y_offset = v;
-        if state.uv_offset_linked {
-            params.x_offset += delta;
-        }
+
+    // Value display (centered)
+    let value_x = btn_start + (btn_size + btn_spacing) * 2.0;
+    let value_rect = Rect::new(value_x, current_y, value_width, row_height);
+    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, Color::from_rgba(40, 40, 45, 255));
+    let value_text = format!("{}", x_pixels);
+    let text_dims = measure_text(&value_text, None, 11, 1.0);
+    draw_text(&value_text, value_rect.x + (value_rect.w - text_dims.width) / 2.0, current_y + 12.0, 11.0, WHITE);
+
+    // Fine right (+1 pixel)
+    let fine_right_rect = Rect::new(value_x + value_width + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_right_rect, icon::CHEVRON_RIGHT, icon_font, "+1 pixel") {
+        params.x_offset += 1.0 / 32.0;
         changed = true;
     }
+
+    // Coarse right (+32 pixels)
+    let coarse_right_rect = Rect::new(value_x + value_width + btn_spacing + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_right_rect, icon::SKIP_FORWARD, icon_font, "+32 pixels") {
+        params.x_offset += 1.0; // 1 block = 32 pixels
+        changed = true;
+    }
+
     current_y += row_height;
 
-    // Row 2: Scale - [Link] Label [X] [Y]
+    // Row 2: Y offset with pixel buttons
+    draw_text("Y:", x, current_y + 12.0, 11.0, label_color);
+
+    // Coarse left (−32 pixels)
+    let coarse_left_rect = Rect::new(btn_start, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_left_rect, icon::SKIP_BACK, icon_font, "−32 pixels") {
+        params.y_offset -= 1.0;
+        changed = true;
+    }
+
+    // Fine left (−1 pixel)
+    let fine_left_rect = Rect::new(btn_start + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_left_rect, icon::CHEVRON_LEFT, icon_font, "−1 pixel") {
+        params.y_offset -= 1.0 / 32.0;
+        changed = true;
+    }
+
+    // Value display (centered)
+    let value_rect = Rect::new(value_x, current_y, value_width, row_height);
+    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, Color::from_rgba(40, 40, 45, 255));
+    let value_text = format!("{}", y_pixels);
+    let text_dims = measure_text(&value_text, None, 11, 1.0);
+    draw_text(&value_text, value_rect.x + (value_rect.w - text_dims.width) / 2.0, current_y + 12.0, 11.0, WHITE);
+
+    // Fine right (+1 pixel)
+    let fine_right_rect = Rect::new(value_x + value_width + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_right_rect, icon::CHEVRON_RIGHT, icon_font, "+1 pixel") {
+        params.y_offset += 1.0 / 32.0;
+        changed = true;
+    }
+
+    // Coarse right (+32 pixels)
+    let coarse_right_rect = Rect::new(value_x + value_width + btn_spacing + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_right_rect, icon::SKIP_FORWARD, icon_font, "+32 pixels") {
+        params.y_offset += 1.0;
+        changed = true;
+    }
+
+    current_y += row_height;
+
+    // Row 3: Scale - [Link] Label [X] [Y]
+    let link_btn_size = 16.0;
+    let label_width = 42.0;
+    let scale_value_width = (width - label_width - link_btn_size - 12.0) / 2.0;
+    let scale_value_start = x + link_btn_size + 4.0 + label_width;
+
     let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
     let link_icon = if state.uv_scale_linked { icon::LINK } else { icon::LINK_OFF };
-    if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_scale_linked) {
+    if crate::ui::icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_scale_linked) {
         state.uv_scale_linked = !state.uv_scale_linked;
     }
 
     draw_text("Scale", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
-    let sx_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
+    let sx_rect = Rect::new(scale_value_start, current_y, scale_value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
         ctx, sx_rect, params.x_scale, 0.25, 2003,
         &mut state.uv_drag_active[2], &mut state.uv_drag_start_value[2], &mut state.uv_drag_start_x[2],
@@ -3278,7 +3334,7 @@ fn draw_uv_controls(
         }
         changed = true;
     }
-    let sy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
+    let sy_rect = Rect::new(scale_value_start + scale_value_width, current_y, scale_value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
         ctx, sy_rect, params.y_scale, 0.25, 2004,
         &mut state.uv_drag_active[3], &mut state.uv_drag_start_value[3], &mut state.uv_drag_start_x[3],
@@ -3298,9 +3354,9 @@ fn draw_uv_controls(
     }
     current_y += row_height;
 
-    // Row 3: Angle (no link button, full width)
+    // Row 4: Angle (no link button, full width)
     draw_text("Angle", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
-    let angle_rect = Rect::new(value_start, current_y, width - value_start + x - 4.0, row_height);
+    let angle_rect = Rect::new(scale_value_start, current_y, width - scale_value_start + x - 4.0, row_height);
     let result = draw_drag_value_compact_editable(
         ctx, angle_rect, params.angle, 1.0, 2005,
         &mut state.uv_drag_active[4], &mut state.uv_drag_start_value[4], &mut state.uv_drag_start_x[4],
@@ -3398,7 +3454,7 @@ fn draw_wall_face_container(
             }
         }
     }
-    content_y += 54.0; // Height of UV controls (3 rows * 18px)
+    content_y += 80.0; // Height of UV controls (4 rows × 20px: X offset, Y offset, Scale, Angle)
 
     // UV manipulation buttons
     let btn_size = 20.0;
