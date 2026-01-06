@@ -1595,15 +1595,19 @@ impl Sector {
         let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
 
         // Check gap at bottom (floor to lowest wall)
+        // For triangular gaps, check each corner separately
         let lowest = sorted_walls[0];
-        let bottom_gap_bottom = floor_left.min(floor_right);
-        let bottom_gap_top = lowest.heights[0].min(lowest.heights[1]);
-        let bottom_gap_size = bottom_gap_top - bottom_gap_bottom;
+        let left_gap = lowest.heights[0] - floor_left;  // BL corner gap
+        let right_gap = lowest.heights[1] - floor_right; // BR corner gap
+        let bottom_gap_size = left_gap.max(right_gap);
         if bottom_gap_size > MIN_GAP {
+            // Use average Y for selection purposes
+            let avg_bottom = (floor_left + floor_right) / 2.0;
+            let avg_top = (lowest.heights[0] + lowest.heights[1]) / 2.0;
             gaps.push((
                 [floor_left, floor_right, lowest.heights[1], lowest.heights[0]],
-                bottom_gap_bottom,
-                bottom_gap_top
+                avg_bottom,
+                avg_top
             ));
         }
 
@@ -1612,28 +1616,36 @@ impl Sector {
             let lower = sorted_walls[i];
             let upper = sorted_walls[i + 1];
             // Gap between top of lower wall and bottom of upper wall
-            let gap_bottom = lower.heights[2].max(lower.heights[3]);
-            let gap_top = upper.heights[0].min(upper.heights[1]);
-            let gap_size = gap_top - gap_bottom;
+            // For triangular gaps, check each corner separately
+            let left_gap = upper.heights[0] - lower.heights[3];  // TL of lower to BL of upper
+            let right_gap = upper.heights[1] - lower.heights[2]; // TR of lower to BR of upper
+            let gap_size = left_gap.max(right_gap);
             if gap_size > MIN_GAP {
+                // Use average Y for selection purposes
+                let avg_bottom = (lower.heights[2] + lower.heights[3]) / 2.0;
+                let avg_top = (upper.heights[0] + upper.heights[1]) / 2.0;
                 gaps.push((
                     [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
-                    gap_bottom,
-                    gap_top
+                    avg_bottom,
+                    avg_top
                 ));
             }
         }
 
         // Check gap at top (highest wall to ceiling)
+        // For triangular gaps, check each corner separately
         let highest = sorted_walls.last().unwrap();
-        let top_gap_bottom = highest.heights[2].max(highest.heights[3]);
-        let top_gap_top = ceiling_left.max(ceiling_right);
-        let top_gap_size = top_gap_top - top_gap_bottom;
+        let left_gap = ceiling_left - highest.heights[3];  // TL corner gap
+        let right_gap = ceiling_right - highest.heights[2]; // TR corner gap
+        let top_gap_size = left_gap.max(right_gap);
         if top_gap_size > MIN_GAP {
+            // Use average Y for selection purposes
+            let avg_bottom = (highest.heights[2] + highest.heights[3]) / 2.0;
+            let avg_top = (ceiling_left + ceiling_right) / 2.0;
             gaps.push((
                 [highest.heights[3], highest.heights[2], ceiling_right, ceiling_left],
-                top_gap_bottom,
-                top_gap_top
+                avg_bottom,
+                avg_top
             ));
         }
 

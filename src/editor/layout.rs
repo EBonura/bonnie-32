@@ -379,6 +379,16 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let is_active = state.tool == tool;
         if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_active) {
             state.tool = tool;
+            // Show direction hint when selecting wall tool
+            if tool == EditorTool::DrawWall {
+                let dir_name = match state.wall_direction {
+                    crate::world::Direction::North => "North",
+                    crate::world::Direction::East => "East",
+                    crate::world::Direction::South => "South",
+                    crate::world::Direction::West => "West",
+                };
+                state.set_status(&format!("Wall direction: {} (R to rotate)", dir_name), 2.0);
+            }
         }
     }
 
@@ -4658,15 +4668,28 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
         draw_text(&msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 16.0, Color::from_rgba(100, 255, 100, 255));
     }
 
-    // Show keyboard shortcuts hint on the right (platform-specific)
-    #[cfg(not(target_arch = "wasm32"))]
-    let hints = "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New";
-    #[cfg(target_arch = "wasm32")]
-    let hints = "Ctrl+S: Download | Ctrl+O: Upload | Ctrl+N: New";
+    // Show keyboard shortcuts hint on the right (context-sensitive)
+    let hints = if state.tool == EditorTool::DrawWall {
+        // Wall tool hints - show direction and gap preference
+        let dir = match state.wall_direction {
+            crate::world::Direction::North => "N",
+            crate::world::Direction::East => "E",
+            crate::world::Direction::South => "S",
+            crate::world::Direction::West => "W",
+        };
+        let gap = if state.wall_prefer_high { "High" } else { "Low" };
+        format!("R: Rotate ({}) | F: Gap ({}) | Ctrl+S: Save", dir, gap)
+    } else {
+        // Default file shortcuts
+        #[cfg(not(target_arch = "wasm32"))]
+        { "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New".to_string() }
+        #[cfg(target_arch = "wasm32")]
+        { "Ctrl+S: Download | Ctrl+O: Upload | Ctrl+N: New".to_string() }
+    };
 
     let hint_width = hints.len() as f32 * 6.0; // Approximate width
     draw_text(
-        hints,
+        &hints,
         (rect.right() - hint_width - 8.0).floor(),
         (rect.y + 15.0).floor(),
         14.0,
