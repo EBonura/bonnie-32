@@ -330,6 +330,21 @@ pub fn draw_viewport_3d(
         state.set_status(&format!("Gap preference: {}", gap), 1.0);
     }
 
+    // Tool shortcuts: 1=Select, 2=Floor, 3=Wall, 4=Ceiling, 5=Object
+    if inside_viewport {
+        if is_key_pressed(KeyCode::Key1) {
+            state.tool = EditorTool::Select;
+        } else if is_key_pressed(KeyCode::Key2) {
+            state.tool = EditorTool::DrawFloor;
+        } else if is_key_pressed(KeyCode::Key3) {
+            state.tool = EditorTool::DrawWall;
+        } else if is_key_pressed(KeyCode::Key4) {
+            state.tool = EditorTool::DrawCeiling;
+        } else if is_key_pressed(KeyCode::Key5) {
+            state.tool = EditorTool::PlaceObject;
+        }
+    }
+
     // Clear selection with Escape key
     if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty()) {
         state.save_selection_undo();

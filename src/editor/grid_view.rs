@@ -6,7 +6,7 @@ use macroquad::prelude::*;
 use crate::rasterizer::Vec3;
 use crate::ui::{Rect, UiContext};
 use crate::world::{Direction, SplitDirection, SECTOR_SIZE};
-use super::{EditorState, Selection, GridViewMode, CEILING_HEIGHT, CLICK_HEIGHT};
+use super::{EditorState, EditorTool, Selection, GridViewMode, CEILING_HEIGHT, CLICK_HEIGHT};
 
 /// Determine which edge of a sector the mouse is closest to (in Top view mode)
 /// Returns the direction of the closest edge based on position within the sector
@@ -1499,6 +1499,21 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 state.set_selection(Selection::None);
                 state.set_status("Object deleted", 2.0);
             }
+        }
+    }
+
+    // Tool shortcuts: 1=Select, 2=Floor, 3=Wall, 4=Ceiling, 5=Object
+    if inside {
+        if is_key_pressed(KeyCode::Key1) {
+            state.tool = EditorTool::Select;
+        } else if is_key_pressed(KeyCode::Key2) {
+            state.tool = EditorTool::DrawFloor;
+        } else if is_key_pressed(KeyCode::Key3) {
+            state.tool = EditorTool::DrawWall;
+        } else if is_key_pressed(KeyCode::Key4) {
+            state.tool = EditorTool::DrawCeiling;
+        } else if is_key_pressed(KeyCode::Key5) {
+            state.tool = EditorTool::PlaceObject;
         }
     }
 
