@@ -1,7 +1,7 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, COLLAPSED_PANEL_HEIGHT, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
 use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard, GeometryClipboard, CopiedFace, CopiedFaceData};
@@ -38,12 +38,18 @@ pub struct EditorLayout {
     pub main_split: SplitPanel,
     /// Right split (center viewport | right panels)
     pub right_split: SplitPanel,
-    /// Left vertical split (2D grid | room properties)
-    pub left_split: SplitPanel,
+    /// Left split 1: Skybox | (2D Grid + Room + Debug)
+    pub left_split_1: SplitPanel,
+    /// Left split 2: 2D Grid | (Room + Debug)
+    pub left_split_2: SplitPanel,
+    /// Left split 3: Room | Debug
+    pub left_split_3: SplitPanel,
     /// Right vertical split (texture palette | properties)
     pub right_panel_split: SplitPanel,
     /// Action registry for keyboard shortcuts
     pub actions: ActionRegistry,
+    /// Collapsed state for left panels
+    pub left_collapsed: [bool; 4], // Skybox, 2D Grid, Room, Debug
 }
 
 impl EditorLayout {
@@ -53,9 +59,14 @@ impl EditorLayout {
         Self {
             main_split: SplitPanel::horizontal(1000).with_ratio(0.25).with_min_size(150.0),
             right_split: SplitPanel::horizontal(1001).with_ratio(0.75).with_min_size(150.0),
-            left_split: SplitPanel::vertical(1002).with_ratio(0.6).with_min_size(100.0),
+            // Left sidebar: 4 panels with 3 splits
+            // Skybox ~20%, 2D Grid ~35%, Room ~30%, Debug ~15%
+            left_split_1: SplitPanel::vertical(1002).with_ratio(0.20).with_min_size(50.0),
+            left_split_2: SplitPanel::vertical(1004).with_ratio(0.45).with_min_size(50.0),
+            left_split_3: SplitPanel::vertical(1005).with_ratio(0.65).with_min_size(50.0),
             right_panel_split: SplitPanel::vertical(1003).with_ratio(0.6).with_min_size(100.0),
             actions: create_editor_actions(),
+            left_collapsed: [false, false, false, true], // Debug collapsed by default
         }
     }
 
@@ -63,7 +74,8 @@ impl EditorLayout {
     pub fn apply_config(&mut self, config: &crate::world::EditorLayoutConfig) {
         self.main_split.ratio = config.main_split;
         self.right_split.ratio = config.right_split;
-        self.left_split.ratio = config.left_split;
+        // left_split from old config maps to left_split_2 (2D Grid | Room+Debug)
+        self.left_split_2.ratio = config.left_split;
         self.right_panel_split.ratio = config.right_panel_split;
     }
 
@@ -82,7 +94,7 @@ impl EditorLayout {
         crate::world::EditorLayoutConfig {
             main_split: self.main_split.ratio,
             right_split: self.right_split.ratio,
-            left_split: self.left_split.ratio,
+            left_split: self.left_split_2.ratio, // Save 2D Grid | Room+Debug ratio
             right_panel_split: self.right_panel_split.ratio,
             grid_offset_x,
             grid_offset_y,
@@ -246,55 +258,94 @@ pub fn draw_editor(
     // Right split: center viewport | right panels
     let (center_rect, right_rect) = layout.right_split.update(ctx, rest_rect);
 
-    // Left split: 2D grid view | room controls
-    let (grid_rect, room_props_rect) = layout.left_split.update(ctx, left_rect);
-
     // Right split: texture palette | face properties
     // Use layout() first to get rects, then handle_input() AFTER drawing contents
     // This allows widgets inside the panels to claim drags before the divider can
     let (texture_rect, props_rect) = layout.right_panel_split.layout(right_rect);
 
-    // Split grid_rect: Skybox panel (fixed height) | 2D Grid
-    let skybox_panel_height = 195.0;
-    let skybox_rect = Rect::new(grid_rect.x, grid_rect.y, grid_rect.w, skybox_panel_height);
-    let grid_rect_below = Rect::new(grid_rect.x, grid_rect.y + skybox_panel_height, grid_rect.w, grid_rect.h - skybox_panel_height);
+    // Left sidebar: 4 collapsible panels (Skybox, 2D Grid, Room, Debug)
+    let panel_bg = Color::from_rgba(35, 35, 40, 255);
+    let header_h = COLLAPSED_PANEL_HEIGHT;
 
-    // Draw Skybox panel
-    draw_panel(skybox_rect, Some("Skybox"), Color::from_rgba(35, 35, 40, 255));
-    draw_skybox_panel(ctx, panel_content_rect(skybox_rect, true), state);
+    // Count collapsed panels and calculate available height for expanded ones
+    let num_collapsed = layout.left_collapsed.iter().filter(|&&c| c).count();
+    let collapsed_height = num_collapsed as f32 * header_h;
+    let available_height = (left_rect.h - collapsed_height).max(0.0);
 
-    // Draw 2D Grid panel
-    draw_panel(grid_rect_below, Some("2D Grid"), Color::from_rgba(35, 35, 40, 255));
+    // Calculate heights for expanded panels (equal distribution)
+    let num_expanded = 4 - num_collapsed;
+    let expanded_panel_height = if num_expanded > 0 {
+        available_height / num_expanded as f32
+    } else {
+        0.0
+    };
 
-    // Add view mode toolbar inside the 2D grid panel
-    let grid_content = panel_content_rect(grid_rect_below, true);
-    let view_toolbar_height = 22.0;
-    let view_toolbar_rect = Rect::new(grid_content.x, grid_content.y, grid_content.w, view_toolbar_height);
-    let grid_view_rect = Rect::new(grid_content.x, grid_content.y + view_toolbar_height, grid_content.w, grid_content.h - view_toolbar_height);
+    // Calculate panel rects and draw them
+    let mut y = left_rect.y;
+    let panel_names = ["Skybox", "2D Grid", "Rooms", "Debug"];
 
-    // Draw view mode toolbar
-    draw_rectangle(view_toolbar_rect.x, view_toolbar_rect.y, view_toolbar_rect.w, view_toolbar_rect.h, Color::from_rgba(45, 45, 50, 255));
-    let mut view_toolbar = Toolbar::new(view_toolbar_rect);
-
-    if view_toolbar.letter_button_active(ctx, 'T', "Top view (X-Z)", state.grid_view_mode == GridViewMode::Top) {
-        state.grid_view_mode = GridViewMode::Top;
+    // Panel 0: Skybox
+    let skybox_h = if layout.left_collapsed[0] { header_h } else { expanded_panel_height };
+    let skybox_rect = Rect::new(left_rect.x, y, left_rect.w, skybox_h);
+    let (clicked, skybox_content) = draw_collapsible_panel(ctx, skybox_rect, panel_names[0], layout.left_collapsed[0], panel_bg);
+    if clicked { layout.left_collapsed[0] = !layout.left_collapsed[0]; }
+    if let Some(content) = skybox_content {
+        draw_skybox_panel(ctx, content, state);
     }
-    if view_toolbar.letter_button_active(ctx, 'F', "Front view (X-Y)", state.grid_view_mode == GridViewMode::Front) {
-        state.grid_view_mode = GridViewMode::Front;
-    }
-    if view_toolbar.letter_button_active(ctx, 'S', "Side view (Y-Z)", state.grid_view_mode == GridViewMode::Side) {
-        state.grid_view_mode = GridViewMode::Side;
-    }
+    y += skybox_h;
 
-    // Center 2D view on current room button (right-aligned)
-    if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center 2D view on current room") {
-        state.center_2d_on_current_room();
+    // Panel 1: 2D Grid
+    let grid_h = if layout.left_collapsed[1] { header_h } else { expanded_panel_height };
+    let grid_rect = Rect::new(left_rect.x, y, left_rect.w, grid_h);
+    let (clicked, grid_content) = draw_collapsible_panel(ctx, grid_rect, panel_names[1], layout.left_collapsed[1], panel_bg);
+    if clicked { layout.left_collapsed[1] = !layout.left_collapsed[1]; }
+    if let Some(content) = grid_content {
+        // Add view mode toolbar inside the 2D grid panel
+        let view_toolbar_height = 22.0;
+        let view_toolbar_rect = Rect::new(content.x, content.y, content.w, view_toolbar_height);
+        let grid_view_rect = Rect::new(content.x, content.y + view_toolbar_height, content.w, content.h - view_toolbar_height);
+
+        // Draw view mode toolbar
+        draw_rectangle(view_toolbar_rect.x, view_toolbar_rect.y, view_toolbar_rect.w, view_toolbar_rect.h, Color::from_rgba(45, 45, 50, 255));
+        let mut view_toolbar = Toolbar::new(view_toolbar_rect);
+
+        if view_toolbar.letter_button_active(ctx, 'T', "Top view (X-Z)", state.grid_view_mode == GridViewMode::Top) {
+            state.grid_view_mode = GridViewMode::Top;
+        }
+        if view_toolbar.letter_button_active(ctx, 'F', "Front view (X-Y)", state.grid_view_mode == GridViewMode::Front) {
+            state.grid_view_mode = GridViewMode::Front;
+        }
+        if view_toolbar.letter_button_active(ctx, 'S', "Side view (Y-Z)", state.grid_view_mode == GridViewMode::Side) {
+            state.grid_view_mode = GridViewMode::Side;
+        }
+
+        // Center 2D view on current room button (right-aligned)
+        if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center 2D view on current room") {
+            state.center_2d_on_current_room();
+        }
+
+        draw_grid_view(ctx, grid_view_rect, state);
     }
+    y += grid_h;
 
-    draw_grid_view(ctx, grid_view_rect, state);
+    // Panel 2: Rooms
+    let room_h = if layout.left_collapsed[2] { header_h } else { expanded_panel_height };
+    let room_rect = Rect::new(left_rect.x, y, left_rect.w, room_h);
+    let (clicked, room_content) = draw_collapsible_panel(ctx, room_rect, panel_names[2], layout.left_collapsed[2], panel_bg);
+    if clicked { layout.left_collapsed[2] = !layout.left_collapsed[2]; }
+    if let Some(content) = room_content {
+        draw_room_properties(ctx, content, state, icon_font);
+    }
+    y += room_h;
 
-    draw_panel(room_props_rect, Some("Rooms"), Color::from_rgba(35, 35, 40, 255));
-    draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);
+    // Panel 3: Debug
+    let debug_h = if layout.left_collapsed[3] { header_h } else { expanded_panel_height };
+    let debug_rect = Rect::new(left_rect.x, y, left_rect.w, debug_h);
+    let (clicked, debug_content) = draw_collapsible_panel(ctx, debug_rect, panel_names[3], layout.left_collapsed[3], panel_bg);
+    if clicked { layout.left_collapsed[3] = !layout.left_collapsed[3]; }
+    if let Some(content) = debug_content {
+        draw_debug_panel(ctx, content, state);
+    }
 
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
@@ -2402,6 +2453,69 @@ fn draw_compact_rgb_sliders(
     }
 
     new_color
+}
+
+/// Draw debug panel with frame timing information
+fn draw_debug_panel(_ctx: &mut UiContext, rect: Rect, _state: &mut EditorState) {
+    use macroquad::prelude::*;
+
+    let mut y = rect.y.floor();
+    let x = rect.x.floor();
+
+    // FPS and frame time
+    let fps = get_fps();
+    let frame_time_ms = get_frame_time() * 1000.0;
+
+    let fps_color = if fps >= 55 {
+        Color::from_rgba(100, 255, 100, 255)
+    } else if fps >= 30 {
+        Color::from_rgba(255, 200, 100, 255)
+    } else {
+        Color::from_rgba(255, 100, 100, 255)
+    };
+
+    draw_text(&format!("FPS: {}", fps), x, y + 10.0, FONT_SIZE_CONTENT, fps_color);
+    y += LINE_HEIGHT;
+
+    draw_text(&format!("Frame: {:.2}ms", frame_time_ms), x, y + 10.0, FONT_SIZE_CONTENT, WHITE);
+    y += LINE_HEIGHT;
+
+    // Draw a simple frame time bar
+    let bar_y = y + 4.0;
+    let bar_w = rect.w - 4.0;
+    let bar_h = 8.0;
+
+    // Background
+    draw_rectangle(x, bar_y, bar_w, bar_h, Color::from_rgba(30, 30, 30, 255));
+
+    // Target: 16.67ms = 60fps
+    let target_ms = 16.67;
+    let fill_ratio = (frame_time_ms / target_ms).min(2.0); // Cap at 2x target
+    let fill_w = bar_w * fill_ratio / 2.0; // Scale so target is at 50%
+
+    let bar_color = if frame_time_ms <= target_ms {
+        Color::from_rgba(100, 200, 100, 255)
+    } else if frame_time_ms <= target_ms * 2.0 {
+        Color::from_rgba(200, 200, 100, 255)
+    } else {
+        Color::from_rgba(200, 100, 100, 255)
+    };
+
+    draw_rectangle(x, bar_y, fill_w, bar_h, bar_color);
+
+    // Target line (16.67ms mark at 50%)
+    let target_x = x + bar_w * 0.5;
+    draw_line(target_x, bar_y, target_x, bar_y + bar_h, 1.0, Color::from_rgba(255, 255, 255, 150));
+
+    y += LINE_HEIGHT;
+
+    // Memory info (approximate)
+    y += 4.0;
+    draw_text("---", x, y + 10.0, FONT_SIZE_CONTENT, Color::from_rgba(80, 80, 80, 255));
+    y += LINE_HEIGHT;
+
+    // Draw time (placeholder - would need to track this in state)
+    draw_text("Draw: --ms", x, y + 10.0, FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
 }
 
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
