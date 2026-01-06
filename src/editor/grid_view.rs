@@ -1490,14 +1490,98 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
     }
 
-    // Handle Delete/Backspace key for object deletion in 2D view
+    // Handle Delete/Backspace key for deletion in 2D view (objects and sectors)
     if inside && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
-        // Check if an object is selected
-        if let Selection::Object { room, index } = state.selection {
+        // Collect all selections (primary + multi)
+        let mut all_selections: Vec<Selection> = vec![state.selection.clone()];
+        all_selections.extend(state.multi_selection.clone());
+
+        // Check for object selections first
+        let object_selections: Vec<_> = all_selections.iter()
+            .filter_map(|s| match s {
+                Selection::Object { room, index } => Some((*room, *index)),
+                _ => None,
+            })
+            .collect();
+
+        if !object_selections.is_empty() {
             state.save_undo();
-            if state.level.remove_object(room, index).is_some() {
+            // Delete objects in reverse order to preserve indices
+            let mut sorted_objects = object_selections;
+            sorted_objects.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let mut deleted_count = 0;
+            for (room_idx, obj_idx) in sorted_objects {
+                if state.level.remove_object(room_idx, obj_idx).is_some() {
+                    deleted_count += 1;
+                }
+            }
+
+            if deleted_count > 0 {
                 state.set_selection(Selection::None);
-                state.set_status("Object deleted", 2.0);
+                state.clear_multi_selection();
+                let msg = if deleted_count == 1 { "Deleted 1 object".to_string() } else { format!("Deleted {} objects", deleted_count) };
+                state.set_status(&msg, 2.0);
+            }
+        } else {
+            // Check for sector selections (from 2D drag select)
+            let sector_selections: Vec<_> = all_selections.iter()
+                .filter_map(|s| match s {
+                    Selection::Sector { room, x, z } => Some((*room, *x, *z)),
+                    _ => None,
+                })
+                .collect();
+
+            if !sector_selections.is_empty() {
+                state.save_undo();
+                let mut deleted_count = 0;
+                let mut affected_rooms = std::collections::HashSet::new();
+
+                for (room_idx, gx, gz) in &sector_selections {
+                    if let Some(room) = state.level.rooms.get_mut(*room_idx) {
+                        if let Some(sector) = room.get_sector_mut(*gx, *gz) {
+                            // Clear all geometry in sector
+                            let had_geometry = sector.floor.is_some()
+                                || sector.ceiling.is_some()
+                                || !sector.walls_north.is_empty()
+                                || !sector.walls_east.is_empty()
+                                || !sector.walls_south.is_empty()
+                                || !sector.walls_west.is_empty()
+                                || !sector.walls_nwse.is_empty()
+                                || !sector.walls_nesw.is_empty();
+
+                            if had_geometry {
+                                sector.floor = None;
+                                sector.ceiling = None;
+                                sector.walls_north.clear();
+                                sector.walls_east.clear();
+                                sector.walls_south.clear();
+                                sector.walls_west.clear();
+                                sector.walls_nwse.clear();
+                                sector.walls_nesw.clear();
+                                deleted_count += 1;
+                                affected_rooms.insert(*room_idx);
+                            }
+                        }
+                    }
+                }
+
+                // Cleanup affected rooms
+                for room_idx in affected_rooms {
+                    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                        room.cleanup_empty_sectors();
+                        room.trim_empty_edges();
+                        room.recalculate_bounds();
+                    }
+                }
+
+                if deleted_count > 0 {
+                    state.set_selection(Selection::None);
+                    state.clear_multi_selection();
+                    state.mark_portals_dirty();
+                    let msg = if deleted_count == 1 { "Deleted 1 sector".to_string() } else { format!("Deleted {} sectors", deleted_count) };
+                    state.set_status(&msg, 2.0);
+                }
             }
         }
     }
