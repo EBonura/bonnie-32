@@ -475,7 +475,8 @@ pub fn draw_viewport_3d(
             let (default_y_bottom, default_y_top) = (0.0, CEILING_HEIGHT);
 
             // Find closest edge - each sector has 4 edges
-            let mut closest_edge: Option<(f32, f32, Direction, f32)> = None; // (grid_x, grid_z, direction, screen_dist)
+            // We collect candidates and prioritize edges with existing walls
+            let mut edge_candidates: Vec<(f32, f32, Direction, f32, bool)> = Vec::new(); // (grid_x, grid_z, direction, screen_dist, has_walls)
 
             for ix in 0..(search_radius * 2) {
                 for iz in 0..(search_radius * 2) {
@@ -503,7 +504,8 @@ pub fn draw_viewport_3d(
                             fb.width, fb.height)
                         {
                             let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                            if closest_edge.map_or(true, |(_, _, _, best_dist)| dist < best_dist) {
+                            // Only consider edges within a reasonable distance
+                            if dist < 120.0 {
                                 // Walls face inward based on direction:
                                 // - North wall (at z=grid_z) faces +Z
                                 // - South wall (at z=grid_z+SECTOR_SIZE) faces -Z
@@ -554,12 +556,56 @@ pub fn draw_viewport_3d(
                                         }
                                     }
                                 };
-                                closest_edge = Some((final_grid_x, final_grid_z, dir, dist));
+
+                                // Check if this edge has existing walls
+                                let has_walls = if let Some(room) = state.level.rooms.get(state.current_room) {
+                                    if let Some((gx, gz)) = room.world_to_grid(final_grid_x + SECTOR_SIZE * 0.5, final_grid_z + SECTOR_SIZE * 0.5) {
+                                        if let Some(sector) = room.get_sector(gx, gz) {
+                                            !sector.walls(dir).is_empty()
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+
+                                edge_candidates.push((final_grid_x, final_grid_z, dir, dist, has_walls));
                             }
                         }
                     }
                 }
             }
+
+            // Select edge: prioritize edges with existing walls, but only if reasonably close
+            let closest_edge = {
+                // Find closest edge overall
+                let closest_any = edge_candidates.iter()
+                    .min_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Find closest edge with walls
+                let closest_wall = edge_candidates.iter()
+                    .filter(|(_, _, _, _, has_walls)| *has_walls)
+                    .min_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Prioritize wall edge only if:
+                // 1. It exists and is within 60px (reasonable hovering distance)
+                // 2. AND the closest non-wall edge isn't dramatically closer (within 30px difference)
+                match (closest_wall, closest_any) {
+                    (Some(&(wgx, wgz, wdir, wdist, _)), Some(&(_, _, _, any_dist, _))) => {
+                        // If wall edge is close enough AND not much farther than closest edge
+                        if wdist < 60.0 && (wdist - any_dist) < 30.0 {
+                            Some((wgx, wgz, wdir, wdist))
+                        } else {
+                            closest_any.map(|&(gx, gz, dir, dist, _)| (gx, gz, dir, dist))
+                        }
+                    }
+                    (None, Some(&(gx, gz, dir, dist, _))) => Some((gx, gz, dir, dist)),
+                    _ => None,
+                }
+            };
 
             if let Some((grid_x, grid_z, dir, dist)) = closest_edge {
                 if dist < 80.0 {
@@ -634,6 +680,25 @@ pub fn draw_viewport_3d(
 
                     if let Some((corner_heights, wall_state)) = wall_info {
                         preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
+
+                        // Debug logging
+                        let dir_name = match dir {
+                            Direction::North => "N",
+                            Direction::South => "S",
+                            Direction::East => "E",
+                            Direction::West => "W",
+                        };
+                        let state_name = match wall_state {
+                            0 => "new",
+                            1 => "gap",
+                            2 => "full",
+                            _ => "?",
+                        };
+                        eprintln!("WALL: mouse_fb=({:.0},{:.0}) dist={:.0} edge={:?} dir={} mouse_y_rel={:?} heights=[{:.0},{:.0},{:.0},{:.0}] state={}",
+                            mouse_fb_x, mouse_fb_y, dist, (grid_x, grid_z), dir_name,
+                            mouse_y_room_relative.map(|y| y as i32),
+                            corner_heights[0], corner_heights[1], corner_heights[2], corner_heights[3],
+                            state_name);
                     }
                 }
             }
