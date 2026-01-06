@@ -237,6 +237,9 @@ pub fn draw_editor(
     icon_font: Option<&Font>,
     input: &InputState,
 ) -> EditorAction {
+    use super::state::EditorFrameTimings;
+    let frame_start = EditorFrameTimings::start();
+
     let screen = bounds;
 
     // Single unified toolbar at top
@@ -250,7 +253,9 @@ pub fn draw_editor(
     let panels_rect = main_rect.remaining_after_bottom(status_height);
 
     // Draw unified toolbar and handle keyboard shortcuts
+    let toolbar_start = EditorFrameTimings::start();
     let action = draw_unified_toolbar(ctx, toolbar_rect, state, icon_font, &layout.actions);
+    let toolbar_ms = EditorFrameTimings::elapsed_ms(toolbar_start);
 
     // Main split: left panels | rest
     let (left_rect, rest_rect) = layout.main_split.update(ctx, panels_rect);
@@ -262,6 +267,9 @@ pub fn draw_editor(
     // Use layout() first to get rects, then handle_input() AFTER drawing contents
     // This allows widgets inside the panels to claim drags before the divider can
     let (texture_rect, props_rect) = layout.right_panel_split.layout(right_rect);
+
+    // === LEFT PANEL ===
+    let left_start = EditorFrameTimings::start();
 
     // Left sidebar: 4 collapsible panels (Skybox, 2D Grid, Room, Debug)
     let panel_bg = Color::from_rgba(35, 35, 40, 255);
@@ -347,9 +355,16 @@ pub fn draw_editor(
         draw_debug_panel(ctx, content, state);
     }
 
+    let left_panel_ms = EditorFrameTimings::elapsed_ms(left_start);
+
+    // === 3D VIEWPORT ===
+    let viewport_start = EditorFrameTimings::start();
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
+    let viewport_3d_ms = EditorFrameTimings::elapsed_ms(viewport_start);
 
+    // === RIGHT PANEL ===
+    let right_start = EditorFrameTimings::start();
     draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
     draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
 
@@ -359,9 +374,20 @@ pub fn draw_editor(
     // Handle right panel split input AFTER drawing contents
     // This allows UV controls and other widgets to claim drags first
     layout.right_panel_split.handle_input(ctx, right_rect);
+    let right_panel_ms = EditorFrameTimings::elapsed_ms(right_start);
 
-    // Draw status bar
+    // === STATUS BAR ===
+    let status_start = EditorFrameTimings::start();
     draw_status_bar(status_rect, state);
+    let status_ms = EditorFrameTimings::elapsed_ms(status_start);
+
+    // Store frame timings (viewport sub-timings are stored by viewport_3d.rs)
+    state.frame_timings.total_ms = EditorFrameTimings::elapsed_ms(frame_start);
+    state.frame_timings.toolbar_ms = toolbar_ms;
+    state.frame_timings.left_panel_ms = left_panel_ms;
+    state.frame_timings.viewport_3d_ms = viewport_3d_ms;
+    state.frame_timings.right_panel_ms = right_panel_ms;
+    state.frame_timings.status_ms = status_ms;
 
     action
 }
@@ -2456,11 +2482,32 @@ fn draw_compact_rgb_sliders(
 }
 
 /// Draw debug panel with frame timing information
-fn draw_debug_panel(_ctx: &mut UiContext, rect: Rect, _state: &mut EditorState) {
+fn draw_debug_panel(_ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
     use macroquad::prelude::*;
 
     let mut y = rect.y.floor();
     let x = rect.x.floor();
+    let bar_w = rect.w - 4.0;
+
+    // Colors for timing breakdown
+    let label_color = Color::from_rgba(150, 150, 160, 255);
+    let value_color = Color::from_rgba(200, 200, 210, 255);
+    let toolbar_color = Color::from_rgba(100, 180, 255, 255);   // Blue
+    let left_color = Color::from_rgba(180, 100, 255, 255);      // Purple
+    let viewport_color = Color::from_rgba(255, 100, 100, 255);  // Red
+    let right_color = Color::from_rgba(255, 200, 100, 255);     // Orange
+    let status_color = Color::from_rgba(100, 255, 180, 255);    // Cyan
+
+    // 3D viewport sub-timing colors (shades of red)
+    let vp_input_color = Color::from_rgba(255, 180, 180, 255);   // Light red
+    let vp_clear_color = Color::from_rgba(255, 150, 150, 255);   // Light-mid red
+    let vp_grid_color = Color::from_rgba(255, 120, 120, 255);    // Mid red
+    let vp_lights_color = Color::from_rgba(240, 100, 100, 255);  // Mid-dark red
+    let vp_texconv_color = Color::from_rgba(220, 80, 80, 255);   // Dark red
+    let vp_meshgen_color = Color::from_rgba(200, 60, 60, 255);   // Darker red
+    let vp_raster_color = Color::from_rgba(180, 40, 40, 255);    // Darkest red
+    let vp_preview_color = Color::from_rgba(255, 100, 150, 255); // Red-pink
+    let vp_upload_color = Color::from_rgba(255, 130, 100, 255);  // Red-orange
 
     // FPS and frame time
     let fps = get_fps();
@@ -2480,42 +2527,98 @@ fn draw_debug_panel(_ctx: &mut UiContext, rect: Rect, _state: &mut EditorState) 
     draw_text(&format!("Frame: {:.2}ms", frame_time_ms), x, y + 10.0, FONT_SIZE_CONTENT, WHITE);
     y += LINE_HEIGHT;
 
-    // Draw a simple frame time bar
-    let bar_y = y + 4.0;
-    let bar_w = rect.w - 4.0;
-    let bar_h = 8.0;
+    // Draw stacked timing bar
+    let bar_y = y + 2.0;
+    let bar_h = 10.0;
 
     // Background
     draw_rectangle(x, bar_y, bar_w, bar_h, Color::from_rgba(30, 30, 30, 255));
 
-    // Target: 16.67ms = 60fps
+    // Get timing data
+    let t = &state.frame_timings;
+    let total = t.total_ms.max(0.001); // Avoid division by zero
+
+    // Draw bar segments (stacked horizontally)
+    let mut bar_x = x;
+    let segments = [
+        (t.toolbar_ms, toolbar_color),
+        (t.left_panel_ms, left_color),
+        (t.viewport_3d_ms, viewport_color),
+        (t.right_panel_ms, right_color),
+        (t.status_ms, status_color),
+    ];
+
+    for (ms, color) in segments.iter() {
+        let seg_w = (*ms / total) * bar_w;
+        if seg_w > 0.5 {
+            draw_rectangle(bar_x, bar_y, seg_w, bar_h, *color);
+            bar_x += seg_w;
+        }
+    }
+
+    // Target line (16.67ms = 60fps)
     let target_ms = 16.67;
-    let fill_ratio = (frame_time_ms / target_ms).min(2.0); // Cap at 2x target
-    let fill_w = bar_w * fill_ratio / 2.0; // Scale so target is at 50%
+    let target_x = x + (target_ms / total.max(target_ms)) * bar_w;
+    if target_x < x + bar_w {
+        draw_line(target_x, bar_y - 1.0, target_x, bar_y + bar_h + 1.0, 1.0, Color::from_rgba(255, 255, 255, 150));
+    }
 
-    let bar_color = if frame_time_ms <= target_ms {
-        Color::from_rgba(100, 200, 100, 255)
-    } else if frame_time_ms <= target_ms * 2.0 {
-        Color::from_rgba(200, 200, 100, 255)
-    } else {
-        Color::from_rgba(200, 100, 100, 255)
-    };
+    y += LINE_HEIGHT + 2.0;
 
-    draw_rectangle(x, bar_y, fill_w, bar_h, bar_color);
-
-    // Target line (16.67ms mark at 50%)
-    let target_x = x + bar_w * 0.5;
-    draw_line(target_x, bar_y, target_x, bar_y + bar_h, 1.0, Color::from_rgba(255, 255, 255, 150));
-
+    // Total timing text
+    draw_text(&format!("Total: {:.2}ms", t.total_ms), x, y + 10.0, FONT_SIZE_CONTENT, value_color);
     y += LINE_HEIGHT;
 
-    // Memory info (approximate)
+    // Main breakdown
+    y += 2.0;
+    draw_text("Main:", x, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    y += LINE_HEIGHT;
+
+    // Timing breakdown with colored boxes
+    let box_size = 8.0;
+    let items = [
+        ("Toolbar", t.toolbar_ms, toolbar_color),
+        ("Left", t.left_panel_ms, left_color),
+        ("3D View", t.viewport_3d_ms, viewport_color),
+        ("Right", t.right_panel_ms, right_color),
+        ("Status", t.status_ms, status_color),
+    ];
+
+    for (name, ms, color) in items.iter() {
+        draw_rectangle(x, y + 4.0, box_size, box_size, *color);
+        draw_text(name, x + box_size + 4.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+        let value_str = format!("{:.2}ms", ms);
+        let value_w = value_str.len() as f32 * 6.0;
+        draw_text(&value_str, x + bar_w - value_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+        y += LINE_HEIGHT;
+    }
+
+    // 3D Viewport breakdown
     y += 4.0;
-    draw_text("---", x, y + 10.0, FONT_SIZE_CONTENT, Color::from_rgba(80, 80, 80, 255));
+    draw_text("3D View:", x, y + 10.0, FONT_SIZE_CONTENT, label_color);
     y += LINE_HEIGHT;
 
-    // Draw time (placeholder - would need to track this in state)
-    draw_text("Draw: --ms", x, y + 10.0, FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
+    let vp_items = [
+        ("Input", t.vp_input_ms, vp_input_color),
+        ("Clear", t.vp_clear_ms, vp_clear_color),
+        ("Grid", t.vp_grid_ms, vp_grid_color),
+        ("Lights", t.vp_lights_ms, vp_lights_color),
+        ("TexConv", t.vp_texconv_ms, vp_texconv_color),
+        ("MeshGen", t.vp_meshgen_ms, vp_meshgen_color),
+        ("Raster", t.vp_raster_ms, vp_raster_color),
+        ("Preview", t.vp_preview_ms, vp_preview_color),
+        ("Upload", t.vp_upload_ms, vp_upload_color),
+    ];
+
+    let indent = 8.0;
+    for (name, ms, color) in vp_items.iter() {
+        draw_rectangle(x + indent, y + 4.0, box_size, box_size, *color);
+        draw_text(name, x + indent + box_size + 4.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+        let value_str = format!("{:.2}ms", ms);
+        let value_w = value_str.len() as f32 * 6.0;
+        draw_text(&value_str, x + bar_w - value_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+        y += LINE_HEIGHT;
+    }
 }
 
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {

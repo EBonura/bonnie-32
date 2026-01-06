@@ -257,6 +257,12 @@ pub fn draw_viewport_3d(
     input: &InputState,
     icon_font: Option<&Font>,
 ) {
+    use super::state::EditorFrameTimings;
+    let _vp_start = EditorFrameTimings::start();
+
+    // === INPUT PHASE ===
+    let input_start = EditorFrameTimings::start();
+
     // Resize framebuffer based on resolution setting
     let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
         // Keep horizontal resolution fixed, scale vertical to match viewport aspect ratio
@@ -2544,6 +2550,11 @@ pub fn draw_viewport_3d(
         state.sync_camera_from_orbit();
     }
 
+    let vp_input_ms = EditorFrameTimings::elapsed_ms(input_start);
+
+    // === CLEAR PHASE ===
+    let clear_start = EditorFrameTimings::start();
+
     // Clear framebuffer - use 3D skybox if configured
     if let Some(skybox) = &state.level.skybox {
         fb.clear(RasterColor::new(0, 0, 0));
@@ -2552,6 +2563,11 @@ pub fn draw_viewport_3d(
     } else {
         fb.clear(RasterColor::new(30, 30, 40));
     }
+
+    let vp_clear_ms = EditorFrameTimings::elapsed_ms(clear_start);
+
+    // === GRID PHASE ===
+    let grid_start = EditorFrameTimings::start();
 
     // Draw main floor grid (large, fixed extent)
     if state.show_grid {
@@ -3029,6 +3045,11 @@ pub fn draw_viewport_3d(
         }
     }
 
+    let vp_grid_ms = EditorFrameTimings::elapsed_ms(grid_start);
+
+    // === LIGHTS PHASE ===
+    let lights_start = EditorFrameTimings::start();
+
     // Build texture map from texture packs
     let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     let mut texture_idx = 0;
@@ -3069,6 +3090,11 @@ pub fn draw_viewport_3d(
         Vec::new()
     };
 
+    let vp_lights_ms = EditorFrameTimings::elapsed_ms(lights_start);
+
+    // === TEXTURE CONVERSION PHASE ===
+    let texconv_start = EditorFrameTimings::start();
+
     // Convert textures to RGB555 if enabled
     let use_rgb555 = state.raster_settings.use_rgb555;
     let textures_15: Vec<_> = if use_rgb555 {
@@ -3076,6 +3102,13 @@ pub fn draw_viewport_3d(
     } else {
         Vec::new()
     };
+
+    let vp_texconv_ms = EditorFrameTimings::elapsed_ms(texconv_start);
+
+    // === RENDER PHASE (meshgen + raster) ===
+    let render_start = EditorFrameTimings::start();
+    let mut vp_meshgen_ms = 0.0f32;
+    let mut vp_raster_ms = 0.0f32;
 
     // Render each room with its own ambient setting (skip hidden ones)
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
@@ -3088,14 +3121,26 @@ pub fn draw_viewport_3d(
             ambient: room.ambient,
             ..state.raster_settings.clone()
         };
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
 
+        // Time mesh generation
+        let meshgen_start = EditorFrameTimings::start();
+        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
+        vp_meshgen_ms += EditorFrameTimings::elapsed_ms(meshgen_start);
+
+        // Time rasterization
+        let raster_start = EditorFrameTimings::start();
         if use_rgb555 {
             render_mesh_15(fb, &vertices, &faces, &textures_15, None, &state.camera_3d, &render_settings);
         } else {
             render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
         }
+        vp_raster_ms += EditorFrameTimings::elapsed_ms(raster_start);
     }
+
+    let _render_total_ms = EditorFrameTimings::elapsed_ms(render_start);
+
+    // === PREVIEW/SELECTION PHASE ===
+    let preview_start = EditorFrameTimings::start();
 
     // Draw subtle sector boundary highlight for wall placement
     // Only show if on the drag line (same check as wall preview)
@@ -4720,6 +4765,11 @@ pub fn draw_viewport_3d(
         }
     }
 
+    let vp_preview_ms = EditorFrameTimings::elapsed_ms(preview_start);
+
+    // === UPLOAD PHASE ===
+    let upload_start = EditorFrameTimings::start();
+
     // Convert framebuffer to texture and draw to viewport
     let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
     texture.set_filter(FilterMode::Nearest);
@@ -4734,6 +4784,20 @@ pub fn draw_viewport_3d(
             ..Default::default()
         },
     );
+
+    let vp_upload_ms = EditorFrameTimings::elapsed_ms(upload_start);
+
+    // Store viewport timings
+    state.frame_timings.vp_input_ms = vp_input_ms;
+    state.frame_timings.vp_clear_ms = vp_clear_ms;
+    state.frame_timings.vp_grid_ms = vp_grid_ms;
+    state.frame_timings.vp_lights_ms = vp_lights_ms;
+    state.frame_timings.vp_texconv_ms = vp_texconv_ms;
+    state.frame_timings.vp_meshgen_ms = vp_meshgen_ms;
+    state.frame_timings.vp_raster_ms = vp_raster_ms;
+    state.frame_timings.vp_preview_ms = vp_preview_ms;
+    state.frame_timings.vp_selection_ms = 0.0; // Included in preview
+    state.frame_timings.vp_upload_ms = vp_upload_ms;
 
     // Draw viewport border
     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, Color::from_rgba(60, 60, 60, 255));

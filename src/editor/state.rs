@@ -5,6 +5,57 @@ use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, F
 use crate::rasterizer::{Camera, Vec3, Vec2, Texture, RasterSettings, Color, BlendMode};
 use super::texture_pack::TexturePack;
 
+/// Frame timing breakdown for editor performance debugging
+#[derive(Debug, Clone, Default)]
+pub struct EditorFrameTimings {
+    /// Total frame time (ms)
+    pub total_ms: f32,
+    /// Toolbar drawing time (ms)
+    pub toolbar_ms: f32,
+    /// Left panel (skybox, 2D grid, rooms, debug) time (ms)
+    pub left_panel_ms: f32,
+    /// 3D viewport rendering time (ms) - total
+    pub viewport_3d_ms: f32,
+    /// Right panel (textures, properties) time (ms)
+    pub right_panel_ms: f32,
+    /// Status bar time (ms)
+    pub status_ms: f32,
+
+    // === 3D Viewport sub-timings ===
+    /// Input handling (camera, keyboard shortcuts)
+    pub vp_input_ms: f32,
+    /// Clear/skybox rendering
+    pub vp_clear_ms: f32,
+    /// Grid line drawing
+    pub vp_grid_ms: f32,
+    /// Light collection
+    pub vp_lights_ms: f32,
+    /// Texture conversion (RGB888 to RGB555)
+    pub vp_texconv_ms: f32,
+    /// Mesh data generation (to_render_data)
+    pub vp_meshgen_ms: f32,
+    /// Rasterization (render_mesh calls)
+    pub vp_raster_ms: f32,
+    /// Preview rendering (walls, floors, objects, clipboard)
+    pub vp_preview_ms: f32,
+    /// Selection/highlighting overlays
+    pub vp_selection_ms: f32,
+    /// Texture upload to GPU
+    pub vp_upload_ms: f32,
+}
+
+impl EditorFrameTimings {
+    /// Start timing (returns time in seconds from macroquad)
+    pub fn start() -> f64 {
+        macroquad::prelude::get_time()
+    }
+
+    /// Get elapsed time in ms since start
+    pub fn elapsed_ms(start: f64) -> f32 {
+        ((macroquad::prelude::get_time() - start) * 1000.0) as f32
+    }
+}
+
 /// TRLE grid constraints
 /// Sector size in world units (X-Z plane)
 pub const SECTOR_SIZE: f32 = 1024.0;
@@ -486,6 +537,9 @@ pub struct EditorState {
 
     /// Geometry clipboard for copy/paste entire face selections
     pub geometry_clipboard: Option<GeometryClipboard>,
+
+    /// Frame timing breakdown for debug panel
+    pub frame_timings: EditorFrameTimings,
 }
 
 impl EditorState {
@@ -616,6 +670,7 @@ impl EditorState {
             clipboard: None,
             face_clipboard: None,
             geometry_clipboard: None,
+            frame_timings: EditorFrameTimings::default(),
         }
     }
 
