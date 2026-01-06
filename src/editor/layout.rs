@@ -5,6 +5,7 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Too
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
 use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard};
+use crate::world::UV_SCALE;
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -2673,12 +2674,12 @@ fn draw_horizontal_face_container(
     }
     content_y += line_height;
 
-    // UV coordinates display
+    // UV coordinates display (scaled by UV_SCALE)
     let uv = face.uv.unwrap_or([
-        crate::rasterizer::Vec2::new(0.0, 0.0),  // NW
-        crate::rasterizer::Vec2::new(1.0, 0.0),  // NE
-        crate::rasterizer::Vec2::new(1.0, 1.0),  // SE
-        crate::rasterizer::Vec2::new(0.0, 1.0),  // SW
+        crate::rasterizer::Vec2::new(0.0, 0.0),           // NW
+        crate::rasterizer::Vec2::new(UV_SCALE, 0.0),      // NE
+        crate::rasterizer::Vec2::new(UV_SCALE, UV_SCALE), // SE
+        crate::rasterizer::Vec2::new(0.0, UV_SCALE),      // SW
     ]);
     draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
         content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
@@ -2754,6 +2755,25 @@ fn draw_horizontal_face_container(
                 if is_floor {
                     if let Some(f) = &mut s.floor { rotate_uv_cw(&mut f.uv); }
                 } else if let Some(c) = &mut s.ceiling { rotate_uv_cw(&mut c.uv); }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // 1:1 Texel mapping button - resets scale to 1.0 (one texture per block)
+    let texel_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, texel_rect, icon::RATIO, icon_font, "1:1 Texel Mapping") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    // Reset to default 1:1 mapping: scale 1.0 = one texture per block
+                    let mut params = extract_uv_params(&f.uv);
+                    params.x_scale = 1.0;
+                    params.y_scale = 1.0;
+                    f.uv = Some(apply_uv_params(&params));
+                }
             }
         }
     }
@@ -3013,16 +3033,16 @@ fn flip_uv_horizontal(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
     use crate::rasterizer::Vec2;
     let current = uv.unwrap_or([
         Vec2::new(0.0, 0.0),
-        Vec2::new(1.0, 0.0),
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 1.0),
+        Vec2::new(UV_SCALE, 0.0),
+        Vec2::new(UV_SCALE, UV_SCALE),
+        Vec2::new(0.0, UV_SCALE),
     ]);
-    // Flip X: swap left and right
+    // Flip X: swap left and right (flip within the current scale)
     *uv = Some([
-        Vec2::new(1.0 - current[0].x, current[0].y),
-        Vec2::new(1.0 - current[1].x, current[1].y),
-        Vec2::new(1.0 - current[2].x, current[2].y),
-        Vec2::new(1.0 - current[3].x, current[3].y),
+        Vec2::new(UV_SCALE - current[0].x, current[0].y),
+        Vec2::new(UV_SCALE - current[1].x, current[1].y),
+        Vec2::new(UV_SCALE - current[2].x, current[2].y),
+        Vec2::new(UV_SCALE - current[3].x, current[3].y),
     ]);
 }
 
@@ -3031,16 +3051,16 @@ fn flip_uv_vertical(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
     use crate::rasterizer::Vec2;
     let current = uv.unwrap_or([
         Vec2::new(0.0, 0.0),
-        Vec2::new(1.0, 0.0),
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 1.0),
+        Vec2::new(UV_SCALE, 0.0),
+        Vec2::new(UV_SCALE, UV_SCALE),
+        Vec2::new(0.0, UV_SCALE),
     ]);
-    // Flip Y: swap top and bottom
+    // Flip Y: swap top and bottom (flip within the current scale)
     *uv = Some([
-        Vec2::new(current[0].x, 1.0 - current[0].y),
-        Vec2::new(current[1].x, 1.0 - current[1].y),
-        Vec2::new(current[2].x, 1.0 - current[2].y),
-        Vec2::new(current[3].x, 1.0 - current[3].y),
+        Vec2::new(current[0].x, UV_SCALE - current[0].y),
+        Vec2::new(current[1].x, UV_SCALE - current[1].y),
+        Vec2::new(current[2].x, UV_SCALE - current[2].y),
+        Vec2::new(current[3].x, UV_SCALE - current[3].y),
     ]);
 }
 
@@ -3049,10 +3069,10 @@ fn flip_uv_vertical(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
 fn rotate_uv_cw(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
     use crate::rasterizer::Vec2;
     let current = uv.unwrap_or([
-        Vec2::new(0.0, 0.0),  // corner 0: NW
-        Vec2::new(1.0, 0.0),  // corner 1: NE
-        Vec2::new(1.0, 1.0),  // corner 2: SE
-        Vec2::new(0.0, 1.0),  // corner 3: SW
+        Vec2::new(0.0, 0.0),           // corner 0: NW
+        Vec2::new(UV_SCALE, 0.0),      // corner 1: NE
+        Vec2::new(UV_SCALE, UV_SCALE), // corner 2: SE
+        Vec2::new(0.0, UV_SCALE),      // corner 3: SW
     ]);
     // To rotate the texture 90° CW, each corner gets the UV from the previous corner
     // (i.e., shift the array by 1 position backwards)
@@ -3088,23 +3108,25 @@ impl Default for UvParams {
 }
 
 /// Extract UV parameters from 4-corner UV coordinates
-/// Assumes default UV is [(0,0), (1,0), (1,1), (0,1)] for NW, NE, SE, SW
+/// Assumes default UV is [(0,0), (UV_SCALE,0), (UV_SCALE,UV_SCALE), (0,UV_SCALE)] for NW, NE, SE, SW
+/// Scale is normalized so that 1.0 = default (one texture per block)
 fn extract_uv_params(uv: &Option<[crate::rasterizer::Vec2; 4]>) -> UvParams {
     use crate::rasterizer::Vec2;
     let coords = uv.unwrap_or([
         Vec2::new(0.0, 0.0),
-        Vec2::new(1.0, 0.0),
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 1.0),
+        Vec2::new(UV_SCALE, 0.0),
+        Vec2::new(UV_SCALE, UV_SCALE),
+        Vec2::new(0.0, UV_SCALE),
     ]);
 
     // Calculate center (average of all corners)
     let center_x = (coords[0].x + coords[1].x + coords[2].x + coords[3].x) / 4.0;
     let center_y = (coords[0].y + coords[1].y + coords[2].y + coords[3].y) / 4.0;
 
-    // Offset is how much the center has moved from default (0.5, 0.5)
-    let x_offset = center_x - 0.5;
-    let y_offset = center_y - 0.5;
+    // Offset is how much the center has moved from default (UV_SCALE/2, UV_SCALE/2)
+    // Normalize by UV_SCALE so offset 1.0 = one block
+    let x_offset = (center_x - UV_SCALE / 2.0) / UV_SCALE;
+    let y_offset = (center_y - UV_SCALE / 2.0) / UV_SCALE;
 
     // Scale: measure the width and height of the UV quad
     // Width = distance from NW to NE (along X), Height = distance from NW to SW (along Y)
@@ -3116,22 +3138,26 @@ fn extract_uv_params(uv: &Option<[crate::rasterizer::Vec2; 4]>) -> UvParams {
     let dy = coords[1].y - coords[0].y;
     let angle = dy.atan2(dx).to_degrees();
 
+    // Normalize scale by UV_SCALE so 1.0 = default (one texture per block)
     UvParams {
         x_offset,
         y_offset,
-        x_scale: width,
-        y_scale: height,
+        x_scale: width / UV_SCALE,
+        y_scale: height / UV_SCALE,
         angle,
     }
 }
 
 /// Apply UV parameters to generate 4-corner UV coordinates
+/// Scale 1.0 = default (one texture per block), which maps to UV_SCALE in UV space
 fn apply_uv_params(params: &UvParams) -> [crate::rasterizer::Vec2; 4] {
     use crate::rasterizer::Vec2;
 
-    // Start with unit square centered at origin
-    let half_w = params.x_scale / 2.0;
-    let half_h = params.y_scale / 2.0;
+    // Convert normalized scale to actual UV space (multiply by UV_SCALE)
+    let actual_w = params.x_scale * UV_SCALE;
+    let actual_h = params.y_scale * UV_SCALE;
+    let half_w = actual_w / 2.0;
+    let half_h = actual_h / 2.0;
 
     // Corners before rotation (centered at origin)
     let corners = [
@@ -3153,9 +3179,9 @@ fn apply_uv_params(params: &UvParams) -> [crate::rasterizer::Vec2; 4] {
         )
     }).collect();
 
-    // Translate to final position (center at 0.5 + offset)
-    let center_x = 0.5 + params.x_offset;
-    let center_y = 0.5 + params.y_offset;
+    // Translate to final position (center at UV_SCALE/2 + offset * UV_SCALE)
+    let center_x = UV_SCALE / 2.0 + params.x_offset * UV_SCALE;
+    let center_y = UV_SCALE / 2.0 + params.y_offset * UV_SCALE;
 
     [
         Vec2::new(rotated[0].x + center_x, rotated[0].y + center_y),
@@ -3349,12 +3375,12 @@ fn draw_wall_face_container(
     draw_text(&format!("Blend: {:?}", wall.blend_mode), content_x.floor(), (content_y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
     content_y += line_height;
 
-    // UV coordinates display
+    // UV coordinates display (scaled by UV_SCALE)
     let uv = wall.uv.unwrap_or([
-        crate::rasterizer::Vec2::new(0.0, 1.0),  // bottom-left
-        crate::rasterizer::Vec2::new(1.0, 1.0),  // bottom-right
-        crate::rasterizer::Vec2::new(1.0, 0.0),  // top-right
-        crate::rasterizer::Vec2::new(0.0, 0.0),  // top-left
+        crate::rasterizer::Vec2::new(0.0, UV_SCALE),       // bottom-left
+        crate::rasterizer::Vec2::new(UV_SCALE, UV_SCALE),  // bottom-right
+        crate::rasterizer::Vec2::new(UV_SCALE, 0.0),       // top-right
+        crate::rasterizer::Vec2::new(0.0, 0.0),            // top-left
     ]);
     draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
         content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
@@ -3478,7 +3504,7 @@ fn draw_wall_face_container(
     }
     btn_x += btn_size + btn_spacing;
 
-    // 1:1 Texel mapping button - resets H scale and sets V scale to match wall height
+    // 1:1 Texel mapping button - resets H scale to 1.0 and sets V scale to match wall height
     let texel_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, texel_rect, icon::RATIO, icon_font, "1:1 Texel Mapping") {
         let walls = collect_wall_selections(state);
@@ -3489,10 +3515,11 @@ fn draw_wall_face_container(
                     if let Some(s) = r.get_sector_mut(gx, gz) {
                         if let Some(w) = get_wall_mut(s, &face) {
                             // Calculate V scale based on wall height relative to SECTOR_SIZE
+                            // Scale is normalized: 1.0 = one block width
                             let wall_height = w.height();
                             let v_scale = wall_height / crate::world::SECTOR_SIZE;
                             let mut params = extract_uv_params(&w.uv);
-                            params.x_scale = 1.0; // Wall width is always SECTOR_SIZE
+                            params.x_scale = 1.0; // Wall width = 1 block
                             params.y_scale = v_scale;
                             w.uv = Some(apply_uv_params(&params));
                         }

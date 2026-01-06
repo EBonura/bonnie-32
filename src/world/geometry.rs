@@ -9,6 +9,11 @@ use crate::rasterizer::{Vec3, Vec2, Vertex, Face as RasterFace, BlendMode, Color
 /// TRLE sector size in world units
 pub const SECTOR_SIZE: f32 = 1024.0;
 
+/// UV scale factor: how much UV space one sector consumes
+/// 0.5 means one sector uses UV range [0, 0.5], so a 64x64 texture covers 2x2 blocks (32 texels per block)
+/// 1.0 means one sector uses UV range [0, 1], so a 64x64 texture covers 1 block (64 texels per block)
+pub const UV_SCALE: f32 = 0.5;
+
 /// Texture reference by pack and name
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextureRef {
@@ -1321,29 +1326,30 @@ pub struct VerticalFace {
 
 impl VerticalFace {
     /// Compute 1:1 texel UV mapping based on wall height
-    /// x_scale = 1.0 (wall width is always SECTOR_SIZE)
-    /// y_scale = wall_height / SECTOR_SIZE
+    /// x_scale = UV_SCALE (wall width maps to UV_SCALE of texture)
+    /// y_scale = wall_height / SECTOR_SIZE * UV_SCALE
     fn compute_1to1_uv(heights: &[f32; 4]) -> [Vec2; 4] {
         let bottom = (heights[0] + heights[1]) / 2.0;
         let top = (heights[2] + heights[3]) / 2.0;
         let wall_height = (top - bottom).abs();
-        let v_scale = wall_height / SECTOR_SIZE;
+        let v_scale = wall_height / SECTOR_SIZE * UV_SCALE;
 
         // UV corners: [bottom-left, bottom-right, top-right, top-left]
-        // Default UV with x_scale=1.0, y_scale=v_scale, no rotation, no offset
+        // Default UV with x_scale=UV_SCALE, y_scale=v_scale, no rotation, no offset
         [
-            Vec2::new(0.0, v_scale),  // bottom-left
-            Vec2::new(1.0, v_scale),  // bottom-right
-            Vec2::new(1.0, 0.0),      // top-right
-            Vec2::new(0.0, 0.0),      // top-left
+            Vec2::new(0.0, v_scale),       // bottom-left
+            Vec2::new(UV_SCALE, v_scale),  // bottom-right
+            Vec2::new(UV_SCALE, 0.0),      // top-right
+            Vec2::new(0.0, 0.0),           // top-left
         ]
     }
 
     /// Create a wall from bottom to top (all corners at same heights)
+    /// UVs default to None so world-aligned tiling is used during rendering
     pub fn new(y_bottom: f32, y_top: f32, texture: TextureRef) -> Self {
         let heights = [y_bottom, y_bottom, y_top, y_top];
         Self {
-            uv: Some(Self::compute_1to1_uv(&heights)),
+            uv: None,  // Use world-aligned default UVs
             heights,
             texture,
             solid: true,
@@ -1357,10 +1363,11 @@ impl VerticalFace {
 
     /// Create a wall with individual corner heights for sloped surfaces
     /// Heights order: [bottom-left, bottom-right, top-right, top-left]
+    /// UVs default to None so world-aligned tiling is used during rendering
     pub fn new_sloped(bl: f32, br: f32, tr: f32, tl: f32, texture: TextureRef) -> Self {
         let heights = [bl, br, tr, tl];
         Self {
-            uv: Some(Self::compute_1to1_uv(&heights)),
+            uv: None,  // Use world-aligned default UVs
             heights,
             texture,
             solid: true,
@@ -2758,6 +2765,8 @@ impl Room {
                     floor,
                     base_x,
                     base_z,
+                    grid_x,
+                    grid_z,
                     true, // is_floor
                     &resolve_texture,
                 );
@@ -2771,6 +2780,8 @@ impl Room {
                     ceiling,
                     base_x,
                     base_z,
+                    grid_x,
+                    grid_z,
                     false, // is_ceiling
                     &resolve_texture,
                 );
@@ -2778,23 +2789,23 @@ impl Room {
 
             // Render walls on each edge
             for wall in &sector.walls_north {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, Direction::North, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::North, &resolve_texture);
             }
             for wall in &sector.walls_east {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, Direction::East, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::East, &resolve_texture);
             }
             for wall in &sector.walls_south {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, Direction::South, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::South, &resolve_texture);
             }
             for wall in &sector.walls_west {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, Direction::West, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::West, &resolve_texture);
             }
             // Diagonal walls
             for wall in &sector.walls_nwse {
-                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, true, &resolve_texture);
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, true, &resolve_texture);
             }
             for wall in &sector.walls_nesw {
-                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, false, &resolve_texture);
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, false, &resolve_texture);
             }
         }
 
@@ -2809,6 +2820,8 @@ impl Room {
         face: &HorizontalFace,
         base_x: f32,
         base_z: f32,
+        grid_x: usize,
+        grid_z: usize,
         is_floor: bool,
         resolve_texture: &F,
     )
@@ -2824,13 +2837,18 @@ impl Room {
             Vec3::new(base_x, self.position.y + face.heights[3], base_z + SECTOR_SIZE),           // SW
         ];
 
-        // Default UVs for triangle 1
-        let uvs_1 = face.uv.unwrap_or([
-            Vec2::new(0.0, 0.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(1.0, 1.0),
-            Vec2::new(0.0, 1.0),
-        ]);
+        // Default UVs for triangle 1 (scaled by UV_SCALE, offset by grid position for tiling)
+        // When face.uv is None, use world-aligned UVs based on grid position
+        let uvs_1 = face.uv.unwrap_or_else(|| {
+            let u_offset = (grid_x as f32) * UV_SCALE;
+            let v_offset = (grid_z as f32) * UV_SCALE;
+            [
+                Vec2::new(u_offset, v_offset),                         // NW
+                Vec2::new(u_offset + UV_SCALE, v_offset),              // NE
+                Vec2::new(u_offset + UV_SCALE, v_offset + UV_SCALE),   // SE
+                Vec2::new(u_offset, v_offset + UV_SCALE),              // SW
+            ]
+        });
 
         // UVs for triangle 2 (use override or fall back to triangle 1's UVs)
         let uvs_2 = face.get_uv_2().copied().unwrap_or(uvs_1);
@@ -2909,6 +2927,8 @@ impl Room {
         wall: &VerticalFace,
         base_x: f32,
         base_z: f32,
+        grid_x: usize,
+        grid_z: usize,
         direction: Direction,
         resolve_texture: &F,
     )
@@ -2991,17 +3011,35 @@ impl Room {
             }
         };
 
+        // Calculate U coordinates for world-aligned tiling
+        // Use same technique as floors: grid position determines UV offset
+        // Each wall spans one grid cell, so U goes from grid*UV_SCALE to (grid+1)*UV_SCALE
+        // Corners [0,3] are "left" and [1,2] are "right" from viewer's perspective
+        let (u_left, u_right) = match direction {
+            Direction::North | Direction::South | Direction::NwSe | Direction::NeSw => {
+                let u = (grid_x as f32) * UV_SCALE;
+                (u, u + UV_SCALE)
+            }
+            Direction::East | Direction::West => {
+                let u = (grid_z as f32) * UV_SCALE;
+                (u, u + UV_SCALE)
+            }
+        };
+        // All walls have corners ordered as: [bottom-left, bottom-right, top-right, top-left]
+        // from the viewer's perspective (inside the room looking at the wall)
+        let corner_u: [f32; 4] = [u_left, u_right, u_right, u_left];
+
         // Calculate UVs based on projection mode
         let uvs = if wall.uv_projection == UvProjection::Projected {
             // Projected mode: UVs based on absolute world Y position
             // This creates globally aligned texture mapping across adjacent walls
 
             // Get base UVs to extract the U coordinates
-            let base_uvs = wall.uv.unwrap_or([
-                Vec2::new(0.0, 1.0),  // bottom-left
-                Vec2::new(1.0, 1.0),  // bottom-right
-                Vec2::new(1.0, 0.0),  // top-right
-                Vec2::new(0.0, 0.0),  // top-left
+            let base_uvs = wall.uv.unwrap_or_else(|| [
+                Vec2::new(corner_u[0], UV_SCALE),  // bottom-left
+                Vec2::new(corner_u[1], UV_SCALE),  // bottom-right
+                Vec2::new(corner_u[2], 0.0),       // top-right
+                Vec2::new(corner_u[3], 0.0),       // top-left
             ]);
 
             // Calculate world Y positions (including room y_offset)
@@ -3013,22 +3051,22 @@ impl Room {
                 y_offset + wall.heights[3],
             ];
 
-            // Calculate V based on absolute world position
-            // V = -world_y / SECTOR_SIZE (higher Y = lower V value, texture wraps via rasterizer)
+            // Calculate V based on absolute world position (scaled by UV_SCALE)
+            // V = -world_y / SECTOR_SIZE * UV_SCALE (higher Y = lower V value, texture wraps via rasterizer)
             // Don't use fract() - let the rasterizer handle wrapping to maintain continuous interpolation
             [
-                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE),
-                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE),
-                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE),
-                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE),
+                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE * UV_SCALE),
+                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE * UV_SCALE),
+                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE * UV_SCALE),
+                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE * UV_SCALE),
             ]
         } else {
-            // Default mode: standard per-vertex UVs
-            wall.uv.unwrap_or([
-                Vec2::new(0.0, 1.0),  // bottom-left
-                Vec2::new(1.0, 1.0),  // bottom-right
-                Vec2::new(1.0, 0.0),  // top-right
-                Vec2::new(0.0, 0.0),  // top-left
+            // Default mode: standard per-vertex UVs based on corner world positions
+            wall.uv.unwrap_or_else(|| [
+                Vec2::new(corner_u[0], UV_SCALE),  // bottom-left
+                Vec2::new(corner_u[1], UV_SCALE),  // bottom-right
+                Vec2::new(corner_u[2], 0.0),       // top-right
+                Vec2::new(corner_u[3], 0.0),       // top-left
             ])
         };
 
@@ -3071,6 +3109,8 @@ impl Room {
         wall: &VerticalFace,
         base_x: f32,
         base_z: f32,
+        grid_x: usize,
+        _grid_z: usize,
         is_nwse: bool,
         resolve_texture: &F,
     )
@@ -3109,14 +3149,21 @@ impl Room {
             (corners, Vec3::new(n, 0.0, n))
         };
 
+        // Calculate U coordinates for world-aligned tiling
+        // Use same technique as cardinal walls: grid position determines UV offset
+        let u_left = (grid_x as f32) * UV_SCALE;
+        let u_right = u_left + UV_SCALE;
+        // Corners [0,3] are left side, [1,2] are right side from viewer's perspective
+        let corner_u: [f32; 4] = [u_left, u_right, u_right, u_left];
+
         // Calculate UVs based on projection mode
         let uvs = if wall.uv_projection == UvProjection::Projected {
-            // Projected mode: UVs based on absolute world Y position
-            let base_uvs = wall.uv.unwrap_or([
-                Vec2::new(0.0, 1.0),  // bottom-left
-                Vec2::new(1.0, 1.0),  // bottom-right
-                Vec2::new(1.0, 0.0),  // top-right
-                Vec2::new(0.0, 0.0),  // top-left
+            // Projected mode: UVs based on absolute world Y position (scaled by UV_SCALE)
+            let base_uvs = wall.uv.unwrap_or_else(|| [
+                Vec2::new(corner_u[0], UV_SCALE),  // bottom-left
+                Vec2::new(corner_u[1], UV_SCALE),  // bottom-right
+                Vec2::new(corner_u[2], 0.0),       // top-right
+                Vec2::new(corner_u[3], 0.0),       // top-left
             ]);
 
             let world_heights = [
@@ -3127,18 +3174,18 @@ impl Room {
             ];
 
             [
-                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE),
-                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE),
-                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE),
-                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE),
+                Vec2::new(base_uvs[0].x, -world_heights[0] / SECTOR_SIZE * UV_SCALE),
+                Vec2::new(base_uvs[1].x, -world_heights[1] / SECTOR_SIZE * UV_SCALE),
+                Vec2::new(base_uvs[2].x, -world_heights[2] / SECTOR_SIZE * UV_SCALE),
+                Vec2::new(base_uvs[3].x, -world_heights[3] / SECTOR_SIZE * UV_SCALE),
             ]
         } else {
-            // Default mode: standard per-vertex UVs
-            wall.uv.unwrap_or([
-                Vec2::new(0.0, 1.0),  // bottom-left
-                Vec2::new(1.0, 1.0),  // bottom-right
-                Vec2::new(1.0, 0.0),  // top-right
-                Vec2::new(0.0, 0.0),  // top-left
+            // Default mode: standard per-vertex UVs based on grid position
+            wall.uv.unwrap_or_else(|| [
+                Vec2::new(corner_u[0], UV_SCALE),  // bottom-left
+                Vec2::new(corner_u[1], UV_SCALE),  // bottom-right
+                Vec2::new(corner_u[2], 0.0),       // top-right
+                Vec2::new(corner_u[3], 0.0),       // top-left
             ])
         };
 
