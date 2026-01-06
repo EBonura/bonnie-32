@@ -61,6 +61,27 @@ pub enum SectorFace {
     WallNeSw(usize),   // Diagonal wall NE to SW corner
 }
 
+impl SectorFace {
+    /// Returns true if this is a wall face (not floor or ceiling)
+    pub fn is_wall(&self) -> bool {
+        !matches!(self, SectorFace::Floor | SectorFace::Ceiling)
+    }
+
+    /// Returns the Direction for wall faces, None for floor/ceiling
+    pub fn direction(&self) -> Option<crate::world::Direction> {
+        use crate::world::Direction;
+        match self {
+            SectorFace::WallNorth(_) => Some(Direction::North),
+            SectorFace::WallEast(_) => Some(Direction::East),
+            SectorFace::WallSouth(_) => Some(Direction::South),
+            SectorFace::WallWest(_) => Some(Direction::West),
+            SectorFace::WallNwSe(_) => Some(Direction::NwSe),
+            SectorFace::WallNeSw(_) => Some(Direction::NeSw),
+            SectorFace::Floor | SectorFace::Ceiling => None,
+        }
+    }
+}
+
 /// What is currently selected in the editor
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selection {

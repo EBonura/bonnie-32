@@ -1598,11 +1598,21 @@ impl Sector {
         // edge_heights returns (left, right) when looking from INSIDE the sector,
         // but wall heights are [BL, BR, TR, TL] from the WALL's perspective (facing outward).
         // So we swap: sector's left = wall's right, sector's right = wall's left.
+        //
+        // IMPORTANT: Use fallback_bottom/top (room bounds) as the absolute limits.
+        // If floor is raised above room bottom, use room bottom to detect gaps below floor.
+        // If ceiling is lowered below room top, use room top to detect gaps above ceiling.
         let (floor_right, floor_left) = self.floor.as_ref()
-            .map(|f| f.edge_heights(direction))
+            .map(|f| {
+                let (l, r) = f.edge_heights(direction);
+                (l.min(fallback_bottom), r.min(fallback_bottom))
+            })
             .unwrap_or((fallback_bottom, fallback_bottom));
         let (ceiling_right, ceiling_left) = self.ceiling.as_ref()
-            .map(|c| c.edge_heights(direction))
+            .map(|c| {
+                let (l, r) = c.edge_heights(direction);
+                (l.max(fallback_top), r.max(fallback_top))
+            })
             .unwrap_or((fallback_top, fallback_top));
 
         let walls = self.walls(direction);
