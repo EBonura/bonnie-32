@@ -389,6 +389,40 @@ pub fn draw_editor(
     state.frame_timings.right_panel_ms = right_panel_ms;
     state.frame_timings.status_ms = status_ms;
 
+    // Update memory stats (not every frame - every 30 frames to reduce overhead)
+    static mut FRAME_COUNTER: u32 = 0;
+    unsafe {
+        FRAME_COUNTER += 1;
+        if FRAME_COUNTER % 30 == 0 {
+            state.memory_stats.update_process_memory();
+
+            // Calculate texture memory (4 bytes per pixel for Color struct)
+            let mut tex_bytes = 0usize;
+            let mut tex_count = 0usize;
+            for pack in &state.texture_packs {
+                for tex in &pack.textures {
+                    tex_bytes += tex.width * tex.height * 4; // Color is 4 bytes (r,g,b,blend)
+                    tex_count += 1;
+                }
+            }
+            state.memory_stats.texture_bytes = tex_bytes;
+            state.memory_stats.texture_count = tex_count;
+
+            // RGB555 texture cache (2 bytes per pixel)
+            let mut tex15_bytes = 0usize;
+            for tex in &state.textures_15_cache {
+                tex15_bytes += tex.width * tex.height * 2; // Color15 is 2 bytes
+            }
+            state.memory_stats.texture15_bytes = tex15_bytes;
+
+            // Framebuffer: 320x240 x (4 bytes RGBA + 4 bytes zbuffer)
+            state.memory_stats.framebuffer_bytes = 320 * 240 * 8;
+
+            // GPU texture cache count
+            state.memory_stats.gpu_cache_count = state.gpu_texture_cache.len();
+        }
+    }
+
     action
 }
 
@@ -2618,8 +2652,66 @@ fn draw_debug_panel(_ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
         let value_w = value_str.len() as f32 * 6.0;
         draw_text(&value_str, x + bar_w - value_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
         y += LINE_HEIGHT;
-
     }
+
+    // === MEMORY SECTION ===
+    y += 8.0;
+    draw_text("Memory:", x, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    y += LINE_HEIGHT;
+
+    let m = &state.memory_stats;
+
+    // Process memory (from OS)
+    let physical_str = super::state::MemoryStats::format_bytes(m.physical_bytes);
+    draw_text("Process RSS", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = physical_str.len() as f32 * 6.0;
+    draw_text(&physical_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    // Texture memory breakdown
+    y += 4.0;
+    draw_text("Textures:", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    y += LINE_HEIGHT;
+
+    let tex_str = format!("{} ({})", super::state::MemoryStats::format_bytes(m.texture_bytes), m.texture_count);
+    draw_text("RGB888", x + indent * 2.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = tex_str.len() as f32 * 6.0;
+    draw_text(&tex_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let tex15_str = super::state::MemoryStats::format_bytes(m.texture15_bytes);
+    draw_text("RGB555 cache", x + indent * 2.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = tex15_str.len() as f32 * 6.0;
+    draw_text(&tex15_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let fb_str = super::state::MemoryStats::format_bytes(m.framebuffer_bytes);
+    draw_text("Framebuffer", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = fb_str.len() as f32 * 6.0;
+    draw_text(&fb_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let gpu_str = format!("{}", m.gpu_cache_count);
+    draw_text("GPU cache", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = gpu_str.len() as f32 * 6.0;
+    draw_text(&gpu_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    // Show tracked vs untracked
+    let tracked = m.texture_bytes + m.texture15_bytes + m.framebuffer_bytes;
+    let untracked = m.physical_bytes.saturating_sub(tracked);
+    y += 4.0;
+    let tracked_str = super::state::MemoryStats::format_bytes(tracked);
+    draw_text("Tracked", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = tracked_str.len() as f32 * 6.0;
+    draw_text(&tracked_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let untracked_str = super::state::MemoryStats::format_bytes(untracked);
+    draw_text("Untracked", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = untracked_str.len() as f32 * 6.0;
+    draw_text(&untracked_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, Color::from_rgba(255, 180, 100, 255));
+    let _ = y; // suppress unused warning
 }
 
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {

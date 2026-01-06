@@ -44,6 +44,45 @@ pub struct EditorFrameTimings {
     pub vp_upload_ms: f32,
 }
 
+/// Memory usage statistics
+#[derive(Debug, Clone, Default)]
+pub struct MemoryStats {
+    /// Physical memory (RSS) in bytes
+    pub physical_bytes: usize,
+    /// Texture memory estimate (bytes)
+    pub texture_bytes: usize,
+    /// Texture15 cache memory estimate (bytes)
+    pub texture15_bytes: usize,
+    /// Framebuffer memory estimate (bytes)
+    pub framebuffer_bytes: usize,
+    /// Number of loaded textures
+    pub texture_count: usize,
+    /// GPU texture cache count (for texture palette)
+    pub gpu_cache_count: usize,
+}
+
+impl MemoryStats {
+    /// Update process memory stats from the OS
+    pub fn update_process_memory(&mut self) {
+        if let Some(usage) = memory_stats::memory_stats() {
+            self.physical_bytes = usage.physical_mem;
+        }
+    }
+
+    /// Format bytes as human-readable string (KB, MB, GB)
+    pub fn format_bytes(bytes: usize) -> String {
+        if bytes >= 1024 * 1024 * 1024 {
+            format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else if bytes >= 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else if bytes >= 1024 {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        } else {
+            format!("{} B", bytes)
+        }
+    }
+}
+
 impl EditorFrameTimings {
     /// Start timing (returns time in seconds from macroquad)
     pub fn start() -> f64 {
@@ -541,8 +580,15 @@ pub struct EditorState {
     /// Frame timing breakdown for debug panel
     pub frame_timings: EditorFrameTimings,
 
+    /// Memory usage statistics for debug panel
+    pub memory_stats: MemoryStats,
+
     /// Cached RGB555 textures (lazy-populated, invalidated when texture count changes)
     pub textures_15_cache: Vec<Texture15>,
+
+    /// Cached GPU textures for palette display (prevents memory leak from repeated uploads)
+    /// Key: (pack_index, texture_index), Value: Texture2D
+    pub gpu_texture_cache: std::collections::HashMap<(usize, usize), macroquad::prelude::Texture2D>,
 }
 
 impl EditorState {
@@ -674,7 +720,9 @@ impl EditorState {
             face_clipboard: None,
             geometry_clipboard: None,
             frame_timings: EditorFrameTimings::default(),
+            memory_stats: MemoryStats::default(),
             textures_15_cache: Vec::new(),
+            gpu_texture_cache: std::collections::HashMap::new(),
         }
     }
 
