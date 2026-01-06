@@ -5,7 +5,7 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Too
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
 use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard};
-use crate::world::UV_SCALE;
+use crate::world::{UV_SCALE, Sector};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -822,17 +822,23 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     // Paste object or face properties
     if actions.triggered("edit.paste", &actx) {
-        // First try to paste face properties if a face is selected
+        // Collect all face selections (primary + multi)
+        let mut face_selections: Vec<(usize, usize, usize, SectorFace)> = Vec::new();
         if let Selection::SectorFace { room, x, z, face } = &state.selection {
+            face_selections.push((*room, *x, *z, face.clone()));
+        }
+        for sel in &state.multi_selection {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                face_selections.push((*room, *x, *z, face.clone()));
+            }
+        }
+
+        if !face_selections.is_empty() {
             if let Some(fc) = &state.face_clipboard {
-                let room_idx = *room;
-                let sx = *x;
-                let sz = *z;
-                let target_face = face.clone();
                 let fc_clone = fc.clone();
 
-                // Check compatibility
-                let compatible = match (&target_face, &fc_clone) {
+                // Check compatibility with first selection (all should be same type)
+                let compatible = match (&face_selections[0].3, &fc_clone) {
                     (SectorFace::Floor, FaceClipboard::Horizontal { .. }) |
                     (SectorFace::Ceiling, FaceClipboard::Horizontal { .. }) => true,
                     (SectorFace::WallNorth(_), FaceClipboard::Vertical { .. }) |
@@ -848,154 +854,24 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
                     // Save undo BEFORE getting mutable borrow
                     state.save_undo();
 
-                    let success = if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                        if let Some(sector) = room.get_sector_mut(sx, sz) {
-                            match (&target_face, fc_clone) {
-                                // Horizontal -> Horizontal
-                                (SectorFace::Floor, FaceClipboard::Horizontal {
-                                    split_direction, texture, uv, colors,
-                                    texture_2, uv_2, colors_2, walkable,
-                                    blend_mode, normal_mode, black_transparent
-                                }) => {
-                                    if let Some(f) = sector.floor.as_mut() {
-                                        f.split_direction = split_direction;
-                                        f.texture = texture;
-                                        f.uv = uv;
-                                        f.colors = colors;
-                                        f.texture_2 = texture_2;
-                                        f.uv_2 = uv_2;
-                                        f.colors_2 = colors_2;
-                                        f.walkable = walkable;
-                                        f.blend_mode = blend_mode;
-                                        f.normal_mode = normal_mode;
-                                        f.black_transparent = black_transparent;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::Ceiling, FaceClipboard::Horizontal {
-                                    split_direction, texture, uv, colors,
-                                    texture_2, uv_2, colors_2, walkable,
-                                    blend_mode, normal_mode, black_transparent
-                                }) => {
-                                    if let Some(f) = sector.ceiling.as_mut() {
-                                        f.split_direction = split_direction;
-                                        f.texture = texture;
-                                        f.uv = uv;
-                                        f.colors = colors;
-                                        f.texture_2 = texture_2;
-                                        f.uv_2 = uv_2;
-                                        f.colors_2 = colors_2;
-                                        f.walkable = walkable;
-                                        f.blend_mode = blend_mode;
-                                        f.normal_mode = normal_mode;
-                                        f.black_transparent = black_transparent;
-                                        true
-                                    } else { false }
-                                }
-                                // Vertical -> Vertical
-                                (SectorFace::WallNorth(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_north.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallEast(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_east.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallSouth(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_south.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallWest(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_west.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallNwSe(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_nwse.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallNeSw(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_nesw.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                _ => false,
-                            }
-                        } else { false }
-                    } else { false };
+                    let mut paste_count = 0;
+                    for (room_idx, sx, sz, target_face) in face_selections {
+                        let success = if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                            if let Some(sector) = room.get_sector_mut(sx, sz) {
+                                paste_face_properties(sector, &target_face, &fc_clone)
+                            } else { false }
+                        } else { false };
+                        if success {
+                            paste_count += 1;
+                        }
+                    }
 
-                    if success {
-                        state.set_status("Face properties pasted", 2.0);
+                    if paste_count > 0 {
+                        if paste_count == 1 {
+                            state.set_status("Face properties pasted", 2.0);
+                        } else {
+                            state.set_status(&format!("Face properties pasted to {} faces", paste_count), 2.0);
+                        }
                     }
                 } else {
                     state.set_status("Cannot paste: incompatible face types", 2.0);
@@ -1048,6 +924,152 @@ fn paste_object(state: &mut EditorState, copied: crate::world::LevelObject) {
         }
     } else {
         state.set_status("Select a sector to paste into", 2.0);
+    }
+}
+
+/// Helper function to paste face properties from clipboard to a sector face
+fn paste_face_properties(sector: &mut Sector, target_face: &SectorFace, fc: &FaceClipboard) -> bool {
+    match (target_face, fc) {
+        // Horizontal -> Horizontal (Floor)
+        (SectorFace::Floor, FaceClipboard::Horizontal {
+            split_direction, texture, uv, colors,
+            texture_2, uv_2, colors_2, walkable,
+            blend_mode, normal_mode, black_transparent
+        }) => {
+            if let Some(f) = sector.floor.as_mut() {
+                f.split_direction = *split_direction;
+                f.texture = texture.clone();
+                f.uv = *uv;
+                f.colors = *colors;
+                f.texture_2 = texture_2.clone();
+                f.uv_2 = *uv_2;
+                f.colors_2 = *colors_2;
+                f.walkable = *walkable;
+                f.blend_mode = *blend_mode;
+                f.normal_mode = *normal_mode;
+                f.black_transparent = *black_transparent;
+                true
+            } else { false }
+        }
+        // Horizontal -> Horizontal (Ceiling)
+        (SectorFace::Ceiling, FaceClipboard::Horizontal {
+            split_direction, texture, uv, colors,
+            texture_2, uv_2, colors_2, walkable,
+            blend_mode, normal_mode, black_transparent
+        }) => {
+            if let Some(f) = sector.ceiling.as_mut() {
+                f.split_direction = *split_direction;
+                f.texture = texture.clone();
+                f.uv = *uv;
+                f.colors = *colors;
+                f.texture_2 = texture_2.clone();
+                f.uv_2 = *uv_2;
+                f.colors_2 = *colors_2;
+                f.walkable = *walkable;
+                f.blend_mode = *blend_mode;
+                f.normal_mode = *normal_mode;
+                f.black_transparent = *black_transparent;
+                true
+            } else { false }
+        }
+        // Vertical -> Vertical (walls)
+        (SectorFace::WallNorth(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_north.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallEast(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_east.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallSouth(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_south.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallWest(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_west.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallNwSe(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_nwse.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallNeSw(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_nesw.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        _ => false,
     }
 }
 
