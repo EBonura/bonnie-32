@@ -21,7 +21,7 @@ use crate::rasterizer::{
 };
 use crate::world::{SECTOR_SIZE, SplitDirection};
 use crate::input::{InputState, Action};
-use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT};
+use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT, CopiedFaceData};
 
 /// Calculate distance from point (px, py) to line segment from (x1, y1) to (x2, y2)
 fn point_to_line_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
@@ -345,12 +345,33 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Clear selection with Escape key
-    if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty()) {
+    // H/V flip for geometry clipboard
+    if inside_viewport && is_key_pressed(KeyCode::H) {
+        if let Some(gc) = &mut state.geometry_clipboard {
+            gc.flip_h = !gc.flip_h;
+            let status = if gc.flip_h { "Geometry: flipped horizontally" } else { "Geometry: flip H off" };
+            state.set_status(status, 1.0);
+        }
+    }
+    if inside_viewport && is_key_pressed(KeyCode::V) {
+        if let Some(gc) = &mut state.geometry_clipboard {
+            gc.flip_v = !gc.flip_v;
+            let status = if gc.flip_v { "Geometry: flipped vertically" } else { "Geometry: flip V off" };
+            state.set_status(status, 1.0);
+        }
+    }
+
+    // Clear selection and geometry clipboard with Escape key
+    if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty() || state.geometry_clipboard.is_some()) {
         state.save_selection_undo();
         state.set_selection(Selection::None);
         state.clear_multi_selection();
-        state.set_status("Selection cleared", 0.5);
+        if state.geometry_clipboard.is_some() {
+            state.geometry_clipboard = None;
+            state.set_status("Paste cancelled", 0.5);
+        } else {
+            state.set_status("Selection cleared", 0.5);
+        }
     }
 
     // Delete selected elements with Delete or Backspace key (supports multi-selection)
@@ -453,6 +474,66 @@ pub fn draw_viewport_3d(
     let hovered_edge = hover.edge;
     let hovered_face = hover.face;
     let hovered_object = hover.object;
+
+    // Geometry paste preview: detect sector position when we have clipboard
+    // This enables showing a wireframe preview of where geometry will be pasted
+    // Uses signed coordinates to allow pasting outside current room bounds (room will expand)
+    // Shows preview anywhere - not just on empty space (user can paste to overwrite existing geometry)
+    let geometry_paste_preview: Option<(i32, i32)> = if inside_viewport
+        && state.tool == EditorTool::Select
+        && state.geometry_clipboard.is_some()
+    {
+        // Find sector under cursor using similar logic to DrawFloor mode
+        if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
+            let detection_y = 0.0;
+            let search_radius = 20;
+            let cam_x = state.camera_3d.position.x;
+            let cam_z = state.camera_3d.position.z;
+            let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+
+            let mut closest: Option<(f32, f32, f32)> = None;
+            for ix in 0..(search_radius * 2) {
+                for iz in 0..(search_radius * 2) {
+                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
+                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
+                    let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, detection_y, grid_z + SECTOR_SIZE / 2.0);
+
+                    if let Some((sx, sy)) = world_to_screen(test_pos, state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb_width, fb_height)
+                    {
+                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                        if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                            closest = Some((grid_x, grid_z, dist));
+                        }
+                    }
+                }
+            }
+
+            if let Some((snapped_x, snapped_z, dist)) = closest {
+                if dist < 100.0 {
+                    // Convert world coords to grid coords relative to room position
+                    // Allow negative values and values beyond room bounds (room will expand on paste)
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                        let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
+                        Some((gx, gz))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // In drawing modes, find preview sector position
     if inside_viewport && (state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling) {
@@ -1395,6 +1476,19 @@ pub fn draw_viewport_3d(
                         state.save_selection_undo();
                         state.set_selection(Selection::Object { room: obj_room_idx, index: obj_idx });
                         state.set_status("Object selected", 1.0);
+                    }
+                } else if let Some((anchor_gx, anchor_gz)) = geometry_paste_preview {
+                    // Click to paste geometry from clipboard at preview location
+                    if let Some(gc) = state.geometry_clipboard.clone() {
+                        // Create a temporary selection at the anchor point for paste_geometry_selection
+                        state.set_selection(Selection::Sector {
+                            room: state.current_room,
+                            x: anchor_gx.max(0) as usize,
+                            z: anchor_gz.max(0) as usize,
+                        });
+                        // Trigger paste via the action system by setting a flag
+                        // We'll handle the paste inline here since we have all the info
+                        crate::editor::layout::paste_geometry_at(state, &gc, anchor_gx, anchor_gz);
                     }
                 } else if let Some((room_idx, gx, gz, face)) = hovered_face {
                     // Start dragging face (all 4 vertices)
@@ -3959,6 +4053,166 @@ pub fn draw_viewport_3d(
                                 draw_3d_line(fb, p3, p0, &state.camera_3d, hover_color);
                                 draw_3d_line(fb, p0, p2, &state.camera_3d, hover_color);
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw geometry paste preview wireframe when hovering over empty space with clipboard
+    if let Some((anchor_gx, anchor_gz)) = geometry_paste_preview {
+        if let Some(gc) = &state.geometry_clipboard {
+            if let Some(room) = state.level.rooms.get(state.current_room) {
+                let room_y = room.position.y;
+                let preview_color = RasterColor::new(100, 255, 150); // Green wireframe for paste preview
+
+                // Get bounds for flip transformation
+                let (min_x, max_x, min_z, max_z) = gc.bounds();
+                let width = max_x - min_x;
+                let depth = max_z - min_z;
+
+                for copied_face in &gc.faces {
+                    // Apply flip transformations (same logic as paste_geometry_selection)
+                    let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
+                        (width - copied_face.rel_x, depth - copied_face.rel_z)
+                    } else if gc.flip_h {
+                        (width - copied_face.rel_x, copied_face.rel_z)
+                    } else if gc.flip_v {
+                        (copied_face.rel_x, depth - copied_face.rel_z)
+                    } else {
+                        (copied_face.rel_x, copied_face.rel_z)
+                    };
+
+                    let target_gx = anchor_gx + rel_x;
+                    let target_gz = anchor_gz + rel_z;
+
+                    // Calculate world position - allow any grid position (room will expand on paste)
+                    let base_x = room.position.x + (target_gx as f32) * SECTOR_SIZE;
+                    let base_z = room.position.z + (target_gz as f32) * SECTOR_SIZE;
+
+                    match &copied_face.face {
+                        CopiedFaceData::Floor(f) => {
+                            // Apply height flips for preview
+                            let mut heights = f.heights;
+                            if gc.flip_h {
+                                heights = [heights[1], heights[0], heights[3], heights[2]];
+                            }
+                            if gc.flip_v {
+                                heights = [heights[3], heights[2], heights[1], heights[0]];
+                            }
+                            let corners = [
+                                Vec3::new(base_x, room_y + heights[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + heights[3], base_z + SECTOR_SIZE),
+                            ];
+                            // Draw quad outline + diagonal
+                            draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::Ceiling(f) => {
+                            let mut heights = f.heights;
+                            if gc.flip_h {
+                                heights = [heights[1], heights[0], heights[3], heights[2]];
+                            }
+                            if gc.flip_v {
+                                heights = [heights[3], heights[2], heights[1], heights[0]];
+                            }
+                            let corners = [
+                                Vec3::new(base_x, room_y + heights[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + heights[3], base_z + SECTOR_SIZE),
+                            ];
+                            draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallNorth(_, w) => {
+                            // If flip_v, this becomes south wall visually
+                            let wall_z = if gc.flip_v { base_z + SECTOR_SIZE } else { base_z };
+                            let p0 = Vec3::new(base_x, room_y + w.heights[0], wall_z);
+                            let p1 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[1], wall_z);
+                            let p2 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[2], wall_z);
+                            let p3 = Vec3::new(base_x, room_y + w.heights[3], wall_z);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallSouth(_, w) => {
+                            let wall_z = if gc.flip_v { base_z } else { base_z + SECTOR_SIZE };
+                            let p0 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[0], wall_z);
+                            let p1 = Vec3::new(base_x, room_y + w.heights[1], wall_z);
+                            let p2 = Vec3::new(base_x, room_y + w.heights[2], wall_z);
+                            let p3 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[3], wall_z);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallEast(_, w) => {
+                            let wall_x = if gc.flip_h { base_x } else { base_x + SECTOR_SIZE };
+                            let p0 = Vec3::new(wall_x, room_y + w.heights[0], base_z);
+                            let p1 = Vec3::new(wall_x, room_y + w.heights[1], base_z + SECTOR_SIZE);
+                            let p2 = Vec3::new(wall_x, room_y + w.heights[2], base_z + SECTOR_SIZE);
+                            let p3 = Vec3::new(wall_x, room_y + w.heights[3], base_z);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallWest(_, w) => {
+                            let wall_x = if gc.flip_h { base_x + SECTOR_SIZE } else { base_x };
+                            let p0 = Vec3::new(wall_x, room_y + w.heights[0], base_z + SECTOR_SIZE);
+                            let p1 = Vec3::new(wall_x, room_y + w.heights[1], base_z);
+                            let p2 = Vec3::new(wall_x, room_y + w.heights[2], base_z);
+                            let p3 = Vec3::new(wall_x, room_y + w.heights[3], base_z + SECTOR_SIZE);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallNwSe(_, w) => {
+                            // NW to SE diagonal - swap to NE-SW if both flips
+                            let (c0, c1) = if gc.flip_h != gc.flip_v {
+                                // Becomes NE-SW diagonal
+                                ((base_x + SECTOR_SIZE, base_z), (base_x, base_z + SECTOR_SIZE))
+                            } else {
+                                // Stays NW-SE
+                                ((base_x, base_z), (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE))
+                            };
+                            let p0 = Vec3::new(c0.0, room_y + w.heights[0], c0.1);
+                            let p1 = Vec3::new(c1.0, room_y + w.heights[1], c1.1);
+                            let p2 = Vec3::new(c1.0, room_y + w.heights[2], c1.1);
+                            let p3 = Vec3::new(c0.0, room_y + w.heights[3], c0.1);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallNeSw(_, w) => {
+                            let (c0, c1) = if gc.flip_h != gc.flip_v {
+                                // Becomes NW-SE diagonal
+                                ((base_x, base_z), (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE))
+                            } else {
+                                // Stays NE-SW
+                                ((base_x + SECTOR_SIZE, base_z), (base_x, base_z + SECTOR_SIZE))
+                            };
+                            let p0 = Vec3::new(c0.0, room_y + w.heights[0], c0.1);
+                            let p1 = Vec3::new(c1.0, room_y + w.heights[1], c1.1);
+                            let p2 = Vec3::new(c1.0, room_y + w.heights[2], c1.1);
+                            let p3 = Vec3::new(c0.0, room_y + w.heights[3], c0.1);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
                         }
                     }
                 }

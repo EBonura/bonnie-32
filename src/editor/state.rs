@@ -1,7 +1,7 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection};
+use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
 use crate::rasterizer::{Camera, Vec3, Vec2, Texture, RasterSettings, Color, BlendMode};
 use super::texture_pack::TexturePack;
 
@@ -143,6 +143,68 @@ pub enum FaceClipboard {
         black_transparent: bool,
         uv_projection: UvProjection,
     },
+}
+
+/// A copied face with its position relative to anchor
+#[derive(Debug, Clone)]
+pub struct CopiedFace {
+    /// Relative sector position (from anchor)
+    pub rel_x: i32,
+    pub rel_z: i32,
+    /// The face type and data
+    pub face: CopiedFaceData,
+}
+
+/// The actual face data (floor, ceiling, or wall)
+#[derive(Debug, Clone)]
+pub enum CopiedFaceData {
+    Floor(HorizontalFace),
+    Ceiling(HorizontalFace),
+    WallNorth(usize, VerticalFace),  // wall index + face data
+    WallEast(usize, VerticalFace),
+    WallSouth(usize, VerticalFace),
+    WallWest(usize, VerticalFace),
+    WallNwSe(usize, VerticalFace),
+    WallNeSw(usize, VerticalFace),
+}
+
+/// Geometry clipboard for copying/pasting entire face selections
+#[derive(Debug, Clone)]
+pub struct GeometryClipboard {
+    /// All copied faces with their relative positions
+    pub faces: Vec<CopiedFace>,
+    /// Horizontal flip state (toggled with H key)
+    pub flip_h: bool,
+    /// Vertical flip state (toggled with V key)
+    pub flip_v: bool,
+}
+
+impl GeometryClipboard {
+    pub fn new() -> Self {
+        Self {
+            faces: Vec::new(),
+            flip_h: false,
+            flip_v: false,
+        }
+    }
+
+    /// Get bounding box of copied geometry (min_x, max_x, min_z, max_z)
+    pub fn bounds(&self) -> (i32, i32, i32, i32) {
+        if self.faces.is_empty() {
+            return (0, 0, 0, 0);
+        }
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
+        for face in &self.faces {
+            min_x = min_x.min(face.rel_x);
+            max_x = max_x.max(face.rel_x);
+            min_z = min_z.min(face.rel_z);
+            max_z = max_z.max(face.rel_z);
+        }
+        (min_x, max_x, min_z, max_z)
+    }
 }
 
 /// Unified undo event - either a level change or a selection change
@@ -421,6 +483,9 @@ pub struct EditorState {
 
     /// Face clipboard for copy/paste face properties (texture, UV, colors, etc.)
     pub face_clipboard: Option<FaceClipboard>,
+
+    /// Geometry clipboard for copy/paste entire face selections
+    pub geometry_clipboard: Option<GeometryClipboard>,
 }
 
 impl EditorState {
@@ -550,6 +615,7 @@ impl EditorState {
             player_prop_buffer: String::new(),
             clipboard: None,
             face_clipboard: None,
+            geometry_clipboard: None,
         }
     }
 

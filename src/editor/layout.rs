@@ -4,7 +4,7 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
-use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard};
+use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard, GeometryClipboard, CopiedFace, CopiedFaceData};
 use crate::world::{UV_SCALE, Sector};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
@@ -690,133 +690,145 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.redo();
     }
 
-    // Copy selected object or face
+    // Copy selected object or face(s)
     if actions.triggered("edit.copy", &actx) {
-        match &state.selection {
-            Selection::Object { room, index } => {
-                if let Some(r) = state.level.rooms.get(*room) {
-                    if let Some(obj) = r.objects.get(*index) {
-                        state.clipboard = Some(obj.clone());
-                        state.set_status("Object copied to clipboard", 2.0);
-                    }
-                }
-            }
-            Selection::SectorFace { room, x, z, face } => {
-                if let Some(r) = state.level.rooms.get(*room) {
-                    if let Some(sector) = r.get_sector(*x, *z) {
-                        // Copy face properties based on face type
-                        let copied = match face {
-                            SectorFace::Floor => {
-                                sector.floor.as_ref().map(|f| FaceClipboard::Horizontal {
-                                    split_direction: f.split_direction,
-                                    texture: f.texture.clone(),
-                                    uv: f.uv,
-                                    colors: f.colors,
-                                    texture_2: f.texture_2.clone(),
-                                    uv_2: f.uv_2,
-                                    colors_2: f.colors_2,
-                                    walkable: f.walkable,
-                                    blend_mode: f.blend_mode,
-                                    normal_mode: f.normal_mode,
-                                    black_transparent: f.black_transparent,
-                                })
-                            }
-                            SectorFace::Ceiling => {
-                                sector.ceiling.as_ref().map(|f| FaceClipboard::Horizontal {
-                                    split_direction: f.split_direction,
-                                    texture: f.texture.clone(),
-                                    uv: f.uv,
-                                    colors: f.colors,
-                                    texture_2: f.texture_2.clone(),
-                                    uv_2: f.uv_2,
-                                    colors_2: f.colors_2,
-                                    walkable: f.walkable,
-                                    blend_mode: f.blend_mode,
-                                    normal_mode: f.normal_mode,
-                                    black_transparent: f.black_transparent,
-                                })
-                            }
-                            SectorFace::WallNorth(i) => {
-                                sector.walls_north.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallEast(i) => {
-                                sector.walls_east.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallSouth(i) => {
-                                sector.walls_south.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallWest(i) => {
-                                sector.walls_west.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallNwSe(i) => {
-                                sector.walls_nwse.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallNeSw(i) => {
-                                sector.walls_nesw.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                        };
-                        if let Some(fc) = copied {
-                            state.face_clipboard = Some(fc);
-                            state.set_status("Face properties copied", 2.0);
+        // Check if we have multiple faces or sectors selected - if so, copy geometry
+        let has_multi_faces = !state.multi_selection.is_empty() &&
+            state.multi_selection.iter().any(|s| matches!(s, Selection::SectorFace { .. }));
+        let has_multi_sectors = !state.multi_selection.is_empty() &&
+            state.multi_selection.iter().any(|s| matches!(s, Selection::Sector { .. }));
+
+        if has_multi_faces || has_multi_sectors {
+            // Copy entire geometry (all selected faces/sectors with positions)
+            copy_geometry_selection(state);
+        } else {
+            // Single selection - copy properties or object
+            match &state.selection {
+                Selection::Object { room, index } => {
+                    if let Some(r) = state.level.rooms.get(*room) {
+                        if let Some(obj) = r.objects.get(*index) {
+                            state.clipboard = Some(obj.clone());
+                            state.set_status("Object copied to clipboard", 2.0);
                         }
                     }
                 }
+                Selection::SectorFace { room, x, z, face } => {
+                    if let Some(r) = state.level.rooms.get(*room) {
+                        if let Some(sector) = r.get_sector(*x, *z) {
+                            // Copy face properties based on face type
+                            let copied = match face {
+                                SectorFace::Floor => {
+                                    sector.floor.as_ref().map(|f| FaceClipboard::Horizontal {
+                                        split_direction: f.split_direction,
+                                        texture: f.texture.clone(),
+                                        uv: f.uv,
+                                        colors: f.colors,
+                                        texture_2: f.texture_2.clone(),
+                                        uv_2: f.uv_2,
+                                        colors_2: f.colors_2,
+                                        walkable: f.walkable,
+                                        blend_mode: f.blend_mode,
+                                        normal_mode: f.normal_mode,
+                                        black_transparent: f.black_transparent,
+                                    })
+                                }
+                                SectorFace::Ceiling => {
+                                    sector.ceiling.as_ref().map(|f| FaceClipboard::Horizontal {
+                                        split_direction: f.split_direction,
+                                        texture: f.texture.clone(),
+                                        uv: f.uv,
+                                        colors: f.colors,
+                                        texture_2: f.texture_2.clone(),
+                                        uv_2: f.uv_2,
+                                        colors_2: f.colors_2,
+                                        walkable: f.walkable,
+                                        blend_mode: f.blend_mode,
+                                        normal_mode: f.normal_mode,
+                                        black_transparent: f.black_transparent,
+                                    })
+                                }
+                                SectorFace::WallNorth(i) => {
+                                    sector.walls_north.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallEast(i) => {
+                                    sector.walls_east.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallSouth(i) => {
+                                    sector.walls_south.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallWest(i) => {
+                                    sector.walls_west.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallNwSe(i) => {
+                                    sector.walls_nwse.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallNeSw(i) => {
+                                    sector.walls_nesw.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                            };
+                            if let Some(fc) = copied {
+                                state.face_clipboard = Some(fc);
+                                state.set_status("Face properties copied", 2.0);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -882,6 +894,9 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             } else {
                 state.set_status("Nothing in clipboard", 2.0);
             }
+        } else if let Some(gc) = state.geometry_clipboard.clone() {
+            // Paste geometry at selected sector
+            paste_geometry_selection(state, &gc);
         } else if let Some(copied) = state.clipboard.clone() {
             // Regular object paste
             paste_object(state, copied);
@@ -1070,6 +1085,386 @@ fn paste_face_properties(sector: &mut Sector, target_face: &SectorFace, fc: &Fac
             } else { false }
         }
         _ => false,
+    }
+}
+
+/// Copy all selected faces as geometry (with relative positions)
+/// Handles both SectorFace selections (individual faces) and Sector selections (all faces in sector)
+fn copy_geometry_selection(state: &mut EditorState) {
+    // Collect all sector positions that need their faces extracted
+    let mut sector_positions: Vec<(usize, usize, usize)> = Vec::new();
+    let mut all_faces: Vec<(usize, usize, usize, SectorFace)> = Vec::new();
+
+    // Handle primary selection
+    match &state.selection {
+        Selection::SectorFace { room, x, z, face } => {
+            all_faces.push((*room, *x, *z, face.clone()));
+        }
+        Selection::Sector { room, x, z } => {
+            sector_positions.push((*room, *x, *z));
+        }
+        _ => {}
+    }
+
+    // Handle multi-selection
+    for sel in &state.multi_selection {
+        match sel {
+            Selection::SectorFace { room, x, z, face } => {
+                all_faces.push((*room, *x, *z, face.clone()));
+            }
+            Selection::Sector { room, x, z } => {
+                sector_positions.push((*room, *x, *z));
+            }
+            _ => {}
+        }
+    }
+
+    // Extract faces from sector positions
+    for (room_idx, x, z) in sector_positions {
+        if let Some(room) = state.level.rooms.get(room_idx) {
+            if let Some(sector) = room.get_sector(x, z) {
+                // Add floor if present
+                if sector.floor.is_some() {
+                    all_faces.push((room_idx, x, z, SectorFace::Floor));
+                }
+                // Add ceiling if present
+                if sector.ceiling.is_some() {
+                    all_faces.push((room_idx, x, z, SectorFace::Ceiling));
+                }
+                // Add all walls
+                for i in 0..sector.walls_north.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallNorth(i)));
+                }
+                for i in 0..sector.walls_east.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallEast(i)));
+                }
+                for i in 0..sector.walls_south.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallSouth(i)));
+                }
+                for i in 0..sector.walls_west.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallWest(i)));
+                }
+                for i in 0..sector.walls_nwse.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallNwSe(i)));
+                }
+                for i in 0..sector.walls_nesw.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallNeSw(i)));
+                }
+            }
+        }
+    }
+
+    if all_faces.is_empty() {
+        state.set_status("No geometry to copy", 2.0);
+        return;
+    }
+
+    // Find anchor point (minimum x, z coordinates)
+    let anchor_x = all_faces.iter().map(|(_, x, _, _)| *x as i32).min().unwrap_or(0);
+    let anchor_z = all_faces.iter().map(|(_, _, z, _)| *z as i32).min().unwrap_or(0);
+
+    let mut copied_faces: Vec<CopiedFace> = Vec::new();
+
+    for (room_idx, sx, sz, face) in &all_faces {
+        let rel_x = *sx as i32 - anchor_x;
+        let rel_z = *sz as i32 - anchor_z;
+
+        if let Some(room) = state.level.rooms.get(*room_idx) {
+            if let Some(sector) = room.get_sector(*sx, *sz) {
+                let face_data = match face {
+                    SectorFace::Floor => {
+                        sector.floor.as_ref().map(|f| CopiedFaceData::Floor(f.clone()))
+                    }
+                    SectorFace::Ceiling => {
+                        sector.ceiling.as_ref().map(|f| CopiedFaceData::Ceiling(f.clone()))
+                    }
+                    SectorFace::WallNorth(i) => {
+                        sector.walls_north.get(*i).map(|w| CopiedFaceData::WallNorth(*i, w.clone()))
+                    }
+                    SectorFace::WallEast(i) => {
+                        sector.walls_east.get(*i).map(|w| CopiedFaceData::WallEast(*i, w.clone()))
+                    }
+                    SectorFace::WallSouth(i) => {
+                        sector.walls_south.get(*i).map(|w| CopiedFaceData::WallSouth(*i, w.clone()))
+                    }
+                    SectorFace::WallWest(i) => {
+                        sector.walls_west.get(*i).map(|w| CopiedFaceData::WallWest(*i, w.clone()))
+                    }
+                    SectorFace::WallNwSe(i) => {
+                        sector.walls_nwse.get(*i).map(|w| CopiedFaceData::WallNwSe(*i, w.clone()))
+                    }
+                    SectorFace::WallNeSw(i) => {
+                        sector.walls_nesw.get(*i).map(|w| CopiedFaceData::WallNeSw(*i, w.clone()))
+                    }
+                };
+
+                if let Some(data) = face_data {
+                    copied_faces.push(CopiedFace {
+                        rel_x,
+                        rel_z,
+                        face: data,
+                    });
+                }
+            }
+        }
+    }
+
+    if !copied_faces.is_empty() {
+        let count = copied_faces.len();
+        state.geometry_clipboard = Some(GeometryClipboard {
+            faces: copied_faces,
+            flip_h: false,
+            flip_v: false,
+        });
+        state.set_status(&format!("Copied {} faces to geometry clipboard", count), 2.0);
+    }
+}
+
+/// Paste geometry from clipboard at the selected/hovered sector
+fn paste_geometry_selection(state: &mut EditorState, gc: &GeometryClipboard) {
+    // Get anchor point from current selection (Sector or SectorFace)
+    let anchor = match &state.selection {
+        Selection::Sector { room, x, z } => Some((*room, *x as i32, *z as i32)),
+        Selection::SectorFace { room, x, z, .. } => Some((*room, *x as i32, *z as i32)),
+        _ => None,
+    };
+
+    let Some((room_idx, anchor_x, anchor_z)) = anchor else {
+        state.set_status("Select a sector to paste geometry", 2.0);
+        return;
+    };
+
+    paste_geometry_at_impl(state, gc, room_idx, anchor_x, anchor_z);
+}
+
+/// Paste geometry from clipboard at specific anchor coordinates (public for viewport click)
+pub fn paste_geometry_at(state: &mut EditorState, gc: &GeometryClipboard, anchor_x: i32, anchor_z: i32) {
+    paste_geometry_at_impl(state, gc, state.current_room, anchor_x, anchor_z);
+}
+
+/// Internal implementation for pasting geometry
+fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_idx: usize, anchor_x: i32, anchor_z: i32) {
+    state.save_undo();
+
+    let mut paste_count = 0;
+    let (min_x, max_x, min_z, max_z) = gc.bounds();
+    let width = max_x - min_x;
+    let depth = max_z - min_z;
+
+    // First pass: calculate bounds needed to expand room
+    let mut target_min_x = i32::MAX;
+    let mut target_max_x = i32::MIN;
+    let mut target_min_z = i32::MAX;
+    let mut target_max_z = i32::MIN;
+
+    for face in &gc.faces {
+        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
+            (width - face.rel_x, depth - face.rel_z)
+        } else if gc.flip_h {
+            (width - face.rel_x, face.rel_z)
+        } else if gc.flip_v {
+            (face.rel_x, depth - face.rel_z)
+        } else {
+            (face.rel_x, face.rel_z)
+        };
+        let target_x = anchor_x + rel_x;
+        let target_z = anchor_z + rel_z;
+        target_min_x = target_min_x.min(target_x);
+        target_max_x = target_max_x.max(target_x);
+        target_min_z = target_min_z.min(target_z);
+        target_max_z = target_max_z.max(target_z);
+    }
+
+    // Expand room grid to accommodate all target positions
+    let mut offset_x = 0i32;
+    let mut offset_z = 0i32;
+
+    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+        // Expand in negative X direction
+        while target_min_x + offset_x < 0 {
+            room.position.x -= SECTOR_SIZE;
+            room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+            room.width += 1;
+            offset_x += 1;
+        }
+
+        // Expand in negative Z direction
+        while target_min_z + offset_z < 0 {
+            room.position.z -= SECTOR_SIZE;
+            for col in &mut room.sectors {
+                col.insert(0, None);
+            }
+            room.depth += 1;
+            offset_z += 1;
+        }
+
+        // Expand in positive X direction
+        while (target_max_x + offset_x) as usize >= room.width {
+            room.width += 1;
+            room.sectors.push((0..room.depth).map(|_| None).collect());
+        }
+
+        // Expand in positive Z direction
+        while (target_max_z + offset_z) as usize >= room.depth {
+            room.depth += 1;
+            for col in &mut room.sectors {
+                col.push(None);
+            }
+        }
+    }
+
+    // Second pass: paste all faces with adjusted coordinates
+    for face in &gc.faces {
+        // Apply flip transformations
+        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
+            (width - face.rel_x, depth - face.rel_z)
+        } else if gc.flip_h {
+            (width - face.rel_x, face.rel_z)
+        } else if gc.flip_v {
+            (face.rel_x, depth - face.rel_z)
+        } else {
+            (face.rel_x, face.rel_z)
+        };
+
+        let target_x = (anchor_x + rel_x + offset_x) as usize;
+        let target_z = (anchor_z + rel_z + offset_z) as usize;
+
+        if let Some(room) = state.level.rooms.get_mut(room_idx) {
+            // Ensure sector exists
+            room.ensure_sector(target_x, target_z);
+
+            if let Some(sector) = room.get_sector_mut(target_x, target_z) {
+                match &face.face {
+                    CopiedFaceData::Floor(f) => {
+                        let mut new_face = f.clone();
+                        // Flip heights if needed
+                        if gc.flip_h {
+                            new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[1], h2[0], h2[3], h2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.heights = [new_face.heights[3], new_face.heights[2], new_face.heights[1], new_face.heights[0]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[3], h2[2], h2[1], h2[0]];
+                            }
+                        }
+                        sector.floor = Some(new_face);
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::Ceiling(f) => {
+                        let mut new_face = f.clone();
+                        if gc.flip_h {
+                            new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[1], h2[0], h2[3], h2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.heights = [new_face.heights[3], new_face.heights[2], new_face.heights[1], new_face.heights[0]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[3], h2[2], h2[1], h2[0]];
+                            }
+                        }
+                        sector.ceiling = Some(new_face);
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallNorth(i, w) => {
+                        // Flip N<->S when flipping V
+                        let target_wall = if gc.flip_v {
+                            &mut sector.walls_south
+                        } else {
+                            &mut sector.walls_north
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallSouth(i, w) => {
+                        let target_wall = if gc.flip_v {
+                            &mut sector.walls_north
+                        } else {
+                            &mut sector.walls_south
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallEast(i, w) => {
+                        // Flip E<->W when flipping H
+                        let target_wall = if gc.flip_h {
+                            &mut sector.walls_west
+                        } else {
+                            &mut sector.walls_east
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallWest(i, w) => {
+                        let target_wall = if gc.flip_h {
+                            &mut sector.walls_east
+                        } else {
+                            &mut sector.walls_west
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallNwSe(i, w) => {
+                        // Diagonal walls: NW-SE flips to NE-SW when H or V (but not both)
+                        let target_wall = if gc.flip_h != gc.flip_v {
+                            &mut sector.walls_nesw
+                        } else {
+                            &mut sector.walls_nwse
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallNeSw(i, w) => {
+                        let target_wall = if gc.flip_h != gc.flip_v {
+                            &mut sector.walls_nwse
+                        } else {
+                            &mut sector.walls_nesw
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Recalculate room bounds
+    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+        room.recalculate_bounds();
+    }
+
+    if paste_count > 0 {
+        state.set_status(&format!("Pasted {} faces", paste_count), 2.0);
+    } else {
+        state.set_status("No faces pasted (out of bounds?)", 2.0);
     }
 }
 
