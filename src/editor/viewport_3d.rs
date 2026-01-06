@@ -49,6 +49,42 @@ fn is_wall_face(face: &SectorFace) -> bool {
     )
 }
 
+/// Get the wall index from a wall face (vertical layer index)
+fn get_wall_index(face: &SectorFace) -> Option<usize> {
+    match face {
+        SectorFace::WallNorth(i) | SectorFace::WallEast(i) |
+        SectorFace::WallSouth(i) | SectorFace::WallWest(i) |
+        SectorFace::WallNwSe(i) | SectorFace::WallNeSw(i) => Some(*i),
+        _ => None,
+    }
+}
+
+/// Get the wall direction type (0-5) for matching walls of the same orientation
+fn get_wall_direction_type(face: &SectorFace) -> Option<usize> {
+    match face {
+        SectorFace::WallNorth(_) => Some(0),
+        SectorFace::WallEast(_) => Some(1),
+        SectorFace::WallSouth(_) => Some(2),
+        SectorFace::WallWest(_) => Some(3),
+        SectorFace::WallNwSe(_) => Some(4),
+        SectorFace::WallNeSw(_) => Some(5),
+        _ => None,
+    }
+}
+
+/// Create a wall face with the given direction type and index
+fn make_wall_face(direction_type: usize, index: usize) -> SectorFace {
+    match direction_type {
+        0 => SectorFace::WallNorth(index),
+        1 => SectorFace::WallEast(index),
+        2 => SectorFace::WallSouth(index),
+        3 => SectorFace::WallWest(index),
+        4 => SectorFace::WallNwSe(index),
+        5 => SectorFace::WallNeSw(index),
+        _ => SectorFace::WallNorth(index), // Fallback
+    }
+}
+
 /// Get the two grid corner endpoints for a wall face
 /// Returns ((x1, z1), (x2, z2)) in grid coordinates (fractional, where corners are at 0 and 1 within sector)
 fn get_wall_endpoints(gx: usize, gz: usize, face: &SectorFace) -> ((i32, i32), (i32, i32)) {
@@ -68,7 +104,8 @@ fn get_wall_endpoints(gx: usize, gz: usize, face: &SectorFace) -> ((i32, i32), (
 }
 
 /// Find a connected path of walls/diagonals between two wall faces using BFS
-/// Returns the path including start and end, or None if not connected
+/// Now layer-aware: if start and end walls have different indices (vertical layers),
+/// returns all walls in the index range [min_idx, max_idx] for each XZ position along the path.
 fn find_wall_path(
     room: &crate::world::Room,
     start_x: usize, start_z: usize, start_face: &SectorFace,
@@ -76,57 +113,75 @@ fn find_wall_path(
 ) -> Option<Vec<(usize, usize, SectorFace)>> {
     use std::collections::{VecDeque, HashSet, HashMap};
 
+    // Get start/end wall indices (vertical layer)
+    let start_wall_idx = get_wall_index(start_face).unwrap_or(0);
+    let end_wall_idx = get_wall_index(end_face).unwrap_or(0);
+    let min_layer = start_wall_idx.min(end_wall_idx);
+    let max_layer = start_wall_idx.max(end_wall_idx);
+
     // Get all walls in the room as (x, z, face, endpoints)
+    // Use index 0 for path finding (we'll expand to all layers at the end)
     let mut all_walls: Vec<(usize, usize, SectorFace, ((i32, i32), (i32, i32)))> = Vec::new();
+    // Also track how many walls exist at each (x, z, direction_type)
+    let mut wall_counts: HashMap<(usize, usize, usize), usize> = HashMap::new();
 
     for gz in 0..room.depth {
         for gx in 0..room.width {
             if let Some(sector) = room.get_sector(gx, gz) {
-                // Cardinal walls
-                for (i, _) in sector.walls_north.iter().enumerate() {
-                    let face = SectorFace::WallNorth(i);
+                // Cardinal walls - only add index 0 for BFS, track count
+                if !sector.walls_north.is_empty() {
+                    let face = SectorFace::WallNorth(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 0), sector.walls_north.len());
                 }
-                for (i, _) in sector.walls_east.iter().enumerate() {
-                    let face = SectorFace::WallEast(i);
+                if !sector.walls_east.is_empty() {
+                    let face = SectorFace::WallEast(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 1), sector.walls_east.len());
                 }
-                for (i, _) in sector.walls_south.iter().enumerate() {
-                    let face = SectorFace::WallSouth(i);
+                if !sector.walls_south.is_empty() {
+                    let face = SectorFace::WallSouth(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 2), sector.walls_south.len());
                 }
-                for (i, _) in sector.walls_west.iter().enumerate() {
-                    let face = SectorFace::WallWest(i);
+                if !sector.walls_west.is_empty() {
+                    let face = SectorFace::WallWest(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 3), sector.walls_west.len());
                 }
                 // Diagonal walls
-                for (i, _) in sector.walls_nwse.iter().enumerate() {
-                    let face = SectorFace::WallNwSe(i);
+                if !sector.walls_nwse.is_empty() {
+                    let face = SectorFace::WallNwSe(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 4), sector.walls_nwse.len());
                 }
-                for (i, _) in sector.walls_nesw.iter().enumerate() {
-                    let face = SectorFace::WallNeSw(i);
+                if !sector.walls_nesw.is_empty() {
+                    let face = SectorFace::WallNeSw(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 5), sector.walls_nesw.len());
                 }
             }
         }
     }
 
-    // Find indices of start and end walls
-    let start_idx = all_walls.iter().position(|(x, z, f, _)| *x == start_x && *z == start_z && *f == *start_face)?;
-    let end_idx = all_walls.iter().position(|(x, z, f, _)| *x == end_x && *z == end_z && *f == *end_face)?;
+    // Get wall direction types for BFS lookup
+    let start_dir_type = get_wall_direction_type(start_face)?;
+    let end_dir_type = get_wall_direction_type(end_face)?;
 
-    if start_idx == end_idx {
-        // Same wall
-        return Some(vec![(start_x, start_z, *start_face)]);
-    }
+    // Find indices of start and end walls (using index-0 faces)
+    let start_idx = all_walls.iter().position(|(x, z, f, _)| {
+        *x == start_x && *z == start_z && get_wall_direction_type(f) == Some(start_dir_type)
+    })?;
+    let end_idx = all_walls.iter().position(|(x, z, f, _)| {
+        *x == end_x && *z == end_z && get_wall_direction_type(f) == Some(end_dir_type)
+    })?;
 
     // Check if two walls share an endpoint (are connected)
     let walls_connected = |a: &((i32, i32), (i32, i32)), b: &((i32, i32), (i32, i32))| -> bool {
         a.0 == b.0 || a.0 == b.1 || a.1 == b.0 || a.1 == b.1
     };
 
-    // BFS to find shortest path
+    // BFS to find shortest path (by XZ connectivity)
     let mut visited: HashSet<usize> = HashSet::new();
     let mut parent: HashMap<usize, usize> = HashMap::new();
     let mut queue: VecDeque<usize> = VecDeque::new();
@@ -134,36 +189,62 @@ fn find_wall_path(
     visited.insert(start_idx);
     queue.push_back(start_idx);
 
-    while let Some(current) = queue.pop_front() {
-        if current == end_idx {
-            // Found path, reconstruct it
-            let mut path = Vec::new();
-            let mut node = end_idx;
-            while node != start_idx {
-                let (x, z, f, _) = &all_walls[node];
-                path.push((*x, *z, *f));
-                node = *parent.get(&node).unwrap();
+    let mut path_indices: Option<Vec<usize>> = None;
+
+    if start_idx == end_idx {
+        // Same XZ position and direction
+        path_indices = Some(vec![start_idx]);
+    } else {
+        while let Some(current) = queue.pop_front() {
+            if current == end_idx {
+                // Found path, reconstruct it
+                let mut indices = Vec::new();
+                let mut node = end_idx;
+                while node != start_idx {
+                    indices.push(node);
+                    node = *parent.get(&node).unwrap();
+                }
+                indices.push(start_idx);
+                indices.reverse();
+                path_indices = Some(indices);
+                break;
             }
-            let (x, z, f, _) = &all_walls[start_idx];
-            path.push((*x, *z, *f));
-            path.reverse();
-            return Some(path);
-        }
 
-        let current_endpoints = &all_walls[current].3;
+            let current_endpoints = &all_walls[current].3;
 
-        // Find all connected walls
-        for (i, (_, _, _, endpoints)) in all_walls.iter().enumerate() {
-            if !visited.contains(&i) && walls_connected(current_endpoints, endpoints) {
-                visited.insert(i);
-                parent.insert(i, current);
-                queue.push_back(i);
+            // Find all connected walls
+            for (i, (_, _, _, endpoints)) in all_walls.iter().enumerate() {
+                if !visited.contains(&i) && walls_connected(current_endpoints, endpoints) {
+                    visited.insert(i);
+                    parent.insert(i, current);
+                    queue.push_back(i);
+                }
             }
         }
     }
 
-    // No path found
-    None
+    // Expand path to include all wall layers in range [min_layer, max_layer]
+    let path_indices = path_indices?;
+    let mut result: Vec<(usize, usize, SectorFace)> = Vec::new();
+
+    for idx in path_indices {
+        let (x, z, face, _) = &all_walls[idx];
+        let dir_type = get_wall_direction_type(face).unwrap_or(0);
+        let count = wall_counts.get(&(*x, *z, dir_type)).copied().unwrap_or(1);
+
+        // Add all walls in the layer range that exist at this position
+        for layer in min_layer..=max_layer {
+            if layer < count {
+                result.push((*x, *z, make_wall_face(dir_type, layer)));
+            }
+        }
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Draw the 3D viewport using the software rasterizer
