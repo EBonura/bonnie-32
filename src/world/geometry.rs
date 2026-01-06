@@ -1114,6 +1114,10 @@ pub struct HorizontalFace {
     /// Vertex colors for triangle 2 (None = use same as triangle 1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colors_2: Option<[Color; 4]>,
+    /// Corner heights for triangle 2 (None = use same as triangle 1)
+    /// When set, allows each triangle to have independent height levels
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heights_2: Option<[f32; 4]>,
 
     // === Shared properties ===
     /// Is this surface walkable? (for collision/AI)
@@ -1142,6 +1146,7 @@ impl HorizontalFace {
             texture_2: None,
             uv_2: None,
             colors_2: None,
+            heights_2: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
             normal_mode: FaceNormalMode::default(),
@@ -1160,6 +1165,7 @@ impl HorizontalFace {
             texture_2: None,
             uv_2: None,
             colors_2: None,
+            heights_2: None,
             walkable: true,
             blend_mode: BlendMode::Opaque,
             normal_mode: FaceNormalMode::default(),
@@ -1182,9 +1188,24 @@ impl HorizontalFace {
         self.colors_2.as_ref().unwrap_or(&self.colors)
     }
 
+    /// Get effective heights for triangle 2 (returns heights_2 or falls back to heights)
+    pub fn get_heights_2(&self) -> &[f32; 4] {
+        self.heights_2.as_ref().unwrap_or(&self.heights)
+    }
+
+    /// Check if heights are linked (both triangles use same heights)
+    pub fn heights_linked(&self) -> bool {
+        self.heights_2.is_none()
+    }
+
     /// Check if triangle 2 has different properties than triangle 1
     pub fn has_split_textures(&self) -> bool {
         self.texture_2.is_some() || self.uv_2.is_some() || self.colors_2.is_some()
+    }
+
+    /// Check if the face has split heights (different heights for each triangle)
+    pub fn has_split_heights(&self) -> bool {
+        self.heights_2.is_some()
     }
 
 
@@ -2828,13 +2849,22 @@ impl Room {
     where
         F: Fn(&TextureRef) -> Option<usize>,
     {
-        // Corner positions: NW, NE, SE, SW
+        // Corner positions for triangle 1: NW, NE, SE, SW
         // Heights are room-relative, so add room.position.y for world-space rendering
-        let corners = [
+        let corners_1 = [
             Vec3::new(base_x, self.position.y + face.heights[0], base_z),                         // NW
             Vec3::new(base_x + SECTOR_SIZE, self.position.y + face.heights[1], base_z),           // NE
             Vec3::new(base_x + SECTOR_SIZE, self.position.y + face.heights[2], base_z + SECTOR_SIZE), // SE
             Vec3::new(base_x, self.position.y + face.heights[3], base_z + SECTOR_SIZE),           // SW
+        ];
+
+        // Corner positions for triangle 2 (may use different heights if unlinked)
+        let heights_2 = face.get_heights_2();
+        let corners_2 = [
+            Vec3::new(base_x, self.position.y + heights_2[0], base_z),                         // NW
+            Vec3::new(base_x + SECTOR_SIZE, self.position.y + heights_2[1], base_z),           // NE
+            Vec3::new(base_x + SECTOR_SIZE, self.position.y + heights_2[2], base_z + SECTOR_SIZE), // SE
+            Vec3::new(base_x, self.position.y + heights_2[3], base_z + SECTOR_SIZE),           // SW
         ];
 
         // Default UVs for triangle 1 (scaled by UV_SCALE, offset by grid position for tiling)
@@ -2870,20 +2900,29 @@ impl Room {
         let tri1_corners = split.triangle_1_corners();
         let tri2_corners = split.triangle_2_corners();
 
-        // Calculate normal from cross product (using first triangle's edges)
-        let edge1 = corners[1] - corners[0]; // NW -> NE (along +X)
-        let edge2 = corners[3] - corners[0]; // NW -> SW (along +Z)
-        let front_normal = if is_floor {
-            edge2.cross(edge1).normalize() // +Z x +X = +Y (up)
+        // Calculate normals from cross product (each triangle may have different normal if heights differ)
+        let edge1_t1 = corners_1[1] - corners_1[0];
+        let edge2_t1 = corners_1[3] - corners_1[0];
+        let front_normal_1 = if is_floor {
+            edge2_t1.cross(edge1_t1).normalize()
         } else {
-            edge1.cross(edge2).normalize() // +X x +Z = -Y (down)
+            edge1_t1.cross(edge2_t1).normalize()
         };
-        let back_normal = front_normal.scale(-1.0);
+        let back_normal_1 = front_normal_1.scale(-1.0);
 
-        // Helper to add a single triangle
+        let edge1_t2 = corners_2[1] - corners_2[0];
+        let edge2_t2 = corners_2[3] - corners_2[0];
+        let front_normal_2 = if is_floor {
+            edge2_t2.cross(edge1_t2).normalize()
+        } else {
+            edge1_t2.cross(edge2_t2).normalize()
+        };
+        let back_normal_2 = front_normal_2.scale(-1.0);
+
+        // Helper to add a single triangle with specific corners
         let add_triangle = |vertices: &mut Vec<Vertex>, faces: &mut Vec<RasterFace>,
-                           c: [usize; 3], uvs: &[Vec2; 4], colors: &[Color; 4],
-                           normal: Vec3, texture_id: usize, flip_winding: bool| {
+                           corners: &[Vec3; 4], c: [usize; 3], uvs: &[Vec2; 4], colors: &[Color; 4],
+                           normal: Vec3, texture_id: usize, flip_winding: bool, black_transparent: bool| {
             let base_idx = vertices.len();
             vertices.push(Vertex::with_color(corners[c[0]], uvs[c[0]], normal, colors[c[0]]));
             vertices.push(Vertex::with_color(corners[c[1]], uvs[c[1]], normal, colors[c[1]]));
@@ -2891,31 +2930,31 @@ impl Room {
 
             if flip_winding {
                 faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id)
-                    .with_black_transparent(face.black_transparent));
+                    .with_black_transparent(black_transparent));
             } else {
                 faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id)
-                    .with_black_transparent(face.black_transparent));
+                    .with_black_transparent(black_transparent));
             }
         };
 
         // Render triangle 1
         if render_front {
             let flip = !is_floor; // Ceilings need flipped winding
-            add_triangle(vertices, faces, tri1_corners, &uvs_1, colors_1, front_normal, texture_id_1, flip);
+            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, front_normal_1, texture_id_1, flip, face.black_transparent);
         }
         if render_back {
             let flip = is_floor; // Back faces flip the winding
-            add_triangle(vertices, faces, tri1_corners, &uvs_1, colors_1, back_normal, texture_id_1, flip);
+            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, back_normal_1, texture_id_1, flip, face.black_transparent);
         }
 
-        // Render triangle 2
+        // Render triangle 2 (uses corners_2 which may have different heights)
         if render_front {
             let flip = !is_floor;
-            add_triangle(vertices, faces, tri2_corners, &uvs_2, colors_2, front_normal, texture_id_2, flip);
+            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, front_normal_2, texture_id_2, flip, face.black_transparent);
         }
         if render_back {
             let flip = is_floor;
-            add_triangle(vertices, faces, tri2_corners, &uvs_2, colors_2, back_normal, texture_id_2, flip);
+            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, back_normal_2, texture_id_2, flip, face.black_transparent);
         }
     }
 

@@ -2377,13 +2377,13 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floo
     let split_diagram_height = 50.0; // Mini split diagram with toggle
     let triangle_textures_height = 40.0; // Dual texture slots with link toggle
     let extrude_button_height = if is_floor { 56.0 } else { 0.0 }; // Extrude button only for floors
-    let mut lines = 2; // height, walkable (texture moved to triangle slots)
-    if !face.is_flat() {
-        lines += 1; // extra line for individual heights
-    }
+    // Height link row + optional height controls when unlinked
+    let height_link_row = 20.0;
+    let height_controls_height = if face.has_split_heights() { 36.0 } else { 0.0 }; // 2 rows × 18px when unlinked
+    let lines = 1; // walkable only (height moved to link row)
     // Add space for UV coordinates, controls, buttons, color, color picker, normal mode, split diagram, triangle textures, and extrude
     let uv_lines = 1; // Just coordinates
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + split_diagram_height + triangle_textures_height + extrude_button_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + split_diagram_height + triangle_textures_height + height_link_row + height_controls_height + extrude_button_height
 }
 
 /// Calculate height needed for a wall face container
@@ -2643,15 +2643,127 @@ fn draw_horizontal_face_container(
 
     content_y += slot_height + 8.0;
 
-    // Heights
-    if !face.is_flat() {
-        draw_text(&format!("Heights: [{:.0}, {:.0}, {:.0}, {:.0}]",
-            face.heights[0], face.heights[1], face.heights[2], face.heights[3]),
-            content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
-        content_y += line_height;
+    // === Triangle Heights with Link Toggle ===
+    let heights_linked = face.heights_linked();
+    let heights_1 = &face.heights;
+    let heights_2 = face.get_heights_2();
+
+    // Height link button
+    let height_link_btn_size = 18.0;
+    let height_link_rect = Rect::new(content_x, content_y, height_link_btn_size, height_link_btn_size);
+    let height_link_icon = if heights_linked { icon::LINK } else { icon::LINK_OFF };
+    let height_link_tooltip = if heights_linked { "Unlink triangle heights" } else { "Link triangle heights" };
+    let height_link_clicked = crate::ui::icon_button(ctx, height_link_rect, height_link_icon, icon_font, height_link_tooltip);
+
+    if height_link_clicked {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    if heights_linked {
+                        // Unlink: copy heights to heights_2
+                        f.heights_2 = Some(f.heights);
+                    } else {
+                        // Link: clear heights_2 (will use heights)
+                        f.heights_2 = None;
+                    }
+                }
+            }
+        }
     }
-    draw_text(&format!("Base: {:.0}", face.heights[0]), content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
-    content_y += line_height;
+
+    // Height display/label next to link button
+    let height_label_x = content_x + height_link_btn_size + 6.0;
+    if heights_linked {
+        // Show single height (base height from NW corner)
+        draw_text(&format!("Height: {:.0}", heights_1[0]), height_label_x.floor(), (content_y + 13.0).floor(), 12.0, WHITE);
+    } else {
+        // Show both heights
+        draw_text("Heights unlinked", height_label_x.floor(), (content_y + 13.0).floor(), 12.0, Color::from_rgba(255, 180, 100, 255));
+    }
+    content_y += 20.0;
+
+    // When heights are unlinked, show height controls for each triangle
+    if !heights_linked {
+        // Triangle 1 height row
+        draw_text("Tri 1:", content_x.floor(), (content_y + 12.0).floor(), 11.0, label_color_dim);
+        let h1_display = format!("{:.0}", heights_1[0]);
+        draw_text(&h1_display, (content_x + 40.0).floor(), (content_y + 12.0).floor(), 11.0, WHITE);
+
+        // Height adjustment buttons for Tri 1
+        let adj_btn_size = 16.0;
+        let adj_x = content_x + 70.0;
+        let minus_rect = Rect::new(adj_x, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, minus_rect, icon::MINUS, icon_font, "Lower Tri 1 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        for h in &mut f.heights {
+                            *h -= 256.0;
+                        }
+                    }
+                }
+            }
+        }
+        let plus_rect = Rect::new(adj_x + adj_btn_size + 2.0, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, plus_rect, icon::PLUS, icon_font, "Raise Tri 1 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        for h in &mut f.heights {
+                            *h += 256.0;
+                        }
+                    }
+                }
+            }
+        }
+        content_y += 18.0;
+
+        // Triangle 2 height row
+        draw_text("Tri 2:", content_x.floor(), (content_y + 12.0).floor(), 11.0, label_color_dim);
+        let h2_display = format!("{:.0}", heights_2[0]);
+        draw_text(&h2_display, (content_x + 40.0).floor(), (content_y + 12.0).floor(), 11.0, WHITE);
+
+        // Height adjustment buttons for Tri 2
+        let minus_rect = Rect::new(adj_x, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, minus_rect, icon::MINUS, icon_font, "Lower Tri 2 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        if let Some(h2) = &mut f.heights_2 {
+                            for h in h2 {
+                                *h -= 256.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let plus_rect = Rect::new(adj_x + adj_btn_size + 2.0, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, plus_rect, icon::PLUS, icon_font, "Raise Tri 2 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        if let Some(h2) = &mut f.heights_2 {
+                            for h in h2 {
+                                *h += 256.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        content_y += 18.0;
+    }
 
     // Walkable icon button
     let walkable = face.walkable;

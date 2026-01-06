@@ -3697,46 +3697,92 @@ pub fn draw_viewport_3d(
                         match face {
                             SectorFace::Floor => {
                                 if let Some(floor) = &sector.floor {
-                                    let corners = [
+                                    // Triangle 1 corners (use heights)
+                                    let corners_1 = [
                                         Vec3::new(base_x, room_y + floor.heights[0], base_z),                    // NW = 0
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),      // NE = 1
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE), // SE = 2
                                         Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                     ];
-                                    // Draw all 4 edges
-                                    for i in 0..4 {
-                                        draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
-                                    }
-                                    // Draw diagonal based on split direction
+                                    // Triangle 2 corners (use heights_2 if unlinked)
+                                    let h2 = floor.get_heights_2();
+                                    let corners_2 = [
+                                        Vec3::new(base_x, room_y + h2[0], base_z),                    // NW = 0
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),      // NE = 1
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE), // SE = 2
+                                        Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),      // SW = 3
+                                    ];
+                                    // Draw triangle edges based on split direction
                                     match floor.split_direction {
                                         SplitDirection::NwSe => {
-                                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SE, Tri2: NW-SE-SW
+                                            // Tri1 edges: NW-NE, NE-SE
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                            // Tri2 edges: SE-SW, SW-NW
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NW-SE, Tri2 NW-SE)
+                                            draw_3d_line(fb, corners_1[0], corners_1[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[0], corners_2[2], &state.camera_3d, select_color);
                                         }
                                         SplitDirection::NeSw => {
-                                            draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SW, Tri2: NE-SE-SW
+                                            // Tri1 edges: NW-NE, NW-SW
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                            // Tri2 edges: NE-SE, SE-SW
+                                            draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NE-SW, Tri2 NE-SW)
+                                            draw_3d_line(fb, corners_1[1], corners_1[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[1], corners_2[3], &state.camera_3d, select_color);
                                         }
                                     }
                                 }
                             }
                             SectorFace::Ceiling => {
                                 if let Some(ceiling) = &sector.ceiling {
-                                    let corners = [
+                                    // Triangle 1 corners (use heights)
+                                    let corners_1 = [
                                         Vec3::new(base_x, room_y + ceiling.heights[0], base_z),                    // NW = 0
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),      // NE = 1
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE), // SE = 2
                                         Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                     ];
-                                    // Draw all 4 edges
-                                    for i in 0..4 {
-                                        draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
-                                    }
-                                    // Draw diagonal based on split direction
+                                    // Triangle 2 corners (use heights_2 if unlinked)
+                                    let h2 = ceiling.get_heights_2();
+                                    let corners_2 = [
+                                        Vec3::new(base_x, room_y + h2[0], base_z),                    // NW = 0
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),      // NE = 1
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE), // SE = 2
+                                        Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),      // SW = 3
+                                    ];
+                                    // Draw triangle edges based on split direction
                                     match ceiling.split_direction {
                                         SplitDirection::NwSe => {
-                                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SE, Tri2: NW-SE-SW
+                                            // Tri1 edges: NW-NE, NE-SE
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                            // Tri2 edges: SE-SW, SW-NW
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NW-SE, Tri2 NW-SE)
+                                            draw_3d_line(fb, corners_1[0], corners_1[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[0], corners_2[2], &state.camera_3d, select_color);
                                         }
                                         SplitDirection::NeSw => {
-                                            draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SW, Tri2: NE-SE-SW
+                                            // Tri1 edges: NW-NE, NW-SW
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                            // Tri2 edges: NE-SE, SE-SW
+                                            draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NE-SW, Tri2 NE-SW)
+                                            draw_3d_line(fb, corners_1[1], corners_1[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[1], corners_2[3], &state.camera_3d, select_color);
                                         }
                                     }
                                 }
@@ -3831,29 +3877,71 @@ pub fn draw_viewport_3d(
                         let base_z = room_data.position.z + (*z as f32) * SECTOR_SIZE;
                         let room_y = room_data.position.y; // Y offset for world-space
 
-                        // Draw floor outline if floor exists
+                        // Draw floor outline if floor exists (both triangles if heights unlinked)
                         if let Some(floor) = &sector.floor {
-                            let corners = [
+                            let corners_1 = [
                                 Vec3::new(base_x, room_y + floor.heights[0], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
                                 Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
                             ];
-                            for i in 0..4 {
-                                draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
+                            let h2 = floor.get_heights_2();
+                            let corners_2 = [
+                                Vec3::new(base_x, room_y + h2[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),
+                            ];
+                            // Draw outer edges for both triangles
+                            match floor.split_direction {
+                                SplitDirection::NwSe => {
+                                    // Tri1: NW-NE-SE outer edges: NW-NE, NE-SE
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                    // Tri2: NW-SE-SW outer edges: SE-SW, SW-NW
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                }
+                                SplitDirection::NeSw => {
+                                    // Tri1: NW-NE-SW outer edges: NW-NE, NW-SW
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                    // Tri2: NE-SE-SW outer edges: NE-SE, SE-SW
+                                    draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                }
                             }
                         }
 
-                        // Draw ceiling outline if ceiling exists
+                        // Draw ceiling outline if ceiling exists (both triangles if heights unlinked)
                         if let Some(ceiling) = &sector.ceiling {
-                            let corners = [
+                            let corners_1 = [
                                 Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
                                 Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
                             ];
-                            for i in 0..4 {
-                                draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
+                            let h2 = ceiling.get_heights_2();
+                            let corners_2 = [
+                                Vec3::new(base_x, room_y + h2[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),
+                            ];
+                            // Draw outer edges for both triangles
+                            match ceiling.split_direction {
+                                SplitDirection::NwSe => {
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                }
+                                SplitDirection::NeSw => {
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                }
                             }
                         }
 
