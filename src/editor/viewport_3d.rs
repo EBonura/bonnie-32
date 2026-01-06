@@ -1965,15 +1965,21 @@ pub fn draw_viewport_3d(
                         let adjusted_gx = (gx + offset_x) as usize;
                         let adjusted_gz = (gz + offset_z) as usize;
 
-                        // Check if there's already a wall here
-                        let has_wall = room.get_sector(adjusted_gx, adjusted_gz)
-                            .map(|s| !s.walls(dir).is_empty())
-                            .unwrap_or(false);
-
-                        if !has_wall {
-                            room.ensure_sector(adjusted_gx, adjusted_gz);
-                            room.add_wall(adjusted_gx, adjusted_gz, dir, 0.0, CEILING_HEIGHT, texture.clone());
-                            placed_count += 1;
+                        // Check if there's a gap to fill (handles both empty edges and gaps between walls)
+                        room.ensure_sector(adjusted_gx, adjusted_gz);
+                        if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
+                            if let Some(heights) = sector.next_wall_position(dir, 0.0, CEILING_HEIGHT, None) {
+                                // There's a gap - add wall with computed heights
+                                if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
+                                    sector_mut.walls_mut(dir).push(
+                                        crate::world::VerticalFace::new_sloped(
+                                            heights[0], heights[1], heights[2], heights[3],
+                                            texture.clone()
+                                        )
+                                    );
+                                    placed_count += 1;
+                                }
+                            }
                         }
                     }
                     room.recalculate_bounds();
@@ -2062,23 +2068,24 @@ pub fn draw_viewport_3d(
                         let adjusted_gx = (gx + offset_x) as usize;
                         let adjusted_gz = (gz + offset_z) as usize;
 
-                        // Check if there's already a diagonal wall here
-                        let has_diagonal = room.get_sector(adjusted_gx, adjusted_gz)
-                            .map(|s| {
-                                if is_nwse { !s.walls_nwse.is_empty() } else { !s.walls_nesw.is_empty() }
-                            })
-                            .unwrap_or(false);
-
-                        if !has_diagonal {
-                            // Use ensure_sector to create sector if needed, then add diagonal
-                            let sector = room.ensure_sector(adjusted_gx, adjusted_gz);
-                            let wall = VerticalFace::new(0.0, CEILING_HEIGHT, texture.clone());
-                            if is_nwse {
-                                sector.walls_nwse.push(wall);
-                            } else {
-                                sector.walls_nesw.push(wall);
+                        // Check if there's a gap to fill (handles both empty diagonals and gaps)
+                        room.ensure_sector(adjusted_gx, adjusted_gz);
+                        if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
+                            if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, 0.0, CEILING_HEIGHT, None) {
+                                // There's a gap - add wall with computed heights
+                                if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
+                                    let wall = VerticalFace::new_sloped(
+                                        heights[0], heights[1], heights[2], heights[3],
+                                        texture.clone()
+                                    );
+                                    if is_nwse {
+                                        sector_mut.walls_nwse.push(wall);
+                                    } else {
+                                        sector_mut.walls_nesw.push(wall);
+                                    }
+                                    placed_count += 1;
+                                }
                             }
-                            placed_count += 1;
                         }
                     }
                     room.recalculate_bounds();
@@ -2418,7 +2425,8 @@ pub fn draw_viewport_3d(
         let min_iter = iter_axis_start.min(iter_axis_end);
         let max_iter = iter_axis_start.max(iter_axis_end);
 
-        let wall_color = RasterColor::new(80, 200, 180); // Teal
+        let new_wall_color = RasterColor::new(80, 200, 180); // Teal - new wall
+        let gap_fill_color = RasterColor::new(255, 180, 80); // Orange - filling gap
         let vertex_color = RasterColor::new(255, 255, 255); // White
 
         for i in min_iter..=max_iter {
@@ -2431,35 +2439,58 @@ pub fn draw_viewport_3d(
             let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
             let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
-            // Use default heights (0 to CEILING_HEIGHT)
-            let floor_y = room_pos.y;
-            let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
+            // Check if there's a sector with existing walls - use gap heights if so
+            let (corner_heights, is_gap_fill) = if gx >= 0 && gz >= 0 {
+                if let Some(room) = state.level.rooms.get(state.current_room) {
+                    if let Some(sector) = room.get_sector(gx as usize, gz as usize) {
+                        // Check if edge has walls and find the gap
+                        let has_walls = !sector.walls(dir).is_empty();
+                        if let Some(heights) = sector.next_wall_position(dir, 0.0, super::CEILING_HEIGHT, None) {
+                            (heights, has_walls)
+                        } else {
+                            // Fully covered - skip this segment
+                            continue;
+                        }
+                    } else {
+                        // No sector - use default heights
+                        ([0.0, 0.0, super::CEILING_HEIGHT, super::CEILING_HEIGHT], false)
+                    }
+                } else {
+                    ([0.0, 0.0, super::CEILING_HEIGHT, super::CEILING_HEIGHT], false)
+                }
+            } else {
+                // Negative coordinates - use default heights
+                ([0.0, 0.0, super::CEILING_HEIGHT, super::CEILING_HEIGHT], false)
+            };
 
-            // Wall corners based on direction
+            let wall_color = if is_gap_fill { gap_fill_color } else { new_wall_color };
+
+            // Wall corners based on direction, using computed corner heights
+            // corner_heights: [bottom-left, bottom-right, top-right, top-left]
             let (p0, p1, p2, p3) = match dir {
                 Direction::North => (
-                    Vec3::new(grid_x, floor_y, grid_z),
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
-                    Vec3::new(grid_x, ceiling_y, grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[0], grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[1], grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[2], grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[3], grid_z),
                 ),
                 Direction::East => (
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[0], grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[1], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[2], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[3], grid_z),
                 ),
                 Direction::South => (
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[0], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[1], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[2], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[3], grid_z + SECTOR_SIZE),
                 ),
                 Direction::West => (
-                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x, floor_y, grid_z),
-                    Vec3::new(grid_x, ceiling_y, grid_z),
-                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[0], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[1], grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[2], grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[3], grid_z + SECTOR_SIZE),
                 ),
             };
 
@@ -2474,6 +2505,21 @@ pub fn draw_viewport_3d(
             draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
             draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
             draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+
+            // Draw + through it if filling gap to indicate addition
+            if is_gap_fill {
+                // Vertical line (center)
+                let mid_x = (p0.x + p1.x) / 2.0;
+                let mid_z = (p0.z + p1.z) / 2.0;
+                let center_bottom = Vec3::new(mid_x, room_pos.y + (corner_heights[0] + corner_heights[1]) / 2.0, mid_z);
+                let center_top = Vec3::new(mid_x, room_pos.y + (corner_heights[2] + corner_heights[3]) / 2.0, mid_z);
+                draw_3d_line(fb, center_bottom, center_top, &state.camera_3d, wall_color);
+                // Horizontal line (middle height)
+                let mid_y = room_pos.y + (corner_heights[0] + corner_heights[1] + corner_heights[2] + corner_heights[3]) / 4.0;
+                let left = Vec3::new(p0.x, mid_y, p0.z);
+                let right = Vec3::new(p1.x, mid_y, p1.z);
+                draw_3d_line(fb, left, right, &state.camera_3d, wall_color);
+            }
         }
 
         // Show wall count in status
