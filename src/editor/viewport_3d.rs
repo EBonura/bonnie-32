@@ -324,9 +324,10 @@ pub fn draw_viewport_3d(
     // Find hovered elements using 2D screen-space projection
     // Priority: vertex > edge > face
     let mut preview_sector: Option<(f32, f32, f32, bool)> = None; // (x, z, target_y, is_occupied)
-    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state)
+    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state, mouse_y_room_relative)
     // state: 0 = new wall, 1 = filling gap, 2 = fully covered
-    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [f32; 4], u8)> = None;
+    // mouse_y_room_relative: Y position for gap selection (room-relative)
+    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [f32; 4], u8, Option<f32>)> = None;
     // Diagonal wall preview: (x, z, is_nwse, corner_heights [corner1_bot, corner2_bot, corner2_top, corner1_top])
     let mut preview_diagonal_wall: Option<(f32, f32, bool, [f32; 4])> = None;
 
@@ -458,6 +459,11 @@ pub fn draw_viewport_3d(
         }
     }
 
+    // Clear wall hover lock when not in DrawWall mode or not inside viewport
+    if !inside_viewport || state.tool != EditorTool::DrawWall {
+        state.wall_hover_lock = None;
+    }
+
     // In DrawWall mode, find preview wall edge
     if inside_viewport && state.tool == EditorTool::DrawWall {
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
@@ -474,87 +480,133 @@ pub fn draw_viewport_3d(
             // Default wall height (floor to ceiling or 0 to CEILING_HEIGHT)
             let (default_y_bottom, default_y_top) = (0.0, CEILING_HEIGHT);
 
-            // Find closest edge - each sector has 4 edges
+            // Sticky wall edge detection: once hovering an edge, stay locked to it
+            // until moving horizontally away (prevents accidentally selecting sector behind)
             let mut closest_edge: Option<(f32, f32, Direction, f32)> = None; // (grid_x, grid_z, direction, screen_dist)
 
-            for ix in 0..(search_radius * 2) {
-                for iz in 0..(search_radius * 2) {
-                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
+            // Check if we have a locked edge and if mouse is still horizontally near it
+            let mut use_locked_edge = false;
+            if let Some((lock_gx, lock_gz, lock_dir)) = state.wall_hover_lock {
+                // Get room position
+                let room_pos = state.level.rooms.get(state.current_room)
+                    .map(|r| r.position)
+                    .unwrap_or_default();
 
-                    // Mid-height for edge center detection
-                    let mid_y = (default_y_bottom + default_y_top) / 2.0;
+                // Convert grid coords to world coords for the locked edge
+                let lock_world_x = room_pos.x + (lock_gx as f32) * SECTOR_SIZE;
+                let lock_world_z = room_pos.z + (lock_gz as f32) * SECTOR_SIZE;
 
-                    // Check all 4 edges of this sector
-                    let edges = [
-                        // North edge (-Z): from NW to NE corner
-                        (Direction::North, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z)),
-                        // East edge (+X): from NE to SE corner
-                        (Direction::East, Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE / 2.0)),
-                        // South edge (+Z): from SE to SW corner
-                        (Direction::South, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE)),
-                        // West edge (-X): from SW to NW corner
-                        (Direction::West, Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE / 2.0)),
-                    ];
+                // Calculate edge center in world space (mid-height)
+                let mid_y = (default_y_bottom + default_y_top) / 2.0;
+                let edge_center = match lock_dir {
+                    Direction::North => Vec3::new(lock_world_x + SECTOR_SIZE / 2.0, mid_y, lock_world_z),
+                    Direction::East => Vec3::new(lock_world_x + SECTOR_SIZE, mid_y, lock_world_z + SECTOR_SIZE / 2.0),
+                    Direction::South => Vec3::new(lock_world_x + SECTOR_SIZE / 2.0, mid_y, lock_world_z + SECTOR_SIZE),
+                    Direction::West => Vec3::new(lock_world_x, mid_y, lock_world_z + SECTOR_SIZE / 2.0),
+                };
 
-                    for (edge_dir, center) in edges {
-                        if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height)
-                        {
-                            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                            if closest_edge.map_or(true, |(_, _, _, best_dist)| dist < best_dist) {
-                                // Walls face inward based on direction:
-                                // - North wall (at z=grid_z) faces +Z
-                                // - South wall (at z=grid_z+SECTOR_SIZE) faces -Z
-                                // - East wall (at x=grid_x+SECTOR_SIZE) faces -X
-                                // - West wall (at x=grid_x) faces +X
-                                //
-                                // To make wall face camera, we may need to place on adjacent sector
-                                let cam = state.camera_3d.position;
-                                let (final_grid_x, final_grid_z, dir) = match edge_dir {
-                                    Direction::North => {
-                                        // Edge at z=grid_z, wall faces +Z (south)
-                                        // If camera is north of edge (cam.z < center.z), place as South wall
-                                        // on the sector to the north (grid_z - SECTOR_SIZE)
-                                        if cam.z < center.z {
-                                            (grid_x, grid_z - SECTOR_SIZE, Direction::South)
-                                        } else {
-                                            (grid_x, grid_z, Direction::North)
+                // Project to screen and check HORIZONTAL distance only
+                if let Some((edge_sx, _edge_sy)) = world_to_screen(edge_center, state.camera_3d.position,
+                    state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                    fb.width, fb.height)
+                {
+                    // Horizontal distance - allow large vertical movement while staying locked
+                    let h_dist = (mouse_fb_x - edge_sx).abs();
+
+                    // Lock tolerance: stay locked if within ~120 pixels horizontally
+                    // This allows vertical mouse movement for gap selection
+                    if h_dist < 120.0 {
+                        use_locked_edge = true;
+                        // Use locked edge with a small distance (so it passes the dist < 80 check)
+                        closest_edge = Some((lock_world_x, lock_world_z, lock_dir, 0.0));
+                    }
+                }
+            }
+
+            // If not using locked edge, search for closest edge normally
+            if !use_locked_edge {
+                // Clear lock since we're searching fresh
+                state.wall_hover_lock = None;
+
+                for ix in 0..(search_radius * 2) {
+                    for iz in 0..(search_radius * 2) {
+                        let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
+                        let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
+
+                        // Mid-height for edge center detection
+                        let mid_y = (default_y_bottom + default_y_top) / 2.0;
+
+                        // Check all 4 edges of this sector
+                        let edges = [
+                            // North edge (-Z): from NW to NE corner
+                            (Direction::North, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z)),
+                            // East edge (+X): from NE to SE corner
+                            (Direction::East, Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE / 2.0)),
+                            // South edge (+Z): from SE to SW corner
+                            (Direction::South, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE)),
+                            // West edge (-X): from SW to NW corner
+                            (Direction::West, Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE / 2.0)),
+                        ];
+
+                        for (edge_dir, center) in edges {
+                            if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
+                                state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                                fb.width, fb.height)
+                            {
+                                let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                                if closest_edge.map_or(true, |(_, _, _, best_dist)| dist < best_dist) {
+                                    // Walls face inward based on direction:
+                                    // - North wall (at z=grid_z) faces +Z
+                                    // - South wall (at z=grid_z+SECTOR_SIZE) faces -Z
+                                    // - East wall (at x=grid_x+SECTOR_SIZE) faces -X
+                                    // - West wall (at x=grid_x) faces +X
+                                    //
+                                    // To make wall face camera, we may need to place on adjacent sector
+                                    let cam = state.camera_3d.position;
+                                    let (final_grid_x, final_grid_z, dir) = match edge_dir {
+                                        Direction::North => {
+                                            // Edge at z=grid_z, wall faces +Z (south)
+                                            // If camera is north of edge (cam.z < center.z), place as South wall
+                                            // on the sector to the north (grid_z - SECTOR_SIZE)
+                                            if cam.z < center.z {
+                                                (grid_x, grid_z - SECTOR_SIZE, Direction::South)
+                                            } else {
+                                                (grid_x, grid_z, Direction::North)
+                                            }
                                         }
-                                    }
-                                    Direction::South => {
-                                        // Edge at z=grid_z+SECTOR_SIZE, wall faces -Z (north)
-                                        // If camera is south of edge (cam.z > center.z), place as North wall
-                                        // on the sector to the south (grid_z + SECTOR_SIZE)
-                                        if cam.z > center.z {
-                                            (grid_x, grid_z + SECTOR_SIZE, Direction::North)
-                                        } else {
-                                            (grid_x, grid_z, Direction::South)
+                                        Direction::South => {
+                                            // Edge at z=grid_z+SECTOR_SIZE, wall faces -Z (north)
+                                            // If camera is south of edge (cam.z > center.z), place as North wall
+                                            // on the sector to the south (grid_z + SECTOR_SIZE)
+                                            if cam.z > center.z {
+                                                (grid_x, grid_z + SECTOR_SIZE, Direction::North)
+                                            } else {
+                                                (grid_x, grid_z, Direction::South)
+                                            }
                                         }
-                                    }
-                                    Direction::East => {
-                                        // Edge at x=grid_x+SECTOR_SIZE, wall faces -X (west)
-                                        // If camera is east of edge (cam.x > center.x), place as West wall
-                                        // on the sector to the east (grid_x + SECTOR_SIZE)
-                                        if cam.x > center.x {
-                                            (grid_x + SECTOR_SIZE, grid_z, Direction::West)
-                                        } else {
-                                            (grid_x, grid_z, Direction::East)
+                                        Direction::East => {
+                                            // Edge at x=grid_x+SECTOR_SIZE, wall faces -X (west)
+                                            // If camera is east of edge (cam.x > center.x), place as West wall
+                                            // on the sector to the east (grid_x + SECTOR_SIZE)
+                                            if cam.x > center.x {
+                                                (grid_x + SECTOR_SIZE, grid_z, Direction::West)
+                                            } else {
+                                                (grid_x, grid_z, Direction::East)
+                                            }
                                         }
-                                    }
-                                    Direction::West => {
-                                        // Edge at x=grid_x, wall faces +X (east)
-                                        // If camera is west of edge (cam.x < center.x), place as East wall
-                                        // on the sector to the west (grid_x - SECTOR_SIZE)
-                                        if cam.x < center.x {
-                                            (grid_x - SECTOR_SIZE, grid_z, Direction::East)
-                                        } else {
-                                            (grid_x, grid_z, Direction::West)
+                                        Direction::West => {
+                                            // Edge at x=grid_x, wall faces +X (east)
+                                            // If camera is west of edge (cam.x < center.x), place as East wall
+                                            // on the sector to the west (grid_x - SECTOR_SIZE)
+                                            if cam.x < center.x {
+                                                (grid_x - SECTOR_SIZE, grid_z, Direction::East)
+                                            } else {
+                                                (grid_x, grid_z, Direction::West)
+                                            }
                                         }
-                                    }
-                                };
-                                closest_edge = Some((final_grid_x, final_grid_z, dir, dist));
+                                    };
+                                    closest_edge = Some((final_grid_x, final_grid_z, dir, dist));
+                                }
                             }
                         }
                     }
@@ -562,7 +614,15 @@ pub fn draw_viewport_3d(
             }
 
             if let Some((grid_x, grid_z, dir, dist)) = closest_edge {
-                if dist < 80.0 {
+                if dist < 80.0 || use_locked_edge {
+                    // Update sticky lock when we have a valid edge
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let local_x = grid_x - room.position.x;
+                        let local_z = grid_z - room.position.z;
+                        let gx = (local_x / SECTOR_SIZE).floor() as i32;
+                        let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                        state.wall_hover_lock = Some((gx, gz, dir));
+                    }
                     // Estimate mouse world Y by projecting floor and ceiling points and interpolating
                     // Use the wall edge center position for X/Z
                     let edge_x = match dir {
@@ -633,7 +693,7 @@ pub fn draw_viewport_3d(
                     };
 
                     if let Some((corner_heights, wall_state)) = wall_info {
-                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state));
+                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
                     }
                 }
             }
@@ -1522,7 +1582,7 @@ pub fn draw_viewport_3d(
             }
             // DrawWall mode - start drag for wall placement
             else if state.tool == EditorTool::DrawWall {
-                if let Some((grid_x, grid_z, dir, _corner_heights, wall_state)) = preview_wall {
+                if let Some((grid_x, grid_z, dir, _corner_heights, wall_state, mouse_y)) = preview_wall {
                     // Only start drag if not fully covered
                     if wall_state != 2 {
                         // Convert world coords to grid coords
@@ -1533,6 +1593,8 @@ pub fn draw_viewport_3d(
                             let gz = (local_z / SECTOR_SIZE).floor() as i32;
                             state.wall_drag_start = Some((gx, gz, dir));
                             state.wall_drag_current = Some((gx, gz, dir));
+                            // Capture mouse Y for consistent gap selection during drag
+                            state.wall_drag_mouse_y = mouse_y;
                         }
                     } else {
                         state.set_status("Edge is fully covered", 2.0);
@@ -1698,7 +1760,7 @@ pub fn draw_viewport_3d(
                 use crate::world::Direction;
 
                 // Get mouse grid position from preview_wall or preview_sector
-                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _)) = preview_wall {
+                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _, _)) = preview_wall {
                     if let Some(room) = state.level.rooms.get(state.current_room) {
                         let local_x = grid_x - room.position.x;
                         let local_z = grid_z - room.position.z;
@@ -1966,9 +2028,10 @@ pub fn draw_viewport_3d(
                         let adjusted_gz = (gz + offset_z) as usize;
 
                         // Check if there's a gap to fill (handles both empty edges and gaps between walls)
+                        // Use wall_drag_mouse_y for consistent gap selection (same as preview)
                         room.ensure_sector(adjusted_gx, adjusted_gz);
                         if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
-                            if let Some(heights) = sector.next_wall_position(dir, 0.0, CEILING_HEIGHT, None) {
+                            if let Some(heights) = sector.next_wall_position(dir, 0.0, CEILING_HEIGHT, state.wall_drag_mouse_y) {
                                 // There's a gap - add wall with computed heights
                                 if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
                                     sector_mut.walls_mut(dir).push(
@@ -1999,6 +2062,7 @@ pub fn draw_viewport_3d(
                 // Clear wall drag state
                 state.wall_drag_start = None;
                 state.wall_drag_current = None;
+                state.wall_drag_mouse_y = None;
             }
 
             // Handle diagonal wall drag completion
@@ -2440,12 +2504,13 @@ pub fn draw_viewport_3d(
             let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
             // Check if there's a sector with existing walls - use gap heights if so
+            // Use wall_drag_mouse_y for consistent gap selection across all segments
             let (corner_heights, is_gap_fill) = if gx >= 0 && gz >= 0 {
                 if let Some(room) = state.level.rooms.get(state.current_room) {
                     if let Some(sector) = room.get_sector(gx as usize, gz as usize) {
                         // Check if edge has walls and find the gap
                         let has_walls = !sector.walls(dir).is_empty();
-                        if let Some(heights) = sector.next_wall_position(dir, 0.0, super::CEILING_HEIGHT, None) {
+                        if let Some(heights) = sector.next_wall_position(dir, 0.0, super::CEILING_HEIGHT, state.wall_drag_mouse_y) {
                             (heights, has_walls)
                         } else {
                             // Fully covered - skip this segment
@@ -2671,7 +2736,7 @@ pub fn draw_viewport_3d(
 
     // Draw subtle sector boundary highlight for wall placement
     // Only show if on the drag line (same check as wall preview)
-    if let Some((grid_x, grid_z, dir, _, _)) = preview_wall {
+    if let Some((grid_x, grid_z, dir, _, _, _)) = preview_wall {
         // Check if this sector is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;
@@ -2812,7 +2877,7 @@ pub fn draw_viewport_3d(
     // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
     // corner_heights: [bottom-left, bottom-right, top-right, top-left] (room-relative)
     // Skip single wall preview if it's not on the drag line
-    if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
+    if let Some((grid_x, grid_z, dir, corner_heights, wall_state, _mouse_y)) = preview_wall {
         // Check if this preview is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;
