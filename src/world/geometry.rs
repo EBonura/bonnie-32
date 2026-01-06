@@ -1368,7 +1368,7 @@ impl VerticalFace {
             colors: [Color::NEUTRAL; 4],
             normal_mode: FaceNormalMode::default(),
             black_transparent: true,
-            uv_projection: UvProjection::default(),
+            uv_projection: UvProjection::Projected,
         }
     }
 

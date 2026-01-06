@@ -1892,14 +1892,50 @@ pub fn draw_viewport_3d(
                         room.ensure_sector(adjusted_gx, adjusted_gz);
                         if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
                             if let Some(heights) = sector.next_wall_position(dir, 0.0, CEILING_HEIGHT, state.wall_drag_mouse_y) {
+                                // Calculate wall center position in world space
+                                let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
+                                let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
+                                let wall_center = match dir {
+                                    Direction::North => macroquad::math::Vec3::new(base_x + SECTOR_SIZE / 2.0, 0.0, base_z),
+                                    Direction::South => macroquad::math::Vec3::new(base_x + SECTOR_SIZE / 2.0, 0.0, base_z + SECTOR_SIZE),
+                                    Direction::East => macroquad::math::Vec3::new(base_x + SECTOR_SIZE, 0.0, base_z + SECTOR_SIZE / 2.0),
+                                    Direction::West => macroquad::math::Vec3::new(base_x, 0.0, base_z + SECTOR_SIZE / 2.0),
+                                    Direction::NwSe | Direction::NeSw => unreachable!(),
+                                };
+
+                                // Wall normal (front-facing direction)
+                                let wall_normal = match dir {
+                                    Direction::North => macroquad::math::Vec3::new(0.0, 0.0, 1.0),
+                                    Direction::South => macroquad::math::Vec3::new(0.0, 0.0, -1.0),
+                                    Direction::East => macroquad::math::Vec3::new(-1.0, 0.0, 0.0),
+                                    Direction::West => macroquad::math::Vec3::new(1.0, 0.0, 0.0),
+                                    Direction::NwSe | Direction::NeSw => unreachable!(),
+                                };
+
+                                // Vector from wall to camera (XZ plane only)
+                                let cam_pos = state.camera_3d.position;
+                                let to_camera = macroquad::math::Vec3::new(
+                                    cam_pos.x - wall_center.x,
+                                    0.0,
+                                    cam_pos.z - wall_center.z,
+                                );
+
+                                // If dot product is negative, camera is on the back side
+                                let dot = wall_normal.dot(to_camera);
+                                let normal_mode = if dot < 0.0 {
+                                    crate::world::FaceNormalMode::Back
+                                } else {
+                                    crate::world::FaceNormalMode::Front
+                                };
+
                                 // There's a gap - add wall with computed heights
                                 if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
-                                    sector_mut.walls_mut(dir).push(
-                                        crate::world::VerticalFace::new_sloped(
-                                            heights[0], heights[1], heights[2], heights[3],
-                                            texture.clone()
-                                        )
+                                    let mut wall = crate::world::VerticalFace::new_sloped(
+                                        heights[0], heights[1], heights[2], heights[3],
+                                        texture.clone()
                                     );
+                                    wall.normal_mode = normal_mode;
+                                    sector_mut.walls_mut(dir).push(wall);
                                     placed_count += 1;
                                 }
                             }
@@ -1994,12 +2030,48 @@ pub fn draw_viewport_3d(
                             room.ensure_sector(adjusted_gx, adjusted_gz);
                             if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
                                 if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, 0.0, CEILING_HEIGHT, state.wall_drag_mouse_y) {
+                                    // Calculate diagonal wall center position in world space
+                                    let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
+                                    let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
+                                    let wall_center = macroquad::math::Vec3::new(
+                                        base_x + SECTOR_SIZE / 2.0,
+                                        0.0,
+                                        base_z + SECTOR_SIZE / 2.0,
+                                    );
+
+                                    // Diagonal wall normal (perpendicular to the diagonal line)
+                                    // NW-SE diagonal: normal faces (1, 0, -1) normalized
+                                    // NE-SW diagonal: normal faces (-1, 0, -1) normalized
+                                    let inv_sqrt2 = 1.0 / 2.0_f32.sqrt();
+                                    let wall_normal = if is_nwse {
+                                        macroquad::math::Vec3::new(inv_sqrt2, 0.0, -inv_sqrt2)
+                                    } else {
+                                        macroquad::math::Vec3::new(-inv_sqrt2, 0.0, -inv_sqrt2)
+                                    };
+
+                                    // Vector from wall to camera (XZ plane only)
+                                    let cam_pos = state.camera_3d.position;
+                                    let to_camera = macroquad::math::Vec3::new(
+                                        cam_pos.x - wall_center.x,
+                                        0.0,
+                                        cam_pos.z - wall_center.z,
+                                    );
+
+                                    // If dot product is negative, camera is on the back side
+                                    let dot = wall_normal.dot(to_camera);
+                                    let normal_mode = if dot < 0.0 {
+                                        crate::world::FaceNormalMode::Back
+                                    } else {
+                                        crate::world::FaceNormalMode::Front
+                                    };
+
                                     // There's a gap - add wall with computed heights
                                     if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
-                                        let wall = VerticalFace::new_sloped(
+                                        let mut wall = VerticalFace::new_sloped(
                                             heights[0], heights[1], heights[2], heights[3],
                                             texture.clone()
                                         );
+                                        wall.normal_mode = normal_mode;
                                         if is_nwse {
                                             sector_mut.walls_nwse.push(wall);
                                         } else {
