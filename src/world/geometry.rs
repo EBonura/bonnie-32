@@ -1585,16 +1585,42 @@ impl Sector {
         }
 
         if walls.is_empty() {
-            // No walls - fill from floor to ceiling, preserving slant
+            // No walls yet - check if floor/ceiling are sloped to offer triangular gaps
+            let floor_diff = (floor_left - floor_right).abs();
+            let ceiling_diff = (ceiling_left - ceiling_right).abs();
+
+            if floor_diff > MIN_GAP || ceiling_diff > MIN_GAP {
+                // Sloped floor/ceiling - offer triangular gaps based on mouse_y preference
+                let floor_max = floor_left.max(floor_right);
+                let ceiling_min = ceiling_left.min(ceiling_right);
+                let mid_height = (floor_max + ceiling_min) / 2.0;
+
+                if let Some(y) = mouse_y {
+                    if y < mid_height {
+                        // User wants bottom triangular gap
+                        // Bottom goes from actual floor heights, top aligns to the higher floor
+                        let top_height = floor_max;
+                        return Some([floor_left, floor_right, top_height, top_height]);
+                    } else {
+                        // User wants top triangular gap
+                        // Bottom aligns to the higher floor, top goes to actual ceiling heights
+                        let bottom_height = floor_max;
+                        return Some([bottom_height, bottom_height, ceiling_right, ceiling_left]);
+                    }
+                }
+            }
+
+            // No slope or no preference - fill from floor to ceiling, preserving slant
             // [bottom-left, bottom-right, top-right, top-left]
             return Some([floor_left, floor_right, ceiling_right, ceiling_left]);
         }
 
         // Sort walls by their bottom height to find gaps
+        // Use AVERAGE of bottom corners to handle triangular walls correctly
         let mut sorted_walls: Vec<_> = walls.iter().collect();
         sorted_walls.sort_by(|a, b| {
-            let a_bottom = a.heights[0].min(a.heights[1]);
-            let b_bottom = b.heights[0].min(b.heights[1]);
+            let a_bottom = (a.heights[0] + a.heights[1]) / 2.0;
+            let b_bottom = (b.heights[0] + b.heights[1]) / 2.0;
             a_bottom.partial_cmp(&b_bottom).unwrap()
         });
 
@@ -1741,31 +1767,75 @@ impl Sector {
         }
 
         if walls.is_empty() {
-            // No walls - fill from floor to ceiling
+            // No walls yet - check if floor/ceiling are sloped to offer triangular gaps
+            let floor_diff = (floor_c1 - floor_c2).abs();
+            let ceiling_diff = (ceiling_c1 - ceiling_c2).abs();
+
+            if floor_diff > MIN_GAP || ceiling_diff > MIN_GAP {
+                // Sloped floor/ceiling - offer triangular gaps based on mouse_y preference
+                // Calculate the "midpoint" height where floor and ceiling would intersect
+                // if extended (or just use average for simpler selection)
+                let floor_max = floor_c1.max(floor_c2);
+                let ceiling_min = ceiling_c1.min(ceiling_c2);
+                let mid_height = (floor_max + ceiling_min) / 2.0;
+
+                if let Some(y) = mouse_y {
+                    if y < mid_height {
+                        // User wants bottom triangular gap
+                        // Bottom goes from actual floor heights, top aligns to the higher floor
+                        let top_height = floor_max;
+                        return Some([floor_c1, floor_c2, top_height, top_height]);
+                    } else {
+                        // User wants top triangular gap
+                        // Bottom aligns to the higher floor, top goes to actual ceiling heights
+                        let bottom_height = floor_max;
+                        return Some([bottom_height, bottom_height, ceiling_c2, ceiling_c1]);
+                    }
+                }
+            }
+
+            // No slope or no preference - fill from floor to ceiling
             // [corner1_bot, corner2_bot, corner2_top, corner1_top]
             return Some([floor_c1, floor_c2, ceiling_c2, ceiling_c1]);
         }
 
         // Sort walls by bottom height
+        // Use AVERAGE of bottom corners to handle triangular walls correctly
         let mut sorted_walls: Vec<_> = walls.iter().collect();
         sorted_walls.sort_by(|a, b| {
-            let a_bottom = a.heights[0].min(a.heights[1]);
-            let b_bottom = b.heights[0].min(b.heights[1]);
+            let a_bottom = (a.heights[0] + a.heights[1]) / 2.0;
+            let b_bottom = (b.heights[0] + b.heights[1]) / 2.0;
             a_bottom.partial_cmp(&b_bottom).unwrap()
         });
 
         // Collect gaps: (heights, bottom_y, top_y)
+        // For triangular gaps, check each corner separately (same as axis-aligned walls)
         let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
 
         // Gap at bottom (floor to lowest wall)
+        // Check each corner separately for triangular gap support
         let lowest = sorted_walls[0];
-        let bottom_gap_bottom = floor_c1.min(floor_c2);
-        let bottom_gap_top = lowest.heights[0].min(lowest.heights[1]);
-        if bottom_gap_top - bottom_gap_bottom > MIN_GAP {
+        let c1_gap = lowest.heights[0] - floor_c1;  // Corner 1 gap (bottom of wall to floor)
+        let c2_gap = lowest.heights[1] - floor_c2;  // Corner 2 gap
+        let bottom_gap_size = c1_gap.max(c2_gap);
+        if bottom_gap_size > MIN_GAP {
+            // For triangular gaps: if one side has no gap, collapse vertices
+            let (c1_bot, c1_top) = if c1_gap > MIN_GAP {
+                (floor_c1, lowest.heights[0])
+            } else {
+                (floor_c1, floor_c1)  // Collapse to floor
+            };
+            let (c2_bot, c2_top) = if c2_gap > MIN_GAP {
+                (floor_c2, lowest.heights[1])
+            } else {
+                (floor_c2, floor_c2)  // Collapse to floor
+            };
+            let avg_bottom = (c1_bot + c2_bot) / 2.0;
+            let avg_top = (c1_top + c2_top) / 2.0;
             gaps.push((
-                [floor_c1, floor_c2, lowest.heights[1], lowest.heights[0]],
-                bottom_gap_bottom,
-                bottom_gap_top
+                [c1_bot, c2_bot, c2_top, c1_top],
+                avg_bottom,
+                avg_top
             ));
         }
 
@@ -1773,26 +1843,45 @@ impl Sector {
         for i in 0..sorted_walls.len() - 1 {
             let lower = sorted_walls[i];
             let upper = sorted_walls[i + 1];
-            let gap_bottom = lower.heights[2].max(lower.heights[3]);
-            let gap_top = upper.heights[0].min(upper.heights[1]);
-            if gap_top - gap_bottom > MIN_GAP {
+            // Check each corner separately
+            let c1_gap = upper.heights[0] - lower.heights[3];  // Corner 1: top of lower to bottom of upper
+            let c2_gap = upper.heights[1] - lower.heights[2];  // Corner 2
+            let gap_size = c1_gap.max(c2_gap);
+            if gap_size > MIN_GAP {
+                let avg_bottom = (lower.heights[2] + lower.heights[3]) / 2.0;
+                let avg_top = (upper.heights[0] + upper.heights[1]) / 2.0;
                 gaps.push((
                     [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
-                    gap_bottom,
-                    gap_top
+                    avg_bottom,
+                    avg_top
                 ));
             }
         }
 
         // Gap at top (highest wall to ceiling)
+        // Check each corner separately for triangular gap support
         let highest = sorted_walls.last().unwrap();
-        let top_gap_bottom = highest.heights[2].max(highest.heights[3]);
-        let top_gap_top = ceiling_c1.max(ceiling_c2);
-        if top_gap_top - top_gap_bottom > MIN_GAP {
+        let c1_gap = ceiling_c1 - highest.heights[3];  // Corner 1 gap (ceiling to top of wall)
+        let c2_gap = ceiling_c2 - highest.heights[2];  // Corner 2 gap
+        let top_gap_size = c1_gap.max(c2_gap);
+        if top_gap_size > MIN_GAP {
+            // For triangular gaps: if one side has no gap, collapse vertices
+            let (c1_bot, c1_top) = if c1_gap > MIN_GAP {
+                (highest.heights[3], ceiling_c1)
+            } else {
+                (ceiling_c1, ceiling_c1)  // Collapse to ceiling
+            };
+            let (c2_bot, c2_top) = if c2_gap > MIN_GAP {
+                (highest.heights[2], ceiling_c2)
+            } else {
+                (ceiling_c2, ceiling_c2)  // Collapse to ceiling
+            };
+            let avg_bottom = (c1_bot + c2_bot) / 2.0;
+            let avg_top = (c1_top + c2_top) / 2.0;
             gaps.push((
-                [highest.heights[3], highest.heights[2], ceiling_c2, ceiling_c1],
-                top_gap_bottom,
-                top_gap_top
+                [c1_bot, c2_bot, c2_top, c1_top],
+                avg_bottom,
+                avg_top
             ));
         }
 

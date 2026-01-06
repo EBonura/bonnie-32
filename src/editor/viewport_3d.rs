@@ -630,30 +630,11 @@ pub fn draw_viewport_3d(
                     // Use wall_direction to determine diagonal type (NwSe or NeSw)
                     let is_nwse = state.wall_direction == crate::world::Direction::NwSe;
 
-                    // Compute mouse Y in room-relative space for gap selection
-                    let room_y = state.level.rooms.get(state.current_room)
-                        .map(|r| r.position.y)
-                        .unwrap_or(0.0);
-                    let floor_world = Vec3::new(center_x, room_y + default_y_bottom, center_z);
-                    let ceiling_world = Vec3::new(center_x, room_y + default_y_top, center_z);
-
-                    let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
-                        world_to_screen(floor_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                        world_to_screen(ceiling_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                    ) {
-                        if (floor_sy - ceiling_sy).abs() > 1.0 {
-                            let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
-                            let t_clamped = t.clamp(0.0, 1.0);
-                            Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
-                        } else {
-                            None
-                        }
+                    // Use prefer_high setting to select gap (same as axis-aligned walls)
+                    let gap_select_y = if state.wall_prefer_high {
+                        Some(default_y_top - 1.0)  // Near ceiling
                     } else {
-                        None
+                        Some(default_y_bottom + 1.0)  // Near floor
                     };
 
                     // Use gap detection for diagonal walls
@@ -662,7 +643,7 @@ pub fn draw_viewport_3d(
                             if let Some(sector) = room.get_sector(gx, gz) {
                                 let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
                                 let has_existing = !walls.is_empty();
-                                match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, mouse_y_room_relative) {
+                                match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, gap_select_y) {
                                     Some(heights) => Some((heights, if has_existing { 1u8 } else { 0u8 })),
                                     None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)), // Fully covered
                                 }
@@ -1474,8 +1455,13 @@ pub fn draw_viewport_3d(
                         // Use wall_direction which already has the diagonal type
                         state.wall_drag_start = Some((gx, gz, state.wall_direction));
                         state.wall_drag_current = Some((gx, gz, state.wall_direction));
-                        // Store mouse Y for consistent gap selection during drag
-                        state.wall_drag_mouse_y = Some(state.camera_3d.position.y);
+                        // Use wall_prefer_high to select gap (same as axis-aligned walls)
+                        let gap_y = if state.wall_prefer_high {
+                            Some(super::CEILING_HEIGHT - 1.0)  // Near ceiling
+                        } else {
+                            Some(1.0)  // Near floor
+                        };
+                        state.wall_drag_mouse_y = gap_y;
                     }
                 }
             }
@@ -2007,7 +1993,7 @@ pub fn draw_viewport_3d(
                             // Check if there's a gap to fill (handles both empty diagonals and gaps)
                             room.ensure_sector(adjusted_gx, adjusted_gz);
                             if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
-                                if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, 0.0, CEILING_HEIGHT, None) {
+                                if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, 0.0, CEILING_HEIGHT, state.wall_drag_mouse_y) {
                                     // There's a gap - add wall with computed heights
                                     if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
                                         let wall = VerticalFace::new_sloped(
