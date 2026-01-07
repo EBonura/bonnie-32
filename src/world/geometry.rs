@@ -2178,16 +2178,16 @@ pub struct PlayerSettings {
 impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
-            radius: 100.0,
-            height: 762.0,
+            radius: 300.0,
+            height: 1800.0,
             step_height: 384.0,
-            walk_speed: 800.0,
-            run_speed: 1600.0,
+            walk_speed: 3000.0,
+            run_speed: 5000.0,
             gravity: 2400.0,
             jump_velocity: 1200.0,          // Initial upward velocity for jump
             sprint_jump_multiplier: 1.15,   // 15% higher jump when sprinting
-            camera_distance: 800.0,
-            camera_vertical_offset: 500.0,  // Shoulder/upper chest height
+            camera_distance: 6000.0,
+            camera_vertical_offset: 2000.0,
             camera_pitch_min: -0.8,         // Can look up ~45 degrees
             camera_pitch_max: 0.8,          // Can look down ~45 degrees
             camera_height: 610.0,           // Legacy, kept for compatibility

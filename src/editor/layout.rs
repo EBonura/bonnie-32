@@ -125,8 +125,6 @@ fn draw_player_prop_field(
     line_height: f32,
     label: &str,
     value: f32,
-    min: f32,
-    max: f32,
     field_id: usize,
     editing: &mut Option<usize>,
     buffer: &mut String,
@@ -192,7 +190,7 @@ fn draw_player_prop_field(
         // Handle Enter - confirm edit
         if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
             if let Ok(v) = buffer.parse::<f32>() {
-                new_value = Some(v.clamp(min, max));
+                new_value = Some(v);
             }
             *editing = None;
             buffer.clear();
@@ -207,7 +205,7 @@ fn draw_player_prop_field(
         // Click outside to confirm
         if ctx.mouse.left_pressed && !hovered {
             if let Ok(v) = buffer.parse::<f32>() {
-                new_value = Some(v.clamp(min, max));
+                new_value = Some(v);
             }
             *editing = None;
             buffer.clear();
@@ -5206,19 +5204,19 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 y += 18.0;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Radius",
-                                    state.level.player_settings.radius, 20.0, 500.0, 0,
+                                    state.level.player_settings.radius, 0,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.radius = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
-                                    state.level.player_settings.height, 100.0, 2000.0, 1,
+                                    state.level.player_settings.height, 1,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.height = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Step",
-                                    state.level.player_settings.step_height, 50.0, 1000.0, 2,
+                                    state.level.player_settings.step_height, 2,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.step_height = v; }
                                 y = r.new_y;
@@ -5230,19 +5228,19 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 y += 18.0;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Walk",
-                                    state.level.player_settings.walk_speed, 100.0, 3000.0, 3,
+                                    state.level.player_settings.walk_speed, 3,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.walk_speed = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Run",
-                                    state.level.player_settings.run_speed, 200.0, 5000.0, 4,
+                                    state.level.player_settings.run_speed, 4,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.run_speed = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Gravity",
-                                    state.level.player_settings.gravity, 500.0, 10000.0, 5,
+                                    state.level.player_settings.gravity, 5,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.gravity = v; }
                                 y = r.new_y;
@@ -5254,13 +5252,13 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 y += 18.0;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Distance",
-                                    state.level.player_settings.camera_distance, 200.0, 3000.0, 6,
+                                    state.level.player_settings.camera_distance, 6,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.camera_distance = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Y Offset",
-                                    state.level.player_settings.camera_vertical_offset, 100.0, 1500.0, 7,
+                                    state.level.player_settings.camera_vertical_offset, 7,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.camera_vertical_offset = v; }
                                 y = r.new_y;
