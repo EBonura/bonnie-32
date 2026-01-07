@@ -80,11 +80,8 @@ pub async fn load_model_list() -> Vec<ModelInfo> {
     models
 }
 
-/// Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
-
 /// Load a specific model by path (for WASM async loading)
-/// Supports both compressed (zstd) and uncompressed RON files
+/// Supports both compressed (brotli) and uncompressed RON files
 pub async fn load_model(path: &PathBuf) -> Option<MeshProject> {
     use macroquad::prelude::*;
     use std::io::Cursor;
@@ -97,20 +94,23 @@ pub async fn load_model(path: &PathBuf) -> Option<MeshProject> {
         Err(_) => return None,
     };
 
-    // Detect format by magic bytes: zstd vs plain RON text
-    let contents = if bytes.starts_with(&ZSTD_MAGIC) {
-        // Zstd compressed - decompress first
-        match zstd::decode_all(Cursor::new(&bytes)) {
-            Ok(decompressed) => match String::from_utf8(decompressed) {
-                Ok(s) => s,
-                Err(_) => return None,
-            },
-            Err(_) => return None,
-        }
-    } else {
+    // Detect format: RON files start with '(' or whitespace, brotli is binary
+    let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+    let contents = if is_plain_ron {
         // Plain RON text
         match String::from_utf8(bytes) {
             Ok(s) => s,
+            Err(_) => return None,
+        }
+    } else {
+        // Brotli compressed - decompress first
+        let mut decompressed = Vec::new();
+        match brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed) {
+            Ok(_) => match String::from_utf8(decompressed) {
+                Ok(s) => s,
+                Err(_) => return None,
+            },
             Err(_) => return None,
         }
     };

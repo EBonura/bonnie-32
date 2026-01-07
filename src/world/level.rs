@@ -1,17 +1,14 @@
 //! Level loading and saving
 //!
 //! Uses RON (Rusty Object Notation) for human-readable level files.
-//! Supports both compressed (zstd) and uncompressed RON files.
-//! - Reading: Auto-detects format by magic bytes
-//! - Writing: Always uses zstd compression
+//! Supports both compressed (brotli) and uncompressed RON files.
+//! - Reading: Auto-detects format by checking for valid RON start
+//! - Writing: Always uses brotli compression
 
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 use super::{Level, Room, Sector, HorizontalFace, VerticalFace, TextureRef};
-
-/// Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 /// Validation limits to prevent resource exhaustion from malicious files
 pub mod limits {
@@ -246,25 +243,28 @@ pub fn load_level<P: AsRef<Path>>(path: P) -> Result<Level, LevelError> {
     let path = path.as_ref();
     let bytes = fs::read(path)?;
 
-    // Detect format by magic bytes: zstd vs plain RON text
-    let contents = if bytes.starts_with(&ZSTD_MAGIC) {
-        // Zstd compressed - decompress first
-        let decompressed = zstd::decode_all(Cursor::new(&bytes))
-            .map_err(|e| LevelError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("zstd decompression failed: {}", e)
-            )))?;
-        String::from_utf8(decompressed)
-            .map_err(|e| LevelError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid UTF-8 after decompression: {}", e)
-            )))?
-    } else {
+    // Detect format: RON files start with '(' or whitespace, brotli is binary
+    let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+    let contents = if is_plain_ron {
         // Plain RON text
         String::from_utf8(bytes)
             .map_err(|e| LevelError::IoError(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("invalid UTF-8: {}", e)
+            )))?
+    } else {
+        // Brotli compressed - decompress first
+        let mut decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed)
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("brotli decompression failed: {}", e)
+            )))?;
+        String::from_utf8(decompressed)
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid UTF-8 after decompression: {}", e)
             )))?
     };
 
@@ -302,7 +302,7 @@ pub fn load_level<P: AsRef<Path>>(path: P) -> Result<Level, LevelError> {
     Ok(level)
 }
 
-/// Save a level to a compressed RON file (zstd)
+/// Save a level to a compressed RON file (brotli)
 pub fn save_level<P: AsRef<Path>>(level: &Level, path: P) -> Result<(), LevelError> {
     let config = ron::ser::PrettyConfig::new()
         .depth_limit(4)
@@ -310,12 +310,16 @@ pub fn save_level<P: AsRef<Path>>(level: &Level, path: P) -> Result<(), LevelErr
 
     let ron_string = ron::ser::to_string_pretty(level, config)?;
 
-    // Compress with zstd (level 3 is a good balance of speed/ratio)
-    let compressed = zstd::encode_all(Cursor::new(ron_string.as_bytes()), 3)
-        .map_err(|e| LevelError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("zstd compression failed: {}", e)
-        )))?;
+    // Compress with brotli (quality 6, window 22 - good balance of speed/ratio)
+    let mut compressed = Vec::new();
+    brotli::BrotliCompress(&mut Cursor::new(ron_string.as_bytes()), &mut compressed, &brotli::enc::BrotliEncoderParams {
+        quality: 6,
+        lgwin: 22,
+        ..Default::default()
+    }).map_err(|e| LevelError::IoError(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("brotli compression failed: {}", e)
+    )))?;
 
     fs::write(path, compressed)?;
     Ok(())

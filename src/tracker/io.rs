@@ -1,9 +1,9 @@
 //! Song file I/O for the tracker
 //!
 //! Saves and loads songs in RON format (.ron extension).
-//! Supports both compressed (zstd) and uncompressed RON files.
-//! - Reading: Auto-detects format by magic bytes
-//! - Writing: Always uses zstd compression
+//! Supports both compressed (brotli) and uncompressed RON files.
+//! - Reading: Auto-detects format by checking for valid RON start
+//! - Writing: Always uses brotli compression
 
 use std::fs;
 use std::io::Cursor;
@@ -11,10 +11,7 @@ use std::path::Path;
 
 use super::pattern::Song;
 
-/// Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
-
-/// Save a song to a file in compressed RON format (zstd)
+/// Save a song to a file in compressed RON format (brotli)
 pub fn save_song(song: &Song, path: &Path) -> Result<(), String> {
     let config = ron::ser::PrettyConfig::new()
         .depth_limit(8)
@@ -23,9 +20,13 @@ pub fn save_song(song: &Song, path: &Path) -> Result<(), String> {
     let contents = ron::ser::to_string_pretty(song, config)
         .map_err(|e| format!("Failed to serialize song: {}", e))?;
 
-    // Compress with zstd (level 3 is a good balance of speed/ratio)
-    let compressed = zstd::encode_all(Cursor::new(contents.as_bytes()), 3)
-        .map_err(|e| format!("Failed to compress: {}", e))?;
+    // Compress with brotli
+    let mut compressed = Vec::new();
+    brotli::BrotliCompress(&mut Cursor::new(contents.as_bytes()), &mut compressed, &brotli::enc::BrotliEncoderParams {
+        quality: 6,
+        lgwin: 22,
+        ..Default::default()
+    }).map_err(|e| format!("Failed to compress: {}", e))?;
 
     fs::write(path, compressed).map_err(|e| format!("Failed to write file: {}", e))?;
 
@@ -36,17 +37,20 @@ pub fn save_song(song: &Song, path: &Path) -> Result<(), String> {
 pub fn load_song(path: &Path) -> Result<Song, String> {
     let bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
 
-    // Detect format by magic bytes: zstd vs plain RON text
-    let contents = if bytes.starts_with(&ZSTD_MAGIC) {
-        // Zstd compressed - decompress first
-        let decompressed = zstd::decode_all(Cursor::new(&bytes))
-            .map_err(|e| format!("Failed to decompress: {}", e))?;
-        String::from_utf8(decompressed)
-            .map_err(|e| format!("Invalid UTF-8 after decompression: {}", e))?
-    } else {
+    // Detect format: RON files start with '(' or whitespace, brotli is binary
+    let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+    let contents = if is_plain_ron {
         // Plain RON text
         String::from_utf8(bytes)
             .map_err(|e| format!("Invalid UTF-8: {}", e))?
+    } else {
+        // Brotli compressed - decompress first
+        let mut decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed)
+            .map_err(|e| format!("Failed to decompress: {}", e))?;
+        String::from_utf8(decompressed)
+            .map_err(|e| format!("Invalid UTF-8 after decompression: {}", e))?
     };
 
     load_song_from_str(&contents)

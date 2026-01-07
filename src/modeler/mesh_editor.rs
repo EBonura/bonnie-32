@@ -3,19 +3,15 @@
 //!
 //! Also includes PicoCAD-style mesh organization with named objects and texture atlas.
 //!
-//! Supports both compressed (zstd) and uncompressed RON files.
-//! - Reading: Auto-detects format by magic bytes
-//! - Writing: Always uses zstd compression
+//! Supports both compressed (brotli) and uncompressed RON files.
+//! - Reading: Auto-detects format by checking for valid RON start
+//! - Writing: Always uses brotli compression
 
 use crate::rasterizer::{Vec3, Face, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;
-
-/// Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
-#[cfg(not(target_arch = "wasm32"))]
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 // ============================================================================
 // PicoCAD-style Mesh Organization
@@ -133,7 +129,7 @@ impl MeshProject {
         self.objects.iter().map(|o| o.mesh.face_count()).sum()
     }
 
-    /// Save project to file (compressed RON format with zstd)
+    /// Save project to file (compressed RON format with brotli)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &Path) -> Result<(), MeshEditorError> {
         let config = ron::ser::PrettyConfig::new()
@@ -142,9 +138,13 @@ impl MeshProject {
         let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
-        // Compress with zstd (level 3 is a good balance of speed/ratio)
-        let compressed = zstd::encode_all(Cursor::new(ron_data.as_bytes()), 3)
-            .map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
+        // Compress with brotli
+        let mut compressed = Vec::new();
+        brotli::BrotliCompress(&mut Cursor::new(ron_data.as_bytes()), &mut compressed, &brotli::enc::BrotliEncoderParams {
+            quality: 6,
+            lgwin: 22,
+            ..Default::default()
+        }).map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
 
         std::fs::write(path, compressed)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
@@ -157,14 +157,17 @@ impl MeshProject {
         let bytes = std::fs::read(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
 
-        // Detect format by magic bytes: zstd vs plain RON text
-        let ron_data = if bytes.starts_with(&ZSTD_MAGIC) {
-            let decompressed = zstd::decode_all(Cursor::new(&bytes))
-                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
-            String::from_utf8(decompressed)
+        // Detect format: RON files start with '(' or whitespace, brotli is binary
+        let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+        let ron_data = if is_plain_ron {
+            String::from_utf8(bytes)
                 .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
         } else {
-            String::from_utf8(bytes)
+            let mut decompressed = Vec::new();
+            brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed)
+                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
+            String::from_utf8(decompressed)
                 .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
         };
 
@@ -708,7 +711,7 @@ impl MeshEditorModel {
         }
     }
 
-    /// Save mesh editor model to file (compressed RON format with zstd)
+    /// Save mesh editor model to file (compressed RON format with brotli)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &Path) -> Result<(), MeshEditorError> {
         let config = ron::ser::PrettyConfig::new()
@@ -717,9 +720,17 @@ impl MeshEditorModel {
         let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
-        // Compress with zstd (level 3 is a good balance of speed/ratio)
-        let compressed = zstd::encode_all(Cursor::new(ron_data.as_bytes()), 3)
-            .map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
+        // Compress with brotli (quality 6, window 22 - good balance of speed/ratio)
+        let mut compressed = Vec::new();
+        brotli::BrotliCompress(
+            &mut Cursor::new(ron_data.as_bytes()),
+            &mut compressed,
+            &brotli::enc::BrotliEncoderParams {
+                quality: 6,
+                lgwin: 22,
+                ..Default::default()
+            },
+        ).map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
 
         std::fs::write(path, compressed)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
@@ -732,14 +743,17 @@ impl MeshEditorModel {
         let bytes = std::fs::read(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
 
-        // Detect format by magic bytes: zstd vs plain RON text
-        let ron_data = if bytes.starts_with(&ZSTD_MAGIC) {
-            let decompressed = zstd::decode_all(Cursor::new(&bytes))
-                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
-            String::from_utf8(decompressed)
+        // Detect format: RON files start with '(' or whitespace, brotli is binary
+        let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+        let ron_data = if is_plain_ron {
+            String::from_utf8(bytes)
                 .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
         } else {
-            String::from_utf8(bytes)
+            let mut decompressed = Vec::new();
+            brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed)
+                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
+            String::from_utf8(decompressed)
                 .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
         };
 
@@ -1479,16 +1493,25 @@ impl EditableMesh {
         new_top_faces
     }
 
-    /// Save mesh to file (compressed RON format with zstd)
+    /// Save mesh to file (compressed RON format with brotli)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), MeshEditorError> {
+        use std::io::Cursor;
         let config = ron::ser::PrettyConfig::default();
         let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
-        // Compress with zstd (level 3 is a good balance of speed/ratio)
-        let compressed = zstd::encode_all(Cursor::new(ron_data.as_bytes()), 3)
-            .map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
+        // Compress with brotli (quality 6, window 22 - good balance of speed/ratio)
+        let mut compressed = Vec::new();
+        brotli::BrotliCompress(
+            &mut Cursor::new(ron_data.as_bytes()),
+            &mut compressed,
+            &brotli::enc::BrotliEncoderParams {
+                quality: 6,
+                lgwin: 22,
+                ..Default::default()
+            },
+        ).map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
 
         std::fs::write(path, compressed)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
@@ -1498,17 +1521,21 @@ impl EditableMesh {
     /// Load mesh from file (supports both compressed and uncompressed RON)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, MeshEditorError> {
+        use std::io::Cursor;
         let bytes = std::fs::read(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
 
-        // Detect format by magic bytes: zstd vs plain RON text
-        let ron_data = if bytes.starts_with(&ZSTD_MAGIC) {
-            let decompressed = zstd::decode_all(Cursor::new(&bytes))
-                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
-            String::from_utf8(decompressed)
+        // Detect format: RON files start with '(' or whitespace, brotli is binary
+        let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+        let ron_data = if is_plain_ron {
+            String::from_utf8(bytes)
                 .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
         } else {
-            String::from_utf8(bytes)
+            let mut decompressed = Vec::new();
+            brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed)
+                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
+            String::from_utf8(decompressed)
                 .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
         };
 
