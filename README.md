@@ -47,6 +47,17 @@ python3 -m http.server 8000
 
 Download from [itch.io](https://bonnie-games.itch.io/) or the [GitHub Releases](https://github.com/EBonura/bonnie-engine/releases) page.
 
+**macOS Note**: The app must be run from its own directory so it can find assets:
+```bash
+cd ~/Downloads/bonnie-engine-macos-aarch64-v0.1.6  # or wherever you extracted it
+./bonnie-engine
+```
+
+If you get security warnings, remove the quarantine attribute first:
+```bash
+xattr -cr ~/Downloads/bonnie-engine-macos-aarch64-v0.1.6
+```
+
 ## Usage
 
 The engine is organized into tabs accessible from the top bar:
