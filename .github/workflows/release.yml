@@ -82,6 +82,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -103,7 +110,7 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} release/
           cp -r assets release/
           cp README.md LICENSE release/
-          cd release && tar -czvf ../${{ matrix.asset_name }}.tar.gz *
+          cd release && tar -czvf ../${{ matrix.asset_name }}-v${{ steps.version.outputs.version }}.tar.gz *
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
@@ -113,21 +120,21 @@ jobs:
           Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact_name }} release/
           Copy-Item -Recurse assets release/
           Copy-Item README.md, LICENSE release/
-          Compress-Archive -Path release/* -DestinationPath ${{ matrix.asset_name }}.zip
+          Compress-Archive -Path release/* -DestinationPath ${{ matrix.asset_name }}-v${{ steps.version.outputs.version }}.zip
 
       - name: Upload artifact (Unix)
         if: matrix.os != 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.tar.gz
+          name: ${{ matrix.asset_name }}-v${{ steps.version.outputs.version }}
+          path: ${{ matrix.asset_name }}-v${{ steps.version.outputs.version }}.tar.gz
 
       - name: Upload artifact (Windows)
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.zip
+          name: ${{ matrix.asset_name }}-v${{ steps.version.outputs.version }}
+          path: ${{ matrix.asset_name }}-v${{ steps.version.outputs.version }}.zip
 
   build-wasm:
     needs: [check-version, create-tag]
@@ -138,27 +145,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
       - name: Build WASM
-        run: cargo build --release --target wasm32-unknown-unknown
+        run: cargo xtask build-web
 
       - name: Package WASM
         run: |
-          mkdir -p release
-          cp target/wasm32-unknown-unknown/release/bonnie-engine.wasm release/
-          cp index.html release/
-          cp -r assets release/
-          cd release && tar -czvf ../bonnie-engine-wasm.tar.gz *
+          cd dist/web && tar -czvf ../../bonnie-engine-wasm-v${{ steps.version.outputs.version }}.tar.gz *
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bonnie-engine-wasm
-          path: bonnie-engine-wasm.tar.gz
+          name: bonnie-engine-wasm-v${{ steps.version.outputs.version }}
+          path: bonnie-engine-wasm-v${{ steps.version.outputs.version }}.tar.gz
 
   release:
     needs: [check-version, build, build-wasm]
@@ -174,26 +183,31 @@ jobs:
         id: version
         run: |
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            VERSION=${GITHUB_REF#refs/tags/v}
           else
-            echo "version=v${{ needs.check-version.outputs.version }}" >> $GITHUB_OUTPUT
+            VERSION=${{ needs.check-version.outputs.version }}
           fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: List artifacts
+        run: find artifacts -type f
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.tag }}
           files: |
-            artifacts/bonnie-engine-linux-x86_64/bonnie-engine-linux-x86_64.tar.gz
-            artifacts/bonnie-engine-windows-x86_64/bonnie-engine-windows-x86_64.zip
-            artifacts/bonnie-engine-macos-x86_64/bonnie-engine-macos-x86_64.tar.gz
-            artifacts/bonnie-engine-macos-aarch64/bonnie-engine-macos-aarch64.tar.gz
-            artifacts/bonnie-engine-wasm/bonnie-engine-wasm.tar.gz
+            artifacts/bonnie-engine-linux-x86_64-v${{ steps.version.outputs.version }}/bonnie-engine-linux-x86_64-v${{ steps.version.outputs.version }}.tar.gz
+            artifacts/bonnie-engine-windows-x86_64-v${{ steps.version.outputs.version }}/bonnie-engine-windows-x86_64-v${{ steps.version.outputs.version }}.zip
+            artifacts/bonnie-engine-macos-x86_64-v${{ steps.version.outputs.version }}/bonnie-engine-macos-x86_64-v${{ steps.version.outputs.version }}.tar.gz
+            artifacts/bonnie-engine-macos-aarch64-v${{ steps.version.outputs.version }}/bonnie-engine-macos-aarch64-v${{ steps.version.outputs.version }}.tar.gz
+            artifacts/bonnie-engine-wasm-v${{ steps.version.outputs.version }}/bonnie-engine-wasm-v${{ steps.version.outputs.version }}.tar.gz
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

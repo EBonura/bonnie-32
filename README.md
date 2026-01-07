@@ -1,6 +1,6 @@
 # Bonnie Engine
 
-[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
+[![Version](https://img.shields.io/badge/version-0.1.5-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg)]()
 
@@ -46,6 +46,17 @@ python3 -m http.server 8000
 ### Pre-built Binaries
 
 Download from [itch.io](https://bonnie-games.itch.io/) or the [GitHub Releases](https://github.com/EBonura/bonnie-engine/releases) page.
+
+**macOS Note**: The app must be run from its own directory so it can find assets:
+```bash
+cd ~/Downloads/bonnie-engine-macos-aarch64-v0.1.6  # or wherever you extracted it
+./bonnie-engine
+```
+
+If you get security warnings, remove the quarantine attribute first:
+```bash
+xattr -cr ~/Downloads/bonnie-engine-macos-aarch64-v0.1.6
+```
 
 ## Usage
 
