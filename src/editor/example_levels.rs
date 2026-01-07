@@ -91,11 +91,55 @@ pub async fn load_example_level(path: &PathBuf) -> Option<Level> {
     #[cfg(target_arch = "wasm32")]
     {
         use macroquad::prelude::*;
+        use std::io::Cursor;
+
         // Convert path to string for fetch - ensure forward slashes
         let path_str = path.to_string_lossy().replace('\\', "/");
-        match load_string(&path_str).await {
-            Ok(contents) => load_level_from_str(&contents).ok(),
-            Err(_) => None,
+
+        // Load as binary to support both compressed and uncompressed
+        let bytes = match load_file(&path_str).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Failed to load level file {}: {}", path_str, e);
+                return None;
+            }
+        };
+
+        // Detect format: RON files start with '(' or whitespace, brotli is binary
+        let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+        let contents = if is_plain_ron {
+            match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Invalid UTF-8 in level file {}: {}", path_str, e);
+                    return None;
+                }
+            }
+        } else {
+            // Brotli compressed - decompress first
+            let mut decompressed = Vec::new();
+            match brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed) {
+                Ok(_) => match String::from_utf8(decompressed) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Invalid UTF-8 after decompression {}: {}", path_str, e);
+                        return None;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to decompress level {}: {}", path_str, e);
+                    return None;
+                }
+            }
+        };
+
+        match load_level_from_str(&contents) {
+            Ok(level) => Some(level),
+            Err(e) => {
+                eprintln!("Failed to parse level {}: {}", path_str, e);
+                None
+            }
         }
     }
 }

@@ -35,6 +35,8 @@ pub struct ExampleBrowser {
     pub pending_load_path: Option<std::path::PathBuf>,
     /// Whether we need to async load the example list (WASM)
     pub pending_load_list: bool,
+    /// Local framebuffer for preview rendering (avoids resizing main fb)
+    preview_fb: Framebuffer,
 }
 
 impl Default for ExampleBrowser {
@@ -54,6 +56,7 @@ impl Default for ExampleBrowser {
             scroll_offset: 0.0,
             pending_load_path: None,
             pending_load_list: false,
+            preview_fb: Framebuffer::new(320, 240), // Initial size, will resize as needed
         }
     }
 }
@@ -172,7 +175,6 @@ pub fn draw_example_browser(
     browser: &mut ExampleBrowser,
     icon_font: Option<&Font>,
     texture_packs: &[TexturePack],
-    fb: &mut Framebuffer,
 ) -> BrowserAction {
     if !browser.open {
         return BrowserAction::None;
@@ -247,8 +249,8 @@ pub fn draw_example_browser(
     let has_selection = browser.selected_index.is_some();
 
     if has_preview {
-        // Render 3D preview with orbit camera
-        draw_orbit_preview(ctx, browser, preview_rect, texture_packs, fb);
+        // Render 3D preview with orbit camera (uses browser's local framebuffer)
+        draw_orbit_preview(ctx, browser, preview_rect, texture_packs);
 
         // Draw stats at bottom of preview
         if let Some(stats) = &browser.preview_stats {
@@ -299,13 +301,12 @@ pub fn draw_example_browser(
     action
 }
 
-/// Draw the orbit preview of a level
+/// Draw the orbit preview of a level (uses browser's local framebuffer)
 fn draw_orbit_preview(
     ctx: &mut UiContext,
     browser: &mut ExampleBrowser,
     rect: Rect,
     texture_packs: &[TexturePack],
-    fb: &mut Framebuffer,
 ) {
     use crate::rasterizer::WIDTH;
 
@@ -391,10 +392,11 @@ fn draw_orbit_preview(
 
     camera.update_basis();
 
-    // Resize framebuffer to fit preview area while maintaining aspect
+    // Resize local preview framebuffer to fit preview area while maintaining aspect
     let preview_h = rect.h - 24.0; // Leave room for stats bar
     let target_w = (rect.w as usize).min(WIDTH * 2);
     let target_h = (preview_h as usize).min(target_w * 3 / 4); // Maintain roughly 4:3
+    let fb = &mut browser.preview_fb;
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(15, 15, 20));
 
