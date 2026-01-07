@@ -311,7 +311,6 @@ async fn main() {
                         &mut ws.example_browser,
                         app.icon_font.as_ref(),
                         &ws.editor_state.texture_packs,
-                        &mut fb,
                     );
 
                     match browser_action {
