@@ -140,6 +140,9 @@ fn build_web(dev: bool) -> Result<()> {
     // Copy assets (excluding large/unused directories to stay under itch.io file limit)
     copy_dir_recursive_filtered(&root.join("assets"), &dist.join("assets"), EXCLUDED_ASSET_DIRS)?;
 
+    // Regenerate texture manifest without excluded packs
+    regenerate_texture_manifest(&dist.join("assets/textures"))?;
+
     // Apply dev modifications if requested
     if dev {
         println!("Applying DEV build modifications...");
@@ -152,5 +155,44 @@ fn build_web(dev: bool) -> Result<()> {
     }
 
     println!("Web build complete: dist/web/");
+    Ok(())
+}
+
+/// Regenerate texture manifest based on actual directories present
+fn regenerate_texture_manifest(textures_dir: &Path) -> Result<()> {
+    let mut manifest = String::new();
+
+    // Get sorted list of texture pack directories
+    let mut packs: Vec<_> = std::fs::read_dir(textures_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    packs.sort_by_key(|e| e.file_name());
+
+    for pack in packs {
+        let pack_name = pack.file_name();
+        let pack_name = pack_name.to_string_lossy();
+
+        manifest.push_str(&format!("[{}]\n", pack_name));
+
+        // Get sorted list of textures in this pack
+        let mut textures: Vec<_> = std::fs::read_dir(pack.path())?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "png" || ext == "jpg" || ext == "jpeg")
+                    .unwrap_or(false)
+            })
+            .collect();
+        textures.sort_by_key(|e| e.file_name());
+
+        for tex in textures {
+            manifest.push_str(&format!("{}\n", tex.file_name().to_string_lossy()));
+        }
+    }
+
+    std::fs::write(textures_dir.join("manifest.txt"), manifest)?;
+    println!("Regenerated texture manifest");
     Ok(())
 }
