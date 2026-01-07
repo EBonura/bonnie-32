@@ -150,9 +150,26 @@ pub async fn load_mesh(path: &PathBuf) -> Option<EditableMesh> {
     use macroquad::prelude::*;
 
     let path_str = path.to_string_lossy().replace('\\', "/");
+    eprintln!("[mesh_browser] Loading mesh from: {}", path_str);
+
     match load_string(&path_str).await {
-        Ok(contents) => ObjImporter::parse(&contents).ok(),
-        Err(_) => None,
+        Ok(contents) => {
+            eprintln!("[mesh_browser] Loaded {} bytes, parsing OBJ...", contents.len());
+            match ObjImporter::parse(&contents) {
+                Ok(mesh) => {
+                    eprintln!("[mesh_browser] Parsed: {} vertices, {} faces", mesh.vertices.len(), mesh.faces.len());
+                    Some(mesh)
+                }
+                Err(e) => {
+                    eprintln!("[mesh_browser] OBJ parse error: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[mesh_browser] Failed to load mesh file {}: {}", path_str, e);
+            None
+        }
     }
 }
 

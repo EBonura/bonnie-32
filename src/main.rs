@@ -597,13 +597,14 @@ async fn main() {
                             if let Some(index) = ms.mesh_browser.selected_index {
                                 if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
                                     let path = mesh_info.path.clone();
-                                    let scale = ms.mesh_browser.import_scale;
-                                    let flip_normals = ms.mesh_browser.flip_normals;
-                                    let flip_h = ms.mesh_browser.flip_horizontal;
-                                    let flip_v = ms.mesh_browser.flip_vertical;
 
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
+                                        let scale = ms.mesh_browser.import_scale;
+                                        let flip_normals = ms.mesh_browser.flip_normals;
+                                        let flip_h = ms.mesh_browser.flip_horizontal;
+                                        let flip_v = ms.mesh_browser.flip_vertical;
+
                                         if let Ok(mut mesh) = ObjImporter::load_from_file(&path) {
                                             // Apply scale to preview
                                             for vertex in &mut mesh.vertices {
@@ -636,6 +637,11 @@ async fn main() {
                                             // Use update_preview to preserve camera angles
                                             ms.mesh_browser.update_preview(mesh);
                                         }
+                                    }
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        // Queue async reload with new settings
+                                        ms.mesh_browser.pending_load_path = Some(path);
                                     }
                                 }
                             }
@@ -862,8 +868,49 @@ async fn main() {
             // Load individual mesh preview if pending
             if let Some(path) = ms.mesh_browser.pending_load_path.take() {
                 use modeler::load_mesh;
+                use modeler::{apply_mesh_flip_horizontal, apply_mesh_flip_vertical};
+
                 if let Some(mut mesh) = load_mesh(&path).await {
+                    // Get transform settings from browser
+                    let scale = ms.mesh_browser.import_scale;
+                    let flip_normals = ms.mesh_browser.flip_normals;
+                    let flip_h = ms.mesh_browser.flip_horizontal;
+                    let flip_v = ms.mesh_browser.flip_vertical;
+
+                    // Apply scale to preview
+                    for vertex in &mut mesh.vertices {
+                        vertex.pos = vertex.pos * scale;
+                    }
+
+                    // Compute normals for shading in preview
                     ObjImporter::compute_face_normals(&mut mesh);
+
+                    // Flip normals if requested
+                    if flip_normals {
+                        for vertex in &mut mesh.vertices {
+                            vertex.normal = vertex.normal * -1.0;
+                        }
+                        for face in &mut mesh.faces {
+                            std::mem::swap(&mut face.v1, &mut face.v2);
+                        }
+                    }
+
+                    // Apply horizontal/vertical flips
+                    if flip_h {
+                        apply_mesh_flip_horizontal(&mut mesh);
+                    }
+                    if flip_v {
+                        apply_mesh_flip_vertical(&mut mesh);
+                    }
+
+                    // Update MeshInfo counts (since WASM loads async with initial 0 counts)
+                    if let Some(idx) = ms.mesh_browser.selected_index {
+                        if let Some(info) = ms.mesh_browser.meshes.get_mut(idx) {
+                            info.vertex_count = mesh.vertices.len();
+                            info.face_count = mesh.faces.len();
+                        }
+                    }
+
                     ms.mesh_browser.set_preview(mesh);
                 } else {
                     ms.modeler_state.set_status("Failed to load mesh preview", 3.0);
