@@ -143,10 +143,13 @@ pub fn draw_texture_palette(
             clicked_texture = Some(crate::world::TextureRef::new(pack_name.clone(), texture.name.clone()));
         }
 
-        // Draw texture thumbnail
-        let mq_texture = raster_to_mq_texture(texture);
+        // Draw texture thumbnail (use cached GPU texture to prevent memory leak)
+        let cache_key = (selected_pack, i);
+        let mq_texture = state.gpu_texture_cache.entry(cache_key).or_insert_with(|| {
+            raster_to_mq_texture(texture)
+        });
         draw_texture_ex(
-            &mq_texture,
+            mq_texture,
             x,
             y,
             WHITE,

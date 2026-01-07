@@ -1,9 +1,99 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection};
-use crate::rasterizer::{Camera, Vec3, Vec2, Texture, RasterSettings, Color, BlendMode};
+use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
+use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode};
 use super::texture_pack::TexturePack;
+
+/// Frame timing breakdown for editor performance debugging
+#[derive(Debug, Clone, Default)]
+pub struct EditorFrameTimings {
+    /// Total frame time (ms)
+    pub total_ms: f32,
+    /// Toolbar drawing time (ms)
+    pub toolbar_ms: f32,
+    /// Left panel (skybox, 2D grid, rooms, debug) time (ms)
+    pub left_panel_ms: f32,
+    /// 3D viewport rendering time (ms) - total
+    pub viewport_3d_ms: f32,
+    /// Right panel (textures, properties) time (ms)
+    pub right_panel_ms: f32,
+    /// Status bar time (ms)
+    pub status_ms: f32,
+
+    // === 3D Viewport sub-timings ===
+    /// Input handling (camera, keyboard shortcuts)
+    pub vp_input_ms: f32,
+    /// Clear/skybox rendering
+    pub vp_clear_ms: f32,
+    /// Grid line drawing (total)
+    pub vp_grid_ms: f32,
+    /// Light collection
+    pub vp_lights_ms: f32,
+    /// Texture conversion (RGB888 to RGB555)
+    pub vp_texconv_ms: f32,
+    /// Mesh data generation (to_render_data)
+    pub vp_meshgen_ms: f32,
+    /// Rasterization (render_mesh calls)
+    pub vp_raster_ms: f32,
+    /// Preview rendering (walls, floors, objects, clipboard)
+    pub vp_preview_ms: f32,
+    /// Selection/highlighting overlays
+    pub vp_selection_ms: f32,
+    /// Texture upload to GPU
+    pub vp_upload_ms: f32,
+}
+
+/// Memory usage statistics
+#[derive(Debug, Clone, Default)]
+pub struct MemoryStats {
+    /// Physical memory (RSS) in bytes
+    pub physical_bytes: usize,
+    /// Texture memory estimate (bytes)
+    pub texture_bytes: usize,
+    /// Texture15 cache memory estimate (bytes)
+    pub texture15_bytes: usize,
+    /// Framebuffer memory estimate (bytes)
+    pub framebuffer_bytes: usize,
+    /// Number of loaded textures
+    pub texture_count: usize,
+    /// GPU texture cache count (for texture palette)
+    pub gpu_cache_count: usize,
+}
+
+impl MemoryStats {
+    /// Update process memory stats from the OS
+    pub fn update_process_memory(&mut self) {
+        if let Some(usage) = memory_stats::memory_stats() {
+            self.physical_bytes = usage.physical_mem;
+        }
+    }
+
+    /// Format bytes as human-readable string (KB, MB, GB)
+    pub fn format_bytes(bytes: usize) -> String {
+        if bytes >= 1024 * 1024 * 1024 {
+            format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else if bytes >= 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else if bytes >= 1024 {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        } else {
+            format!("{} B", bytes)
+        }
+    }
+}
+
+impl EditorFrameTimings {
+    /// Start timing (returns time in seconds from macroquad)
+    pub fn start() -> f64 {
+        macroquad::prelude::get_time()
+    }
+
+    /// Get elapsed time in ms since start
+    pub fn elapsed_ms(start: f64) -> f32 {
+        ((macroquad::prelude::get_time() - start) * 1000.0) as f32
+    }
+}
 
 /// TRLE grid constraints
 /// Sector size in world units (X-Z plane)
@@ -25,8 +115,7 @@ pub enum CameraMode {
 pub enum EditorTool {
     Select,
     DrawFloor,
-    DrawWall,
-    DrawDiagonalWall,
+    DrawWall,      // Handles all 6 directions (N, E, S, W, NW-SE, NE-SW)
     DrawCeiling,
     PlaceObject,
 }
@@ -60,6 +149,27 @@ pub enum SectorFace {
     WallWest(usize),
     WallNwSe(usize),   // Diagonal wall NW to SE corner
     WallNeSw(usize),   // Diagonal wall NE to SW corner
+}
+
+impl SectorFace {
+    /// Returns true if this is a wall face (not floor or ceiling)
+    pub fn is_wall(&self) -> bool {
+        !matches!(self, SectorFace::Floor | SectorFace::Ceiling)
+    }
+
+    /// Returns the Direction for wall faces, None for floor/ceiling
+    pub fn direction(&self) -> Option<crate::world::Direction> {
+        use crate::world::Direction;
+        match self {
+            SectorFace::WallNorth(_) => Some(Direction::North),
+            SectorFace::WallEast(_) => Some(Direction::East),
+            SectorFace::WallSouth(_) => Some(Direction::South),
+            SectorFace::WallWest(_) => Some(Direction::West),
+            SectorFace::WallNwSe(_) => Some(Direction::NwSe),
+            SectorFace::WallNeSw(_) => Some(Direction::NeSw),
+            SectorFace::Floor | SectorFace::Ceiling => None,
+        }
+    }
 }
 
 /// What is currently selected in the editor
@@ -123,6 +233,68 @@ pub enum FaceClipboard {
         black_transparent: bool,
         uv_projection: UvProjection,
     },
+}
+
+/// A copied face with its position relative to anchor
+#[derive(Debug, Clone)]
+pub struct CopiedFace {
+    /// Relative sector position (from anchor)
+    pub rel_x: i32,
+    pub rel_z: i32,
+    /// The face type and data
+    pub face: CopiedFaceData,
+}
+
+/// The actual face data (floor, ceiling, or wall)
+#[derive(Debug, Clone)]
+pub enum CopiedFaceData {
+    Floor(HorizontalFace),
+    Ceiling(HorizontalFace),
+    WallNorth(usize, VerticalFace),  // wall index + face data
+    WallEast(usize, VerticalFace),
+    WallSouth(usize, VerticalFace),
+    WallWest(usize, VerticalFace),
+    WallNwSe(usize, VerticalFace),
+    WallNeSw(usize, VerticalFace),
+}
+
+/// Geometry clipboard for copying/pasting entire face selections
+#[derive(Debug, Clone)]
+pub struct GeometryClipboard {
+    /// All copied faces with their relative positions
+    pub faces: Vec<CopiedFace>,
+    /// Horizontal flip state (toggled with H key)
+    pub flip_h: bool,
+    /// Vertical flip state (toggled with V key)
+    pub flip_v: bool,
+}
+
+impl GeometryClipboard {
+    pub fn new() -> Self {
+        Self {
+            faces: Vec::new(),
+            flip_h: false,
+            flip_v: false,
+        }
+    }
+
+    /// Get bounding box of copied geometry (min_x, max_x, min_z, max_z)
+    pub fn bounds(&self) -> (i32, i32, i32, i32) {
+        if self.faces.is_empty() {
+            return (0, 0, 0, 0);
+        }
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
+        for face in &self.faces {
+            min_x = min_x.min(face.rel_x);
+            max_x = max_x.max(face.rel_x);
+            min_z = min_z.min(face.rel_z);
+            max_z = max_z.max(face.rel_z);
+        }
+        (min_x, max_x, min_z, max_z)
+    }
 }
 
 /// Unified undo event - either a level change or a selection change
@@ -340,12 +512,12 @@ pub struct EditorState {
     pub wall_drag_start: Option<(i32, i32, crate::world::Direction)>,
     /// Current position during drag: (grid_x, grid_z, direction)
     pub wall_drag_current: Option<(i32, i32, crate::world::Direction)>,
-
-    /// Diagonal wall drag-to-place state (for DrawDiagonalWall mode)
-    /// Start position: (grid_x, grid_z, is_nwse)
-    pub diagonal_drag_start: Option<(i32, i32, bool)>,
-    /// Current position during drag: (grid_x, grid_z, is_nwse)
-    pub diagonal_drag_current: Option<(i32, i32, bool)>,
+    /// Room-relative Y position when wall drag started (for consistent gap selection)
+    pub wall_drag_mouse_y: Option<f32>,
+    /// Current wall direction for DrawWall mode (rotated with R key)
+    pub wall_direction: crate::world::Direction,
+    /// Prefer high gap when placing walls (toggled with F key)
+    pub wall_prefer_high: bool,
 
     /// Rasterizer settings (PS1 effects)
     pub raster_settings: RasterSettings,
@@ -401,6 +573,22 @@ pub struct EditorState {
 
     /// Face clipboard for copy/paste face properties (texture, UV, colors, etc.)
     pub face_clipboard: Option<FaceClipboard>,
+
+    /// Geometry clipboard for copy/paste entire face selections
+    pub geometry_clipboard: Option<GeometryClipboard>,
+
+    /// Frame timing breakdown for debug panel
+    pub frame_timings: EditorFrameTimings,
+
+    /// Memory usage statistics for debug panel
+    pub memory_stats: MemoryStats,
+
+    /// Cached RGB555 textures (lazy-populated, invalidated when texture count changes)
+    pub textures_15_cache: Vec<Texture15>,
+
+    /// Cached GPU textures for palette display (prevents memory leak from repeated uploads)
+    /// Key: (pack_index, texture_index), Value: Texture2D
+    pub gpu_texture_cache: std::collections::HashMap<(usize, usize), macroquad::prelude::Texture2D>,
 }
 
 impl EditorState {
@@ -506,8 +694,9 @@ impl EditorState {
             placement_drag_current: None,
             wall_drag_start: None,
             wall_drag_current: None,
-            diagonal_drag_start: None,
-            diagonal_drag_current: None,
+            wall_drag_mouse_y: None,
+            wall_direction: crate::world::Direction::North,
+            wall_prefer_high: false,
             raster_settings: RasterSettings::default(), // backface_cull=true shows backfaces as wireframe
             selected_vertex_indices: Vec::new(),
             light_color_slider: None,
@@ -529,6 +718,11 @@ impl EditorState {
             player_prop_buffer: String::new(),
             clipboard: None,
             face_clipboard: None,
+            geometry_clipboard: None,
+            frame_timings: EditorFrameTimings::default(),
+            memory_stats: MemoryStats::default(),
+            textures_15_cache: Vec::new(),
+            gpu_texture_cache: std::collections::HashMap::new(),
         }
     }
 

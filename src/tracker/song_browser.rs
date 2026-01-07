@@ -342,14 +342,42 @@ pub async fn load_song_list() -> Vec<SongInfo> {
     songs
 }
 
+/// Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
 /// Load song from path asynchronously (for WASM)
+/// Supports both compressed (zstd) and uncompressed RON files
 pub async fn load_song_async(path: &PathBuf) -> Option<super::pattern::Song> {
     use macroquad::prelude::*;
+    use std::io::Cursor;
+
     let path_str = path.to_string_lossy().replace('\\', "/");
-    match load_string(&path_str).await {
-        Ok(contents) => super::io::load_song_from_str(&contents).ok(),
-        Err(_) => None,
-    }
+
+    // Load as binary to support both compressed and uncompressed
+    let bytes = match load_file(&path_str).await {
+        Ok(b) => b,
+        Err(_) => return None,
+    };
+
+    // Detect format by magic bytes: zstd vs plain RON text
+    let contents = if bytes.starts_with(&ZSTD_MAGIC) {
+        // Zstd compressed - decompress first
+        match zstd::decode_all(Cursor::new(&bytes)) {
+            Ok(decompressed) => match String::from_utf8(decompressed) {
+                Ok(s) => s,
+                Err(_) => return None,
+            },
+            Err(_) => return None,
+        }
+    } else {
+        // Plain RON text
+        match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return None,
+        }
+    };
+
+    super::io::load_song_from_str(&contents).ok()
 }
 
 /// Draw a close button (X) with icon font

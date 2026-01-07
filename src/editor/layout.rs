@@ -1,10 +1,11 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, COLLAPSED_PANEL_HEIGHT, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
-use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard};
+use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard, GeometryClipboard, CopiedFace, CopiedFaceData};
+use crate::world::{UV_SCALE, Sector};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -37,12 +38,18 @@ pub struct EditorLayout {
     pub main_split: SplitPanel,
     /// Right split (center viewport | right panels)
     pub right_split: SplitPanel,
-    /// Left vertical split (2D grid | room properties)
-    pub left_split: SplitPanel,
+    /// Left split 1: Skybox | (2D Grid + Room + Debug)
+    pub left_split_1: SplitPanel,
+    /// Left split 2: 2D Grid | (Room + Debug)
+    pub left_split_2: SplitPanel,
+    /// Left split 3: Room | Debug
+    pub left_split_3: SplitPanel,
     /// Right vertical split (texture palette | properties)
     pub right_panel_split: SplitPanel,
     /// Action registry for keyboard shortcuts
     pub actions: ActionRegistry,
+    /// Collapsed state for left panels
+    pub left_collapsed: [bool; 4], // Skybox, 2D Grid, Room, Debug
 }
 
 impl EditorLayout {
@@ -52,9 +59,14 @@ impl EditorLayout {
         Self {
             main_split: SplitPanel::horizontal(1000).with_ratio(0.25).with_min_size(150.0),
             right_split: SplitPanel::horizontal(1001).with_ratio(0.75).with_min_size(150.0),
-            left_split: SplitPanel::vertical(1002).with_ratio(0.6).with_min_size(100.0),
+            // Left sidebar: 4 panels with 3 splits
+            // Skybox ~20%, 2D Grid ~35%, Room ~30%, Debug ~15%
+            left_split_1: SplitPanel::vertical(1002).with_ratio(0.20).with_min_size(50.0),
+            left_split_2: SplitPanel::vertical(1004).with_ratio(0.45).with_min_size(50.0),
+            left_split_3: SplitPanel::vertical(1005).with_ratio(0.65).with_min_size(50.0),
             right_panel_split: SplitPanel::vertical(1003).with_ratio(0.6).with_min_size(100.0),
             actions: create_editor_actions(),
+            left_collapsed: [false, false, false, true], // Debug collapsed by default
         }
     }
 
@@ -62,7 +74,8 @@ impl EditorLayout {
     pub fn apply_config(&mut self, config: &crate::world::EditorLayoutConfig) {
         self.main_split.ratio = config.main_split;
         self.right_split.ratio = config.right_split;
-        self.left_split.ratio = config.left_split;
+        // left_split from old config maps to left_split_2 (2D Grid | Room+Debug)
+        self.left_split_2.ratio = config.left_split;
         self.right_panel_split.ratio = config.right_panel_split;
     }
 
@@ -81,7 +94,7 @@ impl EditorLayout {
         crate::world::EditorLayoutConfig {
             main_split: self.main_split.ratio,
             right_split: self.right_split.ratio,
-            left_split: self.left_split.ratio,
+            left_split: self.left_split_2.ratio, // Save 2D Grid | Room+Debug ratio
             right_panel_split: self.right_panel_split.ratio,
             grid_offset_x,
             grid_offset_y,
@@ -112,8 +125,6 @@ fn draw_player_prop_field(
     line_height: f32,
     label: &str,
     value: f32,
-    min: f32,
-    max: f32,
     field_id: usize,
     editing: &mut Option<usize>,
     buffer: &mut String,
@@ -179,7 +190,7 @@ fn draw_player_prop_field(
         // Handle Enter - confirm edit
         if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
             if let Ok(v) = buffer.parse::<f32>() {
-                new_value = Some(v.clamp(min, max));
+                new_value = Some(v);
             }
             *editing = None;
             buffer.clear();
@@ -194,7 +205,7 @@ fn draw_player_prop_field(
         // Click outside to confirm
         if ctx.mouse.left_pressed && !hovered {
             if let Ok(v) = buffer.parse::<f32>() {
-                new_value = Some(v.clamp(min, max));
+                new_value = Some(v);
             }
             *editing = None;
             buffer.clear();
@@ -224,6 +235,9 @@ pub fn draw_editor(
     icon_font: Option<&Font>,
     input: &InputState,
 ) -> EditorAction {
+    use super::state::EditorFrameTimings;
+    let frame_start = EditorFrameTimings::start();
+
     let screen = bounds;
 
     // Single unified toolbar at top
@@ -237,7 +251,9 @@ pub fn draw_editor(
     let panels_rect = main_rect.remaining_after_bottom(status_height);
 
     // Draw unified toolbar and handle keyboard shortcuts
+    let toolbar_start = EditorFrameTimings::start();
     let action = draw_unified_toolbar(ctx, toolbar_rect, state, icon_font, &layout.actions);
+    let toolbar_ms = EditorFrameTimings::elapsed_ms(toolbar_start);
 
     // Main split: left panels | rest
     let (left_rect, rest_rect) = layout.main_split.update(ctx, panels_rect);
@@ -245,59 +261,108 @@ pub fn draw_editor(
     // Right split: center viewport | right panels
     let (center_rect, right_rect) = layout.right_split.update(ctx, rest_rect);
 
-    // Left split: 2D grid view | room controls
-    let (grid_rect, room_props_rect) = layout.left_split.update(ctx, left_rect);
-
     // Right split: texture palette | face properties
     // Use layout() first to get rects, then handle_input() AFTER drawing contents
     // This allows widgets inside the panels to claim drags before the divider can
     let (texture_rect, props_rect) = layout.right_panel_split.layout(right_rect);
 
-    // Split grid_rect: Skybox panel (fixed height) | 2D Grid
-    let skybox_panel_height = 195.0;
-    let skybox_rect = Rect::new(grid_rect.x, grid_rect.y, grid_rect.w, skybox_panel_height);
-    let grid_rect_below = Rect::new(grid_rect.x, grid_rect.y + skybox_panel_height, grid_rect.w, grid_rect.h - skybox_panel_height);
+    // === LEFT PANEL ===
+    let left_start = EditorFrameTimings::start();
 
-    // Draw Skybox panel
-    draw_panel(skybox_rect, Some("Skybox"), Color::from_rgba(35, 35, 40, 255));
-    draw_skybox_panel(ctx, panel_content_rect(skybox_rect, true), state);
+    // Left sidebar: 4 collapsible panels (Skybox, 2D Grid, Room, Debug)
+    let panel_bg = Color::from_rgba(35, 35, 40, 255);
+    let header_h = COLLAPSED_PANEL_HEIGHT;
 
-    // Draw 2D Grid panel
-    draw_panel(grid_rect_below, Some("2D Grid"), Color::from_rgba(35, 35, 40, 255));
+    // Count collapsed panels and calculate available height for expanded ones
+    let num_collapsed = layout.left_collapsed.iter().filter(|&&c| c).count();
+    let collapsed_height = num_collapsed as f32 * header_h;
+    let available_height = (left_rect.h - collapsed_height).max(0.0);
 
-    // Add view mode toolbar inside the 2D grid panel
-    let grid_content = panel_content_rect(grid_rect_below, true);
-    let view_toolbar_height = 22.0;
-    let view_toolbar_rect = Rect::new(grid_content.x, grid_content.y, grid_content.w, view_toolbar_height);
-    let grid_view_rect = Rect::new(grid_content.x, grid_content.y + view_toolbar_height, grid_content.w, grid_content.h - view_toolbar_height);
+    // Calculate heights for expanded panels (equal distribution)
+    let num_expanded = 4 - num_collapsed;
+    let expanded_panel_height = if num_expanded > 0 {
+        available_height / num_expanded as f32
+    } else {
+        0.0
+    };
 
-    // Draw view mode toolbar
-    draw_rectangle(view_toolbar_rect.x, view_toolbar_rect.y, view_toolbar_rect.w, view_toolbar_rect.h, Color::from_rgba(45, 45, 50, 255));
-    let mut view_toolbar = Toolbar::new(view_toolbar_rect);
+    // Calculate panel rects and draw them
+    let mut y = left_rect.y;
+    let panel_names = ["Skybox", "2D Grid", "Rooms", "Debug"];
 
-    if view_toolbar.letter_button_active(ctx, 'T', "Top view (X-Z)", state.grid_view_mode == GridViewMode::Top) {
-        state.grid_view_mode = GridViewMode::Top;
+    // Panel 0: Skybox
+    let skybox_h = if layout.left_collapsed[0] { header_h } else { expanded_panel_height };
+    let skybox_rect = Rect::new(left_rect.x, y, left_rect.w, skybox_h);
+    let (clicked, skybox_content) = draw_collapsible_panel(ctx, skybox_rect, panel_names[0], layout.left_collapsed[0], panel_bg);
+    if clicked { layout.left_collapsed[0] = !layout.left_collapsed[0]; }
+    if let Some(content) = skybox_content {
+        draw_skybox_panel(ctx, content, state);
     }
-    if view_toolbar.letter_button_active(ctx, 'F', "Front view (X-Y)", state.grid_view_mode == GridViewMode::Front) {
-        state.grid_view_mode = GridViewMode::Front;
+    y += skybox_h;
+
+    // Panel 1: 2D Grid
+    let grid_h = if layout.left_collapsed[1] { header_h } else { expanded_panel_height };
+    let grid_rect = Rect::new(left_rect.x, y, left_rect.w, grid_h);
+    let (clicked, grid_content) = draw_collapsible_panel(ctx, grid_rect, panel_names[1], layout.left_collapsed[1], panel_bg);
+    if clicked { layout.left_collapsed[1] = !layout.left_collapsed[1]; }
+    if let Some(content) = grid_content {
+        // Add view mode toolbar inside the 2D grid panel
+        let view_toolbar_height = 22.0;
+        let view_toolbar_rect = Rect::new(content.x, content.y, content.w, view_toolbar_height);
+        let grid_view_rect = Rect::new(content.x, content.y + view_toolbar_height, content.w, content.h - view_toolbar_height);
+
+        // Draw view mode toolbar
+        draw_rectangle(view_toolbar_rect.x, view_toolbar_rect.y, view_toolbar_rect.w, view_toolbar_rect.h, Color::from_rgba(45, 45, 50, 255));
+        let mut view_toolbar = Toolbar::new(view_toolbar_rect);
+
+        if view_toolbar.letter_button_active(ctx, 'T', "Top view (X-Z)", state.grid_view_mode == GridViewMode::Top) {
+            state.grid_view_mode = GridViewMode::Top;
+        }
+        if view_toolbar.letter_button_active(ctx, 'F', "Front view (X-Y)", state.grid_view_mode == GridViewMode::Front) {
+            state.grid_view_mode = GridViewMode::Front;
+        }
+        if view_toolbar.letter_button_active(ctx, 'S', "Side view (Y-Z)", state.grid_view_mode == GridViewMode::Side) {
+            state.grid_view_mode = GridViewMode::Side;
+        }
+
+        // Center 2D view on current room button (right-aligned)
+        if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center 2D view on current room") {
+            state.center_2d_on_current_room();
+        }
+
+        draw_grid_view(ctx, grid_view_rect, state);
     }
-    if view_toolbar.letter_button_active(ctx, 'S', "Side view (Y-Z)", state.grid_view_mode == GridViewMode::Side) {
-        state.grid_view_mode = GridViewMode::Side;
+    y += grid_h;
+
+    // Panel 2: Rooms
+    let room_h = if layout.left_collapsed[2] { header_h } else { expanded_panel_height };
+    let room_rect = Rect::new(left_rect.x, y, left_rect.w, room_h);
+    let (clicked, room_content) = draw_collapsible_panel(ctx, room_rect, panel_names[2], layout.left_collapsed[2], panel_bg);
+    if clicked { layout.left_collapsed[2] = !layout.left_collapsed[2]; }
+    if let Some(content) = room_content {
+        draw_room_properties(ctx, content, state, icon_font);
+    }
+    y += room_h;
+
+    // Panel 3: Debug
+    let debug_h = if layout.left_collapsed[3] { header_h } else { expanded_panel_height };
+    let debug_rect = Rect::new(left_rect.x, y, left_rect.w, debug_h);
+    let (clicked, debug_content) = draw_collapsible_panel(ctx, debug_rect, panel_names[3], layout.left_collapsed[3], panel_bg);
+    if clicked { layout.left_collapsed[3] = !layout.left_collapsed[3]; }
+    if let Some(content) = debug_content {
+        draw_debug_panel(ctx, content, state);
     }
 
-    // Center 2D view on current room button (right-aligned)
-    if view_toolbar.icon_button_right(ctx, icon::SQUARE_SQUARE, icon_font, "Center 2D view on current room") {
-        state.center_2d_on_current_room();
-    }
+    let left_panel_ms = EditorFrameTimings::elapsed_ms(left_start);
 
-    draw_grid_view(ctx, grid_view_rect, state);
-
-    draw_panel(room_props_rect, Some("Rooms"), Color::from_rgba(35, 35, 40, 255));
-    draw_room_properties(ctx, panel_content_rect(room_props_rect, true), state, icon_font);
-
+    // === 3D VIEWPORT ===
+    let viewport_start = EditorFrameTimings::start();
     draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
+    let viewport_3d_ms = EditorFrameTimings::elapsed_ms(viewport_start);
 
+    // === RIGHT PANEL ===
+    let right_start = EditorFrameTimings::start();
     draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
     draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
 
@@ -307,9 +372,54 @@ pub fn draw_editor(
     // Handle right panel split input AFTER drawing contents
     // This allows UV controls and other widgets to claim drags first
     layout.right_panel_split.handle_input(ctx, right_rect);
+    let right_panel_ms = EditorFrameTimings::elapsed_ms(right_start);
 
-    // Draw status bar
+    // === STATUS BAR ===
+    let status_start = EditorFrameTimings::start();
     draw_status_bar(status_rect, state);
+    let status_ms = EditorFrameTimings::elapsed_ms(status_start);
+
+    // Store frame timings (viewport sub-timings are stored by viewport_3d.rs)
+    state.frame_timings.total_ms = EditorFrameTimings::elapsed_ms(frame_start);
+    state.frame_timings.toolbar_ms = toolbar_ms;
+    state.frame_timings.left_panel_ms = left_panel_ms;
+    state.frame_timings.viewport_3d_ms = viewport_3d_ms;
+    state.frame_timings.right_panel_ms = right_panel_ms;
+    state.frame_timings.status_ms = status_ms;
+
+    // Update memory stats (not every frame - every 30 frames to reduce overhead)
+    static mut FRAME_COUNTER: u32 = 0;
+    unsafe {
+        FRAME_COUNTER += 1;
+        if FRAME_COUNTER % 30 == 0 {
+            state.memory_stats.update_process_memory();
+
+            // Calculate texture memory (4 bytes per pixel for Color struct)
+            let mut tex_bytes = 0usize;
+            let mut tex_count = 0usize;
+            for pack in &state.texture_packs {
+                for tex in &pack.textures {
+                    tex_bytes += tex.width * tex.height * 4; // Color is 4 bytes (r,g,b,blend)
+                    tex_count += 1;
+                }
+            }
+            state.memory_stats.texture_bytes = tex_bytes;
+            state.memory_stats.texture_count = tex_count;
+
+            // RGB555 texture cache (2 bytes per pixel)
+            let mut tex15_bytes = 0usize;
+            for tex in &state.textures_15_cache {
+                tex15_bytes += tex.width * tex.height * 2; // Color15 is 2 bytes
+            }
+            state.memory_stats.texture15_bytes = tex15_bytes;
+
+            // Framebuffer: 320x240 x (4 bytes RGBA + 4 bytes zbuffer)
+            state.memory_stats.framebuffer_bytes = 320 * 240 * 8;
+
+            // GPU texture cache count
+            state.memory_stats.gpu_cache_count = state.gpu_texture_cache.len();
+        }
+    }
 
     action
 }
@@ -366,11 +476,11 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     toolbar.separator();
 
     // Tool buttons (Portal removed - portals are now auto-generated)
+    // Wall tool handles all 6 directions (N, E, S, W, NW-SE, NE-SW) - use R to rotate
     let tools = [
         (icon::MOVE, "Select", EditorTool::Select),
         (icon::SQUARE, "Floor", EditorTool::DrawFloor),
         (icon::BRICK_WALL, "Wall", EditorTool::DrawWall),
-        (icon::DIAMOND, "Diagonal Wall", EditorTool::DrawDiagonalWall),
         (icon::LAYERS, "Ceiling", EditorTool::DrawCeiling),
         (icon::MAP_PIN, "Object", EditorTool::PlaceObject),
     ];
@@ -379,6 +489,10 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         let is_active = state.tool == tool;
         if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_active) {
             state.tool = tool;
+            // Show direction hint when selecting wall tool
+            if tool == EditorTool::DrawWall {
+                state.set_status(&format!("Wall direction: {} (R to rotate, F for gap)", state.wall_direction.name()), 2.0);
+            }
         }
     }
 
@@ -685,149 +799,167 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         state.redo();
     }
 
-    // Copy selected object or face
+    // Copy selected object or face(s)
     if actions.triggered("edit.copy", &actx) {
-        match &state.selection {
-            Selection::Object { room, index } => {
-                if let Some(r) = state.level.rooms.get(*room) {
-                    if let Some(obj) = r.objects.get(*index) {
-                        state.clipboard = Some(obj.clone());
-                        state.set_status("Object copied to clipboard", 2.0);
-                    }
-                }
-            }
-            Selection::SectorFace { room, x, z, face } => {
-                if let Some(r) = state.level.rooms.get(*room) {
-                    if let Some(sector) = r.get_sector(*x, *z) {
-                        // Copy face properties based on face type
-                        let copied = match face {
-                            SectorFace::Floor => {
-                                sector.floor.as_ref().map(|f| FaceClipboard::Horizontal {
-                                    split_direction: f.split_direction,
-                                    texture: f.texture.clone(),
-                                    uv: f.uv,
-                                    colors: f.colors,
-                                    texture_2: f.texture_2.clone(),
-                                    uv_2: f.uv_2,
-                                    colors_2: f.colors_2,
-                                    walkable: f.walkable,
-                                    blend_mode: f.blend_mode,
-                                    normal_mode: f.normal_mode,
-                                    black_transparent: f.black_transparent,
-                                })
-                            }
-                            SectorFace::Ceiling => {
-                                sector.ceiling.as_ref().map(|f| FaceClipboard::Horizontal {
-                                    split_direction: f.split_direction,
-                                    texture: f.texture.clone(),
-                                    uv: f.uv,
-                                    colors: f.colors,
-                                    texture_2: f.texture_2.clone(),
-                                    uv_2: f.uv_2,
-                                    colors_2: f.colors_2,
-                                    walkable: f.walkable,
-                                    blend_mode: f.blend_mode,
-                                    normal_mode: f.normal_mode,
-                                    black_transparent: f.black_transparent,
-                                })
-                            }
-                            SectorFace::WallNorth(i) => {
-                                sector.walls_north.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallEast(i) => {
-                                sector.walls_east.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallSouth(i) => {
-                                sector.walls_south.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallWest(i) => {
-                                sector.walls_west.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallNwSe(i) => {
-                                sector.walls_nwse.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                            SectorFace::WallNeSw(i) => {
-                                sector.walls_nesw.get(*i).map(|w| FaceClipboard::Vertical {
-                                    texture: w.texture.clone(),
-                                    uv: w.uv,
-                                    solid: w.solid,
-                                    blend_mode: w.blend_mode,
-                                    colors: w.colors,
-                                    normal_mode: w.normal_mode,
-                                    black_transparent: w.black_transparent,
-                                    uv_projection: w.uv_projection,
-                                })
-                            }
-                        };
-                        if let Some(fc) = copied {
-                            state.face_clipboard = Some(fc);
-                            state.set_status("Face properties copied", 2.0);
+        // Check if we have multiple faces or sectors selected - if so, copy geometry
+        let has_multi_faces = !state.multi_selection.is_empty() &&
+            state.multi_selection.iter().any(|s| matches!(s, Selection::SectorFace { .. }));
+        let has_multi_sectors = !state.multi_selection.is_empty() &&
+            state.multi_selection.iter().any(|s| matches!(s, Selection::Sector { .. }));
+
+        if has_multi_faces || has_multi_sectors {
+            // Copy entire geometry (all selected faces/sectors with positions)
+            copy_geometry_selection(state);
+        } else {
+            // Single selection - copy properties or object
+            match &state.selection {
+                Selection::Object { room, index } => {
+                    if let Some(r) = state.level.rooms.get(*room) {
+                        if let Some(obj) = r.objects.get(*index) {
+                            state.clipboard = Some(obj.clone());
+                            state.set_status("Object copied to clipboard", 2.0);
                         }
                     }
                 }
+                Selection::SectorFace { room, x, z, face } => {
+                    if let Some(r) = state.level.rooms.get(*room) {
+                        if let Some(sector) = r.get_sector(*x, *z) {
+                            // Copy face properties based on face type
+                            let copied = match face {
+                                SectorFace::Floor => {
+                                    sector.floor.as_ref().map(|f| FaceClipboard::Horizontal {
+                                        split_direction: f.split_direction,
+                                        texture: f.texture.clone(),
+                                        uv: f.uv,
+                                        colors: f.colors,
+                                        texture_2: f.texture_2.clone(),
+                                        uv_2: f.uv_2,
+                                        colors_2: f.colors_2,
+                                        walkable: f.walkable,
+                                        blend_mode: f.blend_mode,
+                                        normal_mode: f.normal_mode,
+                                        black_transparent: f.black_transparent,
+                                    })
+                                }
+                                SectorFace::Ceiling => {
+                                    sector.ceiling.as_ref().map(|f| FaceClipboard::Horizontal {
+                                        split_direction: f.split_direction,
+                                        texture: f.texture.clone(),
+                                        uv: f.uv,
+                                        colors: f.colors,
+                                        texture_2: f.texture_2.clone(),
+                                        uv_2: f.uv_2,
+                                        colors_2: f.colors_2,
+                                        walkable: f.walkable,
+                                        blend_mode: f.blend_mode,
+                                        normal_mode: f.normal_mode,
+                                        black_transparent: f.black_transparent,
+                                    })
+                                }
+                                SectorFace::WallNorth(i) => {
+                                    sector.walls_north.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallEast(i) => {
+                                    sector.walls_east.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallSouth(i) => {
+                                    sector.walls_south.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallWest(i) => {
+                                    sector.walls_west.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallNwSe(i) => {
+                                    sector.walls_nwse.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                                SectorFace::WallNeSw(i) => {
+                                    sector.walls_nesw.get(*i).map(|w| FaceClipboard::Vertical {
+                                        texture: w.texture.clone(),
+                                        uv: w.uv,
+                                        solid: w.solid,
+                                        blend_mode: w.blend_mode,
+                                        colors: w.colors,
+                                        normal_mode: w.normal_mode,
+                                        black_transparent: w.black_transparent,
+                                        uv_projection: w.uv_projection,
+                                    })
+                                }
+                            };
+                            if let Some(fc) = copied {
+                                state.face_clipboard = Some(fc);
+                                state.set_status("Face properties copied", 2.0);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
     // Paste object or face properties
     if actions.triggered("edit.paste", &actx) {
-        // First try to paste face properties if a face is selected
+        // Collect all face selections (primary + multi)
+        let mut face_selections: Vec<(usize, usize, usize, SectorFace)> = Vec::new();
         if let Selection::SectorFace { room, x, z, face } = &state.selection {
+            face_selections.push((*room, *x, *z, face.clone()));
+        }
+        for sel in &state.multi_selection {
+            if let Selection::SectorFace { room, x, z, face } = sel {
+                face_selections.push((*room, *x, *z, face.clone()));
+            }
+        }
+
+        if !face_selections.is_empty() {
             if let Some(fc) = &state.face_clipboard {
-                let room_idx = *room;
-                let sx = *x;
-                let sz = *z;
-                let target_face = face.clone();
                 let fc_clone = fc.clone();
 
-                // Check compatibility
-                let compatible = match (&target_face, &fc_clone) {
+                // Check compatibility with first selection (all should be same type)
+                let compatible = match (&face_selections[0].3, &fc_clone) {
                     (SectorFace::Floor, FaceClipboard::Horizontal { .. }) |
                     (SectorFace::Ceiling, FaceClipboard::Horizontal { .. }) => true,
                     (SectorFace::WallNorth(_), FaceClipboard::Vertical { .. }) |
@@ -843,154 +975,24 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
                     // Save undo BEFORE getting mutable borrow
                     state.save_undo();
 
-                    let success = if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                        if let Some(sector) = room.get_sector_mut(sx, sz) {
-                            match (&target_face, fc_clone) {
-                                // Horizontal -> Horizontal
-                                (SectorFace::Floor, FaceClipboard::Horizontal {
-                                    split_direction, texture, uv, colors,
-                                    texture_2, uv_2, colors_2, walkable,
-                                    blend_mode, normal_mode, black_transparent
-                                }) => {
-                                    if let Some(f) = sector.floor.as_mut() {
-                                        f.split_direction = split_direction;
-                                        f.texture = texture;
-                                        f.uv = uv;
-                                        f.colors = colors;
-                                        f.texture_2 = texture_2;
-                                        f.uv_2 = uv_2;
-                                        f.colors_2 = colors_2;
-                                        f.walkable = walkable;
-                                        f.blend_mode = blend_mode;
-                                        f.normal_mode = normal_mode;
-                                        f.black_transparent = black_transparent;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::Ceiling, FaceClipboard::Horizontal {
-                                    split_direction, texture, uv, colors,
-                                    texture_2, uv_2, colors_2, walkable,
-                                    blend_mode, normal_mode, black_transparent
-                                }) => {
-                                    if let Some(f) = sector.ceiling.as_mut() {
-                                        f.split_direction = split_direction;
-                                        f.texture = texture;
-                                        f.uv = uv;
-                                        f.colors = colors;
-                                        f.texture_2 = texture_2;
-                                        f.uv_2 = uv_2;
-                                        f.colors_2 = colors_2;
-                                        f.walkable = walkable;
-                                        f.blend_mode = blend_mode;
-                                        f.normal_mode = normal_mode;
-                                        f.black_transparent = black_transparent;
-                                        true
-                                    } else { false }
-                                }
-                                // Vertical -> Vertical
-                                (SectorFace::WallNorth(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_north.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallEast(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_east.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallSouth(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_south.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallWest(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_west.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallNwSe(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_nwse.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                (SectorFace::WallNeSw(i), FaceClipboard::Vertical {
-                                    texture, uv, solid, blend_mode, colors,
-                                    normal_mode, black_transparent, uv_projection
-                                }) => {
-                                    if let Some(w) = sector.walls_nesw.get_mut(*i) {
-                                        w.texture = texture;
-                                        w.uv = uv;
-                                        w.solid = solid;
-                                        w.blend_mode = blend_mode;
-                                        w.colors = colors;
-                                        w.normal_mode = normal_mode;
-                                        w.black_transparent = black_transparent;
-                                        w.uv_projection = uv_projection;
-                                        true
-                                    } else { false }
-                                }
-                                _ => false,
-                            }
-                        } else { false }
-                    } else { false };
+                    let mut paste_count = 0;
+                    for (room_idx, sx, sz, target_face) in face_selections {
+                        let success = if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                            if let Some(sector) = room.get_sector_mut(sx, sz) {
+                                paste_face_properties(sector, &target_face, &fc_clone)
+                            } else { false }
+                        } else { false };
+                        if success {
+                            paste_count += 1;
+                        }
+                    }
 
-                    if success {
-                        state.set_status("Face properties pasted", 2.0);
+                    if paste_count > 0 {
+                        if paste_count == 1 {
+                            state.set_status("Face properties pasted", 2.0);
+                        } else {
+                            state.set_status(&format!("Face properties pasted to {} faces", paste_count), 2.0);
+                        }
                     }
                 } else {
                     state.set_status("Cannot paste: incompatible face types", 2.0);
@@ -1001,6 +1003,9 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             } else {
                 state.set_status("Nothing in clipboard", 2.0);
             }
+        } else if let Some(gc) = state.geometry_clipboard.clone() {
+            // Paste geometry at selected sector
+            paste_geometry_selection(state, &gc);
         } else if let Some(copied) = state.clipboard.clone() {
             // Regular object paste
             paste_object(state, copied);
@@ -1043,6 +1048,532 @@ fn paste_object(state: &mut EditorState, copied: crate::world::LevelObject) {
         }
     } else {
         state.set_status("Select a sector to paste into", 2.0);
+    }
+}
+
+/// Helper function to paste face properties from clipboard to a sector face
+fn paste_face_properties(sector: &mut Sector, target_face: &SectorFace, fc: &FaceClipboard) -> bool {
+    match (target_face, fc) {
+        // Horizontal -> Horizontal (Floor)
+        (SectorFace::Floor, FaceClipboard::Horizontal {
+            split_direction, texture, uv, colors,
+            texture_2, uv_2, colors_2, walkable,
+            blend_mode, normal_mode, black_transparent
+        }) => {
+            if let Some(f) = sector.floor.as_mut() {
+                f.split_direction = *split_direction;
+                f.texture = texture.clone();
+                f.uv = *uv;
+                f.colors = *colors;
+                f.texture_2 = texture_2.clone();
+                f.uv_2 = *uv_2;
+                f.colors_2 = *colors_2;
+                f.walkable = *walkable;
+                f.blend_mode = *blend_mode;
+                f.normal_mode = *normal_mode;
+                f.black_transparent = *black_transparent;
+                true
+            } else { false }
+        }
+        // Horizontal -> Horizontal (Ceiling)
+        (SectorFace::Ceiling, FaceClipboard::Horizontal {
+            split_direction, texture, uv, colors,
+            texture_2, uv_2, colors_2, walkable,
+            blend_mode, normal_mode, black_transparent
+        }) => {
+            if let Some(f) = sector.ceiling.as_mut() {
+                f.split_direction = *split_direction;
+                f.texture = texture.clone();
+                f.uv = *uv;
+                f.colors = *colors;
+                f.texture_2 = texture_2.clone();
+                f.uv_2 = *uv_2;
+                f.colors_2 = *colors_2;
+                f.walkable = *walkable;
+                f.blend_mode = *blend_mode;
+                f.normal_mode = *normal_mode;
+                f.black_transparent = *black_transparent;
+                true
+            } else { false }
+        }
+        // Vertical -> Vertical (walls)
+        (SectorFace::WallNorth(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_north.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallEast(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_east.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallSouth(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_south.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallWest(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_west.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallNwSe(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_nwse.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        (SectorFace::WallNeSw(i), FaceClipboard::Vertical {
+            texture, uv, solid, blend_mode, colors,
+            normal_mode, black_transparent, uv_projection
+        }) => {
+            if let Some(w) = sector.walls_nesw.get_mut(*i) {
+                w.texture = texture.clone();
+                w.uv = *uv;
+                w.solid = *solid;
+                w.blend_mode = *blend_mode;
+                w.colors = *colors;
+                w.normal_mode = *normal_mode;
+                w.black_transparent = *black_transparent;
+                w.uv_projection = *uv_projection;
+                true
+            } else { false }
+        }
+        _ => false,
+    }
+}
+
+/// Copy all selected faces as geometry (with relative positions)
+/// Handles both SectorFace selections (individual faces) and Sector selections (all faces in sector)
+fn copy_geometry_selection(state: &mut EditorState) {
+    // Collect all sector positions that need their faces extracted
+    let mut sector_positions: Vec<(usize, usize, usize)> = Vec::new();
+    let mut all_faces: Vec<(usize, usize, usize, SectorFace)> = Vec::new();
+
+    // Handle primary selection
+    match &state.selection {
+        Selection::SectorFace { room, x, z, face } => {
+            all_faces.push((*room, *x, *z, face.clone()));
+        }
+        Selection::Sector { room, x, z } => {
+            sector_positions.push((*room, *x, *z));
+        }
+        _ => {}
+    }
+
+    // Handle multi-selection
+    for sel in &state.multi_selection {
+        match sel {
+            Selection::SectorFace { room, x, z, face } => {
+                all_faces.push((*room, *x, *z, face.clone()));
+            }
+            Selection::Sector { room, x, z } => {
+                sector_positions.push((*room, *x, *z));
+            }
+            _ => {}
+        }
+    }
+
+    // Extract faces from sector positions
+    for (room_idx, x, z) in sector_positions {
+        if let Some(room) = state.level.rooms.get(room_idx) {
+            if let Some(sector) = room.get_sector(x, z) {
+                // Add floor if present
+                if sector.floor.is_some() {
+                    all_faces.push((room_idx, x, z, SectorFace::Floor));
+                }
+                // Add ceiling if present
+                if sector.ceiling.is_some() {
+                    all_faces.push((room_idx, x, z, SectorFace::Ceiling));
+                }
+                // Add all walls
+                for i in 0..sector.walls_north.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallNorth(i)));
+                }
+                for i in 0..sector.walls_east.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallEast(i)));
+                }
+                for i in 0..sector.walls_south.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallSouth(i)));
+                }
+                for i in 0..sector.walls_west.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallWest(i)));
+                }
+                for i in 0..sector.walls_nwse.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallNwSe(i)));
+                }
+                for i in 0..sector.walls_nesw.len() {
+                    all_faces.push((room_idx, x, z, SectorFace::WallNeSw(i)));
+                }
+            }
+        }
+    }
+
+    if all_faces.is_empty() {
+        state.set_status("No geometry to copy", 2.0);
+        return;
+    }
+
+    // Find anchor point (minimum x, z coordinates)
+    let anchor_x = all_faces.iter().map(|(_, x, _, _)| *x as i32).min().unwrap_or(0);
+    let anchor_z = all_faces.iter().map(|(_, _, z, _)| *z as i32).min().unwrap_or(0);
+
+    let mut copied_faces: Vec<CopiedFace> = Vec::new();
+
+    for (room_idx, sx, sz, face) in &all_faces {
+        let rel_x = *sx as i32 - anchor_x;
+        let rel_z = *sz as i32 - anchor_z;
+
+        if let Some(room) = state.level.rooms.get(*room_idx) {
+            if let Some(sector) = room.get_sector(*sx, *sz) {
+                let face_data = match face {
+                    SectorFace::Floor => {
+                        sector.floor.as_ref().map(|f| CopiedFaceData::Floor(f.clone()))
+                    }
+                    SectorFace::Ceiling => {
+                        sector.ceiling.as_ref().map(|f| CopiedFaceData::Ceiling(f.clone()))
+                    }
+                    SectorFace::WallNorth(i) => {
+                        sector.walls_north.get(*i).map(|w| CopiedFaceData::WallNorth(*i, w.clone()))
+                    }
+                    SectorFace::WallEast(i) => {
+                        sector.walls_east.get(*i).map(|w| CopiedFaceData::WallEast(*i, w.clone()))
+                    }
+                    SectorFace::WallSouth(i) => {
+                        sector.walls_south.get(*i).map(|w| CopiedFaceData::WallSouth(*i, w.clone()))
+                    }
+                    SectorFace::WallWest(i) => {
+                        sector.walls_west.get(*i).map(|w| CopiedFaceData::WallWest(*i, w.clone()))
+                    }
+                    SectorFace::WallNwSe(i) => {
+                        sector.walls_nwse.get(*i).map(|w| CopiedFaceData::WallNwSe(*i, w.clone()))
+                    }
+                    SectorFace::WallNeSw(i) => {
+                        sector.walls_nesw.get(*i).map(|w| CopiedFaceData::WallNeSw(*i, w.clone()))
+                    }
+                };
+
+                if let Some(data) = face_data {
+                    copied_faces.push(CopiedFace {
+                        rel_x,
+                        rel_z,
+                        face: data,
+                    });
+                }
+            }
+        }
+    }
+
+    if !copied_faces.is_empty() {
+        let count = copied_faces.len();
+        state.geometry_clipboard = Some(GeometryClipboard {
+            faces: copied_faces,
+            flip_h: false,
+            flip_v: false,
+        });
+        state.set_status(&format!("Copied {} faces to geometry clipboard", count), 2.0);
+    }
+}
+
+/// Paste geometry from clipboard at the selected/hovered sector
+fn paste_geometry_selection(state: &mut EditorState, gc: &GeometryClipboard) {
+    // Get anchor point from current selection (Sector or SectorFace)
+    let anchor = match &state.selection {
+        Selection::Sector { room, x, z } => Some((*room, *x as i32, *z as i32)),
+        Selection::SectorFace { room, x, z, .. } => Some((*room, *x as i32, *z as i32)),
+        _ => None,
+    };
+
+    let Some((room_idx, anchor_x, anchor_z)) = anchor else {
+        state.set_status("Select a sector to paste geometry", 2.0);
+        return;
+    };
+
+    paste_geometry_at_impl(state, gc, room_idx, anchor_x, anchor_z);
+}
+
+/// Paste geometry from clipboard at specific anchor coordinates (public for viewport click)
+pub fn paste_geometry_at(state: &mut EditorState, gc: &GeometryClipboard, anchor_x: i32, anchor_z: i32) {
+    paste_geometry_at_impl(state, gc, state.current_room, anchor_x, anchor_z);
+}
+
+/// Internal implementation for pasting geometry
+fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_idx: usize, anchor_x: i32, anchor_z: i32) {
+    state.save_undo();
+
+    let mut paste_count = 0;
+    let (min_x, max_x, min_z, max_z) = gc.bounds();
+    let width = max_x - min_x;
+    let depth = max_z - min_z;
+
+    // First pass: calculate bounds needed to expand room
+    let mut target_min_x = i32::MAX;
+    let mut target_max_x = i32::MIN;
+    let mut target_min_z = i32::MAX;
+    let mut target_max_z = i32::MIN;
+
+    for face in &gc.faces {
+        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
+            (width - face.rel_x, depth - face.rel_z)
+        } else if gc.flip_h {
+            (width - face.rel_x, face.rel_z)
+        } else if gc.flip_v {
+            (face.rel_x, depth - face.rel_z)
+        } else {
+            (face.rel_x, face.rel_z)
+        };
+        let target_x = anchor_x + rel_x;
+        let target_z = anchor_z + rel_z;
+        target_min_x = target_min_x.min(target_x);
+        target_max_x = target_max_x.max(target_x);
+        target_min_z = target_min_z.min(target_z);
+        target_max_z = target_max_z.max(target_z);
+    }
+
+    // Expand room grid to accommodate all target positions
+    let mut offset_x = 0i32;
+    let mut offset_z = 0i32;
+
+    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+        // Expand in negative X direction
+        while target_min_x + offset_x < 0 {
+            room.position.x -= SECTOR_SIZE;
+            room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+            room.width += 1;
+            offset_x += 1;
+        }
+
+        // Expand in negative Z direction
+        while target_min_z + offset_z < 0 {
+            room.position.z -= SECTOR_SIZE;
+            for col in &mut room.sectors {
+                col.insert(0, None);
+            }
+            room.depth += 1;
+            offset_z += 1;
+        }
+
+        // Expand in positive X direction
+        while (target_max_x + offset_x) as usize >= room.width {
+            room.width += 1;
+            room.sectors.push((0..room.depth).map(|_| None).collect());
+        }
+
+        // Expand in positive Z direction
+        while (target_max_z + offset_z) as usize >= room.depth {
+            room.depth += 1;
+            for col in &mut room.sectors {
+                col.push(None);
+            }
+        }
+    }
+
+    // Second pass: paste all faces with adjusted coordinates
+    for face in &gc.faces {
+        // Apply flip transformations
+        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
+            (width - face.rel_x, depth - face.rel_z)
+        } else if gc.flip_h {
+            (width - face.rel_x, face.rel_z)
+        } else if gc.flip_v {
+            (face.rel_x, depth - face.rel_z)
+        } else {
+            (face.rel_x, face.rel_z)
+        };
+
+        let target_x = (anchor_x + rel_x + offset_x) as usize;
+        let target_z = (anchor_z + rel_z + offset_z) as usize;
+
+        if let Some(room) = state.level.rooms.get_mut(room_idx) {
+            // Ensure sector exists
+            room.ensure_sector(target_x, target_z);
+
+            if let Some(sector) = room.get_sector_mut(target_x, target_z) {
+                match &face.face {
+                    CopiedFaceData::Floor(f) => {
+                        let mut new_face = f.clone();
+                        // Flip heights if needed
+                        if gc.flip_h {
+                            new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[1], h2[0], h2[3], h2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.heights = [new_face.heights[3], new_face.heights[2], new_face.heights[1], new_face.heights[0]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[3], h2[2], h2[1], h2[0]];
+                            }
+                        }
+                        sector.floor = Some(new_face);
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::Ceiling(f) => {
+                        let mut new_face = f.clone();
+                        if gc.flip_h {
+                            new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[1], h2[0], h2[3], h2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.heights = [new_face.heights[3], new_face.heights[2], new_face.heights[1], new_face.heights[0]];
+                            if let Some(h2) = &mut new_face.heights_2 {
+                                *h2 = [h2[3], h2[2], h2[1], h2[0]];
+                            }
+                        }
+                        sector.ceiling = Some(new_face);
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallNorth(i, w) => {
+                        // Flip N<->S when flipping V
+                        let target_wall = if gc.flip_v {
+                            &mut sector.walls_south
+                        } else {
+                            &mut sector.walls_north
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallSouth(i, w) => {
+                        let target_wall = if gc.flip_v {
+                            &mut sector.walls_north
+                        } else {
+                            &mut sector.walls_south
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallEast(i, w) => {
+                        // Flip E<->W when flipping H
+                        let target_wall = if gc.flip_h {
+                            &mut sector.walls_west
+                        } else {
+                            &mut sector.walls_east
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallWest(i, w) => {
+                        let target_wall = if gc.flip_h {
+                            &mut sector.walls_east
+                        } else {
+                            &mut sector.walls_west
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallNwSe(i, w) => {
+                        // Diagonal walls: NW-SE flips to NE-SW when H or V (but not both)
+                        let target_wall = if gc.flip_h != gc.flip_v {
+                            &mut sector.walls_nesw
+                        } else {
+                            &mut sector.walls_nwse
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                    CopiedFaceData::WallNeSw(i, w) => {
+                        let target_wall = if gc.flip_h != gc.flip_v {
+                            &mut sector.walls_nwse
+                        } else {
+                            &mut sector.walls_nesw
+                        };
+                        if *i < target_wall.len() {
+                            target_wall[*i] = w.clone();
+                        } else {
+                            target_wall.push(w.clone());
+                        }
+                        paste_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Recalculate room bounds
+    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+        room.recalculate_bounds();
+    }
+
+    if paste_count > 0 {
+        state.set_status(&format!("Pasted {} faces", paste_count), 2.0);
+    } else {
+        state.set_status("No faces pasted (out of bounds?)", 2.0);
     }
 }
 
@@ -1982,6 +2513,205 @@ fn draw_compact_rgb_sliders(
     new_color
 }
 
+/// Draw debug panel with frame timing information
+fn draw_debug_panel(_ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
+    use macroquad::prelude::*;
+
+    let mut y = rect.y.floor();
+    let x = rect.x.floor();
+    let bar_w = rect.w - 4.0;
+
+    // Colors for timing breakdown
+    let label_color = Color::from_rgba(150, 150, 160, 255);
+    let value_color = Color::from_rgba(200, 200, 210, 255);
+    let toolbar_color = Color::from_rgba(100, 180, 255, 255);   // Blue
+    let left_color = Color::from_rgba(180, 100, 255, 255);      // Purple
+    let viewport_color = Color::from_rgba(255, 100, 100, 255);  // Red
+    let right_color = Color::from_rgba(255, 200, 100, 255);     // Orange
+    let status_color = Color::from_rgba(100, 255, 180, 255);    // Cyan
+
+    // 3D viewport sub-timing colors (shades of red)
+    let vp_input_color = Color::from_rgba(255, 180, 180, 255);   // Light red
+    let vp_clear_color = Color::from_rgba(255, 150, 150, 255);   // Light-mid red
+    let vp_grid_color = Color::from_rgba(255, 120, 120, 255);    // Mid red
+    let vp_lights_color = Color::from_rgba(240, 100, 100, 255);  // Mid-dark red
+    let vp_texconv_color = Color::from_rgba(220, 80, 80, 255);   // Dark red
+    let vp_meshgen_color = Color::from_rgba(200, 60, 60, 255);   // Darker red
+    let vp_raster_color = Color::from_rgba(180, 40, 40, 255);    // Darkest red
+    let vp_preview_color = Color::from_rgba(255, 100, 150, 255); // Red-pink
+    let vp_upload_color = Color::from_rgba(255, 130, 100, 255);  // Red-orange
+
+    // FPS and frame time
+    let fps = get_fps();
+    let frame_time_ms = get_frame_time() * 1000.0;
+
+    let fps_color = if fps >= 55 {
+        Color::from_rgba(100, 255, 100, 255)
+    } else if fps >= 30 {
+        Color::from_rgba(255, 200, 100, 255)
+    } else {
+        Color::from_rgba(255, 100, 100, 255)
+    };
+
+    draw_text(&format!("FPS: {}", fps), x, y + 10.0, FONT_SIZE_CONTENT, fps_color);
+    y += LINE_HEIGHT;
+
+    draw_text(&format!("Frame: {:.2}ms", frame_time_ms), x, y + 10.0, FONT_SIZE_CONTENT, WHITE);
+    y += LINE_HEIGHT;
+
+    // Draw stacked timing bar
+    let bar_y = y + 2.0;
+    let bar_h = 10.0;
+
+    // Background
+    draw_rectangle(x, bar_y, bar_w, bar_h, Color::from_rgba(30, 30, 30, 255));
+
+    // Get timing data
+    let t = &state.frame_timings;
+    let total = t.total_ms.max(0.001); // Avoid division by zero
+
+    // Draw bar segments (stacked horizontally)
+    let mut bar_x = x;
+    let segments = [
+        (t.toolbar_ms, toolbar_color),
+        (t.left_panel_ms, left_color),
+        (t.viewport_3d_ms, viewport_color),
+        (t.right_panel_ms, right_color),
+        (t.status_ms, status_color),
+    ];
+
+    for (ms, color) in segments.iter() {
+        let seg_w = (*ms / total) * bar_w;
+        if seg_w > 0.5 {
+            draw_rectangle(bar_x, bar_y, seg_w, bar_h, *color);
+            bar_x += seg_w;
+        }
+    }
+
+    // Target line (16.67ms = 60fps)
+    let target_ms = 16.67;
+    let target_x = x + (target_ms / total.max(target_ms)) * bar_w;
+    if target_x < x + bar_w {
+        draw_line(target_x, bar_y - 1.0, target_x, bar_y + bar_h + 1.0, 1.0, Color::from_rgba(255, 255, 255, 150));
+    }
+
+    y += LINE_HEIGHT + 2.0;
+
+    // Total timing text
+    draw_text(&format!("Total: {:.2}ms", t.total_ms), x, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    // Main breakdown
+    y += 2.0;
+    draw_text("Main:", x, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    y += LINE_HEIGHT;
+
+    // Timing breakdown with colored boxes
+    let box_size = 8.0;
+    let items = [
+        ("Toolbar", t.toolbar_ms, toolbar_color),
+        ("Left", t.left_panel_ms, left_color),
+        ("3D View", t.viewport_3d_ms, viewport_color),
+        ("Right", t.right_panel_ms, right_color),
+        ("Status", t.status_ms, status_color),
+    ];
+
+    for (name, ms, color) in items.iter() {
+        draw_rectangle(x, y + 4.0, box_size, box_size, *color);
+        draw_text(name, x + box_size + 4.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+        let value_str = format!("{:.2}ms", ms);
+        let value_w = value_str.len() as f32 * 6.0;
+        draw_text(&value_str, x + bar_w - value_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+        y += LINE_HEIGHT;
+    }
+
+    // 3D Viewport breakdown
+    y += 4.0;
+    draw_text("3D View:", x, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    y += LINE_HEIGHT;
+
+    let vp_items = [
+        ("Input", t.vp_input_ms, vp_input_color),
+        ("Clear", t.vp_clear_ms, vp_clear_color),
+        ("Grid", t.vp_grid_ms, vp_grid_color),
+        ("Lights", t.vp_lights_ms, vp_lights_color),
+        ("TexConv", t.vp_texconv_ms, vp_texconv_color),
+        ("MeshGen", t.vp_meshgen_ms, vp_meshgen_color),
+        ("Raster", t.vp_raster_ms, vp_raster_color),
+        ("Preview", t.vp_preview_ms, vp_preview_color),
+        ("Upload", t.vp_upload_ms, vp_upload_color),
+    ];
+
+    let indent = 8.0;
+    for (name, ms, color) in vp_items.iter() {
+        draw_rectangle(x + indent, y + 4.0, box_size, box_size, *color);
+        draw_text(name, x + indent + box_size + 4.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+        let value_str = format!("{:.2}ms", ms);
+        let value_w = value_str.len() as f32 * 6.0;
+        draw_text(&value_str, x + bar_w - value_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+        y += LINE_HEIGHT;
+    }
+
+    // === MEMORY SECTION ===
+    y += 8.0;
+    draw_text("Memory:", x, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    y += LINE_HEIGHT;
+
+    let m = &state.memory_stats;
+
+    // Process memory (from OS)
+    let physical_str = super::state::MemoryStats::format_bytes(m.physical_bytes);
+    draw_text("Process RSS", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = physical_str.len() as f32 * 6.0;
+    draw_text(&physical_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    // Texture memory breakdown
+    y += 4.0;
+    draw_text("Textures:", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    y += LINE_HEIGHT;
+
+    let tex_str = format!("{} ({})", super::state::MemoryStats::format_bytes(m.texture_bytes), m.texture_count);
+    draw_text("RGB888", x + indent * 2.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = tex_str.len() as f32 * 6.0;
+    draw_text(&tex_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let tex15_str = super::state::MemoryStats::format_bytes(m.texture15_bytes);
+    draw_text("RGB555 cache", x + indent * 2.0, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = tex15_str.len() as f32 * 6.0;
+    draw_text(&tex15_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let fb_str = super::state::MemoryStats::format_bytes(m.framebuffer_bytes);
+    draw_text("Framebuffer", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = fb_str.len() as f32 * 6.0;
+    draw_text(&fb_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let gpu_str = format!("{}", m.gpu_cache_count);
+    draw_text("GPU cache", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = gpu_str.len() as f32 * 6.0;
+    draw_text(&gpu_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    // Show tracked vs untracked
+    let tracked = m.texture_bytes + m.texture15_bytes + m.framebuffer_bytes;
+    let untracked = m.physical_bytes.saturating_sub(tracked);
+    y += 4.0;
+    let tracked_str = super::state::MemoryStats::format_bytes(tracked);
+    draw_text("Tracked", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = tracked_str.len() as f32 * 6.0;
+    draw_text(&tracked_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, value_color);
+    y += LINE_HEIGHT;
+
+    let untracked_str = super::state::MemoryStats::format_bytes(untracked);
+    draw_text("Untracked", x + indent, y + 10.0, FONT_SIZE_CONTENT, label_color);
+    let val_w = untracked_str.len() as f32 * 6.0;
+    draw_text(&untracked_str, x + bar_w - val_w, y + 10.0, FONT_SIZE_CONTENT, Color::from_rgba(255, 180, 100, 255));
+    let _ = y; // suppress unused warning
+}
+
 fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, icon_font: Option<&Font>) {
     let mut y = rect.y.floor();
     let x = rect.x.floor();
@@ -2366,19 +3096,19 @@ fn horizontal_face_container_height(face: &crate::world::HorizontalFace, is_floo
     let header_height = 22.0;
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
-    let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let uv_controls_height = 80.0; // X offset + Y offset + scale row + angle row (4 rows × 20px)
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
     let split_diagram_height = 50.0; // Mini split diagram with toggle
     let triangle_textures_height = 40.0; // Dual texture slots with link toggle
     let extrude_button_height = if is_floor { 56.0 } else { 0.0 }; // Extrude button only for floors
-    let mut lines = 2; // height, walkable (texture moved to triangle slots)
-    if !face.is_flat() {
-        lines += 1; // extra line for individual heights
-    }
+    // Height link row + optional height controls when unlinked
+    let height_link_row = 20.0;
+    let height_controls_height = if face.has_split_heights() { 36.0 } else { 0.0 }; // 2 rows × 18px when unlinked
+    let lines = 1; // walkable only (height moved to link row)
     // Add space for UV coordinates, controls, buttons, color, color picker, normal mode, split diagram, triangle textures, and extrude
     let uv_lines = 1; // Just coordinates
-    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + split_diagram_height + triangle_textures_height + extrude_button_height
+    header_height + CONTAINER_PADDING * 2.0 + (lines as f32) * line_height + (uv_lines as f32) * line_height + uv_controls_height + button_row_height + color_row_height + color_picker_height + normal_mode_height + split_diagram_height + triangle_textures_height + height_link_row + height_controls_height + extrude_button_height
 }
 
 /// Calculate height needed for a wall face container
@@ -2387,7 +3117,7 @@ fn wall_face_container_height(_wall: &crate::world::VerticalFace) -> f32 {
     let header_height = 22.0;
     let button_row_height = 24.0;
     let color_row_height = 20.0; // Color preview + label
-    let uv_controls_height = 54.0; // offset row + scale row + angle row
+    let uv_controls_height = 80.0; // X offset + Y offset + scale row + angle row (4 rows × 20px)
     let color_picker_height = ps1_color_picker_height() + 54.0; // PS1 color picker widget
     let normal_mode_height = 40.0; // Label + 3-way toggle
     let lines = 3; // texture, y range, blend
@@ -2638,15 +3368,127 @@ fn draw_horizontal_face_container(
 
     content_y += slot_height + 8.0;
 
-    // Heights
-    if !face.is_flat() {
-        draw_text(&format!("Heights: [{:.0}, {:.0}, {:.0}, {:.0}]",
-            face.heights[0], face.heights[1], face.heights[2], face.heights[3]),
-            content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
-        content_y += line_height;
+    // === Triangle Heights with Link Toggle ===
+    let heights_linked = face.heights_linked();
+    let heights_1 = &face.heights;
+    let heights_2 = face.get_heights_2();
+
+    // Height link button
+    let height_link_btn_size = 18.0;
+    let height_link_rect = Rect::new(content_x, content_y, height_link_btn_size, height_link_btn_size);
+    let height_link_icon = if heights_linked { icon::LINK } else { icon::LINK_OFF };
+    let height_link_tooltip = if heights_linked { "Unlink triangle heights" } else { "Link triangle heights" };
+    let height_link_clicked = crate::ui::icon_button(ctx, height_link_rect, height_link_icon, icon_font, height_link_tooltip);
+
+    if height_link_clicked {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    if heights_linked {
+                        // Unlink: copy heights to heights_2
+                        f.heights_2 = Some(f.heights);
+                    } else {
+                        // Link: clear heights_2 (will use heights)
+                        f.heights_2 = None;
+                    }
+                }
+            }
+        }
     }
-    draw_text(&format!("Base: {:.0}", face.heights[0]), content_x.floor(), (content_y + 12.0).floor(), 13.0, WHITE);
-    content_y += line_height;
+
+    // Height display/label next to link button
+    let height_label_x = content_x + height_link_btn_size + 6.0;
+    if heights_linked {
+        // Show single height (base height from NW corner)
+        draw_text(&format!("Height: {:.0}", heights_1[0]), height_label_x.floor(), (content_y + 13.0).floor(), 12.0, WHITE);
+    } else {
+        // Show both heights
+        draw_text("Heights unlinked", height_label_x.floor(), (content_y + 13.0).floor(), 12.0, Color::from_rgba(255, 180, 100, 255));
+    }
+    content_y += 20.0;
+
+    // When heights are unlinked, show height controls for each triangle
+    if !heights_linked {
+        // Triangle 1 height row
+        draw_text("Tri 1:", content_x.floor(), (content_y + 12.0).floor(), 11.0, label_color_dim);
+        let h1_display = format!("{:.0}", heights_1[0]);
+        draw_text(&h1_display, (content_x + 40.0).floor(), (content_y + 12.0).floor(), 11.0, WHITE);
+
+        // Height adjustment buttons for Tri 1
+        let adj_btn_size = 16.0;
+        let adj_x = content_x + 70.0;
+        let minus_rect = Rect::new(adj_x, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, minus_rect, icon::MINUS, icon_font, "Lower Tri 1 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        for h in &mut f.heights {
+                            *h -= 256.0;
+                        }
+                    }
+                }
+            }
+        }
+        let plus_rect = Rect::new(adj_x + adj_btn_size + 2.0, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, plus_rect, icon::PLUS, icon_font, "Raise Tri 1 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        for h in &mut f.heights {
+                            *h += 256.0;
+                        }
+                    }
+                }
+            }
+        }
+        content_y += 18.0;
+
+        // Triangle 2 height row
+        draw_text("Tri 2:", content_x.floor(), (content_y + 12.0).floor(), 11.0, label_color_dim);
+        let h2_display = format!("{:.0}", heights_2[0]);
+        draw_text(&h2_display, (content_x + 40.0).floor(), (content_y + 12.0).floor(), 11.0, WHITE);
+
+        // Height adjustment buttons for Tri 2
+        let minus_rect = Rect::new(adj_x, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, minus_rect, icon::MINUS, icon_font, "Lower Tri 2 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        if let Some(h2) = &mut f.heights_2 {
+                            for h in h2 {
+                                *h -= 256.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let plus_rect = Rect::new(adj_x + adj_btn_size + 2.0, content_y, adj_btn_size, adj_btn_size);
+        if crate::ui::icon_button(ctx, plus_rect, icon::PLUS, icon_font, "Raise Tri 2 by 256") {
+            state.save_undo();
+            if let Some(r) = state.level.rooms.get_mut(room_idx) {
+                if let Some(s) = r.get_sector_mut(gx, gz) {
+                    let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                    if let Some(f) = face_ref {
+                        if let Some(h2) = &mut f.heights_2 {
+                            for h in h2 {
+                                *h += 256.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        content_y += 18.0;
+    }
 
     // Walkable icon button
     let walkable = face.walkable;
@@ -2669,12 +3511,12 @@ fn draw_horizontal_face_container(
     }
     content_y += line_height;
 
-    // UV coordinates display
+    // UV coordinates display (scaled by UV_SCALE)
     let uv = face.uv.unwrap_or([
-        crate::rasterizer::Vec2::new(0.0, 0.0),  // NW
-        crate::rasterizer::Vec2::new(1.0, 0.0),  // NE
-        crate::rasterizer::Vec2::new(1.0, 1.0),  // SE
-        crate::rasterizer::Vec2::new(0.0, 1.0),  // SW
+        crate::rasterizer::Vec2::new(0.0, 0.0),           // NW
+        crate::rasterizer::Vec2::new(UV_SCALE, 0.0),      // NE
+        crate::rasterizer::Vec2::new(UV_SCALE, UV_SCALE), // SE
+        crate::rasterizer::Vec2::new(0.0, UV_SCALE),      // SW
     ]);
     draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
         content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
@@ -2692,7 +3534,7 @@ fn draw_horizontal_face_container(
             }
         }
     }
-    content_y += 54.0; // Height of UV controls (3 rows * 18px)
+    content_y += 80.0; // Height of UV controls (4 rows × 20px: X offset, Y offset, Scale, Angle)
 
     // UV manipulation buttons
     let btn_size = 20.0;
@@ -2750,6 +3592,25 @@ fn draw_horizontal_face_container(
                 if is_floor {
                     if let Some(f) = &mut s.floor { rotate_uv_cw(&mut f.uv); }
                 } else if let Some(c) = &mut s.ceiling { rotate_uv_cw(&mut c.uv); }
+            }
+        }
+    }
+    btn_x += btn_size + btn_spacing;
+
+    // 1:1 Texel mapping button - resets scale to 1.0 (one texture per block)
+    let texel_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
+    if crate::ui::icon_button(ctx, texel_rect, icon::RATIO, icon_font, "1:1 Texel Mapping") {
+        state.save_undo();
+        if let Some(r) = state.level.rooms.get_mut(room_idx) {
+            if let Some(s) = r.get_sector_mut(gx, gz) {
+                let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
+                if let Some(f) = face_ref {
+                    // Reset to default 1:1 mapping: scale 1.0 = one texture per block
+                    let mut params = extract_uv_params(&f.uv);
+                    params.x_scale = 1.0;
+                    params.y_scale = 1.0;
+                    f.uv = Some(apply_uv_params(&params));
+                }
             }
         }
     }
@@ -3009,16 +3870,16 @@ fn flip_uv_horizontal(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
     use crate::rasterizer::Vec2;
     let current = uv.unwrap_or([
         Vec2::new(0.0, 0.0),
-        Vec2::new(1.0, 0.0),
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 1.0),
+        Vec2::new(UV_SCALE, 0.0),
+        Vec2::new(UV_SCALE, UV_SCALE),
+        Vec2::new(0.0, UV_SCALE),
     ]);
-    // Flip X: swap left and right
+    // Flip X: swap left and right (flip within the current scale)
     *uv = Some([
-        Vec2::new(1.0 - current[0].x, current[0].y),
-        Vec2::new(1.0 - current[1].x, current[1].y),
-        Vec2::new(1.0 - current[2].x, current[2].y),
-        Vec2::new(1.0 - current[3].x, current[3].y),
+        Vec2::new(UV_SCALE - current[0].x, current[0].y),
+        Vec2::new(UV_SCALE - current[1].x, current[1].y),
+        Vec2::new(UV_SCALE - current[2].x, current[2].y),
+        Vec2::new(UV_SCALE - current[3].x, current[3].y),
     ]);
 }
 
@@ -3027,16 +3888,16 @@ fn flip_uv_vertical(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
     use crate::rasterizer::Vec2;
     let current = uv.unwrap_or([
         Vec2::new(0.0, 0.0),
-        Vec2::new(1.0, 0.0),
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 1.0),
+        Vec2::new(UV_SCALE, 0.0),
+        Vec2::new(UV_SCALE, UV_SCALE),
+        Vec2::new(0.0, UV_SCALE),
     ]);
-    // Flip Y: swap top and bottom
+    // Flip Y: swap top and bottom (flip within the current scale)
     *uv = Some([
-        Vec2::new(current[0].x, 1.0 - current[0].y),
-        Vec2::new(current[1].x, 1.0 - current[1].y),
-        Vec2::new(current[2].x, 1.0 - current[2].y),
-        Vec2::new(current[3].x, 1.0 - current[3].y),
+        Vec2::new(current[0].x, UV_SCALE - current[0].y),
+        Vec2::new(current[1].x, UV_SCALE - current[1].y),
+        Vec2::new(current[2].x, UV_SCALE - current[2].y),
+        Vec2::new(current[3].x, UV_SCALE - current[3].y),
     ]);
 }
 
@@ -3045,10 +3906,10 @@ fn flip_uv_vertical(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
 fn rotate_uv_cw(uv: &mut Option<[crate::rasterizer::Vec2; 4]>) {
     use crate::rasterizer::Vec2;
     let current = uv.unwrap_or([
-        Vec2::new(0.0, 0.0),  // corner 0: NW
-        Vec2::new(1.0, 0.0),  // corner 1: NE
-        Vec2::new(1.0, 1.0),  // corner 2: SE
-        Vec2::new(0.0, 1.0),  // corner 3: SW
+        Vec2::new(0.0, 0.0),           // corner 0: NW
+        Vec2::new(UV_SCALE, 0.0),      // corner 1: NE
+        Vec2::new(UV_SCALE, UV_SCALE), // corner 2: SE
+        Vec2::new(0.0, UV_SCALE),      // corner 3: SW
     ]);
     // To rotate the texture 90° CW, each corner gets the UV from the previous corner
     // (i.e., shift the array by 1 position backwards)
@@ -3084,23 +3945,25 @@ impl Default for UvParams {
 }
 
 /// Extract UV parameters from 4-corner UV coordinates
-/// Assumes default UV is [(0,0), (1,0), (1,1), (0,1)] for NW, NE, SE, SW
+/// Assumes default UV is [(0,0), (UV_SCALE,0), (UV_SCALE,UV_SCALE), (0,UV_SCALE)] for NW, NE, SE, SW
+/// Scale is normalized so that 1.0 = default (one texture per block)
 fn extract_uv_params(uv: &Option<[crate::rasterizer::Vec2; 4]>) -> UvParams {
     use crate::rasterizer::Vec2;
     let coords = uv.unwrap_or([
         Vec2::new(0.0, 0.0),
-        Vec2::new(1.0, 0.0),
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 1.0),
+        Vec2::new(UV_SCALE, 0.0),
+        Vec2::new(UV_SCALE, UV_SCALE),
+        Vec2::new(0.0, UV_SCALE),
     ]);
 
     // Calculate center (average of all corners)
     let center_x = (coords[0].x + coords[1].x + coords[2].x + coords[3].x) / 4.0;
     let center_y = (coords[0].y + coords[1].y + coords[2].y + coords[3].y) / 4.0;
 
-    // Offset is how much the center has moved from default (0.5, 0.5)
-    let x_offset = center_x - 0.5;
-    let y_offset = center_y - 0.5;
+    // Offset is how much the center has moved from default (UV_SCALE/2, UV_SCALE/2)
+    // Normalize by UV_SCALE so offset 1.0 = one block
+    let x_offset = (center_x - UV_SCALE / 2.0) / UV_SCALE;
+    let y_offset = (center_y - UV_SCALE / 2.0) / UV_SCALE;
 
     // Scale: measure the width and height of the UV quad
     // Width = distance from NW to NE (along X), Height = distance from NW to SW (along Y)
@@ -3112,22 +3975,26 @@ fn extract_uv_params(uv: &Option<[crate::rasterizer::Vec2; 4]>) -> UvParams {
     let dy = coords[1].y - coords[0].y;
     let angle = dy.atan2(dx).to_degrees();
 
+    // Normalize scale by UV_SCALE so 1.0 = default (one texture per block)
     UvParams {
         x_offset,
         y_offset,
-        x_scale: width,
-        y_scale: height,
+        x_scale: width / UV_SCALE,
+        y_scale: height / UV_SCALE,
         angle,
     }
 }
 
 /// Apply UV parameters to generate 4-corner UV coordinates
+/// Scale 1.0 = default (one texture per block), which maps to UV_SCALE in UV space
 fn apply_uv_params(params: &UvParams) -> [crate::rasterizer::Vec2; 4] {
     use crate::rasterizer::Vec2;
 
-    // Start with unit square centered at origin
-    let half_w = params.x_scale / 2.0;
-    let half_h = params.y_scale / 2.0;
+    // Convert normalized scale to actual UV space (multiply by UV_SCALE)
+    let actual_w = params.x_scale * UV_SCALE;
+    let actual_h = params.y_scale * UV_SCALE;
+    let half_w = actual_w / 2.0;
+    let half_h = actual_h / 2.0;
 
     // Corners before rotation (centered at origin)
     let corners = [
@@ -3149,9 +4016,9 @@ fn apply_uv_params(params: &UvParams) -> [crate::rasterizer::Vec2; 4] {
         )
     }).collect();
 
-    // Translate to final position (center at 0.5 + offset)
-    let center_x = 0.5 + params.x_offset;
-    let center_y = 0.5 + params.y_offset;
+    // Translate to final position (center at UV_SCALE/2 + offset * UV_SCALE)
+    let center_x = UV_SCALE / 2.0 + params.x_offset * UV_SCALE;
+    let center_y = UV_SCALE / 2.0 + params.y_offset * UV_SCALE;
 
     [
         Vec2::new(rotated[0].x + center_x, rotated[0].y + center_y),
@@ -3171,66 +4038,122 @@ fn draw_uv_controls(
     state: &mut EditorState,
     icon_font: Option<&Font>,
 ) -> Option<[crate::rasterizer::Vec2; 4]> {
-    use crate::ui::{draw_drag_value_compact_editable, icon_button_active, Rect, icon};
+    use crate::ui::{draw_drag_value_compact_editable, icon_button, Rect, icon};
 
     let mut params = extract_uv_params(uv);
     let mut changed = false;
-    let row_height = 18.0;
-    let link_btn_size = 16.0;
-    let label_width = 42.0;
-    let value_width = (width - label_width - link_btn_size - 12.0) / 2.0;
+    let row_height = 20.0;
     let label_color = Color::from_rgba(150, 150, 150, 255);
 
     let mut current_y = y;
 
-    // Row 1: Offset - [Link] Label [X] [Y]
-    let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
-    let link_icon = if state.uv_offset_linked { icon::LINK } else { icon::LINK_OFF };
-    if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_offset_linked) {
-        state.uv_offset_linked = !state.uv_offset_linked;
+    // UV Offset in pixels (0-63, wraps at 64)
+    // Conversion: offset_blocks * 32 = pixels (since 1 block = 32 texels)
+    // Full texture = 64 pixels = 2 blocks
+    let x_pixels = ((params.x_offset * 32.0).round() as i32).rem_euclid(64);
+    let y_pixels = ((params.y_offset * 32.0).round() as i32).rem_euclid(64);
+
+    // Row 1: X offset with pixel buttons
+    // Layout: X: [◄◄] [◄]  value  [►] [►►]
+    draw_text("X:", x, current_y + 12.0, 11.0, label_color);
+
+    let btn_size = 16.0;
+    let btn_spacing = 2.0;
+    let value_width = 28.0;
+    let btn_start = x + 18.0;
+
+    // Coarse left (−32 pixels)
+    let coarse_left_rect = Rect::new(btn_start, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_left_rect, icon::SKIP_BACK, icon_font, "−32 pixels") {
+        params.x_offset -= 1.0; // 1 block = 32 pixels
+        changed = true;
     }
 
-    draw_text("Offset", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
-    let value_start = x + link_btn_size + 4.0 + label_width;
-    let ox_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
-    let result = draw_drag_value_compact_editable(
-        ctx, ox_rect, params.x_offset, 0.1, 2001,
-        &mut state.uv_drag_active[0], &mut state.uv_drag_start_value[0], &mut state.uv_drag_start_x[0],
-        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 0)),
-    );
-    if let Some(v) = result.value {
-        let delta = v - params.x_offset;
-        params.x_offset = v;
-        if state.uv_offset_linked {
-            params.y_offset += delta;
-        }
+    // Fine left (−1 pixel)
+    let fine_left_rect = Rect::new(btn_start + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_left_rect, icon::CHEVRON_LEFT, icon_font, "−1 pixel") {
+        params.x_offset -= 1.0 / 32.0;
         changed = true;
     }
-    let oy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
-    let result = draw_drag_value_compact_editable(
-        ctx, oy_rect, params.y_offset, 0.1, 2002,
-        &mut state.uv_drag_active[1], &mut state.uv_drag_start_value[1], &mut state.uv_drag_start_x[1],
-        Some(&mut state.uv_editing_field), Some((&mut state.uv_edit_buffer, 1)),
-    );
-    if let Some(v) = result.value {
-        let delta = v - params.y_offset;
-        params.y_offset = v;
-        if state.uv_offset_linked {
-            params.x_offset += delta;
-        }
+
+    // Value display (centered)
+    let value_x = btn_start + (btn_size + btn_spacing) * 2.0;
+    let value_rect = Rect::new(value_x, current_y, value_width, row_height);
+    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, Color::from_rgba(40, 40, 45, 255));
+    let value_text = format!("{}", x_pixels);
+    let text_dims = measure_text(&value_text, None, 11, 1.0);
+    draw_text(&value_text, value_rect.x + (value_rect.w - text_dims.width) / 2.0, current_y + 12.0, 11.0, WHITE);
+
+    // Fine right (+1 pixel)
+    let fine_right_rect = Rect::new(value_x + value_width + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_right_rect, icon::CHEVRON_RIGHT, icon_font, "+1 pixel") {
+        params.x_offset += 1.0 / 32.0;
         changed = true;
     }
+
+    // Coarse right (+32 pixels)
+    let coarse_right_rect = Rect::new(value_x + value_width + btn_spacing + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_right_rect, icon::SKIP_FORWARD, icon_font, "+32 pixels") {
+        params.x_offset += 1.0; // 1 block = 32 pixels
+        changed = true;
+    }
+
     current_y += row_height;
 
-    // Row 2: Scale - [Link] Label [X] [Y]
+    // Row 2: Y offset with pixel buttons
+    draw_text("Y:", x, current_y + 12.0, 11.0, label_color);
+
+    // Coarse left (−32 pixels)
+    let coarse_left_rect = Rect::new(btn_start, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_left_rect, icon::SKIP_BACK, icon_font, "−32 pixels") {
+        params.y_offset -= 1.0;
+        changed = true;
+    }
+
+    // Fine left (−1 pixel)
+    let fine_left_rect = Rect::new(btn_start + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_left_rect, icon::CHEVRON_LEFT, icon_font, "−1 pixel") {
+        params.y_offset -= 1.0 / 32.0;
+        changed = true;
+    }
+
+    // Value display (centered)
+    let value_rect = Rect::new(value_x, current_y, value_width, row_height);
+    draw_rectangle(value_rect.x, value_rect.y, value_rect.w, value_rect.h, Color::from_rgba(40, 40, 45, 255));
+    let value_text = format!("{}", y_pixels);
+    let text_dims = measure_text(&value_text, None, 11, 1.0);
+    draw_text(&value_text, value_rect.x + (value_rect.w - text_dims.width) / 2.0, current_y + 12.0, 11.0, WHITE);
+
+    // Fine right (+1 pixel)
+    let fine_right_rect = Rect::new(value_x + value_width + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, fine_right_rect, icon::CHEVRON_RIGHT, icon_font, "+1 pixel") {
+        params.y_offset += 1.0 / 32.0;
+        changed = true;
+    }
+
+    // Coarse right (+32 pixels)
+    let coarse_right_rect = Rect::new(value_x + value_width + btn_spacing + btn_size + btn_spacing, current_y + 1.0, btn_size, btn_size);
+    if icon_button(ctx, coarse_right_rect, icon::SKIP_FORWARD, icon_font, "+32 pixels") {
+        params.y_offset += 1.0;
+        changed = true;
+    }
+
+    current_y += row_height;
+
+    // Row 3: Scale - [Link] Label [X] [Y]
+    let link_btn_size = 16.0;
+    let label_width = 42.0;
+    let scale_value_width = (width - label_width - link_btn_size - 12.0) / 2.0;
+    let scale_value_start = x + link_btn_size + 4.0 + label_width;
+
     let link_rect = Rect::new(x, current_y + 1.0, link_btn_size, link_btn_size);
     let link_icon = if state.uv_scale_linked { icon::LINK } else { icon::LINK_OFF };
-    if icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_scale_linked) {
+    if crate::ui::icon_button_active(ctx, link_rect, link_icon, icon_font, "Link X/Y", state.uv_scale_linked) {
         state.uv_scale_linked = !state.uv_scale_linked;
     }
 
     draw_text("Scale", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
-    let sx_rect = Rect::new(value_start, current_y, value_width - 2.0, row_height);
+    let sx_rect = Rect::new(scale_value_start, current_y, scale_value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
         ctx, sx_rect, params.x_scale, 0.25, 2003,
         &mut state.uv_drag_active[2], &mut state.uv_drag_start_value[2], &mut state.uv_drag_start_x[2],
@@ -3248,7 +4171,7 @@ fn draw_uv_controls(
         }
         changed = true;
     }
-    let sy_rect = Rect::new(value_start + value_width, current_y, value_width - 2.0, row_height);
+    let sy_rect = Rect::new(scale_value_start + scale_value_width, current_y, scale_value_width - 2.0, row_height);
     let result = draw_drag_value_compact_editable(
         ctx, sy_rect, params.y_scale, 0.25, 2004,
         &mut state.uv_drag_active[3], &mut state.uv_drag_start_value[3], &mut state.uv_drag_start_x[3],
@@ -3268,9 +4191,9 @@ fn draw_uv_controls(
     }
     current_y += row_height;
 
-    // Row 3: Angle (no link button, full width)
+    // Row 4: Angle (no link button, full width)
     draw_text("Angle", x + link_btn_size + 4.0, current_y + 12.0, 11.0, label_color);
-    let angle_rect = Rect::new(value_start, current_y, width - value_start + x - 4.0, row_height);
+    let angle_rect = Rect::new(scale_value_start, current_y, width - scale_value_start + x - 4.0, row_height);
     let result = draw_drag_value_compact_editable(
         ctx, angle_rect, params.angle, 1.0, 2005,
         &mut state.uv_drag_active[4], &mut state.uv_drag_start_value[4], &mut state.uv_drag_start_x[4],
@@ -3345,12 +4268,12 @@ fn draw_wall_face_container(
     draw_text(&format!("Blend: {:?}", wall.blend_mode), content_x.floor(), (content_y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
     content_y += line_height;
 
-    // UV coordinates display
+    // UV coordinates display (scaled by UV_SCALE)
     let uv = wall.uv.unwrap_or([
-        crate::rasterizer::Vec2::new(0.0, 1.0),  // bottom-left
-        crate::rasterizer::Vec2::new(1.0, 1.0),  // bottom-right
-        crate::rasterizer::Vec2::new(1.0, 0.0),  // top-right
-        crate::rasterizer::Vec2::new(0.0, 0.0),  // top-left
+        crate::rasterizer::Vec2::new(0.0, UV_SCALE),       // bottom-left
+        crate::rasterizer::Vec2::new(UV_SCALE, UV_SCALE),  // bottom-right
+        crate::rasterizer::Vec2::new(UV_SCALE, 0.0),       // top-right
+        crate::rasterizer::Vec2::new(0.0, 0.0),            // top-left
     ]);
     draw_text(&format!("UV: [{:.2},{:.2}] [{:.2},{:.2}]", uv[0].x, uv[0].y, uv[1].x, uv[1].y),
         content_x.floor(), (content_y + 12.0).floor(), 11.0, Color::from_rgba(120, 120, 120, 255));
@@ -3368,7 +4291,7 @@ fn draw_wall_face_container(
             }
         }
     }
-    content_y += 54.0; // Height of UV controls (3 rows * 18px)
+    content_y += 80.0; // Height of UV controls (4 rows × 20px: X offset, Y offset, Scale, Angle)
 
     // UV manipulation buttons
     let btn_size = 20.0;
@@ -3474,7 +4397,7 @@ fn draw_wall_face_container(
     }
     btn_x += btn_size + btn_spacing;
 
-    // 1:1 Texel mapping button - resets H scale and sets V scale to match wall height
+    // 1:1 Texel mapping button - resets H scale to 1.0 and sets V scale to match wall height
     let texel_rect = Rect::new(btn_x, content_y, btn_size, btn_size);
     if crate::ui::icon_button(ctx, texel_rect, icon::RATIO, icon_font, "1:1 Texel Mapping") {
         let walls = collect_wall_selections(state);
@@ -3485,10 +4408,11 @@ fn draw_wall_face_container(
                     if let Some(s) = r.get_sector_mut(gx, gz) {
                         if let Some(w) = get_wall_mut(s, &face) {
                             // Calculate V scale based on wall height relative to SECTOR_SIZE
+                            // Scale is normalized: 1.0 = one block width
                             let wall_height = w.height();
                             let v_scale = wall_height / crate::world::SECTOR_SIZE;
                             let mut params = extract_uv_params(&w.uv);
-                            params.x_scale = 1.0; // Wall width is always SECTOR_SIZE
+                            params.x_scale = 1.0; // Wall width = 1 block
                             params.y_scale = v_scale;
                             w.uv = Some(apply_uv_params(&params));
                         }
@@ -4280,19 +5204,19 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 y += 18.0;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Radius",
-                                    state.level.player_settings.radius, 20.0, 500.0, 0,
+                                    state.level.player_settings.radius, 0,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.radius = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
-                                    state.level.player_settings.height, 100.0, 2000.0, 1,
+                                    state.level.player_settings.height, 1,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.height = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Step",
-                                    state.level.player_settings.step_height, 50.0, 1000.0, 2,
+                                    state.level.player_settings.step_height, 2,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.step_height = v; }
                                 y = r.new_y;
@@ -4304,19 +5228,19 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 y += 18.0;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Walk",
-                                    state.level.player_settings.walk_speed, 100.0, 3000.0, 3,
+                                    state.level.player_settings.walk_speed, 3,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.walk_speed = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Run",
-                                    state.level.player_settings.run_speed, 200.0, 5000.0, 4,
+                                    state.level.player_settings.run_speed, 4,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.run_speed = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Gravity",
-                                    state.level.player_settings.gravity, 500.0, 10000.0, 5,
+                                    state.level.player_settings.gravity, 5,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.gravity = v; }
                                 y = r.new_y;
@@ -4328,13 +5252,13 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 y += 18.0;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Distance",
-                                    state.level.player_settings.camera_distance, 200.0, 3000.0, 6,
+                                    state.level.player_settings.camera_distance, 6,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.camera_distance = v; }
                                 y = r.new_y;
 
                                 let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Y Offset",
-                                    state.level.player_settings.camera_vertical_offset, 100.0, 1500.0, 7,
+                                    state.level.player_settings.camera_vertical_offset, 7,
                                     &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
                                 if let Some(v) = r.new_value { state.level.player_settings.camera_vertical_offset = v; }
                                 y = r.new_y;
@@ -4658,15 +5582,30 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
         draw_text(&msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 16.0, Color::from_rgba(100, 255, 100, 255));
     }
 
-    // Show keyboard shortcuts hint on the right (platform-specific)
-    #[cfg(not(target_arch = "wasm32"))]
-    let hints = "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New";
-    #[cfg(target_arch = "wasm32")]
-    let hints = "Ctrl+S: Download | Ctrl+O: Upload | Ctrl+N: New";
+    // Show keyboard shortcuts hint on the right (context-sensitive)
+    let hints = if state.tool == EditorTool::DrawWall {
+        // Wall tool hints - show direction and gap preference
+        let dir = match state.wall_direction {
+            crate::world::Direction::North => "N",
+            crate::world::Direction::East => "E",
+            crate::world::Direction::South => "S",
+            crate::world::Direction::West => "W",
+            crate::world::Direction::NwSe => "NW-SE",
+            crate::world::Direction::NeSw => "NE-SW",
+        };
+        let gap = if state.wall_prefer_high { "High" } else { "Low" };
+        format!("R: Rotate ({}) | F: Gap ({}) | Ctrl+S: Save", dir, gap)
+    } else {
+        // Default file shortcuts
+        #[cfg(not(target_arch = "wasm32"))]
+        { "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New".to_string() }
+        #[cfg(target_arch = "wasm32")]
+        { "Ctrl+S: Download | Ctrl+O: Upload | Ctrl+N: New".to_string() }
+    };
 
     let hint_width = hints.len() as f32 * 6.0; // Approximate width
     draw_text(
-        hints,
+        &hints,
         (rect.right() - hint_width - 8.0).floor(),
         (rect.y + 15.0).floor(),
         14.0,

@@ -6,7 +6,7 @@ use macroquad::prelude::*;
 use crate::rasterizer::Vec3;
 use crate::ui::{Rect, UiContext};
 use crate::world::{Direction, SplitDirection, SECTOR_SIZE};
-use super::{EditorState, Selection, GridViewMode, CEILING_HEIGHT, CLICK_HEIGHT};
+use super::{EditorState, EditorTool, Selection, GridViewMode, CEILING_HEIGHT, CLICK_HEIGHT};
 
 /// Determine which edge of a sector the mouse is closest to (in Top view mode)
 /// Returns the direction of the closest edge based on position within the sector
@@ -52,7 +52,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         // Zoom with scroll wheel
         if ctx.mouse.scroll != 0.0 {
             let zoom_factor = 1.0 + ctx.mouse.scroll * 0.02;
-            state.grid_zoom = (state.grid_zoom * zoom_factor).clamp(0.01, 2.0);
+            state.grid_zoom = (state.grid_zoom * zoom_factor).clamp(0.002, 2.0);
         }
 
         // Pan with right mouse button
@@ -503,6 +503,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 Direction::East  => ((sx1, sy1), (sx2, sy2)), // NE to SE
                 Direction::South => ((sx2, sy2), (sx3, sy3)), // SE to SW
                 Direction::West  => ((sx3, sy3), (sx0, sy0)), // SW to NW
+                Direction::NwSe  => ((sx0, sy0), (sx2, sy2)), // NW to SE diagonal
+                Direction::NeSw  => ((sx1, sy1), (sx3, sy3)), // NE to SW diagonal
             };
 
             // Draw highlighted edge (bright cyan, thick line)
@@ -1395,8 +1397,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 }
 
                 EditorTool::DrawWall => {
-                    // Wall placement only works in Top view mode
-                    if view_mode != GridViewMode::Top {
+                    // Diagonal walls must be placed in 3D viewport
+                    if state.wall_direction.is_diagonal() {
+                        state.set_status("Diagonal walls: use 3D viewport (R to change direction)", 2.0);
+                    } else if view_mode != GridViewMode::Top {
+                        // Wall placement only works in Top view mode
                         state.set_status("Wall tool: switch to Top view", 2.0);
                     } else if let (Some((gx, gz)), Some(edge_dir)) = (hovered_sector, hovered_edge) {
                         // Check if wall already exists on this edge
@@ -1407,6 +1412,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                     Direction::East => !s.walls_east.is_empty(),
                                     Direction::South => !s.walls_south.is_empty(),
                                     Direction::West => !s.walls_west.is_empty(),
+                                    Direction::NwSe | Direction::NeSw => false, // Can't detect in 2D
                                 }
                             }).unwrap_or(false)
                         }).unwrap_or(false);
@@ -1419,13 +1425,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 room.add_wall(gx, gz, edge_dir, 0.0, CEILING_HEIGHT, state.selected_texture.clone());
                                 room.recalculate_bounds();
                                 state.mark_portals_dirty();
-                                let dir_name = match edge_dir {
-                                    Direction::North => "north",
-                                    Direction::East => "east",
-                                    Direction::South => "south",
-                                    Direction::West => "west",
-                                };
-                                state.set_status(&format!("Created {} wall", dir_name), 1.5);
+                                state.set_status(&format!("Created {} wall", edge_dir.name().to_lowercase()), 1.5);
                             }
                         }
                     } else {
@@ -1486,24 +1486,118 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         state.set_status("Click on a sector to place object", 2.0);
                     }
                 }
+            }
+        }
+    }
 
-                EditorTool::DrawDiagonalWall => {
-                    // Diagonal walls are placed in 3D viewport where edge detection is possible
-                    state.set_status("Diagonal wall tool: use 3D viewport", 3.0);
+    // Handle Delete/Backspace key for deletion in 2D view (objects and sectors)
+    if inside && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
+        // Collect all selections (primary + multi)
+        let mut all_selections: Vec<Selection> = vec![state.selection.clone()];
+        all_selections.extend(state.multi_selection.clone());
+
+        // Check for object selections first
+        let object_selections: Vec<_> = all_selections.iter()
+            .filter_map(|s| match s {
+                Selection::Object { room, index } => Some((*room, *index)),
+                _ => None,
+            })
+            .collect();
+
+        if !object_selections.is_empty() {
+            state.save_undo();
+            // Delete objects in reverse order to preserve indices
+            let mut sorted_objects = object_selections;
+            sorted_objects.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let mut deleted_count = 0;
+            for (room_idx, obj_idx) in sorted_objects {
+                if state.level.remove_object(room_idx, obj_idx).is_some() {
+                    deleted_count += 1;
+                }
+            }
+
+            if deleted_count > 0 {
+                state.set_selection(Selection::None);
+                state.clear_multi_selection();
+                let msg = if deleted_count == 1 { "Deleted 1 object".to_string() } else { format!("Deleted {} objects", deleted_count) };
+                state.set_status(&msg, 2.0);
+            }
+        } else {
+            // Check for sector selections (from 2D drag select)
+            let sector_selections: Vec<_> = all_selections.iter()
+                .filter_map(|s| match s {
+                    Selection::Sector { room, x, z } => Some((*room, *x, *z)),
+                    _ => None,
+                })
+                .collect();
+
+            if !sector_selections.is_empty() {
+                state.save_undo();
+                let mut deleted_count = 0;
+                let mut affected_rooms = std::collections::HashSet::new();
+
+                for (room_idx, gx, gz) in &sector_selections {
+                    if let Some(room) = state.level.rooms.get_mut(*room_idx) {
+                        if let Some(sector) = room.get_sector_mut(*gx, *gz) {
+                            // Clear all geometry in sector
+                            let had_geometry = sector.floor.is_some()
+                                || sector.ceiling.is_some()
+                                || !sector.walls_north.is_empty()
+                                || !sector.walls_east.is_empty()
+                                || !sector.walls_south.is_empty()
+                                || !sector.walls_west.is_empty()
+                                || !sector.walls_nwse.is_empty()
+                                || !sector.walls_nesw.is_empty();
+
+                            if had_geometry {
+                                sector.floor = None;
+                                sector.ceiling = None;
+                                sector.walls_north.clear();
+                                sector.walls_east.clear();
+                                sector.walls_south.clear();
+                                sector.walls_west.clear();
+                                sector.walls_nwse.clear();
+                                sector.walls_nesw.clear();
+                                deleted_count += 1;
+                                affected_rooms.insert(*room_idx);
+                            }
+                        }
+                    }
+                }
+
+                // Cleanup affected rooms
+                for room_idx in affected_rooms {
+                    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+                        room.cleanup_empty_sectors();
+                        room.trim_empty_edges();
+                        room.recalculate_bounds();
+                    }
+                }
+
+                if deleted_count > 0 {
+                    state.set_selection(Selection::None);
+                    state.clear_multi_selection();
+                    state.mark_portals_dirty();
+                    let msg = if deleted_count == 1 { "Deleted 1 sector".to_string() } else { format!("Deleted {} sectors", deleted_count) };
+                    state.set_status(&msg, 2.0);
                 }
             }
         }
     }
 
-    // Handle Delete/Backspace key for object deletion in 2D view
-    if inside && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
-        // Check if an object is selected
-        if let Selection::Object { room, index } = state.selection {
-            state.save_undo();
-            if state.level.remove_object(room, index).is_some() {
-                state.set_selection(Selection::None);
-                state.set_status("Object deleted", 2.0);
-            }
+    // Tool shortcuts: 1=Select, 2=Floor, 3=Wall, 4=Ceiling, 5=Object
+    if inside {
+        if is_key_pressed(KeyCode::Key1) {
+            state.tool = EditorTool::Select;
+        } else if is_key_pressed(KeyCode::Key2) {
+            state.tool = EditorTool::DrawFloor;
+        } else if is_key_pressed(KeyCode::Key3) {
+            state.tool = EditorTool::DrawWall;
+        } else if is_key_pressed(KeyCode::Key4) {
+            state.tool = EditorTool::DrawCeiling;
+        } else if is_key_pressed(KeyCode::Key5) {
+            state.tool = EditorTool::PlaceObject;
         }
     }
 

@@ -21,7 +21,7 @@ use crate::rasterizer::{
 };
 use crate::world::{SECTOR_SIZE, SplitDirection};
 use crate::input::{InputState, Action};
-use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT};
+use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT, CopiedFaceData};
 
 /// Calculate distance from point (px, py) to line segment from (x1, y1) to (x2, y2)
 fn point_to_line_dist(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
@@ -49,6 +49,42 @@ fn is_wall_face(face: &SectorFace) -> bool {
     )
 }
 
+/// Get the wall index from a wall face (vertical layer index)
+fn get_wall_index(face: &SectorFace) -> Option<usize> {
+    match face {
+        SectorFace::WallNorth(i) | SectorFace::WallEast(i) |
+        SectorFace::WallSouth(i) | SectorFace::WallWest(i) |
+        SectorFace::WallNwSe(i) | SectorFace::WallNeSw(i) => Some(*i),
+        _ => None,
+    }
+}
+
+/// Get the wall direction type (0-5) for matching walls of the same orientation
+fn get_wall_direction_type(face: &SectorFace) -> Option<usize> {
+    match face {
+        SectorFace::WallNorth(_) => Some(0),
+        SectorFace::WallEast(_) => Some(1),
+        SectorFace::WallSouth(_) => Some(2),
+        SectorFace::WallWest(_) => Some(3),
+        SectorFace::WallNwSe(_) => Some(4),
+        SectorFace::WallNeSw(_) => Some(5),
+        _ => None,
+    }
+}
+
+/// Create a wall face with the given direction type and index
+fn make_wall_face(direction_type: usize, index: usize) -> SectorFace {
+    match direction_type {
+        0 => SectorFace::WallNorth(index),
+        1 => SectorFace::WallEast(index),
+        2 => SectorFace::WallSouth(index),
+        3 => SectorFace::WallWest(index),
+        4 => SectorFace::WallNwSe(index),
+        5 => SectorFace::WallNeSw(index),
+        _ => SectorFace::WallNorth(index), // Fallback
+    }
+}
+
 /// Get the two grid corner endpoints for a wall face
 /// Returns ((x1, z1), (x2, z2)) in grid coordinates (fractional, where corners are at 0 and 1 within sector)
 fn get_wall_endpoints(gx: usize, gz: usize, face: &SectorFace) -> ((i32, i32), (i32, i32)) {
@@ -68,7 +104,8 @@ fn get_wall_endpoints(gx: usize, gz: usize, face: &SectorFace) -> ((i32, i32), (
 }
 
 /// Find a connected path of walls/diagonals between two wall faces using BFS
-/// Returns the path including start and end, or None if not connected
+/// Now layer-aware: if start and end walls have different indices (vertical layers),
+/// returns all walls in the index range [min_idx, max_idx] for each XZ position along the path.
 fn find_wall_path(
     room: &crate::world::Room,
     start_x: usize, start_z: usize, start_face: &SectorFace,
@@ -76,57 +113,75 @@ fn find_wall_path(
 ) -> Option<Vec<(usize, usize, SectorFace)>> {
     use std::collections::{VecDeque, HashSet, HashMap};
 
+    // Get start/end wall indices (vertical layer)
+    let start_wall_idx = get_wall_index(start_face).unwrap_or(0);
+    let end_wall_idx = get_wall_index(end_face).unwrap_or(0);
+    let min_layer = start_wall_idx.min(end_wall_idx);
+    let max_layer = start_wall_idx.max(end_wall_idx);
+
     // Get all walls in the room as (x, z, face, endpoints)
+    // Use index 0 for path finding (we'll expand to all layers at the end)
     let mut all_walls: Vec<(usize, usize, SectorFace, ((i32, i32), (i32, i32)))> = Vec::new();
+    // Also track how many walls exist at each (x, z, direction_type)
+    let mut wall_counts: HashMap<(usize, usize, usize), usize> = HashMap::new();
 
     for gz in 0..room.depth {
         for gx in 0..room.width {
             if let Some(sector) = room.get_sector(gx, gz) {
-                // Cardinal walls
-                for (i, _) in sector.walls_north.iter().enumerate() {
-                    let face = SectorFace::WallNorth(i);
+                // Cardinal walls - only add index 0 for BFS, track count
+                if !sector.walls_north.is_empty() {
+                    let face = SectorFace::WallNorth(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 0), sector.walls_north.len());
                 }
-                for (i, _) in sector.walls_east.iter().enumerate() {
-                    let face = SectorFace::WallEast(i);
+                if !sector.walls_east.is_empty() {
+                    let face = SectorFace::WallEast(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 1), sector.walls_east.len());
                 }
-                for (i, _) in sector.walls_south.iter().enumerate() {
-                    let face = SectorFace::WallSouth(i);
+                if !sector.walls_south.is_empty() {
+                    let face = SectorFace::WallSouth(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 2), sector.walls_south.len());
                 }
-                for (i, _) in sector.walls_west.iter().enumerate() {
-                    let face = SectorFace::WallWest(i);
+                if !sector.walls_west.is_empty() {
+                    let face = SectorFace::WallWest(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 3), sector.walls_west.len());
                 }
                 // Diagonal walls
-                for (i, _) in sector.walls_nwse.iter().enumerate() {
-                    let face = SectorFace::WallNwSe(i);
+                if !sector.walls_nwse.is_empty() {
+                    let face = SectorFace::WallNwSe(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 4), sector.walls_nwse.len());
                 }
-                for (i, _) in sector.walls_nesw.iter().enumerate() {
-                    let face = SectorFace::WallNeSw(i);
+                if !sector.walls_nesw.is_empty() {
+                    let face = SectorFace::WallNeSw(0);
                     all_walls.push((gx, gz, face, get_wall_endpoints(gx, gz, &face)));
+                    wall_counts.insert((gx, gz, 5), sector.walls_nesw.len());
                 }
             }
         }
     }
 
-    // Find indices of start and end walls
-    let start_idx = all_walls.iter().position(|(x, z, f, _)| *x == start_x && *z == start_z && *f == *start_face)?;
-    let end_idx = all_walls.iter().position(|(x, z, f, _)| *x == end_x && *z == end_z && *f == *end_face)?;
+    // Get wall direction types for BFS lookup
+    let start_dir_type = get_wall_direction_type(start_face)?;
+    let end_dir_type = get_wall_direction_type(end_face)?;
 
-    if start_idx == end_idx {
-        // Same wall
-        return Some(vec![(start_x, start_z, *start_face)]);
-    }
+    // Find indices of start and end walls (using index-0 faces)
+    let start_idx = all_walls.iter().position(|(x, z, f, _)| {
+        *x == start_x && *z == start_z && get_wall_direction_type(f) == Some(start_dir_type)
+    })?;
+    let end_idx = all_walls.iter().position(|(x, z, f, _)| {
+        *x == end_x && *z == end_z && get_wall_direction_type(f) == Some(end_dir_type)
+    })?;
 
     // Check if two walls share an endpoint (are connected)
     let walls_connected = |a: &((i32, i32), (i32, i32)), b: &((i32, i32), (i32, i32))| -> bool {
         a.0 == b.0 || a.0 == b.1 || a.1 == b.0 || a.1 == b.1
     };
 
-    // BFS to find shortest path
+    // BFS to find shortest path (by XZ connectivity)
     let mut visited: HashSet<usize> = HashSet::new();
     let mut parent: HashMap<usize, usize> = HashMap::new();
     let mut queue: VecDeque<usize> = VecDeque::new();
@@ -134,36 +189,62 @@ fn find_wall_path(
     visited.insert(start_idx);
     queue.push_back(start_idx);
 
-    while let Some(current) = queue.pop_front() {
-        if current == end_idx {
-            // Found path, reconstruct it
-            let mut path = Vec::new();
-            let mut node = end_idx;
-            while node != start_idx {
-                let (x, z, f, _) = &all_walls[node];
-                path.push((*x, *z, *f));
-                node = *parent.get(&node).unwrap();
+    let mut path_indices: Option<Vec<usize>> = None;
+
+    if start_idx == end_idx {
+        // Same XZ position and direction
+        path_indices = Some(vec![start_idx]);
+    } else {
+        while let Some(current) = queue.pop_front() {
+            if current == end_idx {
+                // Found path, reconstruct it
+                let mut indices = Vec::new();
+                let mut node = end_idx;
+                while node != start_idx {
+                    indices.push(node);
+                    node = *parent.get(&node).unwrap();
+                }
+                indices.push(start_idx);
+                indices.reverse();
+                path_indices = Some(indices);
+                break;
             }
-            let (x, z, f, _) = &all_walls[start_idx];
-            path.push((*x, *z, *f));
-            path.reverse();
-            return Some(path);
-        }
 
-        let current_endpoints = &all_walls[current].3;
+            let current_endpoints = &all_walls[current].3;
 
-        // Find all connected walls
-        for (i, (_, _, _, endpoints)) in all_walls.iter().enumerate() {
-            if !visited.contains(&i) && walls_connected(current_endpoints, endpoints) {
-                visited.insert(i);
-                parent.insert(i, current);
-                queue.push_back(i);
+            // Find all connected walls
+            for (i, (_, _, _, endpoints)) in all_walls.iter().enumerate() {
+                if !visited.contains(&i) && walls_connected(current_endpoints, endpoints) {
+                    visited.insert(i);
+                    parent.insert(i, current);
+                    queue.push_back(i);
+                }
             }
         }
     }
 
-    // No path found
-    None
+    // Expand path to include all wall layers in range [min_layer, max_layer]
+    let path_indices = path_indices?;
+    let mut result: Vec<(usize, usize, SectorFace)> = Vec::new();
+
+    for idx in path_indices {
+        let (x, z, face, _) = &all_walls[idx];
+        let dir_type = get_wall_direction_type(face).unwrap_or(0);
+        let count = wall_counts.get(&(*x, *z, dir_type)).copied().unwrap_or(1);
+
+        // Add all walls in the layer range that exist at this position
+        for layer in min_layer..=max_layer {
+            if layer < count {
+                result.push((*x, *z, make_wall_face(dir_type, layer)));
+            }
+        }
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Draw the 3D viewport using the software rasterizer
@@ -176,6 +257,12 @@ pub fn draw_viewport_3d(
     input: &InputState,
     icon_font: Option<&Font>,
 ) {
+    use super::state::EditorFrameTimings;
+    let _vp_start = EditorFrameTimings::start();
+
+    // === INPUT PHASE ===
+    let input_start = EditorFrameTimings::start();
+
     // Resize framebuffer based on resolution setting
     let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
         // Keep horizontal resolution fixed, scale vertical to match viewport aspect ratio
@@ -235,12 +322,62 @@ pub fn draw_viewport_3d(
         state.set_status(&format!("Vertex mode: {}", mode), 2.0);
     }
 
-    // Clear selection with Escape key
-    if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty()) {
+    // Rotate wall direction with R key (in DrawWall mode)
+    // Cycles through all 6 directions: N -> E -> S -> W -> NW-SE -> NE-SW -> N
+    if inside_viewport && is_key_pressed(KeyCode::R) && state.tool == EditorTool::DrawWall {
+        state.wall_direction = state.wall_direction.rotate_cw();
+        state.set_status(&format!("Wall direction: {}", state.wall_direction.name()), 1.0);
+    }
+
+    // Toggle high/low gap preference with F key (in DrawWall mode)
+    if inside_viewport && is_key_pressed(KeyCode::F) && state.tool == EditorTool::DrawWall {
+        state.wall_prefer_high = !state.wall_prefer_high;
+        let gap = if state.wall_prefer_high { "High" } else { "Low" };
+        state.set_status(&format!("Gap preference: {}", gap), 1.0);
+    }
+
+    // Tool shortcuts: 1=Select, 2=Floor, 3=Wall, 4=Ceiling, 5=Object
+    if inside_viewport {
+        if is_key_pressed(KeyCode::Key1) {
+            state.tool = EditorTool::Select;
+        } else if is_key_pressed(KeyCode::Key2) {
+            state.tool = EditorTool::DrawFloor;
+        } else if is_key_pressed(KeyCode::Key3) {
+            state.tool = EditorTool::DrawWall;
+        } else if is_key_pressed(KeyCode::Key4) {
+            state.tool = EditorTool::DrawCeiling;
+        } else if is_key_pressed(KeyCode::Key5) {
+            state.tool = EditorTool::PlaceObject;
+        }
+    }
+
+    // H/V flip for geometry clipboard
+    if inside_viewport && is_key_pressed(KeyCode::H) {
+        if let Some(gc) = &mut state.geometry_clipboard {
+            gc.flip_h = !gc.flip_h;
+            let status = if gc.flip_h { "Geometry: flipped horizontally" } else { "Geometry: flip H off" };
+            state.set_status(status, 1.0);
+        }
+    }
+    if inside_viewport && is_key_pressed(KeyCode::V) {
+        if let Some(gc) = &mut state.geometry_clipboard {
+            gc.flip_v = !gc.flip_v;
+            let status = if gc.flip_v { "Geometry: flipped vertically" } else { "Geometry: flip V off" };
+            state.set_status(status, 1.0);
+        }
+    }
+
+    // Clear selection and geometry clipboard with Escape key
+    if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty() || state.geometry_clipboard.is_some()) {
         state.save_selection_undo();
         state.set_selection(Selection::None);
         state.clear_multi_selection();
-        state.set_status("Selection cleared", 0.5);
+        if state.geometry_clipboard.is_some() {
+            state.geometry_clipboard = None;
+            state.set_status("Paste cancelled", 0.5);
+        } else {
+            state.set_status("Selection cleared", 0.5);
+        }
     }
 
     // Delete selected elements with Delete or Backspace key (supports multi-selection)
@@ -324,9 +461,9 @@ pub fn draw_viewport_3d(
     // Find hovered elements using 2D screen-space projection
     // Priority: vertex > edge > face
     let mut preview_sector: Option<(f32, f32, f32, bool)> = None; // (x, z, target_y, is_occupied)
-    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state)
+    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state, mouse_y_room_relative)
     // state: 0 = new wall, 1 = filling gap, 2 = fully covered
-    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [f32; 4], u8)> = None;
+    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [f32; 4], u8, Option<f32>)> = None;
     // Diagonal wall preview: (x, z, is_nwse, corner_heights [corner1_bot, corner2_bot, corner2_top, corner1_top])
     let mut preview_diagonal_wall: Option<(f32, f32, bool, [f32; 4])> = None;
 
@@ -343,6 +480,66 @@ pub fn draw_viewport_3d(
     let hovered_edge = hover.edge;
     let hovered_face = hover.face;
     let hovered_object = hover.object;
+
+    // Geometry paste preview: detect sector position when we have clipboard
+    // This enables showing a wireframe preview of where geometry will be pasted
+    // Uses signed coordinates to allow pasting outside current room bounds (room will expand)
+    // Shows preview anywhere - not just on empty space (user can paste to overwrite existing geometry)
+    let geometry_paste_preview: Option<(i32, i32)> = if inside_viewport
+        && state.tool == EditorTool::Select
+        && state.geometry_clipboard.is_some()
+    {
+        // Find sector under cursor using similar logic to DrawFloor mode
+        if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
+            let detection_y = 0.0;
+            let search_radius = 20;
+            let cam_x = state.camera_3d.position.x;
+            let cam_z = state.camera_3d.position.z;
+            let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+
+            let mut closest: Option<(f32, f32, f32)> = None;
+            for ix in 0..(search_radius * 2) {
+                for iz in 0..(search_radius * 2) {
+                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
+                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
+                    let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, detection_y, grid_z + SECTOR_SIZE / 2.0);
+
+                    if let Some((sx, sy)) = world_to_screen(test_pos, state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb_width, fb_height)
+                    {
+                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                        if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                            closest = Some((grid_x, grid_z, dist));
+                        }
+                    }
+                }
+            }
+
+            if let Some((snapped_x, snapped_z, dist)) = closest {
+                if dist < 100.0 {
+                    // Convert world coords to grid coords relative to room position
+                    // Allow negative values and values beyond room bounds (room will expand on paste)
+                    if let Some(room) = state.level.rooms.get(state.current_room) {
+                        let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                        let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
+                        Some((gx, gz))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // In drawing modes, find preview sector position
     if inside_viewport && (state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling) {
@@ -458,125 +655,63 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // In DrawWall mode, find preview wall edge
-    if inside_viewport && state.tool == EditorTool::DrawWall {
+    // In DrawWall mode with cardinal direction, find preview wall at sector under cursor
+    // Direction is controlled by state.wall_direction (rotated with R key)
+    // For diagonal directions, a separate block handles the preview (see below)
+    if inside_viewport && state.tool == EditorTool::DrawWall && !state.wall_direction.is_diagonal() {
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             use super::CEILING_HEIGHT;
-            use crate::world::Direction;
 
-            // Find the closest sector edge to the mouse cursor
+            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            let (default_y_bottom, default_y_top) = state.level.rooms.get(state.current_room)
+                .map(|r| (r.bounds.min.y, r.bounds.max.y))
+                .unwrap_or((0.0, CEILING_HEIGHT));
+            let dir = state.wall_direction;
+
+            // Find sector under cursor by checking sector centers
             let search_radius = 20;
-            let cam_x = state.camera_3d.position.x;
-            let cam_z = state.camera_3d.position.z;
-            let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let cam = &state.camera_3d.position;
+            let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
 
-            // Default wall height (floor to ceiling or 0 to CEILING_HEIGHT)
-            let (default_y_bottom, default_y_top) = (0.0, CEILING_HEIGHT);
-
-            // Find closest edge - each sector has 4 edges
-            let mut closest_edge: Option<(f32, f32, Direction, f32)> = None; // (grid_x, grid_z, direction, screen_dist)
+            let mut closest_sector: Option<(f32, f32, f32)> = None; // (grid_x, grid_z, dist)
 
             for ix in 0..(search_radius * 2) {
                 for iz in 0..(search_radius * 2) {
                     let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
                     let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-
-                    // Mid-height for edge center detection
                     let mid_y = (default_y_bottom + default_y_top) / 2.0;
+                    let center = Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0);
 
-                    // Check all 4 edges of this sector
-                    let edges = [
-                        // North edge (-Z): from NW to NE corner
-                        (Direction::North, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z)),
-                        // East edge (+X): from NE to SE corner
-                        (Direction::East, Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE / 2.0)),
-                        // South edge (+Z): from SE to SW corner
-                        (Direction::South, Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE)),
-                        // West edge (-X): from SW to NW corner
-                        (Direction::West, Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE / 2.0)),
-                    ];
-
-                    for (edge_dir, center) in edges {
-                        if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height)
-                        {
-                            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                            if closest_edge.map_or(true, |(_, _, _, best_dist)| dist < best_dist) {
-                                // Walls face inward based on direction:
-                                // - North wall (at z=grid_z) faces +Z
-                                // - South wall (at z=grid_z+SECTOR_SIZE) faces -Z
-                                // - East wall (at x=grid_x+SECTOR_SIZE) faces -X
-                                // - West wall (at x=grid_x) faces +X
-                                //
-                                // To make wall face camera, we may need to place on adjacent sector
-                                let cam = state.camera_3d.position;
-                                let (final_grid_x, final_grid_z, dir) = match edge_dir {
-                                    Direction::North => {
-                                        // Edge at z=grid_z, wall faces +Z (south)
-                                        // If camera is north of edge (cam.z < center.z), place as South wall
-                                        // on the sector to the north (grid_z - SECTOR_SIZE)
-                                        if cam.z < center.z {
-                                            (grid_x, grid_z - SECTOR_SIZE, Direction::South)
-                                        } else {
-                                            (grid_x, grid_z, Direction::North)
-                                        }
-                                    }
-                                    Direction::South => {
-                                        // Edge at z=grid_z+SECTOR_SIZE, wall faces -Z (north)
-                                        // If camera is south of edge (cam.z > center.z), place as North wall
-                                        // on the sector to the south (grid_z + SECTOR_SIZE)
-                                        if cam.z > center.z {
-                                            (grid_x, grid_z + SECTOR_SIZE, Direction::North)
-                                        } else {
-                                            (grid_x, grid_z, Direction::South)
-                                        }
-                                    }
-                                    Direction::East => {
-                                        // Edge at x=grid_x+SECTOR_SIZE, wall faces -X (west)
-                                        // If camera is east of edge (cam.x > center.x), place as West wall
-                                        // on the sector to the east (grid_x + SECTOR_SIZE)
-                                        if cam.x > center.x {
-                                            (grid_x + SECTOR_SIZE, grid_z, Direction::West)
-                                        } else {
-                                            (grid_x, grid_z, Direction::East)
-                                        }
-                                    }
-                                    Direction::West => {
-                                        // Edge at x=grid_x, wall faces +X (east)
-                                        // If camera is west of edge (cam.x < center.x), place as East wall
-                                        // on the sector to the west (grid_x - SECTOR_SIZE)
-                                        if cam.x < center.x {
-                                            (grid_x - SECTOR_SIZE, grid_z, Direction::East)
-                                        } else {
-                                            (grid_x, grid_z, Direction::West)
-                                        }
-                                    }
-                                };
-                                closest_edge = Some((final_grid_x, final_grid_z, dir, dist));
-                            }
+                    if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb.width, fb.height)
+                    {
+                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                        if closest_sector.map_or(true, |(_, _, best_dist)| dist < best_dist) {
+                            closest_sector = Some((grid_x, grid_z, dist));
                         }
                     }
                 }
             }
 
-            if let Some((grid_x, grid_z, dir, dist)) = closest_edge {
-                if dist < 80.0 {
-                    // Estimate mouse world Y by projecting floor and ceiling points and interpolating
-                    // Use the wall edge center position for X/Z
+            if let Some((grid_x, grid_z, dist)) = closest_sector {
+                if dist < 100.0 {
+                    // Estimate mouse world Y for gap selection
+                    // Note: diagonal directions filtered out in if condition above
                     let edge_x = match dir {
-                        Direction::North | Direction::South => grid_x + SECTOR_SIZE / 2.0,
-                        Direction::East => grid_x + SECTOR_SIZE,
-                        Direction::West => grid_x,
+                        crate::world::Direction::North | crate::world::Direction::South => grid_x + SECTOR_SIZE / 2.0,
+                        crate::world::Direction::East => grid_x + SECTOR_SIZE,
+                        crate::world::Direction::West => grid_x,
+                        crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
                     };
                     let edge_z = match dir {
-                        Direction::North => grid_z,
-                        Direction::South => grid_z + SECTOR_SIZE,
-                        Direction::East | Direction::West => grid_z + SECTOR_SIZE / 2.0,
+                        crate::world::Direction::North => grid_z,
+                        crate::world::Direction::South => grid_z + SECTOR_SIZE,
+                        crate::world::Direction::East | crate::world::Direction::West => grid_z + SECTOR_SIZE / 2.0,
+                        crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
                     };
 
-                    // Project floor and ceiling Y at this edge to screen
                     let room_y = state.level.rooms.get(state.current_room)
                         .map(|r| r.position.y)
                         .unwrap_or(0.0);
@@ -591,12 +726,9 @@ pub fn draw_viewport_3d(
                             state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
                             fb.width, fb.height),
                     ) {
-                        // Interpolate: screen Y goes from ceiling (top) to floor (bottom)
-                        // ceiling_sy < floor_sy in screen space (Y increases downward)
                         if (floor_sy - ceiling_sy).abs() > 1.0 {
                             let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
                             let t_clamped = t.clamp(0.0, 1.0);
-                            // Interpolate from ceiling to floor in room-relative Y
                             Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
                         } else {
                             None
@@ -606,21 +738,53 @@ pub fn draw_viewport_3d(
                     };
 
                     // Calculate where the new wall should be placed
-                    // Uses floor/ceiling heights and finds gaps between existing walls
+                    // Use prefer_high setting to select gap (high Y = ceiling, low Y = floor)
+                    let gap_select_y = if state.wall_prefer_high {
+                        Some(default_y_top - 1.0)  // Near ceiling
+                    } else {
+                        Some(default_y_bottom + 1.0)  // Near floor
+                    };
                     let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
                         if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
                             if let Some(sector) = room.get_sector(gx, gz) {
+                                // Debug logging for wall gap detection (only when sector changes)
+                                {
+                                    use std::sync::atomic::{AtomicI32, Ordering};
+                                    static LAST_GX: AtomicI32 = AtomicI32::new(-999);
+                                    static LAST_GZ: AtomicI32 = AtomicI32::new(-999);
+                                    let gx_i = gx as i32;
+                                    let gz_i = gz as i32;
+                                    if LAST_GX.load(Ordering::Relaxed) != gx_i || LAST_GZ.load(Ordering::Relaxed) != gz_i {
+                                        LAST_GX.store(gx_i, Ordering::Relaxed);
+                                        LAST_GZ.store(gz_i, Ordering::Relaxed);
+                                        let floor_info = sector.floor.as_ref().map(|f| {
+                                            let (l, r) = f.edge_heights(dir);
+                                            format!("F[{:.0},{:.0}]", l, r)
+                                        }).unwrap_or_else(|| "F[-]".to_string());
+                                        let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                            let (l, r) = c.edge_heights(dir);
+                                            format!("C[{:.0},{:.0}]", l, r)
+                                        }).unwrap_or_else(|| "C[-]".to_string());
+                                        let walls = sector.walls(dir);
+                                        let walls_info = if walls.is_empty() {
+                                            "W[]".to_string()
+                                        } else {
+                                            let w_strs: Vec<String> = walls.iter().map(|w| {
+                                                format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
+                                            }).collect();
+                                            format!("W{}", w_strs.join(","))
+                                        };
+                                        let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
+                                        eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
+                                    }
+                                }
                                 let has_existing = !sector.walls(dir).is_empty();
-                                match sector.next_wall_position(dir, default_y_bottom, default_y_top, mouse_y_room_relative) {
+                                match sector.next_wall_position(dir, default_y_bottom, default_y_top, gap_select_y) {
                                     Some(corner_heights) => {
-                                        // 0 = new wall, 1 = filling gap
-                                        let state = if has_existing { 1u8 } else { 0u8 };
-                                        Some((corner_heights, state))
+                                        let wall_state = if has_existing { 1u8 } else { 0u8 };
+                                        Some((corner_heights, wall_state))
                                     }
-                                    None => {
-                                        // Edge is fully covered
-                                        Some(([0.0, 0.0, 0.0, 0.0], 2u8))
-                                    }
+                                    None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)),
                                 }
                             } else {
                                 Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
@@ -633,15 +797,15 @@ pub fn draw_viewport_3d(
                     };
 
                     if let Some((corner_heights, wall_state)) = wall_info {
-                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state));
+                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
                     }
                 }
             }
         }
     }
 
-    // In DrawDiagonalWall mode, find preview diagonal edge
-    if inside_viewport && state.tool == EditorTool::DrawDiagonalWall {
+    // In DrawWall mode with diagonal direction, find preview diagonal edge
+    if inside_viewport && state.tool == EditorTool::DrawWall && state.wall_direction.is_diagonal() {
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             use super::CEILING_HEIGHT;
 
@@ -651,7 +815,10 @@ pub fn draw_viewport_3d(
             let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
             let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
 
-            let (default_y_bottom, default_y_top) = (0.0, CEILING_HEIGHT);
+            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            let (default_y_bottom, default_y_top) = state.level.rooms.get(state.current_room)
+                .map(|r| (r.bounds.min.y, r.bounds.max.y))
+                .unwrap_or((0.0, CEILING_HEIGHT));
             let mid_y = (default_y_bottom + default_y_top) / 2.0;
 
             // Find closest sector center
@@ -680,73 +847,55 @@ pub fn draw_viewport_3d(
                     let center_x = grid_x + SECTOR_SIZE / 2.0;
                     let center_z = grid_z + SECTOR_SIZE / 2.0;
 
-                    // Choose diagonal type based on which diagonal line the mouse is closer to
-                    let is_nwse = if let Some(_) = world_to_screen(
-                        Vec3::new(center_x, mid_y, center_z), state.camera_3d.position,
-                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                        fb.width, fb.height)
-                    {
-                        // Project NW corner and SE corner to screen
-                        let nw = Vec3::new(grid_x, mid_y, grid_z);
-                        let se = Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE);
-                        let ne = Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z);
-                        let sw = Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE);
+                    // Use wall_direction to determine diagonal type (NwSe or NeSw)
+                    let is_nwse = state.wall_direction == crate::world::Direction::NwSe;
 
-                        if let (Some((nw_sx, nw_sy)), Some((se_sx, se_sy)),
-                                Some((ne_sx, ne_sy)), Some((sw_sx, sw_sy))) = (
-                            world_to_screen(nw, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                            world_to_screen(se, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                            world_to_screen(ne, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                            world_to_screen(sw, state.camera_3d.position, state.camera_3d.basis_x,
-                                state.camera_3d.basis_y, state.camera_3d.basis_z, fb.width, fb.height),
-                        ) {
-                            // Calculate distance from mouse to each diagonal line
-                            let dist_nwse = point_to_line_dist(mouse_fb_x, mouse_fb_y, nw_sx, nw_sy, se_sx, se_sy);
-                            let dist_nesw = point_to_line_dist(mouse_fb_x, mouse_fb_y, ne_sx, ne_sy, sw_sx, sw_sy);
-                            dist_nwse < dist_nesw
-                        } else {
-                            true // Default to NW-SE
-                        }
+                    // Use prefer_high setting to select gap (same as axis-aligned walls)
+                    let gap_select_y = if state.wall_prefer_high {
+                        Some(default_y_top - 1.0)  // Near ceiling
                     } else {
-                        true
-                    };
-
-                    // Compute mouse Y in room-relative space for gap selection
-                    let room_y = state.level.rooms.get(state.current_room)
-                        .map(|r| r.position.y)
-                        .unwrap_or(0.0);
-                    let floor_world = Vec3::new(center_x, room_y + default_y_bottom, center_z);
-                    let ceiling_world = Vec3::new(center_x, room_y + default_y_top, center_z);
-
-                    let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
-                        world_to_screen(floor_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                        world_to_screen(ceiling_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                    ) {
-                        if (floor_sy - ceiling_sy).abs() > 1.0 {
-                            let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
-                            let t_clamped = t.clamp(0.0, 1.0);
-                            Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
+                        Some(default_y_bottom + 1.0)  // Near floor
                     };
 
                     // Use gap detection for diagonal walls
                     let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
                         if let Some((gx, gz)) = room.world_to_grid(center_x, center_z) {
                             if let Some(sector) = room.get_sector(gx, gz) {
+                                // Debug logging for diagonal wall gap detection (only when sector changes)
+                                {
+                                    use std::sync::atomic::{AtomicI32, Ordering};
+                                    static LAST_DIAG_GX: AtomicI32 = AtomicI32::new(-999);
+                                    static LAST_DIAG_GZ: AtomicI32 = AtomicI32::new(-999);
+                                    let gx_i = gx as i32;
+                                    let gz_i = gz as i32;
+                                    if LAST_DIAG_GX.load(Ordering::Relaxed) != gx_i || LAST_DIAG_GZ.load(Ordering::Relaxed) != gz_i {
+                                        LAST_DIAG_GX.store(gx_i, Ordering::Relaxed);
+                                        LAST_DIAG_GZ.store(gz_i, Ordering::Relaxed);
+                                        let dir = if is_nwse { crate::world::Direction::NwSe } else { crate::world::Direction::NeSw };
+                                        let floor_info = sector.floor.as_ref().map(|f| {
+                                            let (l, r) = f.edge_heights(dir);
+                                            format!("F[{:.0},{:.0}]", l, r)
+                                        }).unwrap_or_else(|| "F[-]".to_string());
+                                        let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                            let (l, r) = c.edge_heights(dir);
+                                            format!("C[{:.0},{:.0}]", l, r)
+                                        }).unwrap_or_else(|| "C[-]".to_string());
+                                        let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
+                                        let walls_info = if walls.is_empty() {
+                                            "W[]".to_string()
+                                        } else {
+                                            let w_strs: Vec<String> = walls.iter().map(|w| {
+                                                format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
+                                            }).collect();
+                                            format!("W{}", w_strs.join(","))
+                                        };
+                                        let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
+                                        eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
+                                    }
+                                }
                                 let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
                                 let has_existing = !walls.is_empty();
-                                match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, mouse_y_room_relative) {
+                                match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, gap_select_y) {
                                     Some(heights) => Some((heights, if has_existing { 1u8 } else { 0u8 })),
                                     None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)), // Fully covered
                                 }
@@ -783,8 +932,86 @@ pub fn draw_viewport_3d(
                 if let Some((room_idx, gx, gz, corner_idx, face, _)) = hovered_vertex {
                     // Create vertex selection (allows proper vertex multi-selection)
                     let new_selection = Selection::Vertex { room: room_idx, x: gx, z: gz, face: face.clone(), corner_idx };
+                    eprintln!("VERTEX CLICK: ({},{}) corner={} face={:?}, shift={}, current_sel={:?}",
+                        gx, gz, corner_idx, face, shift_down, state.selection);
                     if shift_down {
-                        state.toggle_multi_selection(new_selection.clone());
+                        // Range selection: if current selection is a vertex on same face type,
+                        // select all vertices along the line between them
+                        let mut did_range_select = false;
+                        if let Selection::Vertex { room: sel_room, x: sel_x, z: sel_z, face: sel_face, corner_idx: sel_corner } = &state.selection {
+                            // Only range select on same room, same face type (floor/ceiling)
+                            let same_face_type = matches!((&face, sel_face),
+                                (SectorFace::Floor, SectorFace::Floor) | (SectorFace::Ceiling, SectorFace::Ceiling));
+                            eprintln!("  VERTEX RANGE: sel({},{}) corner {} -> click({},{}) corner {}, same_face={}",
+                                sel_x, sel_z, sel_corner, gx, gz, corner_idx, same_face_type);
+                            if *sel_room == room_idx && same_face_type {
+                                // Determine the line direction based on which coordinates differ
+                                // and which corner indices are involved
+                                let x_min = (*sel_x).min(gx);
+                                let x_max = (*sel_x).max(gx);
+                                let z_min = (*sel_z).min(gz);
+                                let z_max = (*sel_z).max(gz);
+
+                                // Check if selecting along an edge line (same z for N/S edges, same x for E/W edges)
+                                // For floor: corner 0=NW, 1=NE, 2=SE, 3=SW
+                                // North edge vertices: 0 and 1 (both at z_min of their sectors)
+                                // South edge vertices: 2 and 3 (both at z_max of their sectors)
+                                // East edge vertices: 1 and 2 (both at x_max of their sectors)
+                                // West edge vertices: 0 and 3 (both at x_min of their sectors)
+
+                                let is_north_edge = (*sel_corner == 0 || *sel_corner == 1) && (corner_idx == 0 || corner_idx == 1);
+                                let is_south_edge = (*sel_corner == 2 || *sel_corner == 3) && (corner_idx == 2 || corner_idx == 3);
+                                let is_east_edge = (*sel_corner == 1 || *sel_corner == 2) && (corner_idx == 1 || corner_idx == 2);
+                                let is_west_edge = (*sel_corner == 0 || *sel_corner == 3) && (corner_idx == 0 || corner_idx == 3);
+
+                                eprintln!("  edges: N={} S={} E={} W={}", is_north_edge, is_south_edge, is_east_edge, is_west_edge);
+
+                                if is_north_edge || is_south_edge {
+                                    // First, add the original selection to multi-selection so it's not lost
+                                    if !state.multi_selection.contains(&state.selection) {
+                                        state.multi_selection.push(state.selection.clone());
+                                    }
+                                    // Select along X axis (north or south edge)
+                                    let z_coord = *sel_z; // Use the original selection's Z
+                                    for x in x_min..=x_max {
+                                        // Add both corner vertices that form this edge
+                                        for &ci in if is_north_edge { &[0usize, 1] } else { &[2usize, 3] } {
+                                            let vert_sel = Selection::Vertex {
+                                                room: room_idx, x, z: z_coord,
+                                                face: face.clone(), corner_idx: ci,
+                                            };
+                                            if !state.multi_selection.contains(&vert_sel) {
+                                                state.multi_selection.push(vert_sel);
+                                            }
+                                        }
+                                    }
+                                    did_range_select = true;
+                                } else if is_east_edge || is_west_edge {
+                                    // First, add the original selection to multi-selection so it's not lost
+                                    if !state.multi_selection.contains(&state.selection) {
+                                        state.multi_selection.push(state.selection.clone());
+                                    }
+                                    // Select along Z axis (east or west edge)
+                                    let x_coord = *sel_x; // Use the original selection's X
+                                    for z in z_min..=z_max {
+                                        // Add both corner vertices that form this edge
+                                        for &ci in if is_east_edge { &[1usize, 2] } else { &[0usize, 3] } {
+                                            let vert_sel = Selection::Vertex {
+                                                room: room_idx, x: x_coord, z,
+                                                face: face.clone(), corner_idx: ci,
+                                            };
+                                            if !state.multi_selection.contains(&vert_sel) {
+                                                state.multi_selection.push(vert_sel);
+                                            }
+                                        }
+                                    }
+                                    did_range_select = true;
+                                }
+                            }
+                        }
+                        if !did_range_select {
+                            state.toggle_multi_selection(new_selection.clone());
+                        }
                     } else {
                         state.clear_multi_selection();
                     }
@@ -915,8 +1142,95 @@ pub fn draw_viewport_3d(
                         wall_face: wall_face.clone(),
                     };
 
+                    eprintln!("EDGE CLICK: ({},{}) face={} edge={}, shift={}, current_sel={:?}",
+                        gx, gz, face_idx, edge_idx, shift_down, state.selection);
+
                     if shift_down {
-                        state.toggle_multi_selection(new_selection.clone());
+                        // Range selection: if current selection is an edge on same face type,
+                        // select all edges in between along the shared axis
+                        let mut did_range_select = false;
+                        if let Selection::Edge { room: sel_room, x: sel_x, z: sel_z, face_idx: sel_face_idx, edge_idx: sel_edge_idx, wall_face: sel_wall_face } = &state.selection {
+                            eprintln!("  EDGE RANGE: sel({},{}) face={} edge={} -> click({},{}) face={} edge={}",
+                                sel_x, sel_z, sel_face_idx, sel_edge_idx, gx, gz, face_idx, edge_idx);
+
+                            // Range select requires same room, same face type, same edge orientation
+                            if *sel_room == room_idx && *sel_face_idx == face_idx && *sel_edge_idx == edge_idx {
+                                let mut edges_to_add: Vec<Selection> = Vec::new();
+
+                                if face_idx < 2 {
+                                    // Floor/ceiling edges:
+                                    // edge_idx 0 (north) or 2 (south): varies along X axis
+                                    // edge_idx 1 (east) or 3 (west): varies along Z axis
+                                    if edge_idx == 0 || edge_idx == 2 {
+                                        // North/South edges - range along X
+                                        let x_min = (*sel_x).min(gx);
+                                        let x_max = (*sel_x).max(gx);
+                                        let z_coord = if edge_idx == 0 { (*sel_z).min(gz) } else { (*sel_z).max(gz) };
+                                        for x in x_min..=x_max {
+                                            edges_to_add.push(Selection::Edge {
+                                                room: room_idx, x, z: z_coord,
+                                                face_idx, edge_idx, wall_face: None,
+                                            });
+                                        }
+                                    } else {
+                                        // East/West edges - range along Z
+                                        let z_min = (*sel_z).min(gz);
+                                        let z_max = (*sel_z).max(gz);
+                                        let x_coord = if edge_idx == 1 { (*sel_x).max(gx) } else { (*sel_x).min(gx) };
+                                        for z in z_min..=z_max {
+                                            edges_to_add.push(Selection::Edge {
+                                                room: room_idx, x: x_coord, z,
+                                                face_idx, edge_idx, wall_face: None,
+                                            });
+                                        }
+                                    }
+                                } else if edge_idx == 0 || edge_idx == 2 {
+                                    // Wall top/bottom edges - trace wall contour from start to end
+                                    // This follows connected walls regardless of orientation (N/S/E/W/diagonal)
+                                    if let Some(room) = state.level.rooms.get(room_idx) {
+                                        if let (Some(start_face), Some(end_face)) = (sel_wall_face.clone(), wall_face.clone()) {
+                                            eprintln!("    tracing wall contour from ({},{}) {:?} to ({},{}) {:?}",
+                                                sel_x, sel_z, start_face, gx, gz, end_face);
+
+                                            // Use existing find_wall_path function which handles all wall types
+                                            if let Some(path) = find_wall_path(room, *sel_x, *sel_z, &start_face, gx, gz, &end_face) {
+                                                eprintln!("    found path with {} walls", path.len());
+                                                for (px, pz, pwf) in path {
+                                                    edges_to_add.push(Selection::Edge {
+                                                        room: room_idx,
+                                                        x: px,
+                                                        z: pz,
+                                                        face_idx,
+                                                        edge_idx,
+                                                        wall_face: Some(pwf),
+                                                    });
+                                                }
+                                            } else {
+                                                eprintln!("    no path found");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Add all edges in range to multi-selection
+                                eprintln!("    adding {} edges", edges_to_add.len());
+                                let had_edges = !edges_to_add.is_empty();
+                                // First, add the original selection to multi-selection so it's not lost
+                                // when we change state.selection to the new clicked edge
+                                if !state.multi_selection.contains(&state.selection) {
+                                    state.multi_selection.push(state.selection.clone());
+                                }
+                                for edge_sel in edges_to_add {
+                                    if !state.multi_selection.contains(&edge_sel) {
+                                        state.multi_selection.push(edge_sel);
+                                    }
+                                }
+                                did_range_select = had_edges;
+                            }
+                        }
+                        if !did_range_select {
+                            state.toggle_multi_selection(new_selection.clone());
+                        }
                     } else {
                         let clicking_selected = state.selection == new_selection ||
                             state.multi_selection.contains(&new_selection);
@@ -1168,6 +1482,19 @@ pub fn draw_viewport_3d(
                         state.save_selection_undo();
                         state.set_selection(Selection::Object { room: obj_room_idx, index: obj_idx });
                         state.set_status("Object selected", 1.0);
+                    }
+                } else if let Some((anchor_gx, anchor_gz)) = geometry_paste_preview {
+                    // Click to paste geometry from clipboard at preview location
+                    if let Some(gc) = state.geometry_clipboard.clone() {
+                        // Create a temporary selection at the anchor point for paste_geometry_selection
+                        state.set_selection(Selection::Sector {
+                            room: state.current_room,
+                            x: anchor_gx.max(0) as usize,
+                            z: anchor_gz.max(0) as usize,
+                        });
+                        // Trigger paste via the action system by setting a flag
+                        // We'll handle the paste inline here since we have all the info
+                        crate::editor::layout::paste_geometry_at(state, &gc, anchor_gx, anchor_gz);
                     }
                 } else if let Some((room_idx, gx, gz, face)) = hovered_face {
                     // Start dragging face (all 4 vertices)
@@ -1521,8 +1848,8 @@ pub fn draw_viewport_3d(
                 }
             }
             // DrawWall mode - start drag for wall placement
-            else if state.tool == EditorTool::DrawWall {
-                if let Some((grid_x, grid_z, dir, _corner_heights, wall_state)) = preview_wall {
+            else if state.tool == EditorTool::DrawWall && !state.wall_direction.is_diagonal() {
+                if let Some((grid_x, grid_z, dir, _corner_heights, wall_state, _mouse_y)) = preview_wall {
                     // Only start drag if not fully covered
                     if wall_state != 2 {
                         // Convert world coords to grid coords
@@ -1533,23 +1860,38 @@ pub fn draw_viewport_3d(
                             let gz = (local_z / SECTOR_SIZE).floor() as i32;
                             state.wall_drag_start = Some((gx, gz, dir));
                             state.wall_drag_current = Some((gx, gz, dir));
+                            // Use wall_prefer_high to select gap (same as preview)
+                            let gap_y = if state.wall_prefer_high {
+                                Some(super::CEILING_HEIGHT - 1.0)  // Near ceiling
+                            } else {
+                                Some(1.0)  // Near floor
+                            };
+                            state.wall_drag_mouse_y = gap_y;
                         }
                     } else {
                         state.set_status("Edge is fully covered", 2.0);
                     }
                 }
             }
-            // DrawDiagonalWall mode - start drag for diagonal wall placement
-            else if state.tool == EditorTool::DrawDiagonalWall {
-                if let Some((grid_x, grid_z, is_nwse, _corner_heights)) = preview_diagonal_wall {
+            // DrawWall mode with diagonal direction - start drag for diagonal wall placement
+            else if state.tool == EditorTool::DrawWall && state.wall_direction.is_diagonal() {
+                if let Some((grid_x, grid_z, _is_nwse, _corner_heights)) = preview_diagonal_wall {
                     // Convert world coords to grid coords
                     if let Some(room) = state.level.rooms.get(state.current_room) {
                         let local_x = grid_x - room.position.x;
                         let local_z = grid_z - room.position.z;
                         let gx = (local_x / SECTOR_SIZE).floor() as i32;
                         let gz = (local_z / SECTOR_SIZE).floor() as i32;
-                        state.diagonal_drag_start = Some((gx, gz, is_nwse));
-                        state.diagonal_drag_current = Some((gx, gz, is_nwse));
+                        // Use wall_direction which already has the diagonal type
+                        state.wall_drag_start = Some((gx, gz, state.wall_direction));
+                        state.wall_drag_current = Some((gx, gz, state.wall_direction));
+                        // Use wall_prefer_high to select gap (same as axis-aligned walls)
+                        let gap_y = if state.wall_prefer_high {
+                            Some(super::CEILING_HEIGHT - 1.0)  // Near ceiling
+                        } else {
+                            Some(1.0)  // Near floor
+                        };
+                        state.wall_drag_mouse_y = gap_y;
                     }
                 }
             }
@@ -1692,94 +2034,100 @@ pub fn draw_viewport_3d(
             }
         }
 
-        // Continue wall drag (update current grid position based on mouse, locked to start direction)
+        // Continue cardinal wall drag (update current grid position based on mouse, locked to start direction)
+        // Diagonal wall drag is handled in a separate block below
         if ctx.mouse.left_down {
             if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
-                use crate::world::Direction;
+                if !start_dir.is_diagonal() {
+                    // Get mouse grid position from preview_wall or preview_sector
+                    let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _, _)) = preview_wall {
+                        if let Some(room) = state.level.rooms.get(state.current_room) {
+                            let local_x = grid_x - room.position.x;
+                            let local_z = grid_z - room.position.z;
+                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                        } else { None }
+                    } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+                        if let Some(room) = state.level.rooms.get(state.current_room) {
+                            let local_x = snapped_x - room.position.x;
+                            let local_z = snapped_z - room.position.z;
+                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                        } else { None }
+                    } else { None };
 
-                // Get mouse grid position from preview_wall or preview_sector
-                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _)) = preview_wall {
-                    if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let local_x = grid_x - room.position.x;
-                        let local_z = grid_z - room.position.z;
-                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
-                    } else { None }
-                } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
-                    if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let local_x = snapped_x - room.position.x;
-                        let local_z = snapped_z - room.position.z;
-                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
-                    } else { None }
-                } else { None };
-
-                if let Some((gx, gz)) = mouse_grid_pos {
-                    // Lock to the axis based on wall direction
-                    // North/South walls extend along X axis (fixed Z)
-                    // East/West walls extend along Z axis (fixed X)
-                    let (final_gx, final_gz) = match start_dir {
-                        Direction::North | Direction::South => (gx, start_gz),
-                        Direction::East | Direction::West => (start_gx, gz),
-                    };
-                    state.wall_drag_current = Some((final_gx, final_gz, start_dir));
+                    if let Some((gx, gz)) = mouse_grid_pos {
+                        use crate::world::Direction;
+                        // Lock to the axis based on wall direction
+                        // North/South walls extend along X axis (fixed Z)
+                        // East/West walls extend along Z axis (fixed X)
+                        let (final_gx, final_gz) = match start_dir {
+                            Direction::North | Direction::South => (gx, start_gz),
+                            Direction::East | Direction::West => (start_gx, gz),
+                            Direction::NwSe | Direction::NeSw => unreachable!(), // Handled separately
+                        };
+                        state.wall_drag_current = Some((final_gx, final_gz, start_dir));
+                    }
                 }
             }
         }
 
         // Continue diagonal wall drag (update current grid position, locked to diagonal movement)
         if ctx.mouse.left_down {
-            if let Some((start_gx, start_gz, start_is_nwse)) = state.diagonal_drag_start {
-                // Get mouse grid position from preview_diagonal_wall or preview_sector
-                let mouse_grid_pos = if let Some((grid_x, grid_z, _, _)) = preview_diagonal_wall {
-                    if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let local_x = grid_x - room.position.x;
-                        let local_z = grid_z - room.position.z;
-                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
-                    } else { None }
-                } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
-                    if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let local_x = snapped_x - room.position.x;
-                        let local_z = snapped_z - room.position.z;
-                        Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
-                    } else { None }
-                } else { None };
+            if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
+                if start_dir.is_diagonal() {
+                    // Get mouse grid position from preview_diagonal_wall or preview_sector
+                    let mouse_grid_pos = if let Some((grid_x, grid_z, _, _)) = preview_diagonal_wall {
+                        if let Some(room) = state.level.rooms.get(state.current_room) {
+                            let local_x = grid_x - room.position.x;
+                            let local_z = grid_z - room.position.z;
+                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                        } else { None }
+                    } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+                        if let Some(room) = state.level.rooms.get(state.current_room) {
+                            let local_x = snapped_x - room.position.x;
+                            let local_z = snapped_z - room.position.z;
+                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                        } else { None }
+                    } else { None };
 
-                if let Some((mouse_gx, mouse_gz)) = mouse_grid_pos {
-                    // Lock to diagonal movement: both X and Z must change together
-                    // Use the axis with the larger delta to determine the diagonal length
-                    let dx = mouse_gx - start_gx;
-                    let dz = mouse_gz - start_gz;
+                    if let Some((mouse_gx, mouse_gz)) = mouse_grid_pos {
+                        use crate::world::Direction;
+                        // Lock to diagonal movement: both X and Z must change together
+                        // Use the axis with the larger delta to determine the diagonal length
+                        let dx: i32 = mouse_gx - start_gx;
+                        let dz: i32 = mouse_gz - start_gz;
 
-                    // NW-SE diagonal: +X goes with +Z, -X goes with -Z
-                    // NE-SW diagonal: +X goes with -Z, -X goes with +Z
-                    let diag_len = dx.abs().max(dz.abs());
+                        // NW-SE diagonal: +X goes with +Z, -X goes with -Z
+                        // NE-SW diagonal: +X goes with -Z, -X goes with +Z
+                        let diag_len = dx.abs().max(dz.abs());
 
-                    // Determine the diagonal direction based on which quadrant the mouse is in
-                    let (final_gx, final_gz) = if start_is_nwse {
-                        // NW-SE: X and Z move in same direction
-                        // Use the primary movement direction (larger delta)
-                        if dx.abs() >= dz.abs() {
-                            // X is primary
-                            let sign = if dx >= 0 { 1 } else { -1 };
-                            (start_gx + sign * diag_len, start_gz + sign * diag_len)
+                        // Determine the diagonal direction based on which quadrant the mouse is in
+                        let (final_gx, final_gz) = if start_dir == Direction::NwSe {
+                            // NW-SE: X and Z move in same direction
+                            // Use the primary movement direction (larger delta)
+                            if dx.abs() >= dz.abs() {
+                                // X is primary
+                                let sign = if dx >= 0 { 1 } else { -1 };
+                                (start_gx + sign * diag_len, start_gz + sign * diag_len)
+                            } else {
+                                // Z is primary
+                                let sign = if dz >= 0 { 1 } else { -1 };
+                                (start_gx + sign * diag_len, start_gz + sign * diag_len)
+                            }
                         } else {
-                            // Z is primary
-                            let sign = if dz >= 0 { 1 } else { -1 };
-                            (start_gx + sign * diag_len, start_gz + sign * diag_len)
-                        }
-                    } else {
-                        // NE-SW: X and Z move in opposite directions
-                        if dx.abs() >= dz.abs() {
-                            // X is primary
-                            let sign = if dx >= 0 { 1 } else { -1 };
-                            (start_gx + sign * diag_len, start_gz - sign * diag_len)
-                        } else {
-                            // Z is primary
-                            let sign = if dz >= 0 { 1 } else { -1 };
-                            (start_gx - sign * diag_len, start_gz + sign * diag_len)
-                        }
-                    };
+                            // NE-SW: X and Z move in opposite directions
+                            if dx.abs() >= dz.abs() {
+                                // X is primary
+                                let sign = if dx >= 0 { 1 } else { -1 };
+                                (start_gx + sign * diag_len, start_gz - sign * diag_len)
+                            } else {
+                                // Z is primary
+                                let sign = if dz >= 0 { 1 } else { -1 };
+                                (start_gx - sign * diag_len, start_gz + sign * diag_len)
+                            }
+                        };
 
-                    state.diagonal_drag_current = Some((final_gx, final_gz, start_is_nwse));
+                        state.wall_drag_current = Some((final_gx, final_gz, start_dir));
+                    }
                 }
             }
         }
@@ -1883,10 +2231,10 @@ pub fn draw_viewport_3d(
                 state.placement_drag_current = None;
             }
 
-            // Handle wall drag completion
+            // Handle wall drag completion (axis-aligned walls only)
             if let (Some((start_gx, start_gz, dir)), Some((end_gx, end_gz, _))) = (state.wall_drag_start, state.wall_drag_current) {
+                if !dir.is_diagonal() {
                 use crate::world::Direction;
-                use super::CEILING_HEIGHT;
 
                 // Calculate the line of walls to place based on direction
                 let (iter_axis_start, iter_axis_end, fixed_axis) = match dir {
@@ -1898,6 +2246,7 @@ pub fn draw_viewport_3d(
                         // Vertical wall - iterate along Z axis
                         (start_gz, end_gz, start_gx)
                     }
+                    Direction::NwSe | Direction::NeSw => unreachable!(),
                 };
 
                 let min_iter = iter_axis_start.min(iter_axis_end);
@@ -1917,6 +2266,7 @@ pub fn draw_viewport_3d(
                         Direction::East | Direction::West => {
                             (fixed_axis, fixed_axis, min_iter, max_iter)
                         }
+                        Direction::NwSe | Direction::NeSw => unreachable!(),
                     };
 
                     // Expand the room grid to accommodate all walls (like floor/ceiling does)
@@ -1960,20 +2310,65 @@ pub fn draw_viewport_3d(
                         let (gx, gz) = match dir {
                             Direction::North | Direction::South => (i, fixed_axis),
                             Direction::East | Direction::West => (fixed_axis, i),
+                            Direction::NwSe | Direction::NeSw => unreachable!(),
                         };
 
                         let adjusted_gx = (gx + offset_x) as usize;
                         let adjusted_gz = (gz + offset_z) as usize;
 
-                        // Check if there's already a wall here
-                        let has_wall = room.get_sector(adjusted_gx, adjusted_gz)
-                            .map(|s| !s.walls(dir).is_empty())
-                            .unwrap_or(false);
+                        // Check if there's a gap to fill (handles both empty edges and gaps between walls)
+                        // Use room's actual vertical bounds for gap detection
+                        // Use the stored mouse_y from drag start for consistent gap selection
+                        room.ensure_sector(adjusted_gx, adjusted_gz);
+                        if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
+                            if let Some(heights) = sector.next_wall_position(dir, room.bounds.min.y, room.bounds.max.y, state.wall_drag_mouse_y) {
+                                // Calculate wall center position in world space
+                                let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
+                                let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
+                                let wall_center = match dir {
+                                    Direction::North => macroquad::math::Vec3::new(base_x + SECTOR_SIZE / 2.0, 0.0, base_z),
+                                    Direction::South => macroquad::math::Vec3::new(base_x + SECTOR_SIZE / 2.0, 0.0, base_z + SECTOR_SIZE),
+                                    Direction::East => macroquad::math::Vec3::new(base_x + SECTOR_SIZE, 0.0, base_z + SECTOR_SIZE / 2.0),
+                                    Direction::West => macroquad::math::Vec3::new(base_x, 0.0, base_z + SECTOR_SIZE / 2.0),
+                                    Direction::NwSe | Direction::NeSw => unreachable!(),
+                                };
 
-                        if !has_wall {
-                            room.ensure_sector(adjusted_gx, adjusted_gz);
-                            room.add_wall(adjusted_gx, adjusted_gz, dir, 0.0, CEILING_HEIGHT, texture.clone());
-                            placed_count += 1;
+                                // Wall normal (front-facing direction)
+                                let wall_normal = match dir {
+                                    Direction::North => macroquad::math::Vec3::new(0.0, 0.0, 1.0),
+                                    Direction::South => macroquad::math::Vec3::new(0.0, 0.0, -1.0),
+                                    Direction::East => macroquad::math::Vec3::new(-1.0, 0.0, 0.0),
+                                    Direction::West => macroquad::math::Vec3::new(1.0, 0.0, 0.0),
+                                    Direction::NwSe | Direction::NeSw => unreachable!(),
+                                };
+
+                                // Vector from wall to camera (XZ plane only)
+                                let cam_pos = state.camera_3d.position;
+                                let to_camera = macroquad::math::Vec3::new(
+                                    cam_pos.x - wall_center.x,
+                                    0.0,
+                                    cam_pos.z - wall_center.z,
+                                );
+
+                                // If dot product is negative, camera is on the back side
+                                let dot = wall_normal.dot(to_camera);
+                                let normal_mode = if dot < 0.0 {
+                                    crate::world::FaceNormalMode::Back
+                                } else {
+                                    crate::world::FaceNormalMode::Front
+                                };
+
+                                // There's a gap - add wall with computed heights
+                                if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
+                                    let mut wall = crate::world::VerticalFace::new_sloped(
+                                        heights[0], heights[1], heights[2], heights[3],
+                                        texture.clone()
+                                    );
+                                    wall.normal_mode = normal_mode;
+                                    sector_mut.walls_mut(dir).push(wall);
+                                    placed_count += 1;
+                                }
+                            }
                         }
                     }
                     room.recalculate_bounds();
@@ -1981,118 +2376,155 @@ pub fn draw_viewport_3d(
 
                 state.mark_portals_dirty();
                 if placed_count > 0 {
-                    let dir_name = match dir {
-                        Direction::North => "north",
-                        Direction::East => "east",
-                        Direction::South => "south",
-                        Direction::West => "west",
-                    };
-                    state.set_status(&format!("Created {} {} walls", placed_count, dir_name), 2.0);
+                    state.set_status(&format!("Created {} {} walls", placed_count, dir.name().to_lowercase()), 2.0);
                 }
 
                 // Clear wall drag state
                 state.wall_drag_start = None;
                 state.wall_drag_current = None;
+                state.wall_drag_mouse_y = None;
+                } // end if !dir.is_diagonal()
             }
 
             // Handle diagonal wall drag completion
-            if let (Some((start_gx, start_gz, is_nwse)), Some((end_gx, end_gz, _))) = (state.diagonal_drag_start, state.diagonal_drag_current) {
-                use crate::world::VerticalFace;
-                use super::CEILING_HEIGHT;
+            if let (Some((start_gx, start_gz, start_dir)), Some((end_gx, end_gz, _))) = (state.wall_drag_start, state.wall_drag_current) {
+                if start_dir.is_diagonal() {
+                    use crate::world::{Direction, VerticalFace};
 
-                // Calculate the diagonal line of walls to place
-                // Diagonals follow a diagonal line from start to end
-                let min_gx = start_gx.min(end_gx);
-                let max_gx = start_gx.max(end_gx);
-                let min_gz = start_gz.min(end_gz);
-                let max_gz = start_gz.max(end_gz);
+                    let is_nwse = start_dir == Direction::NwSe;
 
-                state.save_undo();
-                let mut placed_count = 0;
+                    // Calculate the diagonal line of walls to place
+                    // Diagonals follow a diagonal line from start to end
+                    let min_gx = start_gx.min(end_gx);
+                    let max_gx = start_gx.max(end_gx);
+                    let min_gz = start_gz.min(end_gz);
+                    let max_gz = start_gz.max(end_gz);
 
-                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
-                    let texture = state.selected_texture.clone();
+                    state.save_undo();
+                    let mut placed_count = 0;
 
-                    // Expand the room grid to accommodate all diagonals (like floor/ceiling does)
-                    let mut offset_x = 0i32;
-                    let mut offset_z = 0i32;
+                    if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                        let texture = state.selected_texture.clone();
 
-                    // Expand in negative X direction
-                    while min_gx + offset_x < 0 {
-                        room.position.x -= SECTOR_SIZE;
-                        room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
-                        room.width += 1;
-                        offset_x += 1;
-                    }
+                        // Expand the room grid to accommodate all diagonals (like floor/ceiling does)
+                        let mut offset_x = 0i32;
+                        let mut offset_z = 0i32;
 
-                    // Expand in negative Z direction
-                    while min_gz + offset_z < 0 {
-                        room.position.z -= SECTOR_SIZE;
-                        for col in &mut room.sectors {
-                            col.insert(0, None);
+                        // Expand in negative X direction
+                        while min_gx + offset_x < 0 {
+                            room.position.x -= SECTOR_SIZE;
+                            room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+                            room.width += 1;
+                            offset_x += 1;
                         }
-                        room.depth += 1;
-                        offset_z += 1;
-                    }
 
-                    // Expand in positive X direction
-                    while (max_gx + offset_x) as usize >= room.width {
-                        room.width += 1;
-                        room.sectors.push((0..room.depth).map(|_| None).collect());
-                    }
-
-                    // Expand in positive Z direction
-                    while (max_gz + offset_z) as usize >= room.depth {
-                        room.depth += 1;
-                        for col in &mut room.sectors {
-                            col.push(None);
-                        }
-                    }
-
-                    // Place diagonal walls along a true diagonal LINE
-                    // Both X and Z step together at the same rate (45-degree grid diagonal)
-                    let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
-                    let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
-                    let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
-
-                    for i in 0..=steps {
-                        let gx = start_gx + sx * i;
-                        let gz = start_gz + sz * i;
-
-                        let adjusted_gx = (gx + offset_x) as usize;
-                        let adjusted_gz = (gz + offset_z) as usize;
-
-                        // Check if there's already a diagonal wall here
-                        let has_diagonal = room.get_sector(adjusted_gx, adjusted_gz)
-                            .map(|s| {
-                                if is_nwse { !s.walls_nwse.is_empty() } else { !s.walls_nesw.is_empty() }
-                            })
-                            .unwrap_or(false);
-
-                        if !has_diagonal {
-                            // Use ensure_sector to create sector if needed, then add diagonal
-                            let sector = room.ensure_sector(adjusted_gx, adjusted_gz);
-                            let wall = VerticalFace::new(0.0, CEILING_HEIGHT, texture.clone());
-                            if is_nwse {
-                                sector.walls_nwse.push(wall);
-                            } else {
-                                sector.walls_nesw.push(wall);
+                        // Expand in negative Z direction
+                        while min_gz + offset_z < 0 {
+                            room.position.z -= SECTOR_SIZE;
+                            for col in &mut room.sectors {
+                                col.insert(0, None);
                             }
-                            placed_count += 1;
+                            room.depth += 1;
+                            offset_z += 1;
                         }
+
+                        // Expand in positive X direction
+                        while (max_gx + offset_x) as usize >= room.width {
+                            room.width += 1;
+                            room.sectors.push((0..room.depth).map(|_| None).collect());
+                        }
+
+                        // Expand in positive Z direction
+                        while (max_gz + offset_z) as usize >= room.depth {
+                            room.depth += 1;
+                            for col in &mut room.sectors {
+                                col.push(None);
+                            }
+                        }
+
+                        // Place diagonal walls along a true diagonal LINE
+                        // Both X and Z step together at the same rate (45-degree grid diagonal)
+                        let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+                        let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+                        let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+
+                        for i in 0..=steps {
+                            let gx = start_gx + sx * i;
+                            let gz = start_gz + sz * i;
+
+                            let adjusted_gx = (gx + offset_x) as usize;
+                            let adjusted_gz = (gz + offset_z) as usize;
+
+                            // Check if there's a gap to fill (handles both empty diagonals and gaps)
+                            // Use room's actual vertical bounds for gap detection
+                            room.ensure_sector(adjusted_gx, adjusted_gz);
+                            if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
+                                if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, room.bounds.min.y, room.bounds.max.y, state.wall_drag_mouse_y) {
+                                    // Calculate diagonal wall center position in world space
+                                    let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
+                                    let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
+                                    let wall_center = macroquad::math::Vec3::new(
+                                        base_x + SECTOR_SIZE / 2.0,
+                                        0.0,
+                                        base_z + SECTOR_SIZE / 2.0,
+                                    );
+
+                                    // Diagonal wall normal (perpendicular to the diagonal line)
+                                    // NW-SE diagonal: normal faces (1, 0, -1) normalized
+                                    // NE-SW diagonal: normal faces (-1, 0, -1) normalized
+                                    let inv_sqrt2 = 1.0 / 2.0_f32.sqrt();
+                                    let wall_normal = if is_nwse {
+                                        macroquad::math::Vec3::new(inv_sqrt2, 0.0, -inv_sqrt2)
+                                    } else {
+                                        macroquad::math::Vec3::new(-inv_sqrt2, 0.0, -inv_sqrt2)
+                                    };
+
+                                    // Vector from wall to camera (XZ plane only)
+                                    let cam_pos = state.camera_3d.position;
+                                    let to_camera = macroquad::math::Vec3::new(
+                                        cam_pos.x - wall_center.x,
+                                        0.0,
+                                        cam_pos.z - wall_center.z,
+                                    );
+
+                                    // If dot product is negative, camera is on the back side
+                                    let dot = wall_normal.dot(to_camera);
+                                    let normal_mode = if dot < 0.0 {
+                                        crate::world::FaceNormalMode::Back
+                                    } else {
+                                        crate::world::FaceNormalMode::Front
+                                    };
+
+                                    // There's a gap - add wall with computed heights
+                                    if let Some(sector_mut) = room.get_sector_mut(adjusted_gx, adjusted_gz) {
+                                        let mut wall = VerticalFace::new_sloped(
+                                            heights[0], heights[1], heights[2], heights[3],
+                                            texture.clone()
+                                        );
+                                        wall.normal_mode = normal_mode;
+                                        if is_nwse {
+                                            sector_mut.walls_nwse.push(wall);
+                                        } else {
+                                            sector_mut.walls_nesw.push(wall);
+                                        }
+                                        placed_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                        room.recalculate_bounds();
                     }
-                    room.recalculate_bounds();
-                }
 
-                state.mark_portals_dirty();
-                if placed_count > 0 {
-                    let type_name = if is_nwse { "NW-SE" } else { "NE-SW" };
-                    state.set_status(&format!("Created {} {} diagonal walls", placed_count, type_name), 2.0);
-                }
+                    state.mark_portals_dirty();
+                    if placed_count > 0 {
+                        state.set_status(&format!("Created {} {} diagonal walls", placed_count, start_dir.name()), 2.0);
+                    }
 
-                // Clear diagonal drag state
-                state.diagonal_drag_start = None;
-                state.diagonal_drag_current = None;
+                    // Clear wall drag state (shared with axis-aligned walls)
+                    state.wall_drag_start = None;
+                    state.wall_drag_current = None;
+                    state.wall_drag_mouse_y = None;
+                }
             }
 
             // If we actually dragged geometry, recalculate room bounds
@@ -2118,6 +2550,11 @@ pub fn draw_viewport_3d(
         state.sync_camera_from_orbit();
     }
 
+    let vp_input_ms = EditorFrameTimings::elapsed_ms(input_start);
+
+    // === CLEAR PHASE ===
+    let clear_start = EditorFrameTimings::start();
+
     // Clear framebuffer - use 3D skybox if configured
     if let Some(skybox) = &state.level.skybox {
         fb.clear(RasterColor::new(0, 0, 0));
@@ -2126,6 +2563,11 @@ pub fn draw_viewport_3d(
     } else {
         fb.clear(RasterColor::new(30, 30, 40));
     }
+
+    let vp_clear_ms = EditorFrameTimings::elapsed_ms(clear_start);
+
+    // === GRID PHASE ===
+    let grid_start = EditorFrameTimings::start();
 
     // Draw main floor grid (large, fixed extent)
     if state.show_grid {
@@ -2400,8 +2842,9 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Draw wall drag preview
+    // Draw wall drag preview (axis-aligned walls only - diagonal handled separately)
     if let (Some((start_gx, start_gz, dir)), Some((end_gx, end_gz, _))) = (state.wall_drag_start, state.wall_drag_current) {
+        if !dir.is_diagonal() {
         use crate::world::Direction;
 
         // Get room position
@@ -2413,54 +2856,84 @@ pub fn draw_viewport_3d(
         let (iter_axis_start, iter_axis_end, fixed_axis) = match dir {
             Direction::North | Direction::South => (start_gx, end_gx, start_gz),
             Direction::East | Direction::West => (start_gz, end_gz, start_gx),
+            Direction::NwSe | Direction::NeSw => unreachable!(),
         };
 
         let min_iter = iter_axis_start.min(iter_axis_end);
         let max_iter = iter_axis_start.max(iter_axis_end);
 
-        let wall_color = RasterColor::new(80, 200, 180); // Teal
+        let new_wall_color = RasterColor::new(80, 200, 180); // Teal - new wall
+        let gap_fill_color = RasterColor::new(255, 180, 80); // Orange - filling gap
         let vertex_color = RasterColor::new(255, 255, 255); // White
 
         for i in min_iter..=max_iter {
             let (gx, gz) = match dir {
                 Direction::North | Direction::South => (i, fixed_axis),
                 Direction::East | Direction::West => (fixed_axis, i),
+                Direction::NwSe | Direction::NeSw => unreachable!(),
             };
 
             // Calculate world position for this grid cell
             let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
             let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
-            // Use default heights (0 to CEILING_HEIGHT)
-            let floor_y = room_pos.y;
-            let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
+            // Check if there's a sector with existing walls - use gap heights if so
+            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            let (corner_heights, is_gap_fill) = if gx >= 0 && gz >= 0 {
+                if let Some(room) = state.level.rooms.get(state.current_room) {
+                    let (fallback_bottom, fallback_top) = (room.bounds.min.y, room.bounds.max.y);
+                    if let Some(sector) = room.get_sector(gx as usize, gz as usize) {
+                        // Check if edge has walls and find the gap
+                        // Use the stored mouse_y from drag start for consistent gap selection
+                        let has_walls = !sector.walls(dir).is_empty();
+                        if let Some(heights) = sector.next_wall_position(dir, fallback_bottom, fallback_top, state.wall_drag_mouse_y) {
+                            (heights, has_walls)
+                        } else {
+                            // Fully covered - skip this segment
+                            continue;
+                        }
+                    } else {
+                        // No sector - use room's vertical bounds
+                        ([fallback_bottom, fallback_bottom, fallback_top, fallback_top], false)
+                    }
+                } else {
+                    ([0.0, 0.0, super::CEILING_HEIGHT, super::CEILING_HEIGHT], false)
+                }
+            } else {
+                // Negative coordinates - use default heights
+                ([0.0, 0.0, super::CEILING_HEIGHT, super::CEILING_HEIGHT], false)
+            };
 
-            // Wall corners based on direction
+            let wall_color = if is_gap_fill { gap_fill_color } else { new_wall_color };
+
+            // Wall corners based on direction, using computed corner heights
+            // corner_heights: [bottom-left, bottom-right, top-right, top-left]
             let (p0, p1, p2, p3) = match dir {
                 Direction::North => (
-                    Vec3::new(grid_x, floor_y, grid_z),
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
-                    Vec3::new(grid_x, ceiling_y, grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[0], grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[1], grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[2], grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[3], grid_z),
                 ),
                 Direction::East => (
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[0], grid_z),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[1], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[2], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[3], grid_z),
                 ),
                 Direction::South => (
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[0], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[1], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[2], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x + SECTOR_SIZE, room_pos.y + corner_heights[3], grid_z + SECTOR_SIZE),
                 ),
                 Direction::West => (
-                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),
-                    Vec3::new(grid_x, floor_y, grid_z),
-                    Vec3::new(grid_x, ceiling_y, grid_z),
-                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[0], grid_z + SECTOR_SIZE),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[1], grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[2], grid_z),
+                    Vec3::new(grid_x, room_pos.y + corner_heights[3], grid_z + SECTOR_SIZE),
                 ),
+                Direction::NwSe | Direction::NeSw => unreachable!(),
             };
 
             // Draw wall outline
@@ -2474,86 +2947,108 @@ pub fn draw_viewport_3d(
             draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
             draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
             draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+
+            // Draw + through it if filling gap to indicate addition
+            // Skip if wall is triangular (collapsed vertices make + look wrong)
+            let is_triangular = (corner_heights[0] - corner_heights[3]).abs() < 1.0
+                             || (corner_heights[1] - corner_heights[2]).abs() < 1.0;
+            if is_gap_fill && !is_triangular {
+                // Vertical line (center)
+                let mid_x = (p0.x + p1.x) / 2.0;
+                let mid_z = (p0.z + p1.z) / 2.0;
+                let center_bottom = Vec3::new(mid_x, room_pos.y + (corner_heights[0] + corner_heights[1]) / 2.0, mid_z);
+                let center_top = Vec3::new(mid_x, room_pos.y + (corner_heights[2] + corner_heights[3]) / 2.0, mid_z);
+                draw_3d_line(fb, center_bottom, center_top, &state.camera_3d, wall_color);
+                // Horizontal line (middle height)
+                let mid_y = room_pos.y + (corner_heights[0] + corner_heights[1] + corner_heights[2] + corner_heights[3]) / 4.0;
+                let left = Vec3::new(p0.x, mid_y, p0.z);
+                let right = Vec3::new(p1.x, mid_y, p1.z);
+                draw_3d_line(fb, left, right, &state.camera_3d, wall_color);
+            }
         }
 
         // Show wall count in status
         let wall_count = (max_iter - min_iter + 1) as usize;
-        let dir_name = match dir {
-            Direction::North => "north",
-            Direction::East => "east",
-            Direction::South => "south",
-            Direction::West => "west",
-        };
-        state.set_status(&format!("Drag to place {} {} walls", wall_count, dir_name), 0.1);
+        state.set_status(&format!("Drag to place {} {} walls", wall_count, dir.name().to_lowercase()), 0.1);
+        } // end if !dir.is_diagonal()
     }
 
     // Draw diagonal wall drag preview
-    if let (Some((start_gx, start_gz, is_nwse)), Some((end_gx, end_gz, _))) = (state.diagonal_drag_start, state.diagonal_drag_current) {
-        // Get room position
-        let room_pos = state.level.rooms.get(state.current_room)
-            .map(|r| r.position)
-            .unwrap_or_default();
+    if let (Some((start_gx, start_gz, start_dir)), Some((end_gx, end_gz, _))) = (state.wall_drag_start, state.wall_drag_current) {
+        if start_dir.is_diagonal() {
+            use crate::world::Direction;
+            let is_nwse = start_dir == Direction::NwSe;
 
-        let diag_color = RasterColor::new(80, 220, 220); // Cyan
-        let vertex_color = RasterColor::new(255, 255, 255); // White
+            // Get room position
+            let room_pos = state.level.rooms.get(state.current_room)
+                .map(|r| r.position)
+                .unwrap_or_default();
 
-        // Simple diagonal line: both X and Z step together at the same rate
-        let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
-        let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
-        let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+            let diag_color = RasterColor::new(80, 220, 220); // Cyan
+            let vertex_color = RasterColor::new(255, 255, 255); // White
 
-        for i in 0..=steps {
-            let gx = start_gx + sx * i;
-            let gz = start_gz + sz * i;
+            // Simple diagonal line: both X and Z step together at the same rate
+            let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+            let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+            let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
 
-            // Calculate world position for this grid cell
-            let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
-            let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
+            for i in 0..=steps {
+                let gx = start_gx + sx * i;
+                let gz = start_gz + sz * i;
 
-            // Use default heights (0 to CEILING_HEIGHT)
-            let floor_y = room_pos.y;
-            let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
+                // Calculate world position for this grid cell
+                let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
+                let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
-            // Diagonal wall corners
-            let (p0, p1, p2, p3) = if is_nwse {
-                // NW-SE diagonal: from NW corner to SE corner
-                (
-                    Vec3::new(grid_x, floor_y, grid_z),                               // NW bottom
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),   // SE bottom
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE), // SE top
-                    Vec3::new(grid_x, ceiling_y, grid_z),                             // NW top
-                )
-            } else {
-                // NE-SW diagonal: from NE corner to SW corner
-                (
-                    Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),                 // NE bottom
-                    Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),                 // SW bottom
-                    Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),               // SW top
-                    Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),               // NE top
-                )
-            };
+                // Use default heights (0 to CEILING_HEIGHT)
+                let floor_y = room_pos.y;
+                let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
 
-            // Draw diagonal wall outline
-            draw_3d_line(fb, p0, p1, &state.camera_3d, diag_color);
-            draw_3d_line(fb, p1, p2, &state.camera_3d, diag_color);
-            draw_3d_line(fb, p2, p3, &state.camera_3d, diag_color);
-            draw_3d_line(fb, p3, p0, &state.camera_3d, diag_color);
-            // Cross pattern to indicate diagonal
-            draw_3d_line(fb, p0, p2, &state.camera_3d, diag_color);
+                // Diagonal wall corners
+                let (p0, p1, p2, p3) = if is_nwse {
+                    // NW-SE diagonal: from NW corner to SE corner
+                    (
+                        Vec3::new(grid_x, floor_y, grid_z),                               // NW bottom
+                        Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z + SECTOR_SIZE),   // SE bottom
+                        Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z + SECTOR_SIZE), // SE top
+                        Vec3::new(grid_x, ceiling_y, grid_z),                             // NW top
+                    )
+                } else {
+                    // NE-SW diagonal: from NE corner to SW corner
+                    (
+                        Vec3::new(grid_x + SECTOR_SIZE, floor_y, grid_z),                 // NE bottom
+                        Vec3::new(grid_x, floor_y, grid_z + SECTOR_SIZE),                 // SW bottom
+                        Vec3::new(grid_x, ceiling_y, grid_z + SECTOR_SIZE),               // SW top
+                        Vec3::new(grid_x + SECTOR_SIZE, ceiling_y, grid_z),               // NE top
+                    )
+                };
 
-            // Draw vertex indicators
-            draw_3d_point(fb, p0, &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+                // Draw diagonal wall outline
+                draw_3d_line(fb, p0, p1, &state.camera_3d, diag_color);
+                draw_3d_line(fb, p1, p2, &state.camera_3d, diag_color);
+                draw_3d_line(fb, p2, p3, &state.camera_3d, diag_color);
+                draw_3d_line(fb, p3, p0, &state.camera_3d, diag_color);
+                // Cross pattern to indicate diagonal
+                draw_3d_line(fb, p0, p2, &state.camera_3d, diag_color);
+
+                // Draw vertex indicators
+                draw_3d_point(fb, p0, &state.camera_3d, 3, vertex_color);
+                draw_3d_point(fb, p1, &state.camera_3d, 3, vertex_color);
+                draw_3d_point(fb, p2, &state.camera_3d, 3, vertex_color);
+                draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
+            }
+
+            let diag_count = steps + 1;
+
+            // Show diagonal count in status
+            state.set_status(&format!("Drag to place {} {} walls", diag_count, start_dir.name()), 0.1);
         }
-
-        let diag_count = steps + 1;
-
-        // Show diagonal count in status
-        let type_name = if is_nwse { "NW-SE" } else { "NE-SW" };
-        state.set_status(&format!("Drag to place {} {} diagonal walls", diag_count, type_name), 0.1);
     }
+
+    let vp_grid_ms = EditorFrameTimings::elapsed_ms(grid_start);
+
+    // === LIGHTS PHASE ===
+    let lights_start = EditorFrameTimings::start();
 
     // Build texture map from texture packs
     let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
@@ -2595,13 +3090,23 @@ pub fn draw_viewport_3d(
         Vec::new()
     };
 
-    // Convert textures to RGB555 if enabled
+    let vp_lights_ms = EditorFrameTimings::elapsed_ms(lights_start);
+
+    // === TEXTURE CONVERSION PHASE ===
+    let texconv_start = EditorFrameTimings::start();
+
+    // Convert textures to RGB555 if enabled (lazy cache: only convert when texture count changes)
     let use_rgb555 = state.raster_settings.use_rgb555;
-    let textures_15: Vec<_> = if use_rgb555 {
-        textures.iter().map(|t| t.to_15()).collect()
-    } else {
-        Vec::new()
-    };
+    if use_rgb555 && state.textures_15_cache.len() != textures.len() {
+        state.textures_15_cache = textures.iter().map(|t| t.to_15()).collect();
+    }
+
+    let vp_texconv_ms = EditorFrameTimings::elapsed_ms(texconv_start);
+
+    // === RENDER PHASE (meshgen + raster) ===
+    let render_start = EditorFrameTimings::start();
+    let mut vp_meshgen_ms = 0.0f32;
+    let mut vp_raster_ms = 0.0f32;
 
     // Render each room with its own ambient setting (skip hidden ones)
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
@@ -2614,32 +3119,49 @@ pub fn draw_viewport_3d(
             ambient: room.ambient,
             ..state.raster_settings.clone()
         };
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
 
+        // Time mesh generation
+        let meshgen_start = EditorFrameTimings::start();
+        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
+        vp_meshgen_ms += EditorFrameTimings::elapsed_ms(meshgen_start);
+
+        // Time rasterization
+        let raster_start = EditorFrameTimings::start();
         if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &state.camera_3d, &render_settings);
+            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, None, &state.camera_3d, &render_settings);
         } else {
             render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
         }
+        vp_raster_ms += EditorFrameTimings::elapsed_ms(raster_start);
     }
+
+    let _render_total_ms = EditorFrameTimings::elapsed_ms(render_start);
+
+    // === PREVIEW/SELECTION PHASE ===
+    let preview_start = EditorFrameTimings::start();
 
     // Draw subtle sector boundary highlight for wall placement
     // Only show if on the drag line (same check as wall preview)
-    if let Some((grid_x, grid_z, dir, _, _)) = preview_wall {
+    if let Some((grid_x, grid_z, dir, _, _, _)) = preview_wall {
         // Check if this sector is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;
-            // Convert preview world coords to grid coords
-            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            // Sector is on the line if direction matches AND the fixed axis matches
-            dir == start_dir && match start_dir {
-                Direction::North | Direction::South => preview_gz == start_gz,
-                Direction::East | Direction::West => preview_gx == start_gx,
+            if start_dir.is_diagonal() {
+                false // Diagonal walls have separate boundary highlighting
+            } else {
+                // Convert preview world coords to grid coords
+                let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                // Sector is on the line if direction matches AND the fixed axis matches
+                dir == start_dir && match start_dir {
+                    Direction::North | Direction::South => preview_gz == start_gz,
+                    Direction::East | Direction::West => preview_gx == start_gx,
+                    Direction::NwSe | Direction::NeSw => unreachable!(),
+                }
             }
         } else {
             true // Not dragging, always show
@@ -2687,37 +3209,43 @@ pub fn draw_viewport_3d(
     // Draw subtle sector boundary highlight for diagonal wall placement
     // Only show if on the drag line (same check as diagonal preview)
     if let Some((grid_x, grid_z, is_nwse, _)) = preview_diagonal_wall {
+        use crate::world::Direction;
         // Check if this sector is on the drag line (if dragging)
-        let on_drag_line = if let Some((start_gx, start_gz, start_is_nwse)) = state.diagonal_drag_start {
-            // Convert preview world coords to grid coords
-            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            // Diagonal is on the line if type matches AND it's on the simple diagonal line
-            if let Some((end_gx, end_gz, _)) = state.diagonal_drag_current {
-                if is_nwse != start_is_nwse {
-                    false // Wrong diagonal type
-                } else {
-                    // Check if preview point is on the diagonal line from start to end
-                    let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
-                    let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
-                    let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
-                    let mut found = false;
-                    for i in 0..=steps {
-                        let gx = start_gx + sx * i;
-                        let gz = start_gz + sz * i;
-                        if gx == preview_gx && gz == preview_gz {
-                            found = true;
-                            break;
-                        }
-                    }
-                    found
-                }
+        let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
+            if !start_dir.is_diagonal() {
+                true // Not diagonal drag, always show
             } else {
-                is_nwse == start_is_nwse
+                let start_is_nwse = start_dir == Direction::NwSe;
+                // Convert preview world coords to grid coords
+                let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                // Diagonal is on the line if type matches AND it's on the simple diagonal line
+                if let Some((end_gx, end_gz, _)) = state.wall_drag_current {
+                    if is_nwse != start_is_nwse {
+                        false // Wrong diagonal type
+                    } else {
+                        // Check if preview point is on the diagonal line from start to end
+                        let sx: i32 = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+                        let sz: i32 = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+                        let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+                        let mut found = false;
+                        for i in 0..=steps {
+                            let gx = start_gx + sx * i;
+                            let gz = start_gz + sz * i;
+                            if gx == preview_gx && gz == preview_gz {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    }
+                } else {
+                    is_nwse == start_is_nwse
+                }
             }
         } else {
             true // Not dragging, always show
@@ -2766,21 +3294,26 @@ pub fn draw_viewport_3d(
     // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
     // corner_heights: [bottom-left, bottom-right, top-right, top-left] (room-relative)
     // Skip single wall preview if it's not on the drag line
-    if let Some((grid_x, grid_z, dir, corner_heights, wall_state)) = preview_wall {
+    if let Some((grid_x, grid_z, dir, corner_heights, wall_state, _mouse_y)) = preview_wall {
         // Check if this preview is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;
-            // Convert preview world coords to grid coords
-            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            // Wall is on the line if direction matches AND the fixed axis matches
-            dir == start_dir && match start_dir {
-                Direction::North | Direction::South => preview_gz == start_gz,
-                Direction::East | Direction::West => preview_gx == start_gx,
+            if start_dir.is_diagonal() {
+                false // Diagonal walls have separate preview
+            } else {
+                // Convert preview world coords to grid coords
+                let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                // Wall is on the line if direction matches AND the fixed axis matches
+                dir == start_dir && match start_dir {
+                    Direction::North | Direction::South => preview_gz == start_gz,
+                    Direction::East | Direction::West => preview_gx == start_gx,
+                    Direction::NwSe | Direction::NeSw => unreachable!(),
+                }
             }
         } else {
             true // Not dragging, always show preview
@@ -2802,6 +3335,7 @@ pub fn draw_viewport_3d(
                 Direction::East => (Vec3::new(grid_x + SECTOR_SIZE, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
                 Direction::South => (Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE), Vec3::new(100.0, 100.0, 0.0)),
                 Direction::West => (Vec3::new(grid_x, mid_y, grid_z + SECTOR_SIZE / 2.0), Vec3::new(0.0, 100.0, 100.0)),
+                Direction::NwSe | Direction::NeSw => unreachable!(),
             };
             let color = RasterColor::new(200, 80, 80); // Red
             draw_3d_line_depth(fb, center - offset, center + offset, &state.camera_3d, color);
@@ -2835,6 +3369,7 @@ pub fn draw_viewport_3d(
                     Vec3::new(grid_x, room_y + corner_heights[2], grid_z),                     // TR
                     Vec3::new(grid_x, room_y + corner_heights[3], grid_z + SECTOR_SIZE),       // TL
                 ),
+                Direction::NwSe | Direction::NeSw => unreachable!(),
             };
 
             // Color: teal for new wall, orange for filling gap
@@ -2858,7 +3393,10 @@ pub fn draw_viewport_3d(
             draw_3d_point(fb, p3, &state.camera_3d, 3, vertex_color);
 
             // Draw + through it if filling gap to indicate addition
-            if wall_state == 1 {
+            // Skip if wall is triangular (collapsed vertices make + look wrong)
+            let is_triangular = (corner_heights[0] - corner_heights[3]).abs() < 1.0
+                             || (corner_heights[1] - corner_heights[2]).abs() < 1.0;
+            if wall_state == 1 && !is_triangular {
                 // Vertical line (center)
                 let mid_x = (p0.x + p1.x) / 2.0;
                 let mid_z = (p0.z + p1.z) / 2.0;
@@ -2875,41 +3413,47 @@ pub fn draw_viewport_3d(
         } // end if on_drag_line
     }
 
-    // Draw diagonal wall preview when in DrawDiagonalWall mode
+    // Draw diagonal wall preview when in DrawWall mode with diagonal direction
     // Skip single diagonal preview if it's not on the drag line
     if let Some((grid_x, grid_z, is_nwse, corner_heights)) = preview_diagonal_wall {
+        use crate::world::Direction;
         // Check if this preview is on the drag line (if dragging)
-        let on_drag_line = if let Some((start_gx, start_gz, start_is_nwse)) = state.diagonal_drag_start {
-            // Convert preview world coords to grid coords
-            let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
-            } else { 0 };
-            // Diagonal is on the line if type matches AND it's on the simple diagonal line
-            if let Some((end_gx, end_gz, _)) = state.diagonal_drag_current {
-                if is_nwse != start_is_nwse {
-                    false // Wrong diagonal type
-                } else {
-                    // Check if preview point is on the diagonal line from start to end
-                    // Simple check: both X and Z step together at the same rate
-                    let sx = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
-                    let sz = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
-                    let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
-                    let mut found = false;
-                    for i in 0..=steps {
-                        let gx = start_gx + sx * i;
-                        let gz = start_gz + sz * i;
-                        if gx == preview_gx && gz == preview_gz {
-                            found = true;
-                            break;
-                        }
-                    }
-                    found
-                }
+        let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
+            if !start_dir.is_diagonal() {
+                true // Not diagonal drag, always show
             } else {
-                is_nwse == start_is_nwse
+                let start_is_nwse = start_dir == Direction::NwSe;
+                // Convert preview world coords to grid coords
+                let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_x - room.position.x) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    ((grid_z - room.position.z) / SECTOR_SIZE).floor() as i32
+                } else { 0 };
+                // Diagonal is on the line if type matches AND it's on the simple diagonal line
+                if let Some((end_gx, end_gz, _)) = state.wall_drag_current {
+                    if is_nwse != start_is_nwse {
+                        false // Wrong diagonal type
+                    } else {
+                        // Check if preview point is on the diagonal line from start to end
+                        // Simple check: both X and Z step together at the same rate
+                        let sx: i32 = if start_gx < end_gx { 1 } else if start_gx > end_gx { -1 } else { 0 };
+                        let sz: i32 = if start_gz < end_gz { 1 } else if start_gz > end_gz { -1 } else { 0 };
+                        let steps = (end_gx - start_gx).abs().max((end_gz - start_gz).abs());
+                        let mut found = false;
+                        for i in 0..=steps {
+                            let gx = start_gx + sx * i;
+                            let gz = start_gz + sz * i;
+                            if gx == preview_gx && gz == preview_gz {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    }
+                } else {
+                    is_nwse == start_is_nwse
+                }
             }
         } else {
             true // Not dragging, always show preview
@@ -3395,46 +3939,80 @@ pub fn draw_viewport_3d(
                     match face {
                         SectorFace::Floor => {
                             if let Some(floor) = &sector.floor {
-                                let corners = [
+                                // Triangle 1 corners (use heights)
+                                let corners_1 = [
                                     Vec3::new(base_x, room_y + floor.heights[0], base_z),                    // NW = 0
                                     Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),      // NE = 1
                                     Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE), // SE = 2
                                     Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                 ];
-                                // Draw all 4 edges
-                                for i in 0..4 {
-                                    draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, hover_color);
-                                }
-                                // Draw diagonal based on split direction
+                                // Triangle 2 corners (use heights_2 if unlinked)
+                                let h2 = floor.get_heights_2();
+                                let corners_2 = [
+                                    Vec3::new(base_x, room_y + h2[0], base_z),                    // NW = 0
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),      // NE = 1
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE), // SE = 2
+                                    Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),      // SW = 3
+                                ];
+                                // Draw triangle edges based on split direction
                                 match floor.split_direction {
                                     SplitDirection::NwSe => {
-                                        draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, hover_color);
+                                        // Tri1: NW-NE-SE, Tri2: NW-SE-SW
+                                        draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, hover_color);
+                                        // Diagonal for both triangles
+                                        draw_3d_line(fb, corners_1[0], corners_1[2], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[0], corners_2[2], &state.camera_3d, hover_color);
                                     }
                                     SplitDirection::NeSw => {
-                                        draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, hover_color);
+                                        // Tri1: NW-NE-SW, Tri2: NE-SE-SW
+                                        draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, hover_color);
+                                        // Diagonal for both triangles
+                                        draw_3d_line(fb, corners_1[1], corners_1[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[1], corners_2[3], &state.camera_3d, hover_color);
                                     }
                                 }
                             }
                         }
                         SectorFace::Ceiling => {
                             if let Some(ceiling) = &sector.ceiling {
-                                let corners = [
+                                // Triangle 1 corners (use heights)
+                                let corners_1 = [
                                     Vec3::new(base_x, room_y + ceiling.heights[0], base_z),                    // NW = 0
                                     Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),      // NE = 1
                                     Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE), // SE = 2
                                     Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                 ];
-                                // Draw all 4 edges
-                                for i in 0..4 {
-                                    draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, hover_color);
-                                }
-                                // Draw diagonal based on split direction
+                                // Triangle 2 corners (use heights_2 if unlinked)
+                                let h2 = ceiling.get_heights_2();
+                                let corners_2 = [
+                                    Vec3::new(base_x, room_y + h2[0], base_z),                    // NW = 0
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),      // NE = 1
+                                    Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE), // SE = 2
+                                    Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),      // SW = 3
+                                ];
+                                // Draw triangle edges based on split direction
                                 match ceiling.split_direction {
                                     SplitDirection::NwSe => {
-                                        draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[0], corners_1[2], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[0], corners_2[2], &state.camera_3d, hover_color);
                                     }
                                     SplitDirection::NeSw => {
-                                        draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_1[1], corners_1[3], &state.camera_3d, hover_color);
+                                        draw_3d_line(fb, corners_2[1], corners_2[3], &state.camera_3d, hover_color);
                                     }
                                 }
                             }
@@ -3525,6 +4103,166 @@ pub fn draw_viewport_3d(
         }
     }
 
+    // Draw geometry paste preview wireframe when hovering over empty space with clipboard
+    if let Some((anchor_gx, anchor_gz)) = geometry_paste_preview {
+        if let Some(gc) = &state.geometry_clipboard {
+            if let Some(room) = state.level.rooms.get(state.current_room) {
+                let room_y = room.position.y;
+                let preview_color = RasterColor::new(100, 255, 150); // Green wireframe for paste preview
+
+                // Get bounds for flip transformation
+                let (min_x, max_x, min_z, max_z) = gc.bounds();
+                let width = max_x - min_x;
+                let depth = max_z - min_z;
+
+                for copied_face in &gc.faces {
+                    // Apply flip transformations (same logic as paste_geometry_selection)
+                    let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
+                        (width - copied_face.rel_x, depth - copied_face.rel_z)
+                    } else if gc.flip_h {
+                        (width - copied_face.rel_x, copied_face.rel_z)
+                    } else if gc.flip_v {
+                        (copied_face.rel_x, depth - copied_face.rel_z)
+                    } else {
+                        (copied_face.rel_x, copied_face.rel_z)
+                    };
+
+                    let target_gx = anchor_gx + rel_x;
+                    let target_gz = anchor_gz + rel_z;
+
+                    // Calculate world position - allow any grid position (room will expand on paste)
+                    let base_x = room.position.x + (target_gx as f32) * SECTOR_SIZE;
+                    let base_z = room.position.z + (target_gz as f32) * SECTOR_SIZE;
+
+                    match &copied_face.face {
+                        CopiedFaceData::Floor(f) => {
+                            // Apply height flips for preview
+                            let mut heights = f.heights;
+                            if gc.flip_h {
+                                heights = [heights[1], heights[0], heights[3], heights[2]];
+                            }
+                            if gc.flip_v {
+                                heights = [heights[3], heights[2], heights[1], heights[0]];
+                            }
+                            let corners = [
+                                Vec3::new(base_x, room_y + heights[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + heights[3], base_z + SECTOR_SIZE),
+                            ];
+                            // Draw quad outline + diagonal
+                            draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::Ceiling(f) => {
+                            let mut heights = f.heights;
+                            if gc.flip_h {
+                                heights = [heights[1], heights[0], heights[3], heights[2]];
+                            }
+                            if gc.flip_v {
+                                heights = [heights[3], heights[2], heights[1], heights[0]];
+                            }
+                            let corners = [
+                                Vec3::new(base_x, room_y + heights[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + heights[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + heights[3], base_z + SECTOR_SIZE),
+                            ];
+                            draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallNorth(_, w) => {
+                            // If flip_v, this becomes south wall visually
+                            let wall_z = if gc.flip_v { base_z + SECTOR_SIZE } else { base_z };
+                            let p0 = Vec3::new(base_x, room_y + w.heights[0], wall_z);
+                            let p1 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[1], wall_z);
+                            let p2 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[2], wall_z);
+                            let p3 = Vec3::new(base_x, room_y + w.heights[3], wall_z);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallSouth(_, w) => {
+                            let wall_z = if gc.flip_v { base_z } else { base_z + SECTOR_SIZE };
+                            let p0 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[0], wall_z);
+                            let p1 = Vec3::new(base_x, room_y + w.heights[1], wall_z);
+                            let p2 = Vec3::new(base_x, room_y + w.heights[2], wall_z);
+                            let p3 = Vec3::new(base_x + SECTOR_SIZE, room_y + w.heights[3], wall_z);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallEast(_, w) => {
+                            let wall_x = if gc.flip_h { base_x } else { base_x + SECTOR_SIZE };
+                            let p0 = Vec3::new(wall_x, room_y + w.heights[0], base_z);
+                            let p1 = Vec3::new(wall_x, room_y + w.heights[1], base_z + SECTOR_SIZE);
+                            let p2 = Vec3::new(wall_x, room_y + w.heights[2], base_z + SECTOR_SIZE);
+                            let p3 = Vec3::new(wall_x, room_y + w.heights[3], base_z);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallWest(_, w) => {
+                            let wall_x = if gc.flip_h { base_x + SECTOR_SIZE } else { base_x };
+                            let p0 = Vec3::new(wall_x, room_y + w.heights[0], base_z + SECTOR_SIZE);
+                            let p1 = Vec3::new(wall_x, room_y + w.heights[1], base_z);
+                            let p2 = Vec3::new(wall_x, room_y + w.heights[2], base_z);
+                            let p3 = Vec3::new(wall_x, room_y + w.heights[3], base_z + SECTOR_SIZE);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallNwSe(_, w) => {
+                            // NW to SE diagonal - swap to NE-SW if both flips
+                            let (c0, c1) = if gc.flip_h != gc.flip_v {
+                                // Becomes NE-SW diagonal
+                                ((base_x + SECTOR_SIZE, base_z), (base_x, base_z + SECTOR_SIZE))
+                            } else {
+                                // Stays NW-SE
+                                ((base_x, base_z), (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE))
+                            };
+                            let p0 = Vec3::new(c0.0, room_y + w.heights[0], c0.1);
+                            let p1 = Vec3::new(c1.0, room_y + w.heights[1], c1.1);
+                            let p2 = Vec3::new(c1.0, room_y + w.heights[2], c1.1);
+                            let p3 = Vec3::new(c0.0, room_y + w.heights[3], c0.1);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                        CopiedFaceData::WallNeSw(_, w) => {
+                            let (c0, c1) = if gc.flip_h != gc.flip_v {
+                                // Becomes NW-SE diagonal
+                                ((base_x, base_z), (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE))
+                            } else {
+                                // Stays NE-SW
+                                ((base_x + SECTOR_SIZE, base_z), (base_x, base_z + SECTOR_SIZE))
+                            };
+                            let p0 = Vec3::new(c0.0, room_y + w.heights[0], c0.1);
+                            let p1 = Vec3::new(c1.0, room_y + w.heights[1], c1.1);
+                            let p2 = Vec3::new(c1.0, room_y + w.heights[2], c1.1);
+                            let p3 = Vec3::new(c0.0, room_y + w.heights[3], c0.1);
+                            draw_3d_line(fb, p0, p1, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p1, p2, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
+                            draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Draw selection highlights for primary selection and all multi-selections
     let select_color = RasterColor::new(255, 200, 80); // Yellow/orange
 
@@ -3541,46 +4279,92 @@ pub fn draw_viewport_3d(
                         match face {
                             SectorFace::Floor => {
                                 if let Some(floor) = &sector.floor {
-                                    let corners = [
+                                    // Triangle 1 corners (use heights)
+                                    let corners_1 = [
                                         Vec3::new(base_x, room_y + floor.heights[0], base_z),                    // NW = 0
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),      // NE = 1
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE), // SE = 2
                                         Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                     ];
-                                    // Draw all 4 edges
-                                    for i in 0..4 {
-                                        draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
-                                    }
-                                    // Draw diagonal based on split direction
+                                    // Triangle 2 corners (use heights_2 if unlinked)
+                                    let h2 = floor.get_heights_2();
+                                    let corners_2 = [
+                                        Vec3::new(base_x, room_y + h2[0], base_z),                    // NW = 0
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),      // NE = 1
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE), // SE = 2
+                                        Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),      // SW = 3
+                                    ];
+                                    // Draw triangle edges based on split direction
                                     match floor.split_direction {
                                         SplitDirection::NwSe => {
-                                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SE, Tri2: NW-SE-SW
+                                            // Tri1 edges: NW-NE, NE-SE
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                            // Tri2 edges: SE-SW, SW-NW
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NW-SE, Tri2 NW-SE)
+                                            draw_3d_line(fb, corners_1[0], corners_1[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[0], corners_2[2], &state.camera_3d, select_color);
                                         }
                                         SplitDirection::NeSw => {
-                                            draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SW, Tri2: NE-SE-SW
+                                            // Tri1 edges: NW-NE, NW-SW
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                            // Tri2 edges: NE-SE, SE-SW
+                                            draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NE-SW, Tri2 NE-SW)
+                                            draw_3d_line(fb, corners_1[1], corners_1[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[1], corners_2[3], &state.camera_3d, select_color);
                                         }
                                     }
                                 }
                             }
                             SectorFace::Ceiling => {
                                 if let Some(ceiling) = &sector.ceiling {
-                                    let corners = [
+                                    // Triangle 1 corners (use heights)
+                                    let corners_1 = [
                                         Vec3::new(base_x, room_y + ceiling.heights[0], base_z),                    // NW = 0
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),      // NE = 1
                                         Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE), // SE = 2
                                         Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),      // SW = 3
                                     ];
-                                    // Draw all 4 edges
-                                    for i in 0..4 {
-                                        draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
-                                    }
-                                    // Draw diagonal based on split direction
+                                    // Triangle 2 corners (use heights_2 if unlinked)
+                                    let h2 = ceiling.get_heights_2();
+                                    let corners_2 = [
+                                        Vec3::new(base_x, room_y + h2[0], base_z),                    // NW = 0
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),      // NE = 1
+                                        Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE), // SE = 2
+                                        Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),      // SW = 3
+                                    ];
+                                    // Draw triangle edges based on split direction
                                     match ceiling.split_direction {
                                         SplitDirection::NwSe => {
-                                            draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SE, Tri2: NW-SE-SW
+                                            // Tri1 edges: NW-NE, NE-SE
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                            // Tri2 edges: SE-SW, SW-NW
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NW-SE, Tri2 NW-SE)
+                                            draw_3d_line(fb, corners_1[0], corners_1[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[0], corners_2[2], &state.camera_3d, select_color);
                                         }
                                         SplitDirection::NeSw => {
-                                            draw_3d_line(fb, corners[1], corners[3], &state.camera_3d, select_color);
+                                            // Tri1: NW-NE-SW, Tri2: NE-SE-SW
+                                            // Tri1 edges: NW-NE, NW-SW
+                                            draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                            // Tri2 edges: NE-SE, SE-SW
+                                            draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                            // Diagonal: draw for both triangles (Tri1 NE-SW, Tri2 NE-SW)
+                                            draw_3d_line(fb, corners_1[1], corners_1[3], &state.camera_3d, select_color);
+                                            draw_3d_line(fb, corners_2[1], corners_2[3], &state.camera_3d, select_color);
                                         }
                                     }
                                 }
@@ -3675,29 +4459,71 @@ pub fn draw_viewport_3d(
                         let base_z = room_data.position.z + (*z as f32) * SECTOR_SIZE;
                         let room_y = room_data.position.y; // Y offset for world-space
 
-                        // Draw floor outline if floor exists
+                        // Draw floor outline if floor exists (both triangles if heights unlinked)
                         if let Some(floor) = &sector.floor {
-                            let corners = [
+                            let corners_1 = [
                                 Vec3::new(base_x, room_y + floor.heights[0], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
                                 Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
                             ];
-                            for i in 0..4 {
-                                draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
+                            let h2 = floor.get_heights_2();
+                            let corners_2 = [
+                                Vec3::new(base_x, room_y + h2[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),
+                            ];
+                            // Draw outer edges for both triangles
+                            match floor.split_direction {
+                                SplitDirection::NwSe => {
+                                    // Tri1: NW-NE-SE outer edges: NW-NE, NE-SE
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                    // Tri2: NW-SE-SW outer edges: SE-SW, SW-NW
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                }
+                                SplitDirection::NeSw => {
+                                    // Tri1: NW-NE-SW outer edges: NW-NE, NW-SW
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                    // Tri2: NE-SE-SW outer edges: NE-SE, SE-SW
+                                    draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                }
                             }
                         }
 
-                        // Draw ceiling outline if ceiling exists
+                        // Draw ceiling outline if ceiling exists (both triangles if heights unlinked)
                         if let Some(ceiling) = &sector.ceiling {
-                            let corners = [
+                            let corners_1 = [
                                 Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
                                 Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
                                 Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
                             ];
-                            for i in 0..4 {
-                                draw_3d_line(fb, corners[i], corners[(i + 1) % 4], &state.camera_3d, select_color);
+                            let h2 = ceiling.get_heights_2();
+                            let corners_2 = [
+                                Vec3::new(base_x, room_y + h2[0], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[1], base_z),
+                                Vec3::new(base_x + SECTOR_SIZE, room_y + h2[2], base_z + SECTOR_SIZE),
+                                Vec3::new(base_x, room_y + h2[3], base_z + SECTOR_SIZE),
+                            ];
+                            // Draw outer edges for both triangles
+                            match ceiling.split_direction {
+                                SplitDirection::NwSe => {
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[1], corners_1[2], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[3], corners_2[0], &state.camera_3d, select_color);
+                                }
+                                SplitDirection::NeSw => {
+                                    draw_3d_line(fb, corners_1[0], corners_1[1], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_1[0], corners_1[3], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[1], corners_2[2], &state.camera_3d, select_color);
+                                    draw_3d_line(fb, corners_2[2], corners_2[3], &state.camera_3d, select_color);
+                                }
                             }
                         }
 
@@ -3937,6 +4763,11 @@ pub fn draw_viewport_3d(
         }
     }
 
+    let vp_preview_ms = EditorFrameTimings::elapsed_ms(preview_start);
+
+    // === UPLOAD PHASE ===
+    let upload_start = EditorFrameTimings::start();
+
     // Convert framebuffer to texture and draw to viewport
     let texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);
     texture.set_filter(FilterMode::Nearest);
@@ -3951,6 +4782,20 @@ pub fn draw_viewport_3d(
             ..Default::default()
         },
     );
+
+    let vp_upload_ms = EditorFrameTimings::elapsed_ms(upload_start);
+
+    // Store viewport timings
+    state.frame_timings.vp_input_ms = vp_input_ms;
+    state.frame_timings.vp_clear_ms = vp_clear_ms;
+    state.frame_timings.vp_grid_ms = vp_grid_ms;
+    state.frame_timings.vp_lights_ms = vp_lights_ms;
+    state.frame_timings.vp_texconv_ms = vp_texconv_ms;
+    state.frame_timings.vp_meshgen_ms = vp_meshgen_ms;
+    state.frame_timings.vp_raster_ms = vp_raster_ms;
+    state.frame_timings.vp_preview_ms = vp_preview_ms;
+    state.frame_timings.vp_selection_ms = 0.0; // Included in preview
+    state.frame_timings.vp_upload_ms = vp_upload_ms;
 
     // Draw viewport border
     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, Color::from_rgba(60, 60, 60, 255));
@@ -4168,11 +5013,20 @@ fn draw_3d_line_impl(
             return;
         };
 
+        // Clip line to screen bounds using Cohen-Sutherland algorithm
+        // This prevents Bresenham from iterating over thousands of off-screen pixels
+        let w = fb.width as f32;
+        let h = fb.height as f32;
+
+        let Some((cx0, cy0, cx1, cy1)) = clip_line_to_rect(x0f, y0f, x1f, y1f, 0.0, 0.0, w, h) else {
+            return; // Line entirely outside viewport
+        };
+
         // Convert to integers for Bresenham
-        let mut x0 = x0f as i32;
-        let mut y0 = y0f as i32;
-        let x1 = x1f as i32;
-        let y1 = y1f as i32;
+        let mut x0 = cx0 as i32;
+        let mut y0 = cy0 as i32;
+        let x1 = cx1 as i32;
+        let y1 = cy1 as i32;
 
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -4180,11 +5034,12 @@ fn draw_3d_line_impl(
         let sy = if y0 < y1 { 1 } else { -1 };
         let mut err = dx + dy;
 
-        let w = fb.width as i32;
-        let h = fb.height as i32;
+        let wi = fb.width as i32;
+        let hi = fb.height as i32;
 
         loop {
-            if x0 >= 0 && x0 < w && y0 >= 0 && y0 < h {
+            // Safety check (should be redundant after clipping, but just in case)
+            if x0 >= 0 && x0 < wi && y0 >= 0 && y0 < hi {
                 fb.set_pixel(x0 as usize, y0 as usize, color);
             }
 
@@ -4201,6 +5056,75 @@ fn draw_3d_line_impl(
                 err += dx;
                 y0 += sy;
             }
+        }
+    }
+}
+
+/// Cohen-Sutherland line clipping to a rectangle.
+/// Returns None if line is entirely outside, otherwise returns clipped endpoints.
+fn clip_line_to_rect(
+    mut x0: f32, mut y0: f32,
+    mut x1: f32, mut y1: f32,
+    xmin: f32, ymin: f32,
+    xmax: f32, ymax: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    // Outcode bits
+    const INSIDE: u8 = 0;
+    const LEFT: u8 = 1;
+    const RIGHT: u8 = 2;
+    const BOTTOM: u8 = 4;
+    const TOP: u8 = 8;
+
+    let outcode = |x: f32, y: f32| -> u8 {
+        let mut code = INSIDE;
+        if x < xmin { code |= LEFT; }
+        else if x >= xmax { code |= RIGHT; }
+        if y < ymin { code |= TOP; }
+        else if y >= ymax { code |= BOTTOM; }
+        code
+    };
+
+    let mut code0 = outcode(x0, y0);
+    let mut code1 = outcode(x1, y1);
+
+    loop {
+        if (code0 | code1) == 0 {
+            // Both inside
+            return Some((x0, y0, x1, y1));
+        }
+        if (code0 & code1) != 0 {
+            // Both outside same edge - reject
+            return None;
+        }
+
+        // Pick the point outside
+        let code_out = if code0 != 0 { code0 } else { code1 };
+
+        // Find intersection
+        let (x, y);
+        if (code_out & BOTTOM) != 0 {
+            x = x0 + (x1 - x0) * (ymax - 1.0 - y0) / (y1 - y0);
+            y = ymax - 1.0;
+        } else if (code_out & TOP) != 0 {
+            x = x0 + (x1 - x0) * (ymin - y0) / (y1 - y0);
+            y = ymin;
+        } else if (code_out & RIGHT) != 0 {
+            y = y0 + (y1 - y0) * (xmax - 1.0 - x0) / (x1 - x0);
+            x = xmax - 1.0;
+        } else {
+            // LEFT
+            y = y0 + (y1 - y0) * (xmin - x0) / (x1 - x0);
+            x = xmin;
+        }
+
+        if code_out == code0 {
+            x0 = x;
+            y0 = y;
+            code0 = outcode(x0, y0);
+        } else {
+            x1 = x;
+            y1 = y;
+            code1 = outcode(x1, y1);
         }
     }
 }

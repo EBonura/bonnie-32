@@ -2,10 +2,20 @@
 //! PS1-style skeletal animation with binary bone weights
 //!
 //! Also includes PicoCAD-style mesh organization with named objects and texture atlas.
+//!
+//! Supports both compressed (zstd) and uncompressed RON files.
+//! - Reading: Auto-detects format by magic bytes
+//! - Writing: Always uses zstd compression
 
 use crate::rasterizer::{Vec3, Face, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Cursor;
+
+/// Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
+#[cfg(not(target_arch = "wasm32"))]
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 // ============================================================================
 // PicoCAD-style Mesh Organization
@@ -123,7 +133,7 @@ impl MeshProject {
         self.objects.iter().map(|o| o.mesh.face_count()).sum()
     }
 
-    /// Save project to file (.ron format)
+    /// Save project to file (compressed RON format with zstd)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &Path) -> Result<(), MeshEditorError> {
         let config = ron::ser::PrettyConfig::new()
@@ -132,16 +142,31 @@ impl MeshProject {
         let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
-        std::fs::write(path, ron_data)
+        // Compress with zstd (level 3 is a good balance of speed/ratio)
+        let compressed = zstd::encode_all(Cursor::new(ron_data.as_bytes()), 3)
+            .map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
+
+        std::fs::write(path, compressed)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
         Ok(())
     }
 
-    /// Load project from file (.ron format)
+    /// Load project from file (supports both compressed and uncompressed RON)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file(path: &Path) -> Result<Self, MeshEditorError> {
-        let ron_data = std::fs::read_to_string(path)
+        let bytes = std::fs::read(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
+
+        // Detect format by magic bytes: zstd vs plain RON text
+        let ron_data = if bytes.starts_with(&ZSTD_MAGIC) {
+            let decompressed = zstd::decode_all(Cursor::new(&bytes))
+                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
+            String::from_utf8(decompressed)
+                .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
+        } else {
+            String::from_utf8(bytes)
+                .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
+        };
 
         Self::load_from_str(&ron_data)
     }
@@ -683,7 +708,8 @@ impl MeshEditorModel {
         }
     }
 
-    /// Save mesh editor model to file (.ron format)
+    /// Save mesh editor model to file (compressed RON format with zstd)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &Path) -> Result<(), MeshEditorError> {
         let config = ron::ser::PrettyConfig::new()
             .depth_limit(4)
@@ -691,15 +717,31 @@ impl MeshEditorModel {
         let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
-        std::fs::write(path, ron_data)
+        // Compress with zstd (level 3 is a good balance of speed/ratio)
+        let compressed = zstd::encode_all(Cursor::new(ron_data.as_bytes()), 3)
+            .map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
+
+        std::fs::write(path, compressed)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
         Ok(())
     }
 
-    /// Load mesh editor model from file (.ron format)
+    /// Load mesh editor model from file (supports both compressed and uncompressed RON)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file(path: &Path) -> Result<Self, MeshEditorError> {
-        let ron_data = std::fs::read_to_string(path)
+        let bytes = std::fs::read(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
+
+        // Detect format by magic bytes: zstd vs plain RON text
+        let ron_data = if bytes.starts_with(&ZSTD_MAGIC) {
+            let decompressed = zstd::decode_all(Cursor::new(&bytes))
+                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
+            String::from_utf8(decompressed)
+                .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
+        } else {
+            String::from_utf8(bytes)
+                .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
+        };
 
         let model: MeshEditorModel = ron::from_str(&ron_data)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
@@ -1437,23 +1479,38 @@ impl EditableMesh {
         new_top_faces
     }
 
-    /// Save mesh to file (.ron format)
+    /// Save mesh to file (compressed RON format with zstd)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), MeshEditorError> {
         let config = ron::ser::PrettyConfig::default();
         let ron_data = ron::ser::to_string_pretty(self, config)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
-        std::fs::write(path, ron_data)
+        // Compress with zstd (level 3 is a good balance of speed/ratio)
+        let compressed = zstd::encode_all(Cursor::new(ron_data.as_bytes()), 3)
+            .map_err(|e| MeshEditorError::Io(format!("compression failed: {}", e)))?;
+
+        std::fs::write(path, compressed)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
         Ok(())
     }
 
-    /// Load mesh from file (.ron format)
+    /// Load mesh from file (supports both compressed and uncompressed RON)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, MeshEditorError> {
-        let ron_data = std::fs::read_to_string(path)
+        let bytes = std::fs::read(path)
             .map_err(|e| MeshEditorError::Io(e.to_string()))?;
+
+        // Detect format by magic bytes: zstd vs plain RON text
+        let ron_data = if bytes.starts_with(&ZSTD_MAGIC) {
+            let decompressed = zstd::decode_all(Cursor::new(&bytes))
+                .map_err(|e| MeshEditorError::Io(format!("decompression failed: {}", e)))?;
+            String::from_utf8(decompressed)
+                .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
+        } else {
+            String::from_utf8(bytes)
+                .map_err(|e| MeshEditorError::Io(format!("invalid UTF-8: {}", e)))?
+        };
 
         let mesh: EditableMesh = ron::from_str(&ron_data)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;

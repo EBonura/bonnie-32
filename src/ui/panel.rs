@@ -189,3 +189,78 @@ pub fn panel_content_rect(rect: Rect, has_title: bool) -> Rect {
         rect.pad(2.0)
     }
 }
+
+/// Height of a collapsed panel (just the header)
+pub const COLLAPSED_PANEL_HEIGHT: f32 = 20.0;
+
+/// Draw a collapsible panel header and return whether it was clicked
+/// Returns (header_clicked, content_rect) where content_rect is None if collapsed
+pub fn draw_collapsible_panel(
+    ctx: &mut UiContext,
+    rect: Rect,
+    title: &str,
+    collapsed: bool,
+    bg_color: Color,
+) -> (bool, Option<Rect>) {
+    let header_height = 20.0;
+
+    // Draw header
+    let header_rect = Rect::new(rect.x, rect.y, rect.w, header_height);
+
+    // Header background (slightly lighter when hovered)
+    let is_hovered = ctx.mouse.inside(&header_rect);
+    let header_color = if is_hovered {
+        Color::from_rgba(60, 60, 70, 255)
+    } else {
+        Color::from_rgba(50, 50, 60, 255)
+    };
+    draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, header_color);
+
+    // Collapse indicator (triangle)
+    let indicator_x = rect.x + 6.0;
+    let indicator_y = rect.y + 10.0;
+    let indicator_size = 5.0;
+
+    if collapsed {
+        // Right-pointing triangle (collapsed)
+        draw_triangle(
+            macroquad::math::Vec2::new(indicator_x, indicator_y - indicator_size),
+            macroquad::math::Vec2::new(indicator_x, indicator_y + indicator_size),
+            macroquad::math::Vec2::new(indicator_x + indicator_size, indicator_y),
+            Color::from_rgba(180, 180, 180, 255),
+        );
+    } else {
+        // Down-pointing triangle (expanded)
+        draw_triangle(
+            macroquad::math::Vec2::new(indicator_x - 2.0, indicator_y - 3.0),
+            macroquad::math::Vec2::new(indicator_x + indicator_size + 2.0, indicator_y - 3.0),
+            macroquad::math::Vec2::new(indicator_x + indicator_size / 2.0, indicator_y + 4.0),
+            Color::from_rgba(180, 180, 180, 255),
+        );
+    }
+
+    // Title text
+    draw_text(title, rect.x + 16.0, rect.y + 14.0, 16.0, WHITE);
+
+    // Check for click
+    let clicked = is_hovered && ctx.mouse.left_pressed;
+
+    if collapsed {
+        // Just draw the header border when collapsed
+        draw_rectangle_lines(rect.x, rect.y, rect.w, header_height, 1.0, Color::from_rgba(80, 80, 80, 255));
+        (clicked, None)
+    } else {
+        // Draw full panel background and border
+        draw_rectangle(rect.x, rect.y + header_height, rect.w, rect.h - header_height, bg_color);
+        draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
+
+        // Content area
+        let content_rect = Rect::new(
+            rect.x + 2.0,
+            rect.y + header_height + 2.0,
+            rect.w - 4.0,
+            rect.h - header_height - 4.0,
+        );
+        (clicked, Some(content_rect))
+    }
+}
