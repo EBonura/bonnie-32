@@ -179,16 +179,21 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Get version
         id: version
         run: |
+          # Always use Cargo.toml version for artifact names (they're built with this version)
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$CARGO_VERSION" >> $GITHUB_OUTPUT
+
+          # Use tag name for the release tag (could be different, e.g., v0.1.5b)
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           else
-            VERSION=${{ needs.check-version.outputs.version }}
+            echo "tag=v$CARGO_VERSION" >> $GITHUB_OUTPUT
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
