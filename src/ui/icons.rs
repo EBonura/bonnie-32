@@ -120,6 +120,12 @@ pub mod icon {
 
     // Close / Cancel
     pub const CIRCLE_X: char = '\u{e084}';        // Circle with X (close button)
+
+    // Drawing tools
+    pub const PENCIL: char = '\u{e135}';          // pencil (draw single pixel)
+    pub const ERASER: char = '\u{e0b2}';          // eraser
+    pub const CIRCLE: char = '\u{e083}';          // circle (ellipse shape)
+    pub const PEN_LINE: char = '\u{e2e1}';        // pen-line (line tool)
 }
 
 /// Draw a Lucide icon centered in a rect

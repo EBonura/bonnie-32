@@ -21,6 +21,7 @@ mod app;
 mod game;
 mod project;
 mod input;
+mod texture;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
