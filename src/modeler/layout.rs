@@ -838,6 +838,61 @@ fn create_editing_texture(state: &ModelerState) -> UserTexture {
     }
 }
 
+/// Available thumbnail sizes for texture grid
+const THUMB_SIZES: [f32; 5] = [32.0, 48.0, 64.0, 96.0, 128.0];
+
+/// Get the next smaller thumbnail size
+fn smaller_thumb_size(current: f32) -> f32 {
+    for i in (0..THUMB_SIZES.len()).rev() {
+        if THUMB_SIZES[i] < current {
+            return THUMB_SIZES[i];
+        }
+    }
+    THUMB_SIZES[0]
+}
+
+/// Get the next larger thumbnail size
+fn larger_thumb_size(current: f32) -> f32 {
+    for size in THUMB_SIZES {
+        if size > current {
+            return size;
+        }
+    }
+    THUMB_SIZES[THUMB_SIZES.len() - 1]
+}
+
+/// Draw zoom buttons for thumbnail size control. Returns (zoom_out_clicked, zoom_in_clicked)
+fn draw_zoom_buttons(ctx: &mut UiContext, x: f32, y: f32, btn_size: f32, icon_font: Option<&Font>) -> (bool, bool) {
+    let mut zoom_out = false;
+    let mut zoom_in = false;
+
+    // Zoom out button (smaller thumbnails)
+    let out_rect = Rect::new(x, y, btn_size, btn_size);
+    let out_hovered = ctx.mouse.inside(&out_rect);
+    if out_hovered {
+        draw_rectangle(out_rect.x, out_rect.y, out_rect.w, out_rect.h, Color::from_rgba(60, 60, 70, 255));
+    }
+    let out_color = if out_hovered { WHITE } else { Color::from_rgba(180, 180, 180, 255) };
+    draw_icon_centered(icon_font, icon::ZOOM_OUT, &out_rect, 12.0, out_color);
+    if ctx.mouse.clicked(&out_rect) {
+        zoom_out = true;
+    }
+
+    // Zoom in button (larger thumbnails)
+    let in_rect = Rect::new(x + btn_size + 2.0, y, btn_size, btn_size);
+    let in_hovered = ctx.mouse.inside(&in_rect);
+    if in_hovered {
+        draw_rectangle(in_rect.x, in_rect.y, in_rect.w, in_rect.h, Color::from_rgba(60, 60, 70, 255));
+    }
+    let in_color = if in_hovered { WHITE } else { Color::from_rgba(180, 180, 180, 255) };
+    draw_icon_centered(icon_font, icon::ZOOM_IN, &in_rect, 12.0, in_color);
+    if ctx.mouse.clicked(&in_rect) {
+        zoom_in = true;
+    }
+
+    (zoom_out, zoom_in)
+}
+
 /// Draw the paint section with unified texture editor
 fn draw_paint_section(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     // If editing a texture, show the texture editor
@@ -920,20 +975,34 @@ fn draw_paint_header(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, 
     let count = state.user_textures.len();
     let count_text = format!("{} textures", count);
     let count_dims = measure_text(&count_text, None, 11, 1.0);
+    let count_x = (rect.right() - count_dims.width - 8.0).floor();
     draw_text(
         &count_text,
-        (rect.right() - count_dims.width - 8.0).floor(),
+        count_x,
         (rect.y + (rect.h + count_dims.height) / 2.0).floor(),
         11.0,
         Color::from_rgba(150, 150, 150, 255),
     );
+
+    // Zoom buttons - before texture count
+    let zoom_btn_size = 20.0;
+    let zoom_x = count_x - (zoom_btn_size * 2.0 + 2.0) - 8.0;
+    let (zoom_out, zoom_in) = draw_zoom_buttons(ctx, zoom_x, (rect.y + 4.0).round(), zoom_btn_size, icon_font);
+    if zoom_out {
+        state.paint_thumb_size = smaller_thumb_size(state.paint_thumb_size);
+    }
+    if zoom_in {
+        state.paint_thumb_size = larger_thumb_size(state.paint_thumb_size);
+    }
 }
 
 /// Draw the texture browser grid (matches World Editor)
 fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     const HEADER_HEIGHT: f32 = 28.0;
-    const THUMB_SIZE: f32 = 48.0;
     const THUMB_PADDING: f32 = 4.0;
+
+    // Get thumbnail size from state
+    let thumb_size = state.paint_thumb_size;
 
     // Header with New/Edit buttons
     let header_rect = Rect::new(rect.x, rect.y, rect.w, HEADER_HEIGHT);
@@ -962,10 +1031,10 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
     }
 
     // Calculate grid layout
-    let cols = ((content_rect.w - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING)).floor() as usize;
+    let cols = ((content_rect.w - THUMB_PADDING) / (thumb_size + THUMB_PADDING)).floor() as usize;
     let cols = cols.max(1);
     let rows = (texture_count + cols - 1) / cols;
-    let total_height = rows as f32 * (THUMB_SIZE + THUMB_PADDING) + THUMB_PADDING;
+    let total_height = rows as f32 * (thumb_size + THUMB_PADDING) + THUMB_PADDING;
 
     // Scroll state
     let max_scroll = (total_height - content_rect.h).max(0.0);
@@ -1012,15 +1081,15 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
         let col = i % cols;
         let row = i / cols;
 
-        let x = content_rect.x + THUMB_PADDING + col as f32 * (THUMB_SIZE + THUMB_PADDING);
-        let y = content_rect.y + THUMB_PADDING + row as f32 * (THUMB_SIZE + THUMB_PADDING) - state.paint_texture_scroll;
+        let x = content_rect.x + THUMB_PADDING + col as f32 * (thumb_size + THUMB_PADDING);
+        let y = content_rect.y + THUMB_PADDING + row as f32 * (thumb_size + THUMB_PADDING) - state.paint_texture_scroll;
 
         // Skip if outside visible area
-        if y + THUMB_SIZE < content_rect.y || y > content_rect.bottom() {
+        if y + thumb_size < content_rect.y || y > content_rect.bottom() {
             continue;
         }
 
-        let thumb_rect = Rect::new(x, y, THUMB_SIZE, THUMB_SIZE);
+        let thumb_rect = Rect::new(x, y, thumb_size, thumb_size);
 
         // Get texture for rendering
         if let Some(tex) = state.user_textures.get(name) {
@@ -1032,13 +1101,13 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
                 y,
                 WHITE,
                 DrawTextureParams {
-                    dest_size: Some(macroquad::math::Vec2::new(THUMB_SIZE, THUMB_SIZE)),
+                    dest_size: Some(macroquad::math::Vec2::new(thumb_size, thumb_size)),
                     ..Default::default()
                 },
             );
         } else {
             // Placeholder for missing texture
-            draw_rectangle(x, y, THUMB_SIZE, THUMB_SIZE, Color::from_rgba(60, 60, 70, 255));
+            draw_rectangle(x, y, thumb_size, thumb_size, Color::from_rgba(60, 60, 70, 255));
         }
 
         // Check visible portion for click detection
@@ -1064,16 +1133,16 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
 
         // Selection highlight (golden border, like source texture selection)
         if is_selected {
-            draw_rectangle_lines(x - 2.0, y - 2.0, THUMB_SIZE + 4.0, THUMB_SIZE + 4.0, 2.0, Color::from_rgba(255, 200, 50, 255));
+            draw_rectangle_lines(x - 2.0, y - 2.0, thumb_size + 4.0, thumb_size + 4.0, 2.0, Color::from_rgba(255, 200, 50, 255));
         } else if ctx.mouse.inside(&visible_rect) {
             // Hover highlight (only if not selected)
-            draw_rectangle_lines(x - 1.0, y - 1.0, THUMB_SIZE + 2.0, THUMB_SIZE + 2.0, 1.0, Color::from_rgba(150, 150, 200, 255));
+            draw_rectangle_lines(x - 1.0, y - 1.0, thumb_size + 2.0, thumb_size + 2.0, 1.0, Color::from_rgba(150, 150, 200, 255));
         }
 
         // Draw texture name (truncated if needed)
-        if y + THUMB_SIZE - 2.0 >= content_rect.y && y + THUMB_SIZE - 2.0 <= content_rect.bottom() {
+        if y + thumb_size - 2.0 >= content_rect.y && y + thumb_size - 2.0 <= content_rect.bottom() {
             let display_name = if name.len() > 8 { &name[..8] } else { name };
-            draw_text(display_name, (x + 2.0).floor(), (y + THUMB_SIZE - 2.0).floor(), 10.0, Color::from_rgba(255, 255, 255, 200));
+            draw_text(display_name, (x + 2.0).floor(), (y + thumb_size - 2.0).floor(), 10.0, Color::from_rgba(255, 255, 255, 200));
         }
     }
 

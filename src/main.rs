@@ -280,12 +280,20 @@ async fn main() {
                     }
                 }
 
-                // Build textures array from texture packs
-                let editor_textures: Vec<Texture> = ws.editor_state.texture_packs
+                // Build textures array from texture packs + user textures
+                let mut editor_textures: Vec<Texture> = ws.editor_state.texture_packs
                     .iter()
                     .flat_map(|pack| &pack.textures)
                     .cloned()
                     .collect();
+
+                // Append user textures (they'll be indexed after pack textures)
+                // These are updated in real-time when editing, so the 3D view shows live changes
+                for name in ws.editor_state.user_textures.names() {
+                    if let Some(user_tex) = ws.editor_state.user_textures.get(name) {
+                        editor_textures.push(user_tex.to_raster_texture());
+                    }
+                }
 
                 // Draw editor UI
                 let action = draw_editor(

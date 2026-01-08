@@ -380,6 +380,16 @@ impl UserTexture {
         Ok(())
     }
 
+    /// Serialize to RON string (for WASM download)
+    pub fn to_ron_string(&self) -> Result<String, TextureError> {
+        self.validate()?;
+        let config = ron::ser::PrettyConfig::new()
+            .depth_limit(4)
+            .indentor("  ".to_string());
+        let ron_string = ron::ser::to_string_pretty(self, config)?;
+        Ok(ron_string)
+    }
+
     /// Validate the texture data
     pub fn validate(&self) -> Result<(), TextureError> {
         // Check dimensions match a valid size
@@ -449,6 +459,33 @@ impl UserTexture {
             }
         }
         rgba
+    }
+
+    /// Convert to rasterizer Texture for 3D rendering
+    pub fn to_raster_texture(&self) -> crate::rasterizer::Texture {
+        use crate::rasterizer::{Texture as RasterTexture, Color as RasterColor, BlendMode};
+
+        let pixels: Vec<RasterColor> = (0..self.height)
+            .flat_map(|y| {
+                (0..self.width).map(move |x| {
+                    let color = self.get_color(x, y);
+                    // Color15 index 0 with value 0x0000 is transparent
+                    if color.is_transparent() {
+                        RasterColor::with_blend(0, 0, 0, BlendMode::Erase)
+                    } else {
+                        let [r, g, b, _] = color.to_rgba();
+                        RasterColor::new(r, g, b)
+                    }
+                })
+            })
+            .collect();
+
+        RasterTexture {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: self.name.clone(),
+        }
     }
 }
 

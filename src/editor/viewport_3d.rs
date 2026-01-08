@@ -3050,7 +3050,7 @@ pub fn draw_viewport_3d(
     // === LIGHTS PHASE ===
     let lights_start = EditorFrameTimings::start();
 
-    // Build texture map from texture packs
+    // Build texture map from texture packs + user textures
     let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     let mut texture_idx = 0;
     for pack in &state.texture_packs {
@@ -3058,6 +3058,11 @@ pub fn draw_viewport_3d(
             texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
             texture_idx += 1;
         }
+    }
+    // Add user textures (using _USER pack name convention)
+    for name in state.user_textures.names() {
+        texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), texture_idx);
+        texture_idx += 1;
     }
 
     // Texture resolver closure
@@ -3095,10 +3100,11 @@ pub fn draw_viewport_3d(
     // === TEXTURE CONVERSION PHASE ===
     let texconv_start = EditorFrameTimings::start();
 
-    // Convert textures to RGB555 if enabled (lazy cache: only convert when texture count changes)
+    // Convert textures to RGB555 if enabled (lazy cache: invalidate when generation changes)
     let use_rgb555 = state.raster_settings.use_rgb555;
-    if use_rgb555 && state.textures_15_cache.len() != textures.len() {
+    if use_rgb555 && (state.textures_15_cache_generation != state.texture_generation || state.textures_15_cache.len() != textures.len()) {
         state.textures_15_cache = textures.iter().map(|t| t.to_15()).collect();
+        state.textures_15_cache_generation = state.texture_generation;
     }
 
     let vp_texconv_ms = EditorFrameTimings::elapsed_ms(texconv_start);

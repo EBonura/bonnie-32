@@ -14,10 +14,13 @@ pub const SECTOR_SIZE: f32 = 1024.0;
 /// 1.0 means one sector uses UV range [0, 1], so a 64x64 texture covers 1 block (64 texels per block)
 pub const UV_SCALE: f32 = 0.5;
 
+/// Reserved pack name for user-created textures (from textures-user/)
+pub const USER_TEXTURE_PACK: &str = "_USER";
+
 /// Texture reference by pack and name
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextureRef {
-    /// Texture pack name (e.g., "SAMPLE")
+    /// Texture pack name (e.g., "SAMPLE" or "_USER" for user textures)
     pub pack: String,
     /// Texture name without extension (e.g., "floor_01")
     pub name: String,
@@ -27,6 +30,14 @@ impl TextureRef {
     pub fn new(pack: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             pack: pack.into(),
+            name: name.into(),
+        }
+    }
+
+    /// Create a reference to a user texture (from textures-user/)
+    pub fn user(name: impl Into<String>) -> Self {
+        Self {
+            pack: USER_TEXTURE_PACK.to_string(),
             name: name.into(),
         }
     }
@@ -42,6 +53,11 @@ impl TextureRef {
     /// Check if this is a valid reference
     pub fn is_valid(&self) -> bool {
         !self.pack.is_empty() && !self.name.is_empty()
+    }
+
+    /// Check if this references a user texture (from textures-user/)
+    pub fn is_user_texture(&self) -> bool {
+        self.pack == USER_TEXTURE_PACK
     }
 }
 

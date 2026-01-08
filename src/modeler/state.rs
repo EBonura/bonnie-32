@@ -736,6 +736,9 @@ pub struct ModelerState {
 
     // Currently selected user texture name (for single-click selection before editing)
     pub selected_user_texture: Option<String>,
+
+    // Thumbnail size for paint texture grid (32, 48, 64, 96)
+    pub paint_thumb_size: f32,
 }
 
 /// Context menu for right-click actions
@@ -913,6 +916,7 @@ impl ModelerState {
             editing_indexed_atlas: false,
             editing_texture: None,
             selected_user_texture: None,
+            paint_thumb_size: 64.0,  // Default thumbnail size
         }
     }
 

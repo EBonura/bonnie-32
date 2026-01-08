@@ -5333,6 +5333,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                     settings.height,
                                     &state.level,
                                     &state.texture_packs,
+                                    &state.user_textures,
                                 );
 
                                 y += preview_h + 8.0;
@@ -5653,6 +5654,7 @@ fn draw_player_camera_preview(
     player_height: f32,
     level: &crate::world::Level,
     texture_packs: &[super::TexturePack],
+    user_textures: &crate::texture::TextureLibrary,
 ) {
     // Create a small framebuffer for the preview
     let fb_w = (width as usize).max(80);
@@ -5710,8 +5712,8 @@ fn draw_player_camera_preview(
         ..RasterSettings::default()
     };
 
-    // Build texture map
-    let textures: Vec<RasterTexture> = texture_packs
+    // Build texture map (packs + user textures)
+    let mut textures: Vec<RasterTexture> = texture_packs
         .iter()
         .flat_map(|pack| &pack.textures)
         .cloned()
@@ -5722,6 +5724,14 @@ fn draw_player_camera_preview(
     for pack in texture_packs {
         for tex in &pack.textures {
             texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
+            texture_idx += 1;
+        }
+    }
+    // Add user textures
+    for name in user_textures.names() {
+        if let Some(user_tex) = user_textures.get(name) {
+            textures.push(user_tex.to_raster_texture());
+            texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), texture_idx);
             texture_idx += 1;
         }
     }

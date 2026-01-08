@@ -13,6 +13,7 @@ pub mod icon {
     pub const SAVE_AS: char = '\u{e40f}';  // save-all (Save As)
     pub const FOLDER_OPEN: char = '\u{e247}';
     pub const FILE_PLUS: char = '\u{e0c9}';
+    pub const DOWNLOAD: char = '\u{e099}';   // download
 
     // Edit operations
     pub const UNDO: char = '\u{e19b}';

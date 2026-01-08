@@ -584,8 +584,15 @@ pub struct EditorState {
     /// Memory usage statistics for debug panel
     pub memory_stats: MemoryStats,
 
-    /// Cached RGB555 textures (lazy-populated, invalidated when texture count changes)
+    /// Cached RGB555 textures (lazy-populated, invalidated when texture_generation changes)
     pub textures_15_cache: Vec<Texture15>,
+
+    /// Generation counter for texture cache invalidation
+    /// Incremented whenever any user texture content changes
+    pub texture_generation: u64,
+
+    /// Last generation when textures_15_cache was built
+    pub textures_15_cache_generation: u64,
 
     /// Cached GPU textures for palette display (prevents memory leak from repeated uploads)
     /// Key: (pack_index, texture_index), Value: Texture2D
@@ -603,8 +610,14 @@ pub struct EditorState {
     /// Currently selected user texture name (for single-click selection before editing)
     pub selected_user_texture: Option<String>,
 
-    /// Texture palette mode: false = source PNGs, true = user textures
+    /// Texture palette mode: false = source PNGs, true = user/paint textures
     pub texture_palette_user_mode: bool,
+
+    /// Thumbnail size for source texture grid (32, 48, 64, 96)
+    pub source_thumb_size: f32,
+
+    /// Thumbnail size for paint texture grid (32, 48, 64, 96)
+    pub paint_thumb_size: f32,
 
     /// Collapsible right panel sections (both can be open simultaneously)
     pub textures_section_expanded: bool,
@@ -742,6 +755,8 @@ impl EditorState {
             frame_timings: EditorFrameTimings::default(),
             memory_stats: MemoryStats::default(),
             textures_15_cache: Vec::new(),
+            texture_generation: 0,
+            textures_15_cache_generation: 0,
             gpu_texture_cache: std::collections::HashMap::new(),
             user_textures: {
                 let mut lib = TextureLibrary::new();
@@ -754,6 +769,8 @@ impl EditorState {
             editing_texture: None,
             selected_user_texture: None,
             texture_palette_user_mode: false,
+            source_thumb_size: 64.0,  // Default thumbnail size
+            paint_thumb_size: 64.0,   // Default thumbnail size
 
             // Collapsible sections (both can be open simultaneously)
             textures_section_expanded: true,
@@ -1049,11 +1066,40 @@ impl EditorState {
     }
 
     /// Scroll texture palette to show and highlight a specific texture
-    /// Switches to the correct pack, adjusts scroll position, and sets selection
+    /// Switches to the correct pack/mode, adjusts scroll position, and sets selection
+    /// Supports both source textures (from texture packs) and user textures (from textures-user/)
     pub fn scroll_to_texture(&mut self, tex_ref: &crate::world::TextureRef) {
         if !tex_ref.is_valid() {
             return;
         }
+
+        const THUMB_PADDING: f32 = 4.0;
+
+        // Check if this is a user texture
+        if tex_ref.is_user_texture() {
+            // Switch to Paint mode
+            self.texture_palette_user_mode = true;
+
+            // Select the user texture
+            self.selected_user_texture = Some(tex_ref.name.clone());
+
+            // Calculate scroll position for user texture grid
+            let texture_names: Vec<_> = self.user_textures.names().collect();
+            if let Some(tex_idx) = texture_names.iter().position(|n| *n == tex_ref.name) {
+                let thumb_size = self.paint_thumb_size;
+                let palette_width = self.texture_palette_width;
+                let cols = ((palette_width - THUMB_PADDING) / (thumb_size + THUMB_PADDING)).floor() as usize;
+                let cols = cols.max(1);
+
+                let row = tex_idx / cols;
+                let row_y = row as f32 * (thumb_size + THUMB_PADDING);
+                self.texture_scroll = row_y;
+            }
+            return;
+        }
+
+        // Source texture - switch to Source mode
+        self.texture_palette_user_mode = false;
 
         // Find the pack index
         let pack_idx = self.texture_packs.iter().position(|p| p.name == tex_ref.pack);
@@ -1068,18 +1114,16 @@ impl EditorState {
             if let Some(pack) = self.texture_packs.get(idx) {
                 if let Some(tex_idx) = pack.textures.iter().position(|t| t.name == tex_ref.name) {
                     // Calculate scroll position to show the texture at the top of visible area
-                    // Constants from texture_palette.rs
-                    const THUMB_SIZE: f32 = 48.0;
-                    const THUMB_PADDING: f32 = 4.0;
+                    let thumb_size = self.source_thumb_size;
 
                     // Use actual palette width (updated by draw_texture_palette)
                     let palette_width = self.texture_palette_width;
-                    let cols = ((palette_width - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING)).floor() as usize;
+                    let cols = ((palette_width - THUMB_PADDING) / (thumb_size + THUMB_PADDING)).floor() as usize;
                     let cols = cols.max(1);
 
                     let row = tex_idx / cols;
                     // Position this row at top of visible area
-                    let row_y = row as f32 * (THUMB_SIZE + THUMB_PADDING);
+                    let row_y = row as f32 * (thumb_size + THUMB_PADDING);
 
                     // Set scroll to show this row at the top (texture_palette will clamp to valid range)
                     self.texture_scroll = row_y;
