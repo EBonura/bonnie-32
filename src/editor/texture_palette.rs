@@ -558,23 +558,45 @@ fn raster_to_mq_texture(texture: &RasterTexture) -> Texture2D {
     tex
 }
 
-/// Convert a UserTexture to a macroquad texture for display
+/// Convert a UserTexture to a macroquad texture for display (with transparency)
 fn user_texture_to_mq_texture(texture: &UserTexture) -> Texture2D {
     let mut pixels = Vec::with_capacity(texture.width * texture.height * 4);
     for y in 0..texture.height {
         for x in 0..texture.width {
             let idx = texture.indices[y * texture.width + x] as usize;
             let color = texture.palette.get(idx).copied().unwrap_or_default();
+            // Index 0 is transparent
+            let alpha = if idx == 0 { 0 } else { 255 };
             pixels.push(color.r8());
             pixels.push(color.g8());
             pixels.push(color.b8());
-            pixels.push(255); // Full alpha
+            pixels.push(alpha);
         }
     }
 
     let tex = Texture2D::from_rgba8(texture.width as u16, texture.height as u16, &pixels);
     tex.set_filter(FilterMode::Nearest);
     tex
+}
+
+/// Draw a checkerboard pattern for transparency display
+fn draw_checkerboard(x: f32, y: f32, w: f32, h: f32, check_size: f32) {
+    let cols = (w / check_size).ceil() as i32;
+    let rows = (h / check_size).ceil() as i32;
+    for row in 0..rows {
+        for col in 0..cols {
+            let c = if (row + col) % 2 == 0 {
+                Color::new(0.25, 0.25, 0.28, 1.0)
+            } else {
+                Color::new(0.18, 0.18, 0.20, 1.0)
+            };
+            let cx = x + col as f32 * check_size;
+            let cy = y + row as f32 * check_size;
+            let cw = check_size.min(x + w - cx);
+            let ch = check_size.min(y + h - cy);
+            draw_rectangle(cx, cy, cw, ch, c);
+        }
+    }
 }
 
 /// Draw header for user texture mode (New + Edit buttons)
@@ -763,7 +785,11 @@ fn draw_user_texture_grid(
 
         // Get texture for rendering
         if let Some(tex) = state.user_textures.get(name) {
-            // Draw texture thumbnail
+            // Draw checkerboard background for transparency
+            let check_size = (thumb_size / tex.width.max(tex.height) as f32 * 2.0).max(4.0);
+            draw_checkerboard(x, y, thumb_size, thumb_size, check_size);
+
+            // Draw texture thumbnail with alpha
             let mq_tex = user_texture_to_mq_texture(tex);
             draw_texture_ex(
                 &mq_tex,
@@ -941,7 +967,7 @@ fn draw_texture_editor_panel(
     };
 
     // Layout: Canvas (square, capped size) + Tool panel (right), Palette panel (below, gets remaining space)
-    let tool_panel_w = 36.0;  // Vertical toolbar (32px buttons + padding)
+    let tool_panel_w = 66.0;  // 2-column layout: 2 * 28px buttons + 2px gap + 4px padding each side
     let canvas_w = content_rect.w - tool_panel_w;
     // Canvas should be square and capped at a reasonable size (leave room for palette)
     let max_canvas_h = (content_rect.h * 0.5).min(canvas_w).max(100.0);  // 50% of height or square, whichever is smaller
