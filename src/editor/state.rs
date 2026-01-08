@@ -600,8 +600,15 @@ pub struct EditorState {
     /// Currently editing texture name (None = not editing)
     pub editing_texture: Option<String>,
 
+    /// Currently selected user texture name (for single-click selection before editing)
+    pub selected_user_texture: Option<String>,
+
     /// Texture palette mode: false = source PNGs, true = user textures
     pub texture_palette_user_mode: bool,
+
+    /// Collapsible right panel sections (both can be open simultaneously)
+    pub textures_section_expanded: bool,
+    pub properties_section_expanded: bool,
 }
 
 impl EditorState {
@@ -745,7 +752,12 @@ impl EditorState {
             },
             texture_editor: TextureEditorState::new(),
             editing_texture: None,
+            selected_user_texture: None,
             texture_palette_user_mode: false,
+
+            // Collapsible sections (both can be open simultaneously)
+            textures_section_expanded: true,
+            properties_section_expanded: true,
         }
     }
 

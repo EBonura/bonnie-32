@@ -261,10 +261,8 @@ pub fn draw_editor(
     // Right split: center viewport | right panels
     let (center_rect, right_rect) = layout.right_split.update(ctx, rest_rect);
 
-    // Right split: texture palette | face properties
-    // Use layout() first to get rects, then handle_input() AFTER drawing contents
-    // This allows widgets inside the panels to claim drags before the divider can
-    let (texture_rect, props_rect) = layout.right_panel_split.layout(right_rect);
+    // Right panel: collapsible sections for Textures and Properties
+    // (Old split panel layout replaced with collapsible sections)
 
     // === LEFT PANEL ===
     let left_start = EditorFrameTimings::start();
@@ -361,17 +359,46 @@ pub fn draw_editor(
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
     let viewport_3d_ms = EditorFrameTimings::elapsed_ms(viewport_start);
 
-    // === RIGHT PANEL ===
+    // === RIGHT PANEL (Collapsible Sections) ===
     let right_start = EditorFrameTimings::start();
-    draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
-    draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
+    let panel_bg = Color::from_rgba(35, 35, 40, 255);
+    let header_h = COLLAPSED_PANEL_HEIGHT;
 
-    draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
-    draw_properties(ctx, panel_content_rect(props_rect, true), state, icon_font);
+    // Count collapsed panels and calculate available height for expanded ones
+    let textures_collapsed = !state.textures_section_expanded;
+    let properties_collapsed = !state.properties_section_expanded;
+    let num_collapsed = [textures_collapsed, properties_collapsed].iter().filter(|&&c| c).count();
+    let collapsed_height = num_collapsed as f32 * header_h;
+    let available_height = (right_rect.h - collapsed_height).max(0.0);
 
-    // Handle right panel split input AFTER drawing contents
-    // This allows UV controls and other widgets to claim drags first
-    layout.right_panel_split.handle_input(ctx, right_rect);
+    // Calculate heights for expanded panels (equal distribution)
+    let num_expanded = 2 - num_collapsed;
+    let expanded_panel_height = if num_expanded > 0 {
+        available_height / num_expanded as f32
+    } else {
+        0.0
+    };
+
+    // Panel 0: Textures
+    let mut y = right_rect.y;
+    let textures_h = if textures_collapsed { header_h } else { expanded_panel_height };
+    let texture_rect = Rect::new(right_rect.x, y, right_rect.w, textures_h);
+    let (clicked, textures_content) = draw_collapsible_panel(ctx, texture_rect, "Textures", textures_collapsed, panel_bg);
+    if clicked { state.textures_section_expanded = !state.textures_section_expanded; }
+    if let Some(content) = textures_content {
+        draw_texture_palette(ctx, content, state, icon_font);
+    }
+    y += textures_h;
+
+    // Panel 1: Properties
+    let props_h = if properties_collapsed { header_h } else { expanded_panel_height };
+    let props_rect = Rect::new(right_rect.x, y, right_rect.w, props_h);
+    let (clicked, props_content) = draw_collapsible_panel(ctx, props_rect, "Properties", properties_collapsed, panel_bg);
+    if clicked { state.properties_section_expanded = !state.properties_section_expanded; }
+    if let Some(content) = props_content {
+        draw_properties(ctx, content, state, icon_font);
+    }
+
     let right_panel_ms = EditorFrameTimings::elapsed_ms(right_start);
 
     // === STATUS BAR ===

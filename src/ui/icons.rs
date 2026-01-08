@@ -114,18 +114,23 @@ pub mod icon {
     // Input / Controller
     pub const GAMEPAD_2: char = '\u{e0df}';       // Gamepad controller
 
-    // View / Focus
+    // View / Focus / Zoom
     pub const FOCUS: char = '\u{e29e}';           // Focus / crosshair target
     pub const SQUARE_SQUARE: char = '\u{e60e}';   // Nested squares / center on selection
+    pub const ZOOM_IN: char = '\u{e1b6}';         // zoom-in
+    pub const ZOOM_OUT: char = '\u{e1b7}';        // zoom-out
 
-    // Close / Cancel
+    // Close / Cancel / Back
     pub const CIRCLE_X: char = '\u{e084}';        // Circle with X (close button)
+    pub const ARROW_BIG_LEFT: char = '\u{e1e2}';  // arrow-big-left (back button)
 
-    // Drawing tools
-    pub const PENCIL: char = '\u{e135}';          // pencil (draw single pixel)
-    pub const ERASER: char = '\u{e0b2}';          // eraser
-    pub const CIRCLE: char = '\u{e083}';          // circle (ellipse shape)
-    pub const PEN_LINE: char = '\u{e2e1}';        // pen-line (line tool)
+    // Drawing tools (texture editor)
+    pub const PENCIL: char = '\u{e1f9}';          // pencil (single pixel / small brush)
+    pub const ERASER: char = '\u{e28f}';          // eraser
+    pub const PENCIL_LINE: char = '\u{e4f0}';     // pencil-line (line tool)
+    pub const RECTANGLE_HORIZONTAL: char = '\u{e376}'; // rectangle-horizontal
+    pub const CIRCLE: char = '\u{e076}';          // circle (ellipse shape)
+    pub const DROPLET: char = '\u{e0b4}';         // droplet (fill toggle)
 }
 
 /// Draw a Lucide icon centered in a rect

@@ -38,6 +38,7 @@ This document tracks planned features, known issues, and future improvements.
 
 ### World Editor - UI/UX
 
+- [ ] **Scissor clipping uses unsafe**: The texture editor and other panels use `unsafe { get_internal_gl().quad_gl.scissor(...) }` for clipping. Consider creating a safe wrapper function in the UI module to encapsulate this pattern.
 - [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
 - [ ] **Gradient fills across cells**: Support linear and spherical gradient fills across multiple selected cells for vertex colors.
 - [ ] **Auto-select room vs room lock**: Automatically select the room the cursor is in, rather than requiring manual room locking.

@@ -20,86 +20,54 @@ const PANEL_BG: Color = Color::new(0.18, 0.18, 0.20, 1.0);
 /// Drawing tool types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DrawTool {
-    /// Single pixel pencil
+    /// Brush with configurable size (size 1 = pencil)
     #[default]
-    Pencil,
-    /// Square brush with configurable size
     Brush,
     /// Eraser (sets to index 0 / transparent)
     Eraser,
     /// Flood fill
     Fill,
-    /// Line drawing
+    /// Line drawing (thickness = brush_size)
     Line,
-    /// Rectangle (outline)
+    /// Rectangle (outline or filled based on fill_shapes toggle)
     Rectangle,
-    /// Filled rectangle
-    RectangleFilled,
-    /// Ellipse (outline)
+    /// Ellipse (outline or filled based on fill_shapes toggle)
     Ellipse,
-    /// Filled ellipse
-    EllipseFilled,
 }
 
 impl DrawTool {
-    /// All available tools
-    pub const ALL: &'static [DrawTool] = &[
-        DrawTool::Pencil,
-        DrawTool::Brush,
-        DrawTool::Eraser,
-        DrawTool::Fill,
-        DrawTool::Line,
-        DrawTool::Rectangle,
-        DrawTool::RectangleFilled,
-        DrawTool::Ellipse,
-        DrawTool::EllipseFilled,
-    ];
-
     /// Icon for this tool
     pub fn icon(&self) -> char {
         match self {
-            DrawTool::Pencil => icon::PENCIL,
-            DrawTool::Brush => icon::BRUSH,
+            DrawTool::Brush => icon::PENCIL,           // pencil icon (size 1 = pixel, size 2+ = brush)
             DrawTool::Eraser => icon::ERASER,
             DrawTool::Fill => icon::PAINT_BUCKET,
-            DrawTool::Line => icon::PEN_LINE,
-            DrawTool::Rectangle => icon::SQUARE,
-            DrawTool::RectangleFilled => icon::SQUARE, // TODO: filled variant
+            DrawTool::Line => icon::PENCIL_LINE,       // pencil-line icon
+            DrawTool::Rectangle => icon::RECTANGLE_HORIZONTAL,
             DrawTool::Ellipse => icon::CIRCLE,
-            DrawTool::EllipseFilled => icon::CIRCLE, // TODO: filled variant
         }
     }
 
     /// Tooltip text
     pub fn tooltip(&self) -> &'static str {
         match self {
-            DrawTool::Pencil => "Pencil (P) - Single pixel",
-            DrawTool::Brush => "Brush (B) - Square brush",
-            DrawTool::Eraser => "Eraser (E) - Set to transparent",
-            DrawTool::Fill => "Fill (F) - Flood fill",
-            DrawTool::Line => "Line (L) - Draw line",
-            DrawTool::Rectangle => "Rectangle (R) - Outline",
-            DrawTool::RectangleFilled => "Rectangle Filled - Solid",
-            DrawTool::Ellipse => "Ellipse - Outline",
-            DrawTool::EllipseFilled => "Ellipse Filled - Solid",
+            DrawTool::Brush => "Brush (B)",
+            DrawTool::Eraser => "Eraser (E)",
+            DrawTool::Fill => "Fill (F)",
+            DrawTool::Line => "Line (L)",
+            DrawTool::Rectangle => "Rectangle (R)",
+            DrawTool::Ellipse => "Ellipse (O)",
         }
     }
 
     /// Whether this tool uses brush size
     pub fn uses_brush_size(&self) -> bool {
-        matches!(self, DrawTool::Brush | DrawTool::Eraser)
+        matches!(self, DrawTool::Brush | DrawTool::Eraser | DrawTool::Line | DrawTool::Rectangle | DrawTool::Ellipse)
     }
 
     /// Whether this tool is a shape tool (requires start/end points)
     pub fn is_shape_tool(&self) -> bool {
-        matches!(
-            self,
-            DrawTool::Line
-                | DrawTool::Rectangle
-                | DrawTool::RectangleFilled
-                | DrawTool::Ellipse
-                | DrawTool::EllipseFilled
-        )
+        matches!(self, DrawTool::Line | DrawTool::Rectangle | DrawTool::Ellipse)
     }
 }
 
@@ -154,12 +122,18 @@ pub struct TextureEditorState {
     pub pan_start_offset: (f32, f32),
     /// Whether texture has unsaved changes
     pub dirty: bool,
+    /// Undo requested via button
+    pub undo_requested: bool,
+    /// Redo requested via button
+    pub redo_requested: bool,
+    /// Fill shapes (Rectangle/Ellipse) instead of outline
+    pub fill_shapes: bool,
 }
 
 impl Default for TextureEditorState {
     fn default() -> Self {
         Self {
-            tool: DrawTool::Pencil,
+            tool: DrawTool::Brush,
             brush_size: 1,
             selected_index: 1, // Default to first non-transparent color
             editing_index: 1,
@@ -178,6 +152,9 @@ impl Default for TextureEditorState {
             pan_start: (0.0, 0.0),
             pan_start_offset: (0.0, 0.0),
             dirty: false,
+            undo_requested: false,
+            redo_requested: false,
+            fill_shapes: false,
         }
     }
 }
@@ -190,7 +167,7 @@ impl TextureEditorState {
 
     /// Reset the editor state for a new texture
     pub fn reset(&mut self) {
-        self.tool = DrawTool::Pencil;
+        self.tool = DrawTool::Brush;
         self.brush_size = 1;
         self.selected_index = 1;
         self.editing_index = 1;
@@ -490,6 +467,18 @@ pub fn draw_texture_canvas(
     // Draw canvas background
     draw_rectangle(canvas_rect.x, canvas_rect.y, canvas_rect.w, canvas_rect.h, PANEL_BG);
 
+    // Enable scissor clipping to canvas bounds
+    let dpi = screen_dpi_scale();
+    gl_use_default_material();
+    unsafe {
+        get_internal_gl().quad_gl.scissor(Some((
+            (canvas_rect.x * dpi) as i32,
+            (canvas_rect.y * dpi) as i32,
+            (canvas_rect.w * dpi) as i32,
+            (canvas_rect.h * dpi) as i32,
+        )));
+    }
+
     // Calculate texture position
     let canvas_cx = canvas_rect.x + canvas_rect.w / 2.0;
     let canvas_cy = canvas_rect.y + canvas_rect.h / 2.0;
@@ -577,6 +566,11 @@ pub fn draw_texture_canvas(
     // Draw texture border
     draw_rectangle_lines(tex_x, tex_y, tex_screen_w, tex_screen_h, 1.0, Color::new(0.5, 0.5, 0.5, 1.0));
 
+    // Disable scissor clipping
+    unsafe {
+        get_internal_gl().quad_gl.scissor(None);
+    }
+
     // Handle input
     let inside = ctx.mouse.inside(&canvas_rect);
 
@@ -658,9 +652,6 @@ pub fn draw_texture_canvas(
                     state.save_undo(texture, &format!("{:?}", state.tool));
 
                     match state.tool {
-                        DrawTool::Pencil => {
-                            tex_draw_pixel(texture, px, py, state.selected_index);
-                        }
                         DrawTool::Brush => {
                             tex_draw_brush(texture, px, py, state.brush_size, state.selected_index);
                         }
@@ -680,9 +671,6 @@ pub fn draw_texture_canvas(
                 if let Some((last_x, last_y)) = state.last_draw_pos {
                     if (px, py) != (last_x, last_y) {
                         match state.tool {
-                            DrawTool::Pencil => {
-                                tex_draw_line(texture, last_x, last_y, px, py, state.selected_index);
-                            }
                             DrawTool::Brush => {
                                 // Interpolate brush along line
                                 let dx = (px - last_x).abs();
@@ -738,19 +726,22 @@ pub fn draw_texture_canvas(
 
                         match state.tool {
                             DrawTool::Line => {
+                                // Line uses brush_size as thickness (for now just 1px)
                                 tex_draw_line(texture, sx, sy, px, py, state.selected_index);
                             }
                             DrawTool::Rectangle => {
-                                tex_draw_rect_outline(texture, sx, sy, px, py, state.selected_index);
-                            }
-                            DrawTool::RectangleFilled => {
-                                tex_draw_rect_filled(texture, sx, sy, px, py, state.selected_index);
+                                if state.fill_shapes {
+                                    tex_draw_rect_filled(texture, sx, sy, px, py, state.selected_index);
+                                } else {
+                                    tex_draw_rect_outline(texture, sx, sy, px, py, state.selected_index);
+                                }
                             }
                             DrawTool::Ellipse => {
-                                tex_draw_ellipse_outline(texture, sx, sy, px, py, state.selected_index);
-                            }
-                            DrawTool::EllipseFilled => {
-                                tex_draw_ellipse_filled(texture, sx, sy, px, py, state.selected_index);
+                                if state.fill_shapes {
+                                    tex_draw_ellipse_filled(texture, sx, sy, px, py, state.selected_index);
+                                } else {
+                                    tex_draw_ellipse_outline(texture, sx, sy, px, py, state.selected_index);
+                                }
                             }
                             _ => {}
                         }
@@ -771,155 +762,269 @@ pub fn draw_texture_canvas(
     }
 }
 
-/// Draw the tool selection panel
+/// Draw the vertical tool panel (on the right side of canvas)
 pub fn draw_tool_panel(
     ctx: &mut UiContext,
     rect: Rect,
     state: &mut TextureEditorState,
     icon_font: Option<&Font>,
 ) {
-    let btn_size = 20.0;
-    let padding = 4.0;
-    let mut x = rect.x + padding;
+    // Background
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::new(0.14, 0.14, 0.16, 1.0));
+
+    let btn_size = 32.0;  // Match main toolbar button size
+    let padding = 2.0;
+    let x = rect.x + padding;
     let mut y = rect.y + padding;
 
-    // Main tools row
-    let main_tools = [
-        DrawTool::Pencil,
+    // Track which tool was clicked
+    let mut clicked_tool: Option<DrawTool> = None;
+
+    // Drawing tools (Brush, Eraser, Fill)
+    let tools = [
         DrawTool::Brush,
         DrawTool::Eraser,
         DrawTool::Fill,
     ];
 
-    for tool in main_tools {
-        let btn_rect = Rect::new(x, y, btn_size, btn_size);
-        let is_selected = state.tool == tool;
-        let hovered = ctx.mouse.inside(&btn_rect);
-
-        let bg = if is_selected {
-            ACCENT_COLOR
-        } else if hovered {
-            Color::new(0.35, 0.35, 0.38, 1.0)
-        } else {
-            Color::new(0.22, 0.22, 0.25, 1.0)
-        };
-        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
-
-        // Draw icon
-        if let Some(font) = icon_font {
-            let icon = tool.icon();
-            let text_dims = measure_text(&icon.to_string(), Some(font), 12, 1.0);
-            draw_text_ex(
-                &icon.to_string(),
-                btn_rect.x + (btn_rect.w - text_dims.width) / 2.0,
-                btn_rect.y + (btn_rect.h + text_dims.height) / 2.0 - 2.0,
-                TextParams {
-                    font: Some(font),
-                    font_size: 12,
-                    color: if is_selected { WHITE } else { TEXT_COLOR },
-                    ..Default::default()
-                },
-            );
+    for tool in tools {
+        if draw_tool_button(ctx, x, y, btn_size, tool, state.tool == tool, icon_font) {
+            clicked_tool = Some(tool);
         }
-
-        if hovered {
-            ctx.set_tooltip(tool.tooltip(), ctx.mouse.x, ctx.mouse.y);
-        }
-
-        if ctx.mouse.clicked(&btn_rect) {
-            state.tool = tool;
-        }
-
-        x += btn_size + 2.0;
+        y += btn_size + 2.0;
     }
 
-    // Shape tools row
-    x = rect.x + padding;
-    y += btn_size + 4.0;
+    // Separator
+    y += 4.0;
+    draw_line(x, y, x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+    y += 6.0;
 
+    // Shape tools (Line, Rectangle, Ellipse)
     let shape_tools = [
         DrawTool::Line,
         DrawTool::Rectangle,
-        DrawTool::RectangleFilled,
         DrawTool::Ellipse,
-        DrawTool::EllipseFilled,
     ];
 
     for tool in shape_tools {
-        let btn_rect = Rect::new(x, y, btn_size, btn_size);
-        let is_selected = state.tool == tool;
-        let hovered = ctx.mouse.inside(&btn_rect);
+        if draw_tool_button(ctx, x, y, btn_size, tool, state.tool == tool, icon_font) {
+            clicked_tool = Some(tool);
+        }
+        y += btn_size + 2.0;
+    }
 
-        let bg = if is_selected {
+    // Apply tool selection
+    if let Some(tool) = clicked_tool {
+        state.tool = tool;
+    }
+
+    // Fill toggle (for Rectangle/Ellipse shapes)
+    if matches!(state.tool, DrawTool::Rectangle | DrawTool::Ellipse) {
+        y += 2.0;
+        let fill_rect = Rect::new(x, y, btn_size, btn_size);
+        let fill_hovered = ctx.mouse.inside(&fill_rect);
+
+        let bg = if state.fill_shapes {
             ACCENT_COLOR
-        } else if hovered {
+        } else if fill_hovered {
             Color::new(0.35, 0.35, 0.38, 1.0)
         } else {
             Color::new(0.22, 0.22, 0.25, 1.0)
         };
-        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+        draw_rectangle(fill_rect.x, fill_rect.y, fill_rect.w, fill_rect.h, bg);
 
-        // Draw icon
         if let Some(font) = icon_font {
-            let icon = tool.icon();
-            let text_dims = measure_text(&icon.to_string(), Some(font), 12, 1.0);
+            let icon_char = icon::DROPLET;
+            let text_dims = measure_text(&icon_char.to_string(), Some(font), 14, 1.0);
             draw_text_ex(
-                &icon.to_string(),
-                btn_rect.x + (btn_rect.w - text_dims.width) / 2.0,
-                btn_rect.y + (btn_rect.h + text_dims.height) / 2.0 - 2.0,
+                &icon_char.to_string(),
+                fill_rect.x + (fill_rect.w - text_dims.width) / 2.0,
+                fill_rect.y + (fill_rect.h + text_dims.height) / 2.0 - 2.0,
                 TextParams {
                     font: Some(font),
-                    font_size: 12,
-                    color: if is_selected { WHITE } else { TEXT_COLOR },
+                    font_size: 14,
+                    color: if state.fill_shapes { WHITE } else { TEXT_COLOR },
                     ..Default::default()
                 },
             );
         }
 
-        if hovered {
-            ctx.set_tooltip(tool.tooltip(), ctx.mouse.x, ctx.mouse.y);
+        if fill_hovered {
+            ctx.set_tooltip(if state.fill_shapes { "Filled (click to outline)" } else { "Outline (click to fill)" }, ctx.mouse.x, ctx.mouse.y);
         }
 
-        if ctx.mouse.clicked(&btn_rect) {
-            state.tool = tool;
+        if ctx.mouse.clicked(&fill_rect) {
+            state.fill_shapes = !state.fill_shapes;
         }
-
-        x += btn_size + 2.0;
+        y += btn_size + 2.0;
     }
 
-    // Brush size slider (for brush/eraser)
+    // Separator
+    y += 4.0;
+    draw_line(x, y, x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+    y += 6.0;
+
+    // Undo/Redo
+    if draw_action_button(ctx, x, y, btn_size, icon::UNDO, "Undo", icon_font) {
+        state.undo_requested = true;
+    }
+    y += btn_size + 2.0;
+
+    if draw_action_button(ctx, x, y, btn_size, icon::REDO, "Redo", icon_font) {
+        state.redo_requested = true;
+    }
+    y += btn_size + 2.0;
+
+    // Separator
+    y += 4.0;
+    draw_line(x, y, x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+    y += 6.0;
+
+    // Zoom controls
+    if draw_action_button(ctx, x, y, btn_size, icon::ZOOM_IN, "Zoom In", icon_font) {
+        state.zoom = (state.zoom * 1.5).min(32.0);
+    }
+    y += btn_size + 2.0;
+
+    if draw_action_button(ctx, x, y, btn_size, icon::ZOOM_OUT, "Zoom Out", icon_font) {
+        state.zoom = (state.zoom / 1.5).max(0.5);
+    }
+    y += btn_size + 2.0;
+
+    if draw_action_button(ctx, x, y, btn_size, icon::FOCUS, "Fit to View", icon_font) {
+        state.pan_x = 0.0;
+        state.pan_y = 0.0;
+        state.zoom = 4.0;
+    }
+    y += btn_size + 2.0;
+
+    // Brush size indicator (when using tools that support size)
     if state.tool.uses_brush_size() {
-        y += btn_size + 6.0;
-        draw_text("Size:", rect.x + padding, y + 10.0, 10.0, TEXT_DIM);
+        y += 4.0;
+        draw_line(x, y, x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+        y += 6.0;
 
-        let slider_x = rect.x + padding + 30.0;
-        let slider_w = rect.w - padding * 2.0 - 55.0;
-        let slider_h = 10.0;
+        // Size label
+        let size_text = format!("{}", state.brush_size);
+        let text_dims = measure_text(&size_text, None, 10, 1.0);
+        draw_text(
+            &size_text,
+            x + (btn_size - text_dims.width) / 2.0,
+            y + 10.0,
+            10.0,
+            TEXT_DIM,
+        );
+        y += 14.0;
 
-        let track_rect = Rect::new(slider_x, y, slider_w.max(40.0), slider_h);
-        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::new(0.15, 0.15, 0.17, 1.0));
-
-        let min_size = 1.0;
-        let max_size = 16.0;
-        let fill_ratio = (state.brush_size as f32 - min_size) / (max_size - min_size);
-        draw_rectangle(track_rect.x, track_rect.y, track_rect.w * fill_ratio, slider_h, ACCENT_COLOR);
-
-        draw_text(&format!("{}", state.brush_size), slider_x + track_rect.w + 4.0, y + 10.0, 10.0, TEXT_DIM);
-
-        // Slider interaction
-        if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && !state.brush_slider_active {
-            state.brush_slider_active = true;
+        // + button
+        let plus_rect = Rect::new(x, y, btn_size, btn_size * 0.6);
+        let plus_hovered = ctx.mouse.inside(&plus_rect);
+        draw_rectangle(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h,
+            if plus_hovered { Color::new(0.35, 0.35, 0.38, 1.0) } else { Color::new(0.22, 0.22, 0.25, 1.0) });
+        draw_text("+", x + btn_size / 2.0 - 3.0, y + 10.0, 12.0, TEXT_COLOR);
+        if ctx.mouse.clicked(&plus_rect) {
+            state.brush_size = (state.brush_size + 1).min(16);
         }
-        if state.brush_slider_active {
-            if ctx.mouse.left_down {
-                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
-                state.brush_size = (min_size + (rel_x / track_rect.w) * (max_size - min_size)).round() as u8;
-                state.brush_size = state.brush_size.clamp(1, 16);
-            } else {
-                state.brush_slider_active = false;
-            }
+        y += btn_size * 0.6 + 2.0;
+
+        // - button
+        let minus_rect = Rect::new(x, y, btn_size, btn_size * 0.6);
+        let minus_hovered = ctx.mouse.inside(&minus_rect);
+        draw_rectangle(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h,
+            if minus_hovered { Color::new(0.35, 0.35, 0.38, 1.0) } else { Color::new(0.22, 0.22, 0.25, 1.0) });
+        draw_text("-", x + btn_size / 2.0 - 2.0, y + 10.0, 12.0, TEXT_COLOR);
+        if ctx.mouse.clicked(&minus_rect) {
+            state.brush_size = (state.brush_size - 1).max(1);
         }
     }
+}
+
+/// Helper: Draw a tool button and return true if clicked
+fn draw_tool_button(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    size: f32,
+    tool: DrawTool,
+    is_selected: bool,
+    icon_font: Option<&Font>,
+) -> bool {
+    let btn_rect = Rect::new(x, y, size, size);
+    let hovered = ctx.mouse.inside(&btn_rect);
+
+    let bg = if is_selected {
+        ACCENT_COLOR
+    } else if hovered {
+        Color::new(0.35, 0.35, 0.38, 1.0)
+    } else {
+        Color::new(0.22, 0.22, 0.25, 1.0)
+    };
+    draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+    if let Some(font) = icon_font {
+        let icon = tool.icon();
+        let icon_size = 16;  // Match main toolbar icon size
+        let text_dims = measure_text(&icon.to_string(), Some(font), icon_size, 1.0);
+        draw_text_ex(
+            &icon.to_string(),
+            btn_rect.x + (btn_rect.w - text_dims.width) / 2.0,
+            btn_rect.y + (btn_rect.h + text_dims.height) / 2.0 - 2.0,
+            TextParams {
+                font: Some(font),
+                font_size: icon_size,
+                color: if is_selected { WHITE } else { TEXT_COLOR },
+                ..Default::default()
+            },
+        );
+    }
+
+    if hovered {
+        ctx.set_tooltip(tool.tooltip(), ctx.mouse.x, ctx.mouse.y);
+    }
+
+    ctx.mouse.clicked(&btn_rect)
+}
+
+/// Helper: Draw an action button and return true if clicked
+fn draw_action_button(
+    ctx: &mut UiContext,
+    x: f32,
+    y: f32,
+    size: f32,
+    icon_char: char,
+    tooltip: &str,
+    icon_font: Option<&Font>,
+) -> bool {
+    let btn_rect = Rect::new(x, y, size, size);
+    let hovered = ctx.mouse.inside(&btn_rect);
+
+    let bg = if hovered {
+        Color::new(0.35, 0.35, 0.38, 1.0)
+    } else {
+        Color::new(0.22, 0.22, 0.25, 1.0)
+    };
+    draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+    if let Some(font) = icon_font {
+        let text_dims = measure_text(&icon_char.to_string(), Some(font), 14, 1.0);
+        draw_text_ex(
+            &icon_char.to_string(),
+            btn_rect.x + (btn_rect.w - text_dims.width) / 2.0,
+            btn_rect.y + (btn_rect.h + text_dims.height) / 2.0 - 2.0,
+            TextParams {
+                font: Some(font),
+                font_size: 14,
+                color: TEXT_COLOR,
+                ..Default::default()
+            },
+        );
+    }
+
+    if hovered {
+        ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+    }
+
+    ctx.mouse.clicked(&btn_rect)
 }
 
 /// Draw the palette panel with color selection and RGB555 editing

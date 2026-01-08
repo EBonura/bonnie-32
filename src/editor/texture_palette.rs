@@ -543,18 +543,39 @@ fn draw_user_texture_header(
         state.texture_editor.reset();
     }
 
-    // "Edit" button (only active if a user texture is somehow selected - for future use)
+    // "Edit" button - edits the selected texture
+    let has_selection = state.selected_user_texture.is_some();
     let edit_rect = Rect::new(rect.x + 8.0 + btn_w, btn_y, btn_w, btn_h);
     let edit_hovered = ctx.mouse.inside(&edit_rect);
-    let edit_bg = if edit_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
+    let edit_enabled = has_selection;
+    let edit_bg = if !edit_enabled {
+        Color::from_rgba(40, 40, 45, 255) // Dimmed when disabled
+    } else if edit_hovered {
+        Color::from_rgba(70, 70, 80, 255)
+    } else {
+        Color::from_rgba(55, 55, 65, 255)
+    };
     draw_rectangle(edit_rect.x, edit_rect.y, edit_rect.w, edit_rect.h, edit_bg);
     draw_rectangle_lines(edit_rect.x, edit_rect.y, edit_rect.w, edit_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
 
+    let icon_color = if !edit_enabled {
+        Color::from_rgba(100, 100, 100, 255) // Dimmed when disabled
+    } else if edit_hovered {
+        WHITE
+    } else {
+        Color::from_rgba(200, 200, 200, 255)
+    };
     let icon_rect = Rect::new(edit_rect.x + 2.0, edit_rect.y, 16.0, edit_rect.h);
-    draw_icon_centered(icon_font, icon::PENCIL, &icon_rect, 12.0, if edit_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
-    draw_text("Edit", (edit_rect.x + 18.0).floor(), (edit_rect.y + edit_rect.h / 2.0 + 4.0).floor(), 12.0, if edit_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+    draw_icon_centered(icon_font, icon::PENCIL, &icon_rect, 12.0, icon_color);
+    draw_text("Edit", (edit_rect.x + 18.0).floor(), (edit_rect.y + edit_rect.h / 2.0 + 4.0).floor(), 12.0, icon_color);
 
-    // Edit button click will be handled in the grid (double-click on texture)
+    // Edit button edits the selected texture
+    if edit_enabled && ctx.mouse.clicked(&edit_rect) {
+        if let Some(name) = &state.selected_user_texture {
+            state.editing_texture = Some(name.clone());
+            state.texture_editor.reset();
+        }
+    }
 
     // Texture count on right side
     let count = state.user_textures.len();
@@ -693,8 +714,14 @@ fn draw_user_texture_grid(
             }
         }
 
-        // Hover highlight
-        if ctx.mouse.inside(&visible_rect) {
+        // Check if this texture is selected
+        let is_selected = state.selected_user_texture.as_ref() == Some(name);
+
+        // Selection highlight (golden border, like source texture selection)
+        if is_selected {
+            draw_rectangle_lines(x - 2.0, y - 2.0, THUMB_SIZE + 4.0, THUMB_SIZE + 4.0, 2.0, Color::from_rgba(255, 200, 50, 255));
+        } else if ctx.mouse.inside(&visible_rect) {
+            // Hover highlight (only if not selected)
             draw_rectangle_lines(x - 1.0, y - 1.0, THUMB_SIZE + 2.0, THUMB_SIZE + 2.0, 1.0, Color::from_rgba(150, 150, 200, 255));
         }
 
@@ -710,8 +737,14 @@ fn draw_user_texture_grid(
         get_internal_gl().quad_gl.scissor(None);
     }
 
-    // Handle double-click to edit
+    // Handle single-click to select
+    if let Some(name) = clicked_texture {
+        state.selected_user_texture = Some(name);
+    }
+
+    // Handle double-click to edit (also sets selection)
     if let Some(name) = double_clicked_texture {
+        state.selected_user_texture = Some(name.clone());
         state.editing_texture = Some(name);
         state.texture_editor.reset();
     }
@@ -729,21 +762,22 @@ fn draw_texture_editor_panel(
         None => return,
     };
 
-    // Header with texture name and close button
-    let header_h = 28.0;
+    // Header with texture name and buttons (match main toolbar sizing: 36px height, 32px buttons, 16px icons)
+    let header_h = 36.0;
+    let btn_size = 32.0;
+    let icon_size = 16.0;
     let header_rect = Rect::new(rect.x, rect.y, rect.w, header_h);
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, Color::from_rgba(45, 45, 55, 255));
 
-    // Close button
-    let close_size = 20.0;
-    let close_rect = Rect::new(rect.right() - close_size - 4.0, rect.y + 4.0, close_size, close_size);
-    let close_hovered = ctx.mouse.inside(&close_rect);
-    if close_hovered {
-        draw_rectangle(close_rect.x, close_rect.y, close_rect.w, close_rect.h, Color::from_rgba(80, 60, 60, 255));
+    // Back button (arrow-big-left) - saves and closes
+    let back_rect = Rect::new(rect.right() - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
+    let back_hovered = ctx.mouse.inside(&back_rect);
+    if back_hovered {
+        draw_rectangle(back_rect.x, back_rect.y, back_rect.w, back_rect.h, Color::from_rgba(80, 60, 60, 255));
     }
-    draw_icon_centered(icon_font, icon::CIRCLE_X, &close_rect, 14.0, if close_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+    draw_icon_centered(icon_font, icon::ARROW_BIG_LEFT, &back_rect, icon_size, if back_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
 
-    if ctx.mouse.clicked(&close_rect) {
+    if ctx.mouse.clicked(&back_rect) {
         // Save before closing
         if let Err(e) = state.user_textures.save_texture(&texture_name) {
             eprintln!("Failed to save texture: {}", e);
@@ -753,12 +787,12 @@ fn draw_texture_editor_panel(
     }
 
     // Save button
-    let save_rect = Rect::new(close_rect.x - close_size - 4.0, rect.y + 4.0, close_size, close_size);
+    let save_rect = Rect::new(back_rect.x - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
     let save_hovered = ctx.mouse.inside(&save_rect);
     if save_hovered {
         draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, Color::from_rgba(60, 80, 60, 255));
     }
-    draw_icon_centered(icon_font, icon::SAVE, &save_rect, 14.0, if save_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+    draw_icon_centered(icon_font, icon::SAVE, &save_rect, icon_size, if save_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
 
     if ctx.mouse.clicked(&save_rect) {
         if let Err(e) = state.user_textures.save_texture(&texture_name) {
@@ -766,9 +800,9 @@ fn draw_texture_editor_panel(
         }
     }
 
-    // Texture name
+    // Texture name (vertically centered in header)
     let name_text = format!("Editing: {}", texture_name);
-    draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + 18.0).floor(), 12.0, WHITE);
+    draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + header_h / 2.0 + 4.0).floor(), 12.0, WHITE);
 
     // Content area below header
     let content_rect = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
@@ -782,17 +816,30 @@ fn draw_texture_editor_panel(
         }
     };
 
-    // Layout: Tool panel (top), Canvas (middle), Palette panel (bottom)
-    let tool_panel_h = 50.0;
-    let palette_panel_h = 120.0;
-    let canvas_h = (content_rect.h - tool_panel_h - palette_panel_h).max(100.0);
+    // Layout: Canvas (square, capped size) + Tool panel (right), Palette panel (below, gets remaining space)
+    let tool_panel_w = 36.0;  // Vertical toolbar (32px buttons + padding)
+    let canvas_w = content_rect.w - tool_panel_w;
+    // Canvas should be square and capped at a reasonable size (leave room for palette)
+    let max_canvas_h = (content_rect.h * 0.5).min(canvas_w).max(100.0);  // 50% of height or square, whichever is smaller
+    let canvas_h = max_canvas_h;
+    let palette_panel_h = content_rect.h - canvas_h;  // Remaining space goes to palette
 
-    let tool_rect = Rect::new(content_rect.x, content_rect.y, content_rect.w, tool_panel_h);
-    let canvas_rect = Rect::new(content_rect.x, content_rect.y + tool_panel_h, content_rect.w, canvas_h);
-    let palette_rect = Rect::new(content_rect.x, content_rect.y + tool_panel_h + canvas_h, content_rect.w, palette_panel_h);
+    let canvas_rect = Rect::new(content_rect.x, content_rect.y, canvas_w, canvas_h);
+    let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
+    let palette_rect = Rect::new(content_rect.x, content_rect.y + canvas_h, content_rect.w, palette_panel_h);
 
     // Draw panels
-    draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
     draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor);
+    draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
     draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
+
+    // Handle undo/redo requests
+    if state.texture_editor.undo_requested {
+        state.texture_editor.undo_requested = false;
+        state.texture_editor.undo(tex);
+    }
+    if state.texture_editor.redo_requested {
+        state.texture_editor.redo_requested = false;
+        state.texture_editor.redo(tex);
+    }
 }
