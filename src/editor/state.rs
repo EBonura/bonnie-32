@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
 use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode};
+use crate::texture::{TextureLibrary, TextureEditorState};
 use super::texture_pack::TexturePack;
 
 /// Frame timing breakdown for editor performance debugging
@@ -589,6 +590,18 @@ pub struct EditorState {
     /// Cached GPU textures for palette display (prevents memory leak from repeated uploads)
     /// Key: (pack_index, texture_index), Value: Texture2D
     pub gpu_texture_cache: std::collections::HashMap<(usize, usize), macroquad::prelude::Texture2D>,
+
+    /// User texture library (editable indexed textures)
+    pub user_textures: TextureLibrary,
+
+    /// Texture editor state (when editing a user texture)
+    pub texture_editor: TextureEditorState,
+
+    /// Currently editing texture name (None = not editing)
+    pub editing_texture: Option<String>,
+
+    /// Texture palette mode: false = source PNGs, true = user textures
+    pub texture_palette_user_mode: bool,
 }
 
 impl EditorState {
@@ -723,6 +736,16 @@ impl EditorState {
             memory_stats: MemoryStats::default(),
             textures_15_cache: Vec::new(),
             gpu_texture_cache: std::collections::HashMap::new(),
+            user_textures: {
+                let mut lib = TextureLibrary::new();
+                if let Err(e) = lib.discover() {
+                    eprintln!("Failed to discover user textures: {}", e);
+                }
+                lib
+            },
+            texture_editor: TextureEditorState::new(),
+            editing_texture: None,
+            texture_palette_user_mode: false,
         }
     }
 

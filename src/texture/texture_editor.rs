@@ -188,6 +188,26 @@ impl TextureEditorState {
         Self::default()
     }
 
+    /// Reset the editor state for a new texture
+    pub fn reset(&mut self) {
+        self.tool = DrawTool::Pencil;
+        self.brush_size = 1;
+        self.selected_index = 1;
+        self.editing_index = 1;
+        self.zoom = 4.0;
+        self.pan_x = 0.0;
+        self.pan_y = 0.0;
+        self.drawing = false;
+        self.shape_start = None;
+        self.last_draw_pos = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.color_slider = None;
+        self.brush_slider_active = false;
+        self.panning = false;
+        self.dirty = false;
+    }
+
     /// Reset zoom and pan to fit texture in view
     pub fn reset_view(&mut self, tex_width: usize, tex_height: usize, view_width: f32, view_height: f32) {
         // Calculate zoom to fit texture with some padding

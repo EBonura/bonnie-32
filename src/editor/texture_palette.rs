@@ -1,14 +1,20 @@
 //! Texture Palette - Grid of available textures with folder selection
+//!
+//! Supports two modes:
+//! - Source PNGs: Read-only textures from assets/textures/
+//! - User Textures: Editable indexed textures from assets/textures-user/
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, icon, draw_icon_centered};
-use crate::rasterizer::Texture as RasterTexture;
+use crate::rasterizer::{Texture as RasterTexture, ClutDepth};
+use crate::texture::{UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel};
 use super::EditorState;
 
 /// Size of texture thumbnails in the palette
 const THUMB_SIZE: f32 = 48.0;
 const THUMB_PADDING: f32 = 4.0;
 const HEADER_HEIGHT: f32 = 28.0;
+const MODE_TOGGLE_HEIGHT: f32 = 24.0;
 
 /// Draw the texture palette
 pub fn draw_texture_palette(
@@ -20,13 +26,84 @@ pub fn draw_texture_palette(
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(25, 25, 30, 255));
 
-    // Draw folder selector header
-    let header_rect = Rect::new(rect.x, rect.y, rect.w, HEADER_HEIGHT);
-    draw_folder_selector(ctx, header_rect, state, icon_font);
+    // If editing a texture, show the texture editor instead
+    if state.editing_texture.is_some() {
+        draw_texture_editor_panel(ctx, rect, state, icon_font);
+        return;
+    }
 
-    // Content area (below header)
-    let content_rect = Rect::new(rect.x, rect.y + HEADER_HEIGHT, rect.w, rect.h - HEADER_HEIGHT);
+    // Mode toggle tabs (Source PNGs | User Textures)
+    let mode_rect = Rect::new(rect.x, rect.y, rect.w, MODE_TOGGLE_HEIGHT);
+    draw_mode_toggle(ctx, mode_rect, state);
 
+    // Header area (folder selector for source PNGs, action buttons for user textures)
+    let header_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT, rect.w, HEADER_HEIGHT);
+
+    if state.texture_palette_user_mode {
+        draw_user_texture_header(ctx, header_rect, state, icon_font);
+        let content_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, rect.w, rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
+        draw_user_texture_grid(ctx, content_rect, state);
+    } else {
+        draw_folder_selector(ctx, header_rect, state, icon_font);
+        let content_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, rect.w, rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
+        draw_source_texture_grid(ctx, content_rect, state);
+    }
+}
+
+/// Draw mode toggle tabs
+fn draw_mode_toggle(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) {
+    let half_w = rect.w / 2.0;
+    let active_bg = Color::from_rgba(50, 50, 60, 255);
+    let inactive_bg = Color::from_rgba(35, 35, 40, 255);
+    let active_text = WHITE;
+    let inactive_text = Color::from_rgba(150, 150, 150, 255);
+
+    // Source PNGs tab
+    let source_rect = Rect::new(rect.x, rect.y, half_w, rect.h);
+    let source_bg = if !state.texture_palette_user_mode { active_bg } else { inactive_bg };
+    let source_text_color = if !state.texture_palette_user_mode { active_text } else { inactive_text };
+    draw_rectangle(source_rect.x, source_rect.y, source_rect.w, source_rect.h, source_bg);
+    let source_label = "Source";
+    let source_dims = measure_text(source_label, None, 12, 1.0);
+    draw_text(
+        source_label,
+        (source_rect.x + (source_rect.w - source_dims.width) / 2.0).floor(),
+        (source_rect.y + (source_rect.h + source_dims.height) / 2.0).floor(),
+        12.0,
+        source_text_color,
+    );
+    if ctx.mouse.clicked(&source_rect) {
+        state.texture_palette_user_mode = false;
+    }
+
+    // User Textures tab
+    let user_rect = Rect::new(rect.x + half_w, rect.y, half_w, rect.h);
+    let user_bg = if state.texture_palette_user_mode { active_bg } else { inactive_bg };
+    let user_text_color = if state.texture_palette_user_mode { active_text } else { inactive_text };
+    draw_rectangle(user_rect.x, user_rect.y, user_rect.w, user_rect.h, user_bg);
+    let user_label = "User";
+    let user_dims = measure_text(user_label, None, 12, 1.0);
+    draw_text(
+        user_label,
+        (user_rect.x + (user_rect.w - user_dims.width) / 2.0).floor(),
+        (user_rect.y + (user_rect.h + user_dims.height) / 2.0).floor(),
+        12.0,
+        user_text_color,
+    );
+    if ctx.mouse.clicked(&user_rect) {
+        state.texture_palette_user_mode = true;
+    }
+
+    // Separator line
+    draw_line(rect.x, rect.bottom() - 1.0, rect.right(), rect.bottom() - 1.0, 1.0, Color::from_rgba(60, 60, 70, 255));
+}
+
+/// Draw the source texture grid (original implementation)
+fn draw_source_texture_grid(
+    ctx: &mut UiContext,
+    content_rect: Rect,
+    state: &mut EditorState,
+) {
     // Store actual width for scroll_to_texture calculations
     state.texture_palette_width = content_rect.w;
 
@@ -410,4 +487,312 @@ fn raster_to_mq_texture(texture: &RasterTexture) -> Texture2D {
     let tex = Texture2D::from_rgba8(texture.width as u16, texture.height as u16, &pixels);
     tex.set_filter(FilterMode::Nearest);
     tex
+}
+
+/// Convert a UserTexture to a macroquad texture for display
+fn user_texture_to_mq_texture(texture: &UserTexture) -> Texture2D {
+    let mut pixels = Vec::with_capacity(texture.width * texture.height * 4);
+    for y in 0..texture.height {
+        for x in 0..texture.width {
+            let idx = texture.indices[y * texture.width + x] as usize;
+            let color = texture.palette.get(idx).copied().unwrap_or_default();
+            pixels.push(color.r8());
+            pixels.push(color.g8());
+            pixels.push(color.b8());
+            pixels.push(255); // Full alpha
+        }
+    }
+
+    let tex = Texture2D::from_rgba8(texture.width as u16, texture.height as u16, &pixels);
+    tex.set_filter(FilterMode::Nearest);
+    tex
+}
+
+/// Draw header for user texture mode (New + Edit buttons)
+fn draw_user_texture_header(
+    ctx: &mut UiContext,
+    rect: Rect,
+    state: &mut EditorState,
+    icon_font: Option<&Font>,
+) {
+    draw_rectangle(rect.x.floor(), rect.y.floor(), rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let btn_h = rect.h - 8.0;
+    let btn_w = 60.0;
+    let btn_y = rect.y + 4.0;
+
+    // "New" button
+    let new_rect = Rect::new(rect.x + 4.0, btn_y, btn_w, btn_h);
+    let new_hovered = ctx.mouse.inside(&new_rect);
+    let new_bg = if new_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
+    draw_rectangle(new_rect.x, new_rect.y, new_rect.w, new_rect.h, new_bg);
+    draw_rectangle_lines(new_rect.x, new_rect.y, new_rect.w, new_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Draw plus icon and "New" text
+    let icon_rect = Rect::new(new_rect.x + 2.0, new_rect.y, 16.0, new_rect.h);
+    draw_icon_centered(icon_font, icon::PLUS, &icon_rect, 12.0, if new_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+    draw_text("New", (new_rect.x + 18.0).floor(), (new_rect.y + new_rect.h / 2.0 + 4.0).floor(), 12.0, if new_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+    if ctx.mouse.clicked(&new_rect) {
+        // Create a new 64x64 texture with default name
+        let name = state.user_textures.generate_unique_name("texture");
+        let tex = UserTexture::new(&name, TextureSize::Size64x64, ClutDepth::Bpp4);
+        state.user_textures.add(tex);
+        state.editing_texture = Some(name.clone());
+        // Reset texture editor state for new texture
+        state.texture_editor.reset();
+    }
+
+    // "Edit" button (only active if a user texture is somehow selected - for future use)
+    let edit_rect = Rect::new(rect.x + 8.0 + btn_w, btn_y, btn_w, btn_h);
+    let edit_hovered = ctx.mouse.inside(&edit_rect);
+    let edit_bg = if edit_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
+    draw_rectangle(edit_rect.x, edit_rect.y, edit_rect.w, edit_rect.h, edit_bg);
+    draw_rectangle_lines(edit_rect.x, edit_rect.y, edit_rect.w, edit_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    let icon_rect = Rect::new(edit_rect.x + 2.0, edit_rect.y, 16.0, edit_rect.h);
+    draw_icon_centered(icon_font, icon::PENCIL, &icon_rect, 12.0, if edit_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+    draw_text("Edit", (edit_rect.x + 18.0).floor(), (edit_rect.y + edit_rect.h / 2.0 + 4.0).floor(), 12.0, if edit_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+    // Edit button click will be handled in the grid (double-click on texture)
+
+    // Texture count on right side
+    let count = state.user_textures.len();
+    let count_text = format!("{} textures", count);
+    let count_dims = measure_text(&count_text, None, 11, 1.0);
+    draw_text(
+        &count_text,
+        (rect.right() - count_dims.width - 8.0).floor(),
+        (rect.y + (rect.h + count_dims.height) / 2.0).floor(),
+        11.0,
+        Color::from_rgba(150, 150, 150, 255),
+    );
+}
+
+/// Draw the user texture grid
+fn draw_user_texture_grid(
+    ctx: &mut UiContext,
+    content_rect: Rect,
+    state: &mut EditorState,
+) {
+    let texture_count = state.user_textures.len();
+
+    if texture_count == 0 {
+        draw_text(
+            "No user textures yet",
+            (content_rect.x + 10.0).floor(),
+            (content_rect.y + 20.0).floor(),
+            14.0,
+            Color::from_rgba(100, 100, 100, 255),
+        );
+        draw_text(
+            "Click 'New' to create one",
+            (content_rect.x + 10.0).floor(),
+            (content_rect.y + 38.0).floor(),
+            12.0,
+            Color::from_rgba(80, 80, 80, 255),
+        );
+        return;
+    }
+
+    // Calculate grid layout
+    let cols = ((content_rect.w - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING)).floor() as usize;
+    let cols = cols.max(1);
+    let rows = (texture_count + cols - 1) / cols;
+    let total_height = rows as f32 * (THUMB_SIZE + THUMB_PADDING) + THUMB_PADDING;
+
+    // Use a separate scroll for user textures (reuse texture_scroll for simplicity)
+    let max_scroll = (total_height - content_rect.h).max(0.0);
+    state.texture_scroll = state.texture_scroll.clamp(0.0, max_scroll);
+
+    // Handle mouse wheel scrolling
+    if ctx.mouse.inside(&content_rect) {
+        state.texture_scroll -= ctx.mouse.scroll * 12.0;
+        state.texture_scroll = state.texture_scroll.clamp(0.0, max_scroll);
+    }
+
+    // Draw scrollbar if needed
+    if total_height > content_rect.h && max_scroll > 0.0 {
+        let scrollbar_width = 8.0;
+        let scrollbar_x = content_rect.right() - scrollbar_width - 2.0;
+        let scrollbar_height = content_rect.h;
+        let thumb_height = (content_rect.h / total_height * scrollbar_height).max(20.0);
+        let thumb_y = content_rect.y + (state.texture_scroll / max_scroll) * (scrollbar_height - thumb_height);
+
+        draw_rectangle(scrollbar_x, content_rect.y, scrollbar_width, scrollbar_height, Color::from_rgba(15, 15, 20, 255));
+        draw_rectangle(scrollbar_x, thumb_y, scrollbar_width, thumb_height, Color::from_rgba(80, 80, 90, 255));
+    }
+
+    // Collect texture names first to avoid borrow issues
+    let texture_names: Vec<String> = state.user_textures.names().map(|s| s.to_string()).collect();
+
+    // Track clicked texture
+    let mut clicked_texture: Option<String> = None;
+    let mut double_clicked_texture: Option<String> = None;
+
+    // Enable scissor clipping
+    let dpi = screen_dpi_scale();
+    gl_use_default_material();
+    unsafe {
+        get_internal_gl().quad_gl.scissor(Some((
+            (content_rect.x * dpi) as i32,
+            (content_rect.y * dpi) as i32,
+            (content_rect.w * dpi) as i32,
+            (content_rect.h * dpi) as i32,
+        )));
+    }
+
+    for (i, name) in texture_names.iter().enumerate() {
+        let col = i % cols;
+        let row = i / cols;
+
+        let x = content_rect.x + THUMB_PADDING + col as f32 * (THUMB_SIZE + THUMB_PADDING);
+        let y = content_rect.y + THUMB_PADDING + row as f32 * (THUMB_SIZE + THUMB_PADDING) - state.texture_scroll;
+
+        // Skip if outside visible area
+        if y + THUMB_SIZE < content_rect.y || y > content_rect.bottom() {
+            continue;
+        }
+
+        let thumb_rect = Rect::new(x, y, THUMB_SIZE, THUMB_SIZE);
+
+        // Get texture for rendering
+        if let Some(tex) = state.user_textures.get(name) {
+            // Draw texture thumbnail
+            let mq_tex = user_texture_to_mq_texture(tex);
+            draw_texture_ex(
+                &mq_tex,
+                x,
+                y,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(THUMB_SIZE, THUMB_SIZE)),
+                    ..Default::default()
+                },
+            );
+        } else {
+            // Placeholder for missing texture
+            draw_rectangle(x, y, THUMB_SIZE, THUMB_SIZE, Color::from_rgba(60, 60, 70, 255));
+        }
+
+        // Check visible portion for click detection
+        let visible_rect = Rect::new(
+            thumb_rect.x,
+            thumb_rect.y.max(content_rect.y),
+            thumb_rect.w,
+            (thumb_rect.bottom().min(content_rect.bottom()) - thumb_rect.y.max(content_rect.y)).max(0.0),
+        );
+
+        if visible_rect.h > 0.0 {
+            if ctx.mouse.double_clicked {
+                if ctx.mouse.inside(&visible_rect) {
+                    double_clicked_texture = Some(name.clone());
+                }
+            } else if ctx.mouse.clicked(&visible_rect) {
+                clicked_texture = Some(name.clone());
+            }
+        }
+
+        // Hover highlight
+        if ctx.mouse.inside(&visible_rect) {
+            draw_rectangle_lines(x - 1.0, y - 1.0, THUMB_SIZE + 2.0, THUMB_SIZE + 2.0, 1.0, Color::from_rgba(150, 150, 200, 255));
+        }
+
+        // Draw texture name (truncated if needed)
+        if y + THUMB_SIZE - 2.0 >= content_rect.y && y + THUMB_SIZE - 2.0 <= content_rect.bottom() {
+            let display_name = if name.len() > 8 { &name[..8] } else { name };
+            draw_text(display_name, (x + 2.0).floor(), (y + THUMB_SIZE - 2.0).floor(), 10.0, Color::from_rgba(255, 255, 255, 200));
+        }
+    }
+
+    // Disable scissor clipping
+    unsafe {
+        get_internal_gl().quad_gl.scissor(None);
+    }
+
+    // Handle double-click to edit
+    if let Some(name) = double_clicked_texture {
+        state.editing_texture = Some(name);
+        state.texture_editor.reset();
+    }
+}
+
+/// Draw the texture editor panel (when editing a texture)
+fn draw_texture_editor_panel(
+    ctx: &mut UiContext,
+    rect: Rect,
+    state: &mut EditorState,
+    icon_font: Option<&Font>,
+) {
+    let texture_name = match &state.editing_texture {
+        Some(name) => name.clone(),
+        None => return,
+    };
+
+    // Header with texture name and close button
+    let header_h = 28.0;
+    let header_rect = Rect::new(rect.x, rect.y, rect.w, header_h);
+    draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, Color::from_rgba(45, 45, 55, 255));
+
+    // Close button
+    let close_size = 20.0;
+    let close_rect = Rect::new(rect.right() - close_size - 4.0, rect.y + 4.0, close_size, close_size);
+    let close_hovered = ctx.mouse.inside(&close_rect);
+    if close_hovered {
+        draw_rectangle(close_rect.x, close_rect.y, close_rect.w, close_rect.h, Color::from_rgba(80, 60, 60, 255));
+    }
+    draw_icon_centered(icon_font, icon::CIRCLE_X, &close_rect, 14.0, if close_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+    if ctx.mouse.clicked(&close_rect) {
+        // Save before closing
+        if let Err(e) = state.user_textures.save_texture(&texture_name) {
+            eprintln!("Failed to save texture: {}", e);
+        }
+        state.editing_texture = None;
+        return;
+    }
+
+    // Save button
+    let save_rect = Rect::new(close_rect.x - close_size - 4.0, rect.y + 4.0, close_size, close_size);
+    let save_hovered = ctx.mouse.inside(&save_rect);
+    if save_hovered {
+        draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, Color::from_rgba(60, 80, 60, 255));
+    }
+    draw_icon_centered(icon_font, icon::SAVE, &save_rect, 14.0, if save_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+    if ctx.mouse.clicked(&save_rect) {
+        if let Err(e) = state.user_textures.save_texture(&texture_name) {
+            eprintln!("Failed to save texture: {}", e);
+        }
+    }
+
+    // Texture name
+    let name_text = format!("Editing: {}", texture_name);
+    draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + 18.0).floor(), 12.0, WHITE);
+
+    // Content area below header
+    let content_rect = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
+
+    // Get mutable texture reference - need to split borrows
+    let tex = match state.user_textures.get_mut(&texture_name) {
+        Some(t) => t,
+        None => {
+            state.editing_texture = None;
+            return;
+        }
+    };
+
+    // Layout: Tool panel (top), Canvas (middle), Palette panel (bottom)
+    let tool_panel_h = 50.0;
+    let palette_panel_h = 120.0;
+    let canvas_h = (content_rect.h - tool_panel_h - palette_panel_h).max(100.0);
+
+    let tool_rect = Rect::new(content_rect.x, content_rect.y, content_rect.w, tool_panel_h);
+    let canvas_rect = Rect::new(content_rect.x, content_rect.y + tool_panel_h, content_rect.w, canvas_h);
+    let palette_rect = Rect::new(content_rect.x, content_rect.y + tool_panel_h + canvas_h, content_rect.w, palette_panel_h);
+
+    // Draw panels
+    draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
+    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor);
+    draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
 }
