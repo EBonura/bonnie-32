@@ -966,12 +966,13 @@ fn draw_texture_editor_panel(
         }
     };
 
-    // Layout: Canvas (square, capped size) + Tool panel (right), Palette panel (below, gets remaining space)
+    // Layout: Canvas (square, expands with sidebar) + Tool panel (right), Palette panel (below)
     let tool_panel_w = 66.0;  // 2-column layout: 2 * 28px buttons + 2px gap + 4px padding each side
     let canvas_w = content_rect.w - tool_panel_w;
-    // Canvas should be square and capped at a reasonable size (leave room for palette)
-    let max_canvas_h = (content_rect.h * 0.5).min(canvas_w).max(100.0);  // 50% of height or square, whichever is smaller
-    let canvas_h = max_canvas_h;
+    // Canvas should be square based on available width, but leave minimum space for palette
+    let min_palette_h = 120.0;  // Minimum palette panel height
+    let max_canvas_h = (content_rect.h - min_palette_h).max(100.0);  // Leave room for palette
+    let canvas_h = canvas_w.min(max_canvas_h);  // Square, but capped to leave palette space
     let palette_panel_h = content_rect.h - canvas_h;  // Remaining space goes to palette
 
     let canvas_rect = Rect::new(content_rect.x, content_rect.y, canvas_w, canvas_h);

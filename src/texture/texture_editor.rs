@@ -18,13 +18,12 @@ const ACCENT_COLOR: Color = Color::new(0.28, 0.51, 0.71, 1.0);
 const PANEL_BG: Color = Color::new(0.18, 0.18, 0.20, 1.0);
 
 /// Drawing tool types
+/// Note: No eraser - paint with index 0 (transparent) to erase
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DrawTool {
     /// Brush with configurable size (size 1 = pencil)
     #[default]
     Brush,
-    /// Eraser (sets to index 0 / transparent)
-    Eraser,
     /// Flood fill
     Fill,
     /// Line drawing (thickness = brush_size)
@@ -40,7 +39,6 @@ impl DrawTool {
     pub fn icon(&self) -> char {
         match self {
             DrawTool::Brush => icon::PENCIL,           // pencil icon (size 1 = pixel, size 2+ = brush)
-            DrawTool::Eraser => icon::ERASER,
             DrawTool::Fill => icon::PAINT_BUCKET,
             DrawTool::Line => icon::PENCIL_LINE,       // pencil-line icon
             DrawTool::Rectangle => icon::RECTANGLE_HORIZONTAL,
@@ -52,7 +50,6 @@ impl DrawTool {
     pub fn tooltip(&self) -> &'static str {
         match self {
             DrawTool::Brush => "Brush (B)",
-            DrawTool::Eraser => "Eraser (E)",
             DrawTool::Fill => "Fill (F)",
             DrawTool::Line => "Line (L)",
             DrawTool::Rectangle => "Rectangle (R)",
@@ -62,7 +59,7 @@ impl DrawTool {
 
     /// Whether this tool uses brush size
     pub fn uses_brush_size(&self) -> bool {
-        matches!(self, DrawTool::Brush | DrawTool::Eraser | DrawTool::Line | DrawTool::Rectangle | DrawTool::Ellipse)
+        matches!(self, DrawTool::Brush | DrawTool::Line | DrawTool::Rectangle | DrawTool::Ellipse)
     }
 
     /// Whether this tool is a shape tool (requires start/end points)
@@ -603,10 +600,10 @@ pub fn draw_texture_canvas(
         }
     }
 
-    // Zoom with scroll wheel
+    // Zoom with scroll wheel (gentle 8% per tick)
     if inside && ctx.mouse.scroll != 0.0 {
         let old_zoom = state.zoom;
-        let zoom_factor = 1.2f32;
+        let zoom_factor = 1.08f32;
         if ctx.mouse.scroll > 0.0 {
             state.zoom = (state.zoom * zoom_factor).min(32.0);
         } else {
@@ -669,9 +666,6 @@ pub fn draw_texture_canvas(
                         DrawTool::Brush => {
                             tex_draw_brush(texture, px, py, state.brush_size, state.selected_index);
                         }
-                        DrawTool::Eraser => {
-                            tex_draw_brush(texture, px, py, state.brush_size, 0);
-                        }
                         DrawTool::Fill => {
                             flood_fill(texture, px, py, state.selected_index);
                         }
@@ -684,31 +678,17 @@ pub fn draw_texture_canvas(
                 // Continue stroke
                 if let Some((last_x, last_y)) = state.last_draw_pos {
                     if (px, py) != (last_x, last_y) {
-                        match state.tool {
-                            DrawTool::Brush => {
-                                // Interpolate brush along line
-                                let dx = (px - last_x).abs();
-                                let dy = (py - last_y).abs();
-                                let steps = dx.max(dy);
-                                for i in 0..=steps {
-                                    let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
-                                    let ix = last_x + ((px - last_x) as f32 * t) as i32;
-                                    let iy = last_y + ((py - last_y) as f32 * t) as i32;
-                                    tex_draw_brush(texture, ix, iy, state.brush_size, state.selected_index);
-                                }
+                        if state.tool == DrawTool::Brush {
+                            // Interpolate brush along line
+                            let dx = (px - last_x).abs();
+                            let dy = (py - last_y).abs();
+                            let steps = dx.max(dy);
+                            for i in 0..=steps {
+                                let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
+                                let ix = last_x + ((px - last_x) as f32 * t) as i32;
+                                let iy = last_y + ((py - last_y) as f32 * t) as i32;
+                                tex_draw_brush(texture, ix, iy, state.brush_size, state.selected_index);
                             }
-                            DrawTool::Eraser => {
-                                let dx = (px - last_x).abs();
-                                let dy = (py - last_y).abs();
-                                let steps = dx.max(dy);
-                                for i in 0..=steps {
-                                    let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
-                                    let ix = last_x + ((px - last_x) as f32 * t) as i32;
-                                    let iy = last_y + ((py - last_y) as f32 * t) as i32;
-                                    tex_draw_brush(texture, ix, iy, state.brush_size, 0);
-                                }
-                            }
-                            _ => {}
                         }
                         state.last_draw_pos = Some((px, py));
                     }
@@ -830,10 +810,10 @@ pub fn draw_tool_panel(
     y += 4.0;
 
     // === Drawing tools in 2-column grid ===
+    // Note: No Eraser tool - just paint with index 0 (transparent) to erase
     let mut clicked_tool: Option<DrawTool> = None;
     let all_tools = [
         DrawTool::Brush,
-        DrawTool::Eraser,
         DrawTool::Fill,
         DrawTool::Line,
         DrawTool::Rectangle,
