@@ -1992,8 +1992,9 @@ pub fn draw_viewport_3d(
                     let grid_dx = (world_dx / SECTOR_SIZE).round() as i32;
                     let grid_dz = (world_dz / SECTOR_SIZE).round() as i32;
 
-                    // Save undo on first actual movement
+                    // Save undo on first actual movement (both geometry and selection)
                     if !state.viewport_drag_started && (grid_dx != 0 || grid_dz != 0) {
+                        state.save_selection_undo();
                         state.save_undo();
                         state.viewport_drag_started = true;
                     }
