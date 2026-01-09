@@ -501,45 +501,30 @@ pub fn draw_viewport_3d(
         && state.tool == EditorTool::Select
         && state.geometry_clipboard.is_some()
     {
-        // Find sector under cursor using similar logic to DrawFloor mode
+        // Find sector under cursor using ray-plane intersection (no distance limit)
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             let detection_y = 0.0;
-            let search_radius = 20;
-            let cam_x = state.camera_3d.position.x;
-            let cam_z = state.camera_3d.position.z;
-            let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let room_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
 
-            let mut closest: Option<(f32, f32, f32)> = None;
-            for ix in 0..(search_radius * 2) {
-                for iz in 0..(search_radius * 2) {
-                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                    let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, detection_y, grid_z + SECTOR_SIZE / 2.0);
+            if let Some(world_pos) = pick_plane(
+                Vec3::new(0.0, room_y + detection_y, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::ZERO,
+                (mouse_fb_x, mouse_fb_y),
+                &state.camera_3d,
+                fb_width, fb_height,
+            ) {
+                let snapped_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let snapped_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
-                    if let Some((sx, sy)) = world_to_screen(test_pos, state.camera_3d.position,
-                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                        fb_width, fb_height)
-                    {
-                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                        if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                            closest = Some((grid_x, grid_z, dist));
-                        }
-                    }
-                }
-            }
-
-            if let Some((snapped_x, snapped_z, dist)) = closest {
-                if dist < 100.0 {
-                    // Convert world coords to grid coords relative to room position
-                    // Allow negative values and values beyond room bounds (room will expand on paste)
-                    if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
-                        let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
-                        Some((gx, gz))
-                    } else {
-                        None
-                    }
+                // Convert world coords to grid coords relative to room position
+                // Allow negative values and values beyond room bounds (room will expand on paste)
+                if let Some(room) = state.level.rooms.get(state.current_room) {
+                    let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                    let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
+                    Some((gx, gz))
                 } else {
                     None
                 }
@@ -565,45 +550,31 @@ pub fn draw_viewport_3d(
             // This is more intuitive - you click on the floor to place a ceiling above it.
             let detection_y = 0.0;
 
-            // Find closest sector to mouse cursor (only when not in height adjust mode)
+            // Find sector position using ray-plane intersection (no distance limit)
             let (snapped_x, snapped_z) = if let Some((locked_x, locked_z)) = state.height_adjust_locked_pos {
                 // Use locked position when in height adjust mode
                 (locked_x, locked_z)
             } else {
-                // Find closest grid position to mouse
-                let search_radius = 20;
-                let cam_x = state.camera_3d.position.x;
-                let cam_z = state.camera_3d.position.z;
-                let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-                let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+                // Get room Y offset for the detection plane
+                let room_y = state.level.rooms.get(state.current_room)
+                    .map(|r| r.position.y)
+                    .unwrap_or(0.0);
 
-                let mut closest: Option<(f32, f32, f32)> = None;
-                for ix in 0..(search_radius * 2) {
-                    for iz in 0..(search_radius * 2) {
-                        let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                        let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                        let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, detection_y, grid_z + SECTOR_SIZE / 2.0);
-
-                        if let Some((sx, sy)) = world_to_screen(test_pos, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height)
-                        {
-                            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                            if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                                closest = Some((grid_x, grid_z, dist));
-                            }
-                        }
-                    }
-                }
-
-                if let Some((x, z, dist)) = closest {
-                    if dist < 100.0 {
-                        (x, z)
-                    } else {
-                        // Too far from any grid position
-                        (f32::NAN, f32::NAN)
-                    }
+                // Use ray-plane intersection to find where mouse points on floor plane
+                if let Some(world_pos) = pick_plane(
+                    Vec3::new(0.0, room_y + detection_y, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),  // Y-up normal
+                    Vec3::ZERO,
+                    (mouse_fb_x, mouse_fb_y),
+                    &state.camera_3d,
+                    fb.width, fb.height,
+                ) {
+                    // Snap to grid
+                    let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                    let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                    (grid_x, grid_z)
                 } else {
+                    // Ray doesn't hit plane (looking away from floor)
                     (f32::NAN, f32::NAN)
                 }
             };
@@ -680,137 +651,127 @@ pub fn draw_viewport_3d(
                 .unwrap_or((0.0, CEILING_HEIGHT));
             let dir = state.wall_direction;
 
-            // Find sector under cursor by checking sector centers
-            let search_radius = 20;
-            let cam = &state.camera_3d.position;
-            let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            // Get room Y offset for the detection plane
+            let room_y_offset = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
 
-            let mut closest_sector: Option<(f32, f32, f32)> = None; // (grid_x, grid_z, dist)
+            // Use ray-plane intersection to find sector (no distance limit)
+            let mid_y = (default_y_bottom + default_y_top) / 2.0;
+            let sector_pos = pick_plane(
+                Vec3::new(0.0, room_y_offset + mid_y, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::ZERO,
+                (mouse_fb_x, mouse_fb_y),
+                &state.camera_3d,
+                fb.width, fb.height,
+            );
 
-            for ix in 0..(search_radius * 2) {
-                for iz in 0..(search_radius * 2) {
-                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                    let mid_y = (default_y_bottom + default_y_top) / 2.0;
-                    let center = Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0);
+            if let Some(world_pos) = sector_pos {
+                let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
-                    if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
+                // Estimate mouse world Y for gap selection
+                // Note: diagonal directions filtered out in if condition above
+                let edge_x = match dir {
+                    crate::world::Direction::North | crate::world::Direction::South => grid_x + SECTOR_SIZE / 2.0,
+                    crate::world::Direction::East => grid_x + SECTOR_SIZE,
+                    crate::world::Direction::West => grid_x,
+                    crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
+                };
+                let edge_z = match dir {
+                    crate::world::Direction::North => grid_z,
+                    crate::world::Direction::South => grid_z + SECTOR_SIZE,
+                    crate::world::Direction::East | crate::world::Direction::West => grid_z + SECTOR_SIZE / 2.0,
+                    crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
+                };
+
+                let room_y = state.level.rooms.get(state.current_room)
+                    .map(|r| r.position.y)
+                    .unwrap_or(0.0);
+                let floor_world = Vec3::new(edge_x, room_y + default_y_bottom, edge_z);
+                let ceiling_world = Vec3::new(edge_x, room_y + default_y_top, edge_z);
+
+                let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
+                    world_to_screen(floor_world, state.camera_3d.position,
                         state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                        fb.width, fb.height)
-                    {
-                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                        if closest_sector.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                            closest_sector = Some((grid_x, grid_z, dist));
-                        }
-                    }
-                }
-            }
-
-            if let Some((grid_x, grid_z, dist)) = closest_sector {
-                if dist < 100.0 {
-                    // Estimate mouse world Y for gap selection
-                    // Note: diagonal directions filtered out in if condition above
-                    let edge_x = match dir {
-                        crate::world::Direction::North | crate::world::Direction::South => grid_x + SECTOR_SIZE / 2.0,
-                        crate::world::Direction::East => grid_x + SECTOR_SIZE,
-                        crate::world::Direction::West => grid_x,
-                        crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
-                    };
-                    let edge_z = match dir {
-                        crate::world::Direction::North => grid_z,
-                        crate::world::Direction::South => grid_z + SECTOR_SIZE,
-                        crate::world::Direction::East | crate::world::Direction::West => grid_z + SECTOR_SIZE / 2.0,
-                        crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
-                    };
-
-                    let room_y = state.level.rooms.get(state.current_room)
-                        .map(|r| r.position.y)
-                        .unwrap_or(0.0);
-                    let floor_world = Vec3::new(edge_x, room_y + default_y_bottom, edge_z);
-                    let ceiling_world = Vec3::new(edge_x, room_y + default_y_top, edge_z);
-
-                    let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
-                        world_to_screen(floor_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                        world_to_screen(ceiling_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                    ) {
-                        if (floor_sy - ceiling_sy).abs() > 1.0 {
-                            let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
-                            let t_clamped = t.clamp(0.0, 1.0);
-                            Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
-                        } else {
-                            None
-                        }
+                        fb.width, fb.height),
+                    world_to_screen(ceiling_world, state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb.width, fb.height),
+                ) {
+                    if (floor_sy - ceiling_sy).abs() > 1.0 {
+                        let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
+                        let t_clamped = t.clamp(0.0, 1.0);
+                        Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
-                    // Calculate where the new wall should be placed
-                    // Use prefer_high setting to select gap (high Y = ceiling, low Y = floor)
-                    let gap_select_y = if state.wall_prefer_high {
-                        Some(default_y_top - 1.0)  // Near ceiling
-                    } else {
-                        Some(default_y_bottom + 1.0)  // Near floor
-                    };
-                    let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
-                        if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
-                            if let Some(sector) = room.get_sector(gx, gz) {
-                                // Debug logging for wall gap detection (only when sector changes)
-                                {
-                                    use std::sync::atomic::{AtomicI32, Ordering};
-                                    static LAST_GX: AtomicI32 = AtomicI32::new(-999);
-                                    static LAST_GZ: AtomicI32 = AtomicI32::new(-999);
-                                    let gx_i = gx as i32;
-                                    let gz_i = gz as i32;
-                                    if LAST_GX.load(Ordering::Relaxed) != gx_i || LAST_GZ.load(Ordering::Relaxed) != gz_i {
-                                        LAST_GX.store(gx_i, Ordering::Relaxed);
-                                        LAST_GZ.store(gz_i, Ordering::Relaxed);
-                                        let floor_info = sector.floor.as_ref().map(|f| {
-                                            let (l, r) = f.edge_heights(dir);
-                                            format!("F[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "F[-]".to_string());
-                                        let ceiling_info = sector.ceiling.as_ref().map(|c| {
-                                            let (l, r) = c.edge_heights(dir);
-                                            format!("C[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "C[-]".to_string());
-                                        let walls = sector.walls(dir);
-                                        let walls_info = if walls.is_empty() {
-                                            "W[]".to_string()
-                                        } else {
-                                            let w_strs: Vec<String> = walls.iter().map(|w| {
-                                                format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
-                                            }).collect();
-                                            format!("W{}", w_strs.join(","))
-                                        };
-                                        let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
-                                        eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
-                                    }
+                // Calculate where the new wall should be placed
+                // Use prefer_high setting to select gap (high Y = ceiling, low Y = floor)
+                let gap_select_y = if state.wall_prefer_high {
+                    Some(default_y_top - 1.0)  // Near ceiling
+                } else {
+                    Some(default_y_bottom + 1.0)  // Near floor
+                };
+                let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
+                        if let Some(sector) = room.get_sector(gx, gz) {
+                            // Debug logging for wall gap detection (only when sector changes)
+                            {
+                                use std::sync::atomic::{AtomicI32, Ordering};
+                                static LAST_GX: AtomicI32 = AtomicI32::new(-999);
+                                static LAST_GZ: AtomicI32 = AtomicI32::new(-999);
+                                let gx_i = gx as i32;
+                                let gz_i = gz as i32;
+                                if LAST_GX.load(Ordering::Relaxed) != gx_i || LAST_GZ.load(Ordering::Relaxed) != gz_i {
+                                    LAST_GX.store(gx_i, Ordering::Relaxed);
+                                    LAST_GZ.store(gz_i, Ordering::Relaxed);
+                                    let floor_info = sector.floor.as_ref().map(|f| {
+                                        let (l, r) = f.edge_heights(dir);
+                                        format!("F[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "F[-]".to_string());
+                                    let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                        let (l, r) = c.edge_heights(dir);
+                                        format!("C[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "C[-]".to_string());
+                                    let walls = sector.walls(dir);
+                                    let walls_info = if walls.is_empty() {
+                                        "W[]".to_string()
+                                    } else {
+                                        let w_strs: Vec<String> = walls.iter().map(|w| {
+                                            format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
+                                        }).collect();
+                                        format!("W{}", w_strs.join(","))
+                                    };
+                                    let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
+                                    eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
                                 }
-                                let has_existing = !sector.walls(dir).is_empty();
-                                match sector.next_wall_position(dir, default_y_bottom, default_y_top, gap_select_y) {
-                                    Some(corner_heights) => {
-                                        let wall_state = if has_existing { 1u8 } else { 0u8 };
-                                        Some((corner_heights, wall_state))
-                                    }
-                                    None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)),
+                            }
+                            let has_existing = !sector.walls(dir).is_empty();
+                            match sector.next_wall_position(dir, default_y_bottom, default_y_top, gap_select_y) {
+                                Some(corner_heights) => {
+                                    let wall_state = if has_existing { 1u8 } else { 0u8 };
+                                    Some((corner_heights, wall_state))
                                 }
-                            } else {
-                                Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                                None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)),
                             }
                         } else {
                             Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
                         }
                     } else {
                         Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
-                    };
-
-                    if let Some((corner_heights, wall_state)) = wall_info {
-                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
                     }
+                } else {
+                    Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                };
+
+                if let Some((corner_heights, wall_state)) = wall_info {
+                    preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
                 }
             }
         }
@@ -821,110 +782,98 @@ pub fn draw_viewport_3d(
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             use super::CEILING_HEIGHT;
 
-            // Find the closest sector center first
-            let search_radius = 20;
-            let cam = &state.camera_3d.position;
-            let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-
             // Use room's effective vertical bounds for gap detection
             let (default_y_bottom, default_y_top) = state.level.rooms.get(state.current_room)
                 .map(|r| r.effective_height_bounds())
                 .unwrap_or((0.0, CEILING_HEIGHT));
             let mid_y = (default_y_bottom + default_y_top) / 2.0;
 
-            // Find closest sector center
-            let mut closest_sector: Option<(f32, f32, f32)> = None; // (grid_x, grid_z, screen_dist)
+            // Get room Y offset for the detection plane
+            let room_y_offset = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
 
-            for ix in 0..(search_radius * 2) {
-                for iz in 0..(search_radius * 2) {
-                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                    let center = Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0);
+            // Use ray-plane intersection to find sector (no distance limit)
+            let sector_pos = pick_plane(
+                Vec3::new(0.0, room_y_offset + mid_y, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::ZERO,
+                (mouse_fb_x, mouse_fb_y),
+                &state.camera_3d,
+                fb.width, fb.height,
+            );
 
-                    if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
-                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                        fb.width, fb.height)
-                    {
-                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                        if closest_sector.map_or(true, |(_, _, best)| dist < best) {
-                            closest_sector = Some((grid_x, grid_z, dist));
-                        }
-                    }
-                }
-            }
+            if let Some(world_pos) = sector_pos {
+                let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let center_x = grid_x + SECTOR_SIZE / 2.0;
+                let center_z = grid_z + SECTOR_SIZE / 2.0;
 
-            if let Some((grid_x, grid_z, dist)) = closest_sector {
-                if dist < 120.0 {
-                    let center_x = grid_x + SECTOR_SIZE / 2.0;
-                    let center_z = grid_z + SECTOR_SIZE / 2.0;
+                // Use wall_direction to determine diagonal type (NwSe or NeSw)
+                let is_nwse = state.wall_direction == crate::world::Direction::NwSe;
 
-                    // Use wall_direction to determine diagonal type (NwSe or NeSw)
-                    let is_nwse = state.wall_direction == crate::world::Direction::NwSe;
+                // Use prefer_high setting to select gap (same as axis-aligned walls)
+                let gap_select_y = if state.wall_prefer_high {
+                    Some(default_y_top - 1.0)  // Near ceiling
+                } else {
+                    Some(default_y_bottom + 1.0)  // Near floor
+                };
 
-                    // Use prefer_high setting to select gap (same as axis-aligned walls)
-                    let gap_select_y = if state.wall_prefer_high {
-                        Some(default_y_top - 1.0)  // Near ceiling
-                    } else {
-                        Some(default_y_bottom + 1.0)  // Near floor
-                    };
-
-                    // Use gap detection for diagonal walls
-                    let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
-                        if let Some((gx, gz)) = room.world_to_grid(center_x, center_z) {
-                            if let Some(sector) = room.get_sector(gx, gz) {
-                                // Debug logging for diagonal wall gap detection (only when sector changes)
-                                {
-                                    use std::sync::atomic::{AtomicI32, Ordering};
-                                    static LAST_DIAG_GX: AtomicI32 = AtomicI32::new(-999);
-                                    static LAST_DIAG_GZ: AtomicI32 = AtomicI32::new(-999);
-                                    let gx_i = gx as i32;
-                                    let gz_i = gz as i32;
-                                    if LAST_DIAG_GX.load(Ordering::Relaxed) != gx_i || LAST_DIAG_GZ.load(Ordering::Relaxed) != gz_i {
-                                        LAST_DIAG_GX.store(gx_i, Ordering::Relaxed);
-                                        LAST_DIAG_GZ.store(gz_i, Ordering::Relaxed);
-                                        let dir = if is_nwse { crate::world::Direction::NwSe } else { crate::world::Direction::NeSw };
-                                        let floor_info = sector.floor.as_ref().map(|f| {
-                                            let (l, r) = f.edge_heights(dir);
-                                            format!("F[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "F[-]".to_string());
-                                        let ceiling_info = sector.ceiling.as_ref().map(|c| {
-                                            let (l, r) = c.edge_heights(dir);
-                                            format!("C[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "C[-]".to_string());
-                                        let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
-                                        let walls_info = if walls.is_empty() {
-                                            "W[]".to_string()
-                                        } else {
-                                            let w_strs: Vec<String> = walls.iter().map(|w| {
-                                                format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
-                                            }).collect();
-                                            format!("W{}", w_strs.join(","))
-                                        };
-                                        let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
-                                        eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
-                                    }
+                // Use gap detection for diagonal walls
+                let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    if let Some((gx, gz)) = room.world_to_grid(center_x, center_z) {
+                        if let Some(sector) = room.get_sector(gx, gz) {
+                            // Debug logging for diagonal wall gap detection (only when sector changes)
+                            {
+                                use std::sync::atomic::{AtomicI32, Ordering};
+                                static LAST_DIAG_GX: AtomicI32 = AtomicI32::new(-999);
+                                static LAST_DIAG_GZ: AtomicI32 = AtomicI32::new(-999);
+                                let gx_i = gx as i32;
+                                let gz_i = gz as i32;
+                                if LAST_DIAG_GX.load(Ordering::Relaxed) != gx_i || LAST_DIAG_GZ.load(Ordering::Relaxed) != gz_i {
+                                    LAST_DIAG_GX.store(gx_i, Ordering::Relaxed);
+                                    LAST_DIAG_GZ.store(gz_i, Ordering::Relaxed);
+                                    let dir = if is_nwse { crate::world::Direction::NwSe } else { crate::world::Direction::NeSw };
+                                    let floor_info = sector.floor.as_ref().map(|f| {
+                                        let (l, r) = f.edge_heights(dir);
+                                        format!("F[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "F[-]".to_string());
+                                    let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                        let (l, r) = c.edge_heights(dir);
+                                        format!("C[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "C[-]".to_string());
+                                    let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
+                                    let walls_info = if walls.is_empty() {
+                                        "W[]".to_string()
+                                    } else {
+                                        let w_strs: Vec<String> = walls.iter().map(|w| {
+                                            format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
+                                        }).collect();
+                                        format!("W{}", w_strs.join(","))
+                                    };
+                                    let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
+                                    eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
                                 }
-                                let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
-                                let has_existing = !walls.is_empty();
-                                match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, gap_select_y) {
-                                    Some(heights) => Some((heights, if has_existing { 1u8 } else { 0u8 })),
-                                    None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)), // Fully covered
-                                }
-                            } else {
-                                Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                            }
+                            let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
+                            let has_existing = !walls.is_empty();
+                            match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, gap_select_y) {
+                                Some(heights) => Some((heights, if has_existing { 1u8 } else { 0u8 })),
+                                None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)), // Fully covered
                             }
                         } else {
                             Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
                         }
                     } else {
                         Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
-                    };
+                    }
+                } else {
+                    Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                };
 
-                    if let Some((corner_heights, wall_state)) = wall_info {
-                        if wall_state < 2 { // Not fully covered
-                            preview_diagonal_wall = Some((grid_x, grid_z, is_nwse, corner_heights));
-                        }
+                if let Some((corner_heights, wall_state)) = wall_info {
+                    if wall_state < 2 { // Not fully covered
+                        preview_diagonal_wall = Some((grid_x, grid_z, is_nwse, corner_heights));
                     }
                 }
             }
