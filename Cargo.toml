@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "bonnie-engine"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "PS1-style software rasterizer engine"
 authors = ["ebonura"]
