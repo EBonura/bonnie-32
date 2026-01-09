@@ -268,6 +268,8 @@ pub struct GeometryClipboard {
     pub flip_h: bool,
     /// Vertical flip state (toggled with V key)
     pub flip_v: bool,
+    /// Rotation state: 0=0°, 1=90°, 2=180°, 3=270° clockwise (toggled with R key)
+    pub rotation: u8,
 }
 
 impl GeometryClipboard {
@@ -276,6 +278,7 @@ impl GeometryClipboard {
             faces: Vec::new(),
             flip_h: false,
             flip_v: false,
+            rotation: 0,
         }
     }
 

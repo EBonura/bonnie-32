@@ -1351,6 +1351,7 @@ fn copy_geometry_selection(state: &mut EditorState) {
             faces: copied_faces,
             flip_h: false,
             flip_v: false,
+            rotation: 0,
         });
         state.set_status(&format!("Copied {} faces to geometry clipboard", count), 2.0);
     }
@@ -1371,6 +1372,115 @@ fn paste_geometry_selection(state: &mut EditorState, gc: &GeometryClipboard) {
     };
 
     paste_geometry_at_impl(state, gc, room_idx, anchor_x, anchor_z);
+}
+
+/// Transform position based on rotation (0-3 = 0°, 90°, 180°, 270° CW) and flips
+/// Returns (new_rel_x, new_rel_z, effective_width, effective_depth)
+fn transform_clipboard_position(
+    rel_x: i32, rel_z: i32,
+    width: i32, depth: i32,
+    rotation: u8, flip_h: bool, flip_v: bool,
+) -> (i32, i32, i32, i32) {
+    // Apply rotation first
+    let (rx, rz, rw, rd) = match rotation {
+        1 => (depth - rel_z, rel_x, depth, width),         // 90° CW
+        2 => (width - rel_x, depth - rel_z, width, depth), // 180°
+        3 => (rel_z, width - rel_x, depth, width),         // 270° CW
+        _ => (rel_x, rel_z, width, depth),                 // 0° (no rotation)
+    };
+
+    // Then apply flips
+    let (fx, fz) = match (flip_h, flip_v) {
+        (true, true) => (rw - rx, rd - rz),
+        (true, false) => (rw - rx, rz),
+        (false, true) => (rx, rd - rz),
+        (false, false) => (rx, rz),
+    };
+
+    (fx, fz, rw, rd)
+}
+
+/// Rotate heights array for horizontal faces (90° CW per step)
+fn rotate_heights(heights: [f32; 4], rotation: u8) -> [f32; 4] {
+    match rotation {
+        1 => [heights[3], heights[0], heights[1], heights[2]], // 90° CW: SW→NW, NW→NE, NE→SE, SE→SW
+        2 => [heights[2], heights[3], heights[0], heights[1]], // 180°
+        3 => [heights[1], heights[2], heights[3], heights[0]], // 270° CW
+        _ => heights,
+    }
+}
+
+/// Rotate colors array for horizontal faces (90° CW per step)
+/// Same corner ordering as heights: [NW, NE, SE, SW]
+fn rotate_colors(colors: [RasterColor; 4], rotation: u8) -> [RasterColor; 4] {
+    match rotation {
+        1 => [colors[3], colors[0], colors[1], colors[2]], // 90° CW
+        2 => [colors[2], colors[3], colors[0], colors[1]], // 180°
+        3 => [colors[1], colors[2], colors[3], colors[0]], // 270° CW
+        _ => colors,
+    }
+}
+
+/// Wall direction for rotation and flip calculations
+#[derive(Clone, Copy, PartialEq)]
+enum WallDir { North, East, South, West, NwSe, NeSw }
+
+/// Transform wall direction based on rotation and flips
+fn transform_wall_direction(dir: WallDir, rotation: u8, flip_h: bool, flip_v: bool) -> WallDir {
+    // First apply rotation (clockwise)
+    let rotated = match rotation % 4 {
+        1 => match dir { // 90° CW
+            WallDir::North => WallDir::East,
+            WallDir::East => WallDir::South,
+            WallDir::South => WallDir::West,
+            WallDir::West => WallDir::North,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+        },
+        2 => match dir { // 180°
+            WallDir::North => WallDir::South,
+            WallDir::East => WallDir::West,
+            WallDir::South => WallDir::North,
+            WallDir::West => WallDir::East,
+            WallDir::NwSe => WallDir::NwSe,
+            WallDir::NeSw => WallDir::NeSw,
+        },
+        3 => match dir { // 270° CW
+            WallDir::North => WallDir::West,
+            WallDir::East => WallDir::North,
+            WallDir::South => WallDir::East,
+            WallDir::West => WallDir::South,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+        },
+        _ => dir, // 0°
+    };
+
+    // Then apply flips
+    match (flip_h, flip_v) {
+        (true, true) => match rotated {
+            WallDir::North => WallDir::South,
+            WallDir::South => WallDir::North,
+            WallDir::East => WallDir::West,
+            WallDir::West => WallDir::East,
+            d => d, // Diagonal: both flips = no change
+        },
+        (true, false) => match rotated {
+            WallDir::East => WallDir::West,
+            WallDir::West => WallDir::East,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+            d => d,
+        },
+        (false, true) => match rotated {
+            WallDir::North => WallDir::South,
+            WallDir::South => WallDir::North,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+            d => d,
+        },
+        (false, false) => rotated,
+    }
 }
 
 /// Paste geometry from clipboard at specific anchor coordinates (public for viewport click)
@@ -1394,15 +1504,10 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
     let mut target_max_z = i32::MIN;
 
     for face in &gc.faces {
-        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
-            (width - face.rel_x, depth - face.rel_z)
-        } else if gc.flip_h {
-            (width - face.rel_x, face.rel_z)
-        } else if gc.flip_v {
-            (face.rel_x, depth - face.rel_z)
-        } else {
-            (face.rel_x, face.rel_z)
-        };
+        let (rel_x, rel_z, _, _) = transform_clipboard_position(
+            face.rel_x, face.rel_z, width, depth,
+            gc.rotation, gc.flip_h, gc.flip_v,
+        );
         let target_x = anchor_x + rel_x;
         let target_z = anchor_z + rel_z;
         target_min_x = target_min_x.min(target_x);
@@ -1449,18 +1554,21 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
         }
     }
 
+    // Calculate effective split direction change:
+    // - Rotation by odd amount (90° or 270°) flips the diagonal
+    // - Flip H XOR V also flips the diagonal
+    // Combined: XOR of both conditions
+    let rotation_flips_split = gc.rotation % 2 == 1;
+    let flip_flips_split = gc.flip_h != gc.flip_v;
+    let should_flip_split = rotation_flips_split != flip_flips_split;
+
     // Second pass: paste all faces with adjusted coordinates
     for face in &gc.faces {
-        // Apply flip transformations
-        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
-            (width - face.rel_x, depth - face.rel_z)
-        } else if gc.flip_h {
-            (width - face.rel_x, face.rel_z)
-        } else if gc.flip_v {
-            (face.rel_x, depth - face.rel_z)
-        } else {
-            (face.rel_x, face.rel_z)
-        };
+        // Apply rotation and flip transformations
+        let (rel_x, rel_z, _, _) = transform_clipboard_position(
+            face.rel_x, face.rel_z, width, depth,
+            gc.rotation, gc.flip_h, gc.flip_v,
+        );
 
         let target_x = (anchor_x + rel_x + offset_x) as usize;
         let target_z = (anchor_z + rel_z + offset_z) as usize;
@@ -1473,7 +1581,12 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
                 match &face.face {
                     CopiedFaceData::Floor(f) => {
                         let mut new_face = f.clone();
-                        // Flip heights if needed
+                        // Apply rotation to heights first
+                        new_face.heights = rotate_heights(new_face.heights, gc.rotation);
+                        if let Some(h2) = new_face.heights_2 {
+                            new_face.heights_2 = Some(rotate_heights(h2, gc.rotation));
+                        }
+                        // Then apply flips to already-rotated heights
                         if gc.flip_h {
                             new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
                             if let Some(h2) = &mut new_face.heights_2 {
@@ -1485,12 +1598,57 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
                             if let Some(h2) = &mut new_face.heights_2 {
                                 *h2 = [h2[3], h2[2], h2[1], h2[0]];
                             }
+                        }
+                        // Apply rotation to colors
+                        new_face.colors = rotate_colors(new_face.colors, gc.rotation);
+                        if let Some(c2) = new_face.colors_2 {
+                            new_face.colors_2 = Some(rotate_colors(c2, gc.rotation));
+                        }
+                        // Apply flips to colors
+                        if gc.flip_h {
+                            new_face.colors = [new_face.colors[1], new_face.colors[0], new_face.colors[3], new_face.colors[2]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[1], c2[0], c2[3], c2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.colors = [new_face.colors[3], new_face.colors[2], new_face.colors[1], new_face.colors[0]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[3], c2[2], c2[1], c2[0]];
+                            }
+                        }
+                        // Flip diagonal split direction when needed
+                        if should_flip_split {
+                            new_face.split_direction = new_face.split_direction.next();
+                            // Also swap triangle 1 and 2 properties since they switch positions
+                            let tex1 = new_face.texture.clone();
+                            let tex2 = new_face.texture_2.take().unwrap_or_else(|| tex1.clone());
+                            new_face.texture = tex2;
+                            new_face.texture_2 = Some(tex1);
+
+                            std::mem::swap(&mut new_face.uv, &mut new_face.uv_2);
+
+                            let colors1 = new_face.colors;
+                            let colors2 = new_face.colors_2.take().unwrap_or(colors1);
+                            new_face.colors = colors2;
+                            new_face.colors_2 = Some(colors1);
+
+                            let heights1 = new_face.heights;
+                            let heights2 = new_face.heights_2.take().unwrap_or(heights1);
+                            new_face.heights = heights2;
+                            new_face.heights_2 = Some(heights1);
                         }
                         sector.floor = Some(new_face);
                         paste_count += 1;
                     }
                     CopiedFaceData::Ceiling(f) => {
                         let mut new_face = f.clone();
+                        // Apply rotation to heights first
+                        new_face.heights = rotate_heights(new_face.heights, gc.rotation);
+                        if let Some(h2) = new_face.heights_2 {
+                            new_face.heights_2 = Some(rotate_heights(h2, gc.rotation));
+                        }
+                        // Then apply flips to already-rotated heights
                         if gc.flip_h {
                             new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
                             if let Some(h2) = &mut new_face.heights_2 {
@@ -1503,88 +1661,120 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
                                 *h2 = [h2[3], h2[2], h2[1], h2[0]];
                             }
                         }
+                        // Apply rotation to colors
+                        new_face.colors = rotate_colors(new_face.colors, gc.rotation);
+                        if let Some(c2) = new_face.colors_2 {
+                            new_face.colors_2 = Some(rotate_colors(c2, gc.rotation));
+                        }
+                        // Apply flips to colors
+                        if gc.flip_h {
+                            new_face.colors = [new_face.colors[1], new_face.colors[0], new_face.colors[3], new_face.colors[2]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[1], c2[0], c2[3], c2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.colors = [new_face.colors[3], new_face.colors[2], new_face.colors[1], new_face.colors[0]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[3], c2[2], c2[1], c2[0]];
+                            }
+                        }
+                        // Flip diagonal split direction when needed
+                        if should_flip_split {
+                            new_face.split_direction = new_face.split_direction.next();
+                            // Also swap triangle 1 and 2 properties since they switch positions
+                            let tex1 = new_face.texture.clone();
+                            let tex2 = new_face.texture_2.take().unwrap_or_else(|| tex1.clone());
+                            new_face.texture = tex2;
+                            new_face.texture_2 = Some(tex1);
+
+                            std::mem::swap(&mut new_face.uv, &mut new_face.uv_2);
+
+                            let colors1 = new_face.colors;
+                            let colors2 = new_face.colors_2.take().unwrap_or(colors1);
+                            new_face.colors = colors2;
+                            new_face.colors_2 = Some(colors1);
+
+                            let heights1 = new_face.heights;
+                            let heights2 = new_face.heights_2.take().unwrap_or(heights1);
+                            new_face.heights = heights2;
+                            new_face.heights_2 = Some(heights1);
+                        }
                         sector.ceiling = Some(new_face);
                         paste_count += 1;
                     }
                     CopiedFaceData::WallNorth(i, w) => {
-                        // Flip N<->S when flipping V
-                        let target_wall = if gc.flip_v {
-                            &mut sector.walls_south
-                        } else {
-                            &mut sector.walls_north
+                        let target_dir = transform_wall_direction(WallDir::North, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_north,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallSouth(i, w) => {
-                        let target_wall = if gc.flip_v {
-                            &mut sector.walls_north
-                        } else {
-                            &mut sector.walls_south
+                        let target_dir = transform_wall_direction(WallDir::South, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_south,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallEast(i, w) => {
-                        // Flip E<->W when flipping H
-                        let target_wall = if gc.flip_h {
-                            &mut sector.walls_west
-                        } else {
-                            &mut sector.walls_east
+                        let target_dir = transform_wall_direction(WallDir::East, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_east,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallWest(i, w) => {
-                        let target_wall = if gc.flip_h {
-                            &mut sector.walls_east
-                        } else {
-                            &mut sector.walls_west
+                        let target_dir = transform_wall_direction(WallDir::West, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_west,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallNwSe(i, w) => {
-                        // Diagonal walls: NW-SE flips to NE-SW when H or V (but not both)
-                        let target_wall = if gc.flip_h != gc.flip_v {
+                        let target_dir = transform_wall_direction(WallDir::NwSe, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = if target_dir == WallDir::NeSw {
                             &mut sector.walls_nesw
                         } else {
                             &mut sector.walls_nwse
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallNeSw(i, w) => {
-                        let target_wall = if gc.flip_h != gc.flip_v {
+                        let target_dir = transform_wall_direction(WallDir::NeSw, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = if target_dir == WallDir::NwSe {
                             &mut sector.walls_nwse
                         } else {
                             &mut sector.walls_nesw
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                 }

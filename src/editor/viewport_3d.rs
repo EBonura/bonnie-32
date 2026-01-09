@@ -366,6 +366,13 @@ pub fn draw_viewport_3d(
             state.set_status(status, 1.0);
         }
     }
+    if inside_viewport && is_key_pressed(KeyCode::R) {
+        if let Some(gc) = &mut state.geometry_clipboard {
+            gc.rotation = (gc.rotation + 1) % 4;
+            let degrees = gc.rotation as u16 * 90;
+            state.set_status(&format!("Geometry: rotated {}°", degrees), 1.0);
+        }
+    }
 
     // Clear selection and geometry clipboard with Escape key
     if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty() || state.geometry_clipboard.is_some()) {
@@ -4127,15 +4134,18 @@ pub fn draw_viewport_3d(
                 let depth = max_z - min_z;
 
                 for copied_face in &gc.faces {
-                    // Apply flip transformations (same logic as paste_geometry_selection)
-                    let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
-                        (width - copied_face.rel_x, depth - copied_face.rel_z)
-                    } else if gc.flip_h {
-                        (width - copied_face.rel_x, copied_face.rel_z)
-                    } else if gc.flip_v {
-                        (copied_face.rel_x, depth - copied_face.rel_z)
-                    } else {
-                        (copied_face.rel_x, copied_face.rel_z)
+                    // Apply rotation first, then flip transformations
+                    let (rx, rz, rw, rd) = match gc.rotation % 4 {
+                        1 => (depth - copied_face.rel_z, copied_face.rel_x, depth, width),
+                        2 => (width - copied_face.rel_x, depth - copied_face.rel_z, width, depth),
+                        3 => (copied_face.rel_z, width - copied_face.rel_x, depth, width),
+                        _ => (copied_face.rel_x, copied_face.rel_z, width, depth),
+                    };
+                    let (rel_x, rel_z) = match (gc.flip_h, gc.flip_v) {
+                        (true, true) => (rw - rx, rd - rz),
+                        (true, false) => (rw - rx, rz),
+                        (false, true) => (rx, rd - rz),
+                        (false, false) => (rx, rz),
                     };
 
                     let target_gx = anchor_gx + rel_x;
@@ -4147,8 +4157,13 @@ pub fn draw_viewport_3d(
 
                     match &copied_face.face {
                         CopiedFaceData::Floor(f) => {
-                            // Apply height flips for preview
-                            let mut heights = f.heights;
+                            // Apply rotation then flips to heights for preview
+                            let mut heights = match gc.rotation % 4 {
+                                1 => [f.heights[3], f.heights[0], f.heights[1], f.heights[2]],
+                                2 => [f.heights[2], f.heights[3], f.heights[0], f.heights[1]],
+                                3 => [f.heights[1], f.heights[2], f.heights[3], f.heights[0]],
+                                _ => f.heights,
+                            };
                             if gc.flip_h {
                                 heights = [heights[1], heights[0], heights[3], heights[2]];
                             }
@@ -4169,7 +4184,12 @@ pub fn draw_viewport_3d(
                             draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, preview_color);
                         }
                         CopiedFaceData::Ceiling(f) => {
-                            let mut heights = f.heights;
+                            let mut heights = match gc.rotation % 4 {
+                                1 => [f.heights[3], f.heights[0], f.heights[1], f.heights[2]],
+                                2 => [f.heights[2], f.heights[3], f.heights[0], f.heights[1]],
+                                3 => [f.heights[1], f.heights[2], f.heights[3], f.heights[0]],
+                                _ => f.heights,
+                            };
                             if gc.flip_h {
                                 heights = [heights[1], heights[0], heights[3], heights[2]];
                             }
