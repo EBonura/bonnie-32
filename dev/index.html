@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>[DEV] Bonnie Engine v0.1.4</title>
+    <title>[DEV] Bonnie Engine v0.1.6</title>
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -57,7 +57,7 @@
 </head>
 <body>
     <div id="loading">
-        <div>Loading Bonnie Engine (DEV) v0.1.4...</div>
+        <div>Loading Bonnie Engine (DEV) v0.1.6...</div>
         <div id="loading-bar-container">
             <div id="loading-bar"></div>
         </div>
@@ -597,6 +597,19 @@
                 var gp = GamepadInput.getGamepad();
                 if (!gp || gp.buttons.length < 8) return 0;
                 return Math.round(gp.buttons[7].value * 10000);
+            },
+
+            // Copy gamepad name to WASM memory, returns length
+            copyName: function(destPtr, maxLen) {
+                var gp = GamepadInput.getGamepad();
+                if (!gp) return 0;
+                var name = gp.id || "";
+                var encoder = new TextEncoder();
+                var bytes = encoder.encode(name);
+                var len = Math.min(bytes.length, maxLen);
+                var mem = new Uint8Array(wasm_memory.buffer, destPtr, len);
+                mem.set(bytes.subarray(0, len));
+                return len;
             }
         };
 
@@ -626,6 +639,7 @@
                 env.bonnie_gamepad_get_right_stick_y = GamepadInput.getRightStickY;
                 env.bonnie_gamepad_get_left_trigger = GamepadInput.getLeftTrigger;
                 env.bonnie_gamepad_get_right_trigger = GamepadInput.getRightTrigger;
+                env.bonnie_gamepad_copy_name = GamepadInput.copyName;
 
                 // File I/O
                 env.bonnie_import_file = FileIO.import;
