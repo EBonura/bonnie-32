@@ -4983,8 +4983,8 @@ pub fn draw_viewport_3d(
             let dst_gx = (gx as i32 + dx) as usize;
             let dst_gz = (gz as i32 + dz) as usize;
 
-            // Check if destination is blocked
-            let is_blocked = is_destination_occupied(state, room_idx, dst_gx, dst_gz, face);
+            // Check if destination is blocked (excluding faces that are part of this drag operation)
+            let is_blocked = is_destination_occupied(state, room_idx, dst_gx, dst_gz, face, &state.xz_drag_initial_positions);
             let color = if is_blocked { blocked_color } else { preview_color };
 
             if let Some(room) = state.level.rooms.get(room_idx) {
@@ -6249,11 +6249,12 @@ fn relocate_faces(
         (r, (gx as i32 + offset_x) as usize, (gz as i32 + offset_z) as usize, face.clone())
     }).collect();
 
-    // Phase 3: Check which faces can actually move (destination not occupied)
+    // Phase 3: Check which faces can actually move (destination not occupied by non-moving faces)
     let movable: Vec<(usize, usize, usize, SectorFace)> = adjusted_faces.iter().filter(|(room_idx, gx, gz, face)| {
         let dst_gx = (*gx as i32 + dx) as usize;
         let dst_gz = (*gz as i32 + dz) as usize;
-        !is_destination_occupied(state, *room_idx, dst_gx, dst_gz, face)
+        // Pass adjusted_faces as vacating positions - faces in this list will vacate, so don't count them as blocking
+        !is_destination_occupied(state, *room_idx, dst_gx, dst_gz, face, &adjusted_faces)
     }).cloned().collect();
 
     if movable.is_empty() {
@@ -6296,10 +6297,18 @@ fn relocate_faces(
 }
 
 /// Check if destination has a conflicting face
-fn is_destination_occupied(state: &EditorState, room_idx: usize, gx: usize, gz: usize, face: &SectorFace) -> bool {
+/// `vacating_positions` is the list of positions being moved - faces at these positions don't count as blocking
+fn is_destination_occupied(
+    state: &EditorState,
+    room_idx: usize,
+    gx: usize,
+    gz: usize,
+    face: &SectorFace,
+    vacating_positions: &[(usize, usize, usize, SectorFace)],
+) -> bool {
     if let Some(room) = state.level.rooms.get(room_idx) {
         if let Some(sector) = room.get_sector(gx, gz) {
-            return match face {
+            let has_face = match face {
                 SectorFace::Floor => sector.floor.is_some(),
                 SectorFace::Ceiling => sector.ceiling.is_some(),
                 SectorFace::WallNorth(_) => !sector.walls_north.is_empty(),
@@ -6309,6 +6318,18 @@ fn is_destination_occupied(state: &EditorState, room_idx: usize, gx: usize, gz: 
                 SectorFace::WallNwSe(_) => !sector.walls_nwse.is_empty(),
                 SectorFace::WallNeSw(_) => !sector.walls_nesw.is_empty(),
             };
+
+            if !has_face {
+                return false;
+            }
+
+            // Check if the face at this position is being vacated (part of the selection being moved)
+            let is_being_vacated = vacating_positions.iter().any(|(r, x, z, f)| {
+                *r == room_idx && *x == gx && *z == gz && std::mem::discriminant(f) == std::mem::discriminant(face)
+            });
+
+            // Only blocked if there's a face AND it's not being vacated
+            return !is_being_vacated;
         }
     }
     false
