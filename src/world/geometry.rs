@@ -2440,6 +2440,10 @@ pub struct RoomFog {
     /// Distance over which fog transitions from 0% to 100%
     #[serde(default = "default_fog_falloff", alias = "end")]
     pub falloff: f32,
+    /// Additional distance after full fog where faces are culled (draw distance)
+    /// 0 = cull immediately when fully fogged, higher = render fogged geometry further
+    #[serde(default)]
+    pub cull_offset: f32,
 }
 
 fn default_fog_falloff() -> f32 {
@@ -2453,6 +2457,7 @@ impl Default for RoomFog {
             color: (0.5, 0.5, 0.5), // Gray fog (PS1 typical)
             start: 500.0,           // Fog starts at Z=500
             falloff: 1500.0,        // Full fog 1500 units after start
+            cull_offset: 0.0,       // Cull immediately at full fog
         }
     }
 }

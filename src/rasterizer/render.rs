@@ -1968,10 +1968,10 @@ fn apply_fog_to_color(color: Color, fog_color: Color, fog_factor: f32) -> Color 
 /// Render a mesh using RGB555 textures (PS1-authentic mode)
 /// Uses Texture15 for texture sampling with proper semi-transparency handling
 ///
-/// The `fog` parameter enables PS1-style depth cueing: (start_z, end_z, fog_color)
-/// - Vertices closer than start_z have no fog
-/// - Vertices further than end_z are fully fogged (draw distance)
-/// - Between start and end, fog is linearly interpolated
+/// The `fog` parameter enables PS1-style depth cueing: (start, falloff, cull_distance, fog_color)
+/// - Vertices closer than start have no fog
+/// - Fog increases linearly over falloff distance
+/// - Faces with all vertices beyond cull_distance are culled entirely
 pub fn render_mesh_15(
     fb: &mut Framebuffer,
     vertices: &[Vertex],
@@ -1980,7 +1980,7 @@ pub fn render_mesh_15(
     face_blend_modes: Option<&[BlendMode]>,
     camera: &Camera,
     settings: &RasterSettings,
-    fog: Option<(f32, f32, Color)>,
+    fog: Option<(f32, f32, f32, Color)>,
 ) -> RasterTimings {
     let mut timings = RasterTimings::default();
 
@@ -2088,9 +2088,15 @@ pub fn render_mesh_15(
             }
         };
 
-        // Apply PS1-style fog to vertex colors (depth cueing)
+        // Apply PS1-style fog to vertex colors (depth cueing) and distance culling
         let fog_start_time = get_time();
-        let (vc1, vc2, vc3) = if let Some((fog_start, fog_falloff, fog_color)) = fog {
+        let (vc1, vc2, vc3) = if let Some((fog_start, fog_falloff, cull_distance, fog_color)) = fog {
+            // Cull faces where all vertices are beyond cull distance
+            if cv1.z > cull_distance && cv2.z > cull_distance && cv3.z > cull_distance {
+                fog_total_time += get_time() - fog_start_time;
+                continue;
+            }
+
             // Calculate fog factor for each vertex based on camera-space Z
             let f1 = calculate_fog_factor(cv1.z, fog_start, fog_falloff);
             let f2 = calculate_fog_factor(cv2.z, fog_start, fog_falloff);

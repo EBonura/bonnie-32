@@ -3022,10 +3022,11 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             room.fog.color,
             room.fog.start,
             room.fog.falloff,
+            room.fog.cull_offset,
         )
     });
 
-    if let Some((position, width, depth, sector_count, portal_count, light_count, ambient, fog_enabled, fog_color, fog_start, fog_falloff)) = room_data {
+    if let Some((position, width, depth, sector_count, portal_count, light_count, ambient, fog_enabled, fog_color, fog_start, fog_falloff, fog_cull_offset)) = room_data {
         // Section header
         draw_text("Properties", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
         y += LINE_HEIGHT;
@@ -3227,6 +3228,26 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
                     let raw = (ctx.mouse.x - falloff_track.x) / falloff_track.w * falloff_max;
                     let new_falloff = (raw / step).round() * step;
                     room.fog.falloff = new_falloff.clamp(falloff_min, falloff_max);
+                }
+            }
+            y += LINE_HEIGHT;
+
+            // Fog cull offset slider (0-10000) - additional distance after full fog before culling
+            let cull_max = 10000.0;
+            draw_text("Cull +", x, y + slider_height - 2.0, 11.0, text_color);
+            let cull_track = Rect::new(slider_x, y, slider_width, slider_height);
+            draw_rectangle(cull_track.x, cull_track.y, cull_track.w, cull_track.h, track_bg);
+            let cull_fill = (fog_cull_offset / cull_max).min(1.0) * cull_track.w;
+            draw_rectangle(cull_track.x, cull_track.y, cull_fill, cull_track.h, fog_tint);
+            draw_rectangle(cull_track.x + cull_fill - 1.0, cull_track.y, 3.0, cull_track.h, WHITE);
+            draw_text(&format!("{:.0}", fog_cull_offset), slider_x + slider_width + 4.0, y + slider_height - 2.0, 10.0, text_color);
+
+            if ctx.mouse.inside(&cull_track) && ctx.mouse.left_down {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    let step = 512.0;
+                    let raw = (ctx.mouse.x - cull_track.x) / cull_track.w * cull_max;
+                    let new_cull = (raw / step).round() * step;
+                    room.fog.cull_offset = new_cull.clamp(0.0, cull_max);
                 }
             }
         }

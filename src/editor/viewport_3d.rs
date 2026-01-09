@@ -3186,7 +3186,8 @@ pub fn draw_viewport_3d(
                 (g * 255.0) as u8,
                 (b * 255.0) as u8,
             );
-            Some((room.fog.start, room.fog.falloff, fog_color))
+            let cull_distance = room.fog.start + room.fog.falloff + room.fog.cull_offset;
+            Some((room.fog.start, room.fog.falloff, cull_distance, fog_color))
         } else {
             None
         };
