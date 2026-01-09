@@ -279,6 +279,9 @@ pub struct TextureEditorState {
     pub status_message: Option<String>,
     /// Original selection position before move (for cancel)
     pub move_original_pos: Option<(i32, i32)>,
+    /// Signal to caller that undo should be saved (description of the action)
+    /// Caller should check this after draw_texture_canvas and call global save_texture_undo
+    pub undo_save_pending: Option<String>,
 }
 
 /// Edge or corner being resized
@@ -329,6 +332,7 @@ impl Default for TextureEditorState {
             resizing_edge: None,
             status_message: None,
             move_original_pos: None,
+            undo_save_pending: None,
         }
     }
 }
@@ -797,8 +801,8 @@ fn lift_selection_to_floating(texture: &mut UserTexture, state: &mut TextureEdit
         return; // No selection
     }
 
-    // Save undo before lifting
-    state.save_undo(texture, "Move selection");
+    // Signal to caller to save undo before lifting
+    state.undo_save_pending = Some("Move selection".to_string());
 
     // Now do the lift
     if let Some(ref mut selection) = state.selection {
@@ -1138,8 +1142,8 @@ pub fn draw_texture_canvas(
             let w = clipboard.width;
             let h = clipboard.height;
             state.clipboard = Some(clipboard);
-            // Clear the selected area
-            state.save_undo(texture, "Cut");
+            // Clear the selected area (signal undo to caller)
+            state.undo_save_pending = Some("Cut".to_string());
             clear_selection_area(texture, &selection);
             state.set_status(&format!("Cut {}×{} pixels", w, h));
         }
@@ -1411,8 +1415,8 @@ pub fn draw_texture_canvas(
                     if state.tool.is_shape_tool() {
                         state.shape_start = Some((px, py));
                     } else {
-                        // Save undo state at start of stroke
-                        state.save_undo(texture, &format!("{:?}", state.tool));
+                        // Signal to caller to save undo at start of stroke
+                        state.undo_save_pending = Some(format!("{:?}", state.tool));
 
                         match state.tool {
                             DrawTool::Brush => {
@@ -1468,7 +1472,8 @@ pub fn draw_texture_canvas(
                 if !ctx.mouse.left_down && state.drawing {
                     if state.tool.is_shape_tool() {
                         if let Some((sx, sy)) = state.shape_start {
-                            state.save_undo(texture, &format!("{:?}", state.tool));
+                            // Signal to caller to save undo before applying shape
+                            state.undo_save_pending = Some(format!("{:?}", state.tool));
 
                             match state.tool {
                                 DrawTool::Line => {

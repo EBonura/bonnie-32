@@ -1261,14 +1261,19 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
     draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
 
-    // Handle undo/redo requests
+    // Handle undo save signals from texture editor (save BEFORE the action is applied)
+    if state.texture_editor.undo_save_pending.take().is_some() {
+        state.save_texture_undo();
+    }
+
+    // Handle undo/redo button requests (uses global undo system)
     if state.texture_editor.undo_requested {
         state.texture_editor.undo_requested = false;
-        state.texture_editor.undo(tex);
+        state.undo();
     }
     if state.texture_editor.redo_requested {
         state.texture_editor.redo_requested = false;
-        state.texture_editor.redo(tex);
+        state.redo();
     }
 }
 

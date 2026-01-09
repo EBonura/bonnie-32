@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
-use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode};
+use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode, Color15};
 use crate::texture::{TextureLibrary, TextureEditorState};
 use super::texture_pack::TexturePack;
 
@@ -301,11 +301,17 @@ impl GeometryClipboard {
     }
 }
 
-/// Unified undo event - either a level change or a selection change
+/// Unified undo event - level change, selection change, or texture change
 #[derive(Debug, Clone)]
 pub enum UndoEvent {
     Level(Level),
     Selection(SelectionSnapshot),
+    /// Texture paint edit (name, pixel indices, palette)
+    Texture {
+        name: String,
+        indices: Vec<u8>,
+        palette: Vec<Color15>,
+    },
 }
 
 impl Selection {
@@ -888,7 +894,26 @@ impl EditorState {
         }
     }
 
-    /// Undo last action (level or selection)
+    /// Save current texture state for undo (before making paint changes)
+    pub fn save_texture_undo(&mut self, name: &str) {
+        // Get current texture state
+        if let Some(tex) = self.user_textures.get(name) {
+            self.undo_stack.push(UndoEvent::Texture {
+                name: name.to_string(),
+                indices: tex.indices.clone(),
+                palette: tex.palette.clone(),
+            });
+            self.redo_stack.clear();
+            self.texture_editor.dirty = true;
+
+            // Limit stack size
+            if self.undo_stack.len() > 100 {
+                self.undo_stack.remove(0);
+            }
+        }
+    }
+
+    /// Undo last action (level, selection, or texture)
     pub fn undo(&mut self) {
         if let Some(event) = self.undo_stack.pop() {
             match event {
@@ -904,11 +929,26 @@ impl EditorState {
                     self.set_selection(prev_sel.selection);
                     self.multi_selection = prev_sel.multi_selection;
                 }
+                UndoEvent::Texture { name, indices, palette } => {
+                    // Save current state to redo stack
+                    if let Some(tex) = self.user_textures.get(&name) {
+                        self.redo_stack.push(UndoEvent::Texture {
+                            name: name.clone(),
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Restore previous state
+                    if let Some(tex) = self.user_textures.get_mut(&name) {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
+                }
             }
         }
     }
 
-    /// Redo last undone action (level or selection)
+    /// Redo last undone action (level, selection, or texture)
     pub fn redo(&mut self) {
         if let Some(event) = self.redo_stack.pop() {
             match event {
@@ -923,6 +963,21 @@ impl EditorState {
                     }));
                     self.set_selection(next_sel.selection);
                     self.multi_selection = next_sel.multi_selection;
+                }
+                UndoEvent::Texture { name, indices, palette } => {
+                    // Save current state to undo stack
+                    if let Some(tex) = self.user_textures.get(&name) {
+                        self.undo_stack.push(UndoEvent::Texture {
+                            name: name.clone(),
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Apply redo state
+                    if let Some(tex) = self.user_textures.get_mut(&name) {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
                 }
             }
         }

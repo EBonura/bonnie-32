@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode};
-use crate::texture::{TextureLibrary, TextureEditorState};
+use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15};
+use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
 use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, TextureAtlas};
 use super::model::Animation;
 use super::drag::DragManager;
@@ -759,7 +759,7 @@ impl ContextMenu {
     }
 }
 
-/// Unified undo event - either a mesh change or a selection change
+/// Unified undo event - mesh change, selection change, or texture change
 #[derive(Debug, Clone)]
 pub enum UndoEvent {
     /// Mesh edit (geometry, UVs, etc.)
@@ -771,6 +771,11 @@ pub enum UndoEvent {
     },
     /// Selection change only
     Selection(ModelerSelection),
+    /// Texture paint edit (pixel indices, palette)
+    Texture {
+        indices: Vec<u8>,
+        palette: Vec<Color15>,
+    },
 }
 
 impl ModelerState {
@@ -1202,7 +1207,24 @@ impl ModelerState {
         }
     }
 
-    /// Undo last action (mesh edit or selection)
+    /// Save current texture state for undo (before making paint changes)
+    pub fn save_texture_undo(&mut self) {
+        if let Some(ref tex) = self.editing_texture {
+            self.undo_stack.push(UndoEvent::Texture {
+                indices: tex.indices.clone(),
+                palette: tex.palette.clone(),
+            });
+            self.redo_stack.clear();
+            self.texture_editor.dirty = true;
+
+            // Limit stack size
+            if self.undo_stack.len() > self.max_undo_levels {
+                self.undo_stack.remove(0);
+            }
+        }
+    }
+
+    /// Undo last action (mesh edit, selection, or texture)
     pub fn undo(&mut self) -> bool {
         if let Some(event) = self.undo_stack.pop() {
             match event {
@@ -1239,6 +1261,21 @@ impl ModelerState {
                     self.selection = prev_sel;
                     self.set_status("Undo selection", 1.0);
                 }
+                UndoEvent::Texture { indices, palette } => {
+                    // Save current state to redo stack
+                    if let Some(ref tex) = self.editing_texture {
+                        self.redo_stack.push(UndoEvent::Texture {
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Restore previous state
+                    if let Some(ref mut tex) = self.editing_texture {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
+                    self.set_status("Undo paint", 1.0);
+                }
             }
             true
         } else {
@@ -1247,7 +1284,7 @@ impl ModelerState {
         }
     }
 
-    /// Redo last undone action (mesh edit or selection)
+    /// Redo last undone action (mesh edit, selection, or texture)
     pub fn redo(&mut self) -> bool {
         if let Some(event) = self.redo_stack.pop() {
             match event {
@@ -1283,6 +1320,21 @@ impl ModelerState {
                     self.undo_stack.push(UndoEvent::Selection(self.selection.clone()));
                     self.selection = next_sel;
                     self.set_status("Redo selection", 1.0);
+                }
+                UndoEvent::Texture { indices, palette } => {
+                    // Save current state to undo stack
+                    if let Some(ref tex) = self.editing_texture {
+                        self.undo_stack.push(UndoEvent::Texture {
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Apply redo state
+                    if let Some(ref mut tex) = self.editing_texture {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
+                    self.set_status("Redo paint", 1.0);
                 }
             }
             true
