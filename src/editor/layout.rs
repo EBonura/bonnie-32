@@ -646,56 +646,6 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     toolbar.separator();
 
-    // Room navigation
-    toolbar.label(&format!("Room: {}", state.current_room));
-
-    if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_LEFT, icon_font, "Previous Room") {
-        if !state.level.rooms.is_empty() {
-            if state.current_room > 0 {
-                state.current_room -= 1;
-            } else {
-                // Wrap to last room
-                state.current_room = state.level.rooms.len() - 1;
-            }
-        }
-    }
-    if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_RIGHT, icon_font, "Next Room") {
-        if !state.level.rooms.is_empty() {
-            if state.current_room + 1 < state.level.rooms.len() {
-                state.current_room += 1;
-            } else {
-                // Wrap to first room
-                state.current_room = 0;
-            }
-        }
-    }
-    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Add Room") {
-        // Create new room offset from existing rooms
-        let new_id = state.level.rooms.len();
-
-        // Calculate position: offset from the last room or origin
-        let offset_x = if let Some(last_room) = state.level.rooms.last() {
-            // Place new room to the east of the last room
-            last_room.position.x + (last_room.width as f32) * SECTOR_SIZE + SECTOR_SIZE
-        } else {
-            0.0
-        };
-
-        let new_room = crate::world::Room::new(
-            new_id,
-            crate::rasterizer::Vec3::new(offset_x, 0.0, 0.0),
-            1, // 1x1 grid to start
-            1,
-        );
-
-        state.save_undo();
-        state.level.rooms.push(new_room);
-        state.current_room = new_id;
-        state.set_status(&format!("Created Room {}", new_id), 2.0);
-    }
-
-    toolbar.separator();
-
     // PS1 effect toggles
     if toolbar.icon_button_active(ctx, icon::WAVES, icon_font, "Affine Textures (PS1 warp)", state.raster_settings.affine_textures) {
         state.raster_settings.affine_textures = !state.raster_settings.affine_textures;
@@ -2938,6 +2888,7 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     let num_rooms = state.level.rooms.len();
     let max_visible_rooms = 6; // Show up to 6 rooms before scrolling would be needed
     let rooms_to_show = num_rooms.min(max_visible_rooms);
+    let mut room_to_delete: Option<usize> = None;
 
     for i in 0..num_rooms {
         if i >= rooms_to_show {
@@ -2972,8 +2923,14 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             }
         }
 
-        // Room row (clickable area to the right of visibility button)
-        let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size - 6.0, LINE_HEIGHT);
+        // Delete button on the right
+        let del_btn_rect = Rect::new(x + rect.w - icon_btn_size - 4.0, y + 1.0, icon_btn_size, icon_btn_size);
+        if crate::ui::icon_button(ctx, del_btn_rect, icon::TRASH, icon_font, "Delete room") {
+            room_to_delete = Some(i);
+        }
+
+        // Room row (clickable area between visibility and delete buttons)
+        let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size * 2.0 - 10.0, LINE_HEIGHT);
         if ctx.mouse.clicked(&room_btn_rect) {
             state.current_room = i;
         }
@@ -2987,10 +2944,63 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         y += LINE_HEIGHT;
     }
 
-    if num_rooms == 0 {
+    // Handle room deletion after iteration
+    if let Some(i) = room_to_delete {
+        state.save_undo();
+        state.level.rooms.remove(i);
+        // Update current_room if needed
+        if state.current_room >= state.level.rooms.len() && !state.level.rooms.is_empty() {
+            state.current_room = state.level.rooms.len() - 1;
+        }
+        // Update hidden_rooms: remove this room and shift higher indices down
+        state.hidden_rooms.remove(&i);
+        state.hidden_rooms = state.hidden_rooms.iter()
+            .filter_map(|&idx| if idx > i { Some(idx - 1) } else if idx < i { Some(idx) } else { None })
+            .collect();
+        // Clear selection if it was in the deleted room
+        if let Selection::SectorFace { room, .. } | Selection::Object { room, .. } = &state.selection {
+            if *room == i {
+                state.selection = Selection::None;
+            }
+        }
+        state.multi_selection.clear();
+        state.mark_portals_dirty();
+        state.set_status(&format!("Deleted Room {}", i), 2.0);
+    }
+
+    if state.level.rooms.is_empty() {
         draw_text("No rooms", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
         y += LINE_HEIGHT;
     }
+
+    // Add Room button
+    let add_btn_rect = Rect::new(x, y + 2.0, icon_btn_size, icon_btn_size);
+    if crate::ui::icon_button(ctx, add_btn_rect, icon::PLUS, icon_font, "Add Room") {
+        // Create new room offset from existing rooms
+        let new_id = state.level.rooms.len();
+
+        // Calculate position: offset from the last room or origin
+        let offset_x = if let Some(last_room) = state.level.rooms.last() {
+            // Place new room to the east of the last room
+            last_room.position.x + (last_room.width as f32) * SECTOR_SIZE + SECTOR_SIZE
+        } else {
+            0.0
+        };
+
+        let new_room = crate::world::Room::new(
+            new_id,
+            crate::rasterizer::Vec3::new(offset_x, 0.0, 0.0),
+            1, // 1x1 grid to start
+            1,
+        );
+
+        state.save_undo();
+        state.level.rooms.push(new_room);
+        state.current_room = new_id;
+        state.set_status(&format!("Created Room {}", new_id), 2.0);
+    }
+    draw_text("Add Room", (x + icon_btn_size + 4.0).floor(), (y + 12.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
+    y += LINE_HEIGHT;
 
     // Separator line
     y += 6.0;
@@ -3027,35 +3037,63 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         draw_text(&format!("Lights: {}", light_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
         y += LINE_HEIGHT;
 
-        // Ambient light knob
-        y += 8.0; // Extra space before knob
-        let knob_radius = 20.0;
-        let knob_center_x = x + rect.w / 2.0 - 4.0; // Center in panel
-        let knob_center_y = y + knob_radius + 12.0; // Account for label above
+        // Ambient light slider (0-31 display, maps to 0.0-1.0 internally)
+        y += 8.0;
+        let slider_height = 12.0;
+        let label_width = 55.0;
+        let value_width = 24.0;
+        let slider_x = x + label_width;
+        let slider_width = rect.w - label_width - value_width - 12.0;
 
-        // Convert ambient (0.0-1.0) to knob value (0-127)
-        // Scale so 100% ambient = 127 (max knob position)
-        let ambient_value = (room.ambient * 127.0).round() as u8;
-        let knob_result = draw_knob(
-            ctx,
-            knob_center_x,
-            knob_center_y,
-            knob_radius,
-            ambient_value.min(127),
-            "Ambient",
-            false, // Not bipolar
-            false, // Not editing (no text entry mode for now)
-        );
+        let text_color = Color::new(0.8, 0.8, 0.8, 1.0);
+        let track_bg = Color::new(0.15, 0.15, 0.18, 1.0);
+        let tint = Color::new(0.9, 0.85, 0.4, 1.0); // Yellow/warm for light
 
-        // Apply knob changes
-        if let Some(new_val) = knob_result.value {
-            let clamped: u8 = new_val.min(127);
-            let new_ambient = (clamped as f32) / 127.0;
+        // Label
+        draw_text("Ambient", x, y + slider_height - 2.0, 11.0, text_color);
+
+        // Convert ambient (0.0-1.0) to display value (0-31)
+        let ambient_31 = (room.ambient * 31.0).round() as u8;
+
+        // Slider track background
+        let track_rect = Rect::new(slider_x, y, slider_width, slider_height);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+        // Filled portion
+        let fill_ratio = ambient_31 as f32 / 31.0;
+        let fill_width = fill_ratio * slider_width;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, tint);
+
+        // Thumb indicator
+        let thumb_x = track_rect.x + fill_width - 1.0;
+        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+        // Value text
+        draw_text(&format!("{:2}", ambient_31), slider_x + slider_width + 4.0, y + slider_height - 2.0, 11.0, text_color);
+
+        // Handle slider interaction
+        let hovered = ctx.mouse.inside(&track_rect);
+
+        // Start dragging
+        if hovered && ctx.mouse.left_pressed {
+            state.ambient_slider_active = true;
+        }
+
+        // Continue dragging
+        if state.ambient_slider_active && ctx.mouse.left_down {
+            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+            let new_ambient = new_val as f32 / 31.0;
             if let Some(room) = state.level.rooms.get_mut(state.current_room) {
                 if (room.ambient - new_ambient).abs() > 0.001 {
                     room.ambient = new_ambient;
                 }
             }
+        }
+
+        // End dragging
+        if state.ambient_slider_active && !ctx.mouse.left_down {
+            state.ambient_slider_active = false;
         }
     } else {
         draw_text("No room selected", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));

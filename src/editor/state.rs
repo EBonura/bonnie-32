@@ -559,6 +559,9 @@ pub struct EditorState {
     /// Skybox panel: active slider ID
     pub skybox_active_slider: Option<usize>,
 
+    /// Rooms panel: ambient slider active
+    pub ambient_slider_active: bool,
+
     /// Skybox panel: selected color target (for RGB sliders)
     /// 0-3 = gradient colors (zenith, horizon_sky, horizon_ground, nadir)
     /// 10 = horizontal tint, 20 = sun core, 21 = sun glow, 22 = moon core, 23 = moon glow
@@ -767,6 +770,7 @@ impl EditorState {
             light_color_slider: None,
             vertex_color_slider: None,
             skybox_active_slider: None,
+            ambient_slider_active: false,
             skybox_selected_color: None,
             skybox_gradient_expanded: true,  // Start expanded
             skybox_celestial_expanded: false,

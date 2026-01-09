@@ -29,6 +29,7 @@ pub mod icon {
     // UI / Navigation
     pub const PLUS: char = '\u{e13d}';
     pub const MINUS: char = '\u{e11c}';
+    pub const TRASH: char = '\u{e18d}';
     pub const MOVE: char = '\u{e121}';
     pub const CIRCLE_CHEVRON_LEFT: char = '\u{e4de}';
     pub const CIRCLE_CHEVRON_RIGHT: char = '\u{e4df}';
