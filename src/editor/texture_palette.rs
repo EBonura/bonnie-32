@@ -994,6 +994,11 @@ fn draw_texture_editor_panel(
         state.texture_editor.redo(tex);
     }
 
+    // Forward status messages from texture editor to main editor
+    if let Some(msg) = state.texture_editor.take_status() {
+        state.set_status(&msg, 2.0);
+    }
+
     // Increment texture generation when dirty (for 3D view cache invalidation)
     if state.texture_editor.dirty {
         state.texture_generation = state.texture_generation.wrapping_add(1);

@@ -30,7 +30,7 @@ mod texture_editor;
 pub use user_texture::{UserTexture, TextureSize, TextureError};
 pub use texture_library::{TextureLibrary, TEXTURES_USER_DIR};
 pub use texture_editor::{
-    DrawTool, TextureEditorState, TextureUndoEntry,
+    DrawTool, BrushShape, TextureEditorState, TextureUndoEntry,
     draw_texture_canvas, draw_tool_panel, draw_palette_panel,
     screen_to_texture,
 };

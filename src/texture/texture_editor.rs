@@ -21,6 +21,8 @@ const PANEL_BG: Color = Color::new(0.18, 0.18, 0.20, 1.0);
 /// Note: No eraser - paint with index 0 (transparent) to erase
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DrawTool {
+    /// Selection tool for copy/paste/move
+    Select,
     /// Brush with configurable size (size 1 = pencil)
     #[default]
     Brush,
@@ -34,10 +36,141 @@ pub enum DrawTool {
     Ellipse,
 }
 
+/// Brush shape for the brush tool
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BrushShape {
+    #[default]
+    Square,
+    Circle,
+}
+
+/// Selection rectangle with optional floating pixel data
+#[derive(Debug, Clone)]
+pub struct Selection {
+    /// Top-left X coordinate in texture pixels
+    pub x: i32,
+    /// Top-left Y coordinate in texture pixels
+    pub y: i32,
+    /// Width in pixels
+    pub width: usize,
+    /// Height in pixels
+    pub height: usize,
+    /// Floating pixel data (lifted from canvas when moving)
+    /// None = selection outline only, Some = floating pixels
+    pub floating: Option<Vec<u8>>,
+}
+
+impl Selection {
+    /// Create a new selection from two corner points
+    pub fn from_corners(x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+        let (min_x, max_x) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
+        let (min_y, max_y) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+        Self {
+            x: min_x,
+            y: min_y,
+            width: (max_x - min_x + 1) as usize,
+            height: (max_y - min_y + 1) as usize,
+            floating: None,
+        }
+    }
+
+    /// Check if a point is inside the selection
+    pub fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x
+            && px < self.x + self.width as i32
+            && py >= self.y
+            && py < self.y + self.height as i32
+    }
+
+    /// Get pixel index within the selection (for floating data)
+    pub fn pixel_index(&self, px: i32, py: i32) -> Option<usize> {
+        if self.contains(px, py) {
+            let local_x = (px - self.x) as usize;
+            let local_y = (py - self.y) as usize;
+            Some(local_y * self.width + local_x)
+        } else {
+            None
+        }
+    }
+
+    /// Check if a screen position is near a selection edge/corner
+    /// Returns the edge if within threshold, None otherwise
+    /// Uses screen coordinates (after zoom/pan transform)
+    pub fn hit_test_edge(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        tex_x: f32,
+        tex_y: f32,
+        zoom: f32,
+        threshold: f32,
+    ) -> Option<ResizeEdge> {
+        let sel_x = tex_x + self.x as f32 * zoom;
+        let sel_y = tex_y + self.y as f32 * zoom;
+        let sel_w = self.width as f32 * zoom;
+        let sel_h = self.height as f32 * zoom;
+
+        let left = sel_x;
+        let right = sel_x + sel_w;
+        let top = sel_y;
+        let bottom = sel_y + sel_h;
+
+        let near_left = (screen_x - left).abs() < threshold;
+        let near_right = (screen_x - right).abs() < threshold;
+        let near_top = (screen_y - top).abs() < threshold;
+        let near_bottom = (screen_y - bottom).abs() < threshold;
+
+        let in_x_range = screen_x >= left - threshold && screen_x <= right + threshold;
+        let in_y_range = screen_y >= top - threshold && screen_y <= bottom + threshold;
+
+        // Corners take priority (check these first)
+        if near_left && near_top {
+            return Some(ResizeEdge::TopLeft);
+        }
+        if near_right && near_top {
+            return Some(ResizeEdge::TopRight);
+        }
+        if near_left && near_bottom {
+            return Some(ResizeEdge::BottomLeft);
+        }
+        if near_right && near_bottom {
+            return Some(ResizeEdge::BottomRight);
+        }
+
+        // Then edges
+        if near_top && in_x_range {
+            return Some(ResizeEdge::Top);
+        }
+        if near_bottom && in_x_range {
+            return Some(ResizeEdge::Bottom);
+        }
+        if near_left && in_y_range {
+            return Some(ResizeEdge::Left);
+        }
+        if near_right && in_y_range {
+            return Some(ResizeEdge::Right);
+        }
+
+        None
+    }
+}
+
+/// Clipboard data for copy/paste
+#[derive(Debug, Clone)]
+pub struct ClipboardData {
+    /// Width of clipboard content
+    pub width: usize,
+    /// Height of clipboard content
+    pub height: usize,
+    /// Pixel indices
+    pub indices: Vec<u8>,
+}
+
 impl DrawTool {
     /// Icon for this tool
     pub fn icon(&self) -> char {
         match self {
+            DrawTool::Select => icon::POINTER,         // selection tool
             DrawTool::Brush => icon::PENCIL,           // pencil icon (size 1 = pixel, size 2+ = brush)
             DrawTool::Fill => icon::PAINT_BUCKET,
             DrawTool::Line => icon::PENCIL_LINE,       // pencil-line icon
@@ -49,6 +182,7 @@ impl DrawTool {
     /// Tooltip text
     pub fn tooltip(&self) -> &'static str {
         match self {
+            DrawTool::Select => "Select (S)",
             DrawTool::Brush => "Brush (B)",
             DrawTool::Fill => "Fill (F)",
             DrawTool::Line => "Line (L)",
@@ -86,6 +220,8 @@ pub struct TextureEditorState {
     pub tool: DrawTool,
     /// Brush size (1-16 pixels)
     pub brush_size: u8,
+    /// Brush shape (square or circle)
+    pub brush_shape: BrushShape,
     /// Currently selected palette index for drawing
     pub selected_index: u8,
     /// Currently selected palette entry for editing
@@ -127,6 +263,35 @@ pub struct TextureEditorState {
     pub fill_shapes: bool,
     /// Show pixel grid overlay
     pub show_grid: bool,
+    /// Current selection (None = no selection)
+    pub selection: Option<Selection>,
+    /// Clipboard for copy/paste
+    pub clipboard: Option<ClipboardData>,
+    /// Selection drag start position (for creating/moving selection)
+    pub selection_drag_start: Option<(i32, i32)>,
+    /// Whether we're creating a new selection (vs moving existing)
+    pub creating_selection: bool,
+    /// Animation frame counter for marching ants
+    pub selection_anim_frame: u32,
+    /// Which edge/corner is being resized (None = not resizing)
+    pub resizing_edge: Option<ResizeEdge>,
+    /// Status message to show (forwarded to main editor)
+    pub status_message: Option<String>,
+    /// Original selection position before move (for cancel)
+    pub move_original_pos: Option<(i32, i32)>,
+}
+
+/// Edge or corner being resized
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 impl Default for TextureEditorState {
@@ -134,6 +299,7 @@ impl Default for TextureEditorState {
         Self {
             tool: DrawTool::Brush,
             brush_size: 1,
+            brush_shape: BrushShape::Square,
             selected_index: 1, // Default to first non-transparent color
             editing_index: 1,
             zoom: 4.0, // Start at 4x zoom
@@ -155,6 +321,14 @@ impl Default for TextureEditorState {
             redo_requested: false,
             fill_shapes: false,
             show_grid: true, // Grid on by default
+            selection: None,
+            clipboard: None,
+            selection_drag_start: None,
+            creating_selection: false,
+            selection_anim_frame: 0,
+            resizing_edge: None,
+            status_message: None,
+            move_original_pos: None,
         }
     }
 }
@@ -165,10 +339,21 @@ impl TextureEditorState {
         Self::default()
     }
 
+    /// Set a status message to be forwarded to the main editor
+    pub fn set_status(&mut self, message: &str) {
+        self.status_message = Some(message.to_string());
+    }
+
+    /// Take the status message (clears it)
+    pub fn take_status(&mut self) -> Option<String> {
+        self.status_message.take()
+    }
+
     /// Reset the editor state for a new texture
     pub fn reset(&mut self) {
         self.tool = DrawTool::Brush;
         self.brush_size = 1;
+        self.brush_shape = BrushShape::Square;
         self.selected_index = 1;
         self.editing_index = 1;
         self.zoom = 4.0;
@@ -183,6 +368,10 @@ impl TextureEditorState {
         self.brush_slider_active = false;
         self.panning = false;
         self.dirty = false;
+        self.selection = None;
+        self.selection_drag_start = None;
+        self.creating_selection = false;
+        // Note: clipboard is NOT reset - allow paste across textures
     }
 
     /// Reset zoom and pan to fit texture in view
@@ -308,12 +497,38 @@ fn tex_draw_line(texture: &mut UserTexture, x0: i32, y0: i32, x1: i32, y1: i32, 
 }
 
 /// Draw a brush stroke (square brush)
-fn tex_draw_brush(texture: &mut UserTexture, cx: i32, cy: i32, size: u8, index: u8) {
+fn tex_draw_brush_square(texture: &mut UserTexture, cx: i32, cy: i32, size: u8, index: u8) {
     let half = (size as i32 - 1) / 2;
     for dy in 0..size as i32 {
         for dx in 0..size as i32 {
             tex_draw_pixel(texture, cx - half + dx, cy - half + dy, index);
         }
+    }
+}
+
+/// Draw a brush stroke (circle brush)
+fn tex_draw_brush_circle(texture: &mut UserTexture, cx: i32, cy: i32, size: u8, index: u8) {
+    let r = (size as i32 - 1) / 2;
+    // For size 1, just draw a single pixel
+    if r == 0 {
+        tex_draw_pixel(texture, cx, cy, index);
+        return;
+    }
+    // For larger sizes, draw filled circle
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                tex_draw_pixel(texture, cx + dx, cy + dy, index);
+            }
+        }
+    }
+}
+
+/// Draw a brush stroke with the current shape
+fn tex_draw_brush(texture: &mut UserTexture, cx: i32, cy: i32, size: u8, index: u8, shape: BrushShape) {
+    match shape {
+        BrushShape::Square => tex_draw_brush_square(texture, cx, cy, size, index),
+        BrushShape::Circle => tex_draw_brush_circle(texture, cx, cy, size, index),
     }
 }
 
@@ -430,6 +645,207 @@ fn tex_draw_ellipse_filled(texture: &mut UserTexture, x0: i32, y0: i32, x1: i32,
     }
 }
 
+/// Draw marching ants selection border
+fn draw_selection_marching_ants(selection: &Selection, tex_x: f32, tex_y: f32, zoom: f32, frame: u32) {
+    let x = tex_x + selection.x as f32 * zoom;
+    let y = tex_y + selection.y as f32 * zoom;
+    let w = selection.width as f32 * zoom;
+    let h = selection.height as f32 * zoom;
+
+    // Marching ants effect: alternate black and white dashes that move over time
+    let dash_len = 4.0;
+    let offset = (frame / 12) as f32 * 2.0; // Slow animation speed (divide by 12 for ~5 FPS)
+
+    // Draw dashed lines for all four edges
+    draw_marching_line(x, y, x + w, y, dash_len, offset);           // Top
+    draw_marching_line(x + w, y, x + w, y + h, dash_len, offset);   // Right
+    draw_marching_line(x + w, y + h, x, y + h, dash_len, offset);   // Bottom
+    draw_marching_line(x, y + h, x, y, dash_len, offset);           // Left
+}
+
+/// Draw a single marching ants line segment
+fn draw_marching_line(x0: f32, y0: f32, x1: f32, y1: f32, dash_len: f32, offset: f32) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length < 0.1 {
+        return;
+    }
+
+    let nx = dx / length;
+    let ny = dy / length;
+
+    // Draw alternating black and white segments
+    let mut pos = 0.0;
+    let mut is_white = ((offset / dash_len) as i32 % 2) == 0;
+
+    // Adjust start position based on offset for animation
+    let adjusted_offset = offset % (dash_len * 2.0);
+    pos -= adjusted_offset;
+
+    while pos < length {
+        let seg_start = pos.max(0.0);
+        let seg_end = (pos + dash_len).min(length);
+
+        if seg_end > seg_start {
+            let sx = x0 + nx * seg_start;
+            let sy = y0 + ny * seg_start;
+            let ex = x0 + nx * seg_end;
+            let ey = y0 + ny * seg_end;
+
+            let color = if is_white { WHITE } else { BLACK };
+            draw_line(sx, sy, ex, ey, 1.0, color);
+        }
+
+        pos += dash_len;
+        is_white = !is_white;
+    }
+}
+
+/// Draw resize handles on selection edges/corners
+fn draw_selection_handles(
+    selection: &Selection,
+    tex_x: f32,
+    tex_y: f32,
+    zoom: f32,
+    hovered_edge: Option<ResizeEdge>,
+) {
+    let x = tex_x + selection.x as f32 * zoom;
+    let y = tex_y + selection.y as f32 * zoom;
+    let w = selection.width as f32 * zoom;
+    let h = selection.height as f32 * zoom;
+
+    let handle_size = 6.0;
+    let half = handle_size / 2.0;
+
+    // Define handle positions: (x, y, edge)
+    let handles = [
+        (x - half, y - half, ResizeEdge::TopLeft),
+        (x + w / 2.0 - half, y - half, ResizeEdge::Top),
+        (x + w - half, y - half, ResizeEdge::TopRight),
+        (x + w - half, y + h / 2.0 - half, ResizeEdge::Right),
+        (x + w - half, y + h - half, ResizeEdge::BottomRight),
+        (x + w / 2.0 - half, y + h - half, ResizeEdge::Bottom),
+        (x - half, y + h - half, ResizeEdge::BottomLeft),
+        (x - half, y + h / 2.0 - half, ResizeEdge::Left),
+    ];
+
+    for (hx, hy, edge) in handles {
+        let is_hovered = hovered_edge == Some(edge);
+        let fill_color = if is_hovered {
+            Color::new(1.0, 0.8, 0.2, 1.0) // Gold when hovered
+        } else {
+            WHITE
+        };
+        let border_color = BLACK;
+
+        // Draw filled square with border
+        draw_rectangle(hx, hy, handle_size, handle_size, fill_color);
+        draw_rectangle_lines(hx, hy, handle_size, handle_size, 1.0, border_color);
+    }
+}
+
+/// Copy selection pixels to clipboard (returns ClipboardData to avoid borrow issues)
+fn make_clipboard_from_selection(texture: &UserTexture, selection: &Selection) -> ClipboardData {
+    let mut indices = Vec::with_capacity(selection.width * selection.height);
+
+    // If we have floating data, use that; otherwise read from texture
+    if let Some(ref floating) = selection.floating {
+        indices = floating.clone();
+    } else {
+        for y in 0..selection.height {
+            for x in 0..selection.width {
+                let tx = selection.x + x as i32;
+                let ty = selection.y + y as i32;
+                if tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
+                    indices.push(texture.get_index(tx as usize, ty as usize));
+                } else {
+                    indices.push(0); // Transparent for out-of-bounds
+                }
+            }
+        }
+    }
+
+    ClipboardData {
+        width: selection.width,
+        height: selection.height,
+        indices,
+    }
+}
+
+/// Clear the selection area (fill with index 0 = transparent)
+fn clear_selection_area(texture: &mut UserTexture, selection: &Selection) {
+    for y in 0..selection.height {
+        for x in 0..selection.width {
+            let tx = selection.x + x as i32;
+            let ty = selection.y + y as i32;
+            if tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
+                texture.set_index(tx as usize, ty as usize, 0);
+            }
+        }
+    }
+}
+
+/// Lift selection pixels into floating data (removes from texture)
+fn lift_selection_to_floating(texture: &mut UserTexture, state: &mut TextureEditorState) {
+    // Check if already floating
+    if let Some(ref selection) = state.selection {
+        if selection.floating.is_some() {
+            return; // Already floating
+        }
+    } else {
+        return; // No selection
+    }
+
+    // Save undo before lifting
+    state.save_undo(texture, "Move selection");
+
+    // Now do the lift
+    if let Some(ref mut selection) = state.selection {
+        let mut floating = Vec::with_capacity(selection.width * selection.height);
+
+        for y in 0..selection.height {
+            for x in 0..selection.width {
+                let tx = selection.x + x as i32;
+                let ty = selection.y + y as i32;
+                if tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
+                    let idx = texture.get_index(tx as usize, ty as usize);
+                    floating.push(idx);
+                    // Clear the pixel from the texture
+                    texture.set_index(tx as usize, ty as usize, 0);
+                } else {
+                    floating.push(0);
+                }
+            }
+        }
+
+        selection.floating = Some(floating);
+    }
+}
+
+/// Commit floating selection back to texture
+fn commit_floating_selection(texture: &mut UserTexture, state: &mut TextureEditorState) {
+    if let Some(ref selection) = state.selection {
+        if let Some(ref floating) = selection.floating {
+            // Draw floating pixels onto texture
+            for y in 0..selection.height {
+                for x in 0..selection.width {
+                    let tx = selection.x + x as i32;
+                    let ty = selection.y + y as i32;
+                    let idx = floating[y * selection.width + x];
+
+                    // Only draw non-transparent pixels
+                    if idx != 0 && tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
+                        texture.set_index(tx as usize, ty as usize, idx);
+                    }
+                }
+            }
+        }
+    }
+    // Clear the selection
+    state.selection = None;
+}
+
 /// Convert screen position to texture pixel coordinates
 pub fn screen_to_texture(
     screen_x: f32,
@@ -464,6 +880,9 @@ pub fn draw_texture_canvas(
     texture: &mut UserTexture,
     state: &mut TextureEditorState,
 ) {
+    // Update selection animation frame
+    state.selection_anim_frame = state.selection_anim_frame.wrapping_add(1);
+
     // Draw canvas background
     draw_rectangle(canvas_rect.x, canvas_rect.y, canvas_rect.w, canvas_rect.h, PANEL_BG);
 
@@ -577,6 +996,60 @@ pub fn draw_texture_canvas(
     // Draw texture border
     draw_rectangle_lines(tex_x, tex_y, tex_screen_w, tex_screen_h, 1.0, Color::new(0.5, 0.5, 0.5, 1.0));
 
+    // Draw floating selection pixels (if any)
+    if let Some(ref selection) = state.selection {
+        if let Some(ref floating) = selection.floating {
+            for sy in 0..selection.height {
+                for sx in 0..selection.width {
+                    let idx = floating[sy * selection.width + sx];
+                    if idx == 0 {
+                        continue; // Transparent
+                    }
+
+                    let tx = selection.x + sx as i32;
+                    let ty = selection.y + sy as i32;
+
+                    let screen_x = tex_x + tx as f32 * state.zoom;
+                    let screen_y = tex_y + ty as f32 * state.zoom;
+
+                    // Clip to canvas
+                    if screen_x + state.zoom < canvas_rect.x
+                        || screen_x > canvas_rect.x + canvas_rect.w
+                        || screen_y + state.zoom < canvas_rect.y
+                        || screen_y > canvas_rect.y + canvas_rect.h
+                    {
+                        continue;
+                    }
+
+                    let color = texture.get_palette_color(idx);
+                    let [r, g, b, _] = color.to_rgba();
+                    draw_rectangle(
+                        screen_x,
+                        screen_y,
+                        state.zoom,
+                        state.zoom,
+                        Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0),
+                    );
+                }
+            }
+        }
+
+        // Draw marching ants
+        draw_selection_marching_ants(selection, tex_x, tex_y, state.zoom, state.selection_anim_frame);
+
+        // Check for edge hover (only when not floating - can't resize floating selection)
+        let hovered_edge = if selection.floating.is_none() && !state.creating_selection {
+            selection.hit_test_edge(ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, 8.0)
+        } else {
+            None
+        };
+
+        // Draw resize handles (only for non-floating selections)
+        if selection.floating.is_none() {
+            draw_selection_handles(selection, tex_x, tex_y, state.zoom, hovered_edge);
+        }
+    }
+
     // Disable scissor clipping
     unsafe {
         get_internal_gl().quad_gl.scissor(None);
@@ -620,130 +1093,410 @@ pub fn draw_texture_canvas(
         }
     }
 
-    // Drawing
+    // Keyboard shortcuts for selection (work regardless of mouse position)
+    let cmd_held = is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+
+    // Escape to deselect or cancel move
+    if is_key_pressed(KeyCode::Escape) && state.selection.is_some() {
+        let has_floating = state.selection.as_ref().map_or(false, |s| s.floating.is_some());
+
+        // If we have a floating selection being moved, cancel and restore original position
+        if has_floating && state.move_original_pos.is_some() {
+            if let (Some(ref mut selection), Some((orig_x, orig_y))) = (&mut state.selection, state.move_original_pos) {
+                selection.x = orig_x;
+                selection.y = orig_y;
+            }
+            state.move_original_pos = None;
+            state.set_status("Move cancelled");
+        } else if has_floating {
+            // Commit floating selection
+            commit_floating_selection(texture, state);
+            state.set_status("Selection committed");
+        } else {
+            // Just clear selection
+            state.selection = None;
+        }
+        state.creating_selection = false;
+        state.selection_drag_start = None;
+    }
+
+    // Copy (Cmd+C)
+    if cmd_held && is_key_pressed(KeyCode::C) {
+        if let Some(ref selection) = state.selection {
+            let clipboard = make_clipboard_from_selection(texture, selection);
+            let w = clipboard.width;
+            let h = clipboard.height;
+            state.clipboard = Some(clipboard);
+            state.set_status(&format!("Copied {}×{} pixels", w, h));
+        }
+    }
+
+    // Cut (Cmd+X)
+    if cmd_held && is_key_pressed(KeyCode::X) {
+        if let Some(selection) = state.selection.take() {
+            let clipboard = make_clipboard_from_selection(texture, &selection);
+            let w = clipboard.width;
+            let h = clipboard.height;
+            state.clipboard = Some(clipboard);
+            // Clear the selected area
+            state.save_undo(texture, "Cut");
+            clear_selection_area(texture, &selection);
+            state.set_status(&format!("Cut {}×{} pixels", w, h));
+        }
+    }
+
+    // Paste (Cmd+V)
+    if cmd_held && is_key_pressed(KeyCode::V) {
+        if let Some(ref clipboard) = state.clipboard.clone() {
+            // Commit any existing floating selection
+            let has_floating = state.selection.as_ref().map_or(false, |s| s.floating.is_some());
+            if has_floating {
+                commit_floating_selection(texture, state);
+            }
+
+            // Create floating selection at center of texture
+            let center_x = (texture.width as i32 - clipboard.width as i32) / 2;
+            let center_y = (texture.height as i32 - clipboard.height as i32) / 2;
+
+            state.selection = Some(Selection {
+                x: center_x,
+                y: center_y,
+                width: clipboard.width,
+                height: clipboard.height,
+                floating: Some(clipboard.indices.clone()),
+            });
+            state.tool = DrawTool::Select;
+            state.set_status(&format!("Pasted {}×{} pixels", clipboard.width, clipboard.height));
+        }
+    }
+
+    // Drawing and selection
     if inside && !state.panning {
         if let Some((px, py)) = screen_to_texture(ctx.mouse.x, ctx.mouse.y, &canvas_rect, texture, state) {
-            // Show cursor preview
-            if px >= 0 && py >= 0 && (px as usize) < texture.width && (py as usize) < texture.height {
-                let cursor_x = tex_x + px as f32 * state.zoom;
-                let cursor_y = tex_y + py as f32 * state.zoom;
-
-                if state.tool.uses_brush_size() {
-                    let size = state.brush_size as f32 * state.zoom;
-                    let half = ((state.brush_size as f32 - 1.0) / 2.0) * state.zoom;
-                    draw_rectangle_lines(
-                        cursor_x - half,
-                        cursor_y - half,
-                        size,
-                        size,
-                        1.0,
-                        Color::new(1.0, 1.0, 1.0, 0.5),
-                    );
+            // Handle Select tool
+            if state.tool == DrawTool::Select {
+                // Check for edge hover (for resize cursor feedback)
+                let hovered_edge = if let Some(ref selection) = state.selection {
+                    if selection.floating.is_none() && !state.creating_selection && state.resizing_edge.is_none() {
+                        selection.hit_test_edge(ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, 8.0)
+                    } else {
+                        None
+                    }
                 } else {
-                    draw_rectangle_lines(
-                        cursor_x,
-                        cursor_y,
-                        state.zoom,
-                        state.zoom,
-                        1.0,
-                        Color::new(1.0, 1.0, 1.0, 0.5),
-                    );
-                }
-            }
+                    None
+                };
 
-            // Handle drawing
-            if ctx.mouse.left_pressed && !state.drawing {
-                state.drawing = true;
-                state.last_draw_pos = Some((px, py));
+                // Show cursor preview (crosshair or edge indicator)
+                if px >= 0 && py >= 0 && (px as usize) < texture.width && (py as usize) < texture.height {
+                    let cursor_x = tex_x + px as f32 * state.zoom;
+                    let cursor_y = tex_y + py as f32 * state.zoom;
 
-                if state.tool.is_shape_tool() {
-                    state.shape_start = Some((px, py));
-                } else {
-                    // Save undo state at start of stroke
-                    state.save_undo(texture, &format!("{:?}", state.tool));
-
-                    match state.tool {
-                        DrawTool::Brush => {
-                            tex_draw_brush(texture, px, py, state.brush_size, state.selected_index);
-                        }
-                        DrawTool::Fill => {
-                            flood_fill(texture, px, py, state.selected_index);
-                        }
-                        _ => {}
+                    // Only show crosshair if not hovering an edge
+                    if hovered_edge.is_none() && state.resizing_edge.is_none() {
+                        draw_rectangle_lines(
+                            cursor_x,
+                            cursor_y,
+                            state.zoom,
+                            state.zoom,
+                            1.0,
+                            Color::new(1.0, 1.0, 1.0, 0.5),
+                        );
                     }
                 }
-            }
 
-            if ctx.mouse.left_down && state.drawing && !state.tool.is_shape_tool() {
-                // Continue stroke
-                if let Some((last_x, last_y)) = state.last_draw_pos {
-                    if (px, py) != (last_x, last_y) {
-                        if state.tool == DrawTool::Brush {
-                            // Interpolate brush along line
-                            let dx = (px - last_x).abs();
-                            let dy = (py - last_y).abs();
-                            let steps = dx.max(dy);
-                            for i in 0..=steps {
-                                let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
-                                let ix = last_x + ((px - last_x) as f32 * t) as i32;
-                                let iy = last_y + ((py - last_y) as f32 * t) as i32;
-                                tex_draw_brush(texture, ix, iy, state.brush_size, state.selected_index);
+                // Mouse pressed - start selection, move, or resize
+                if ctx.mouse.left_pressed {
+                    // First check if we're clicking on an edge/handle
+                    if let Some(edge) = hovered_edge {
+                        // Shift+click on edge = resize, otherwise move
+                        let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                        if shift_held {
+                            // Shift+click edge = resize
+                            state.resizing_edge = Some(edge);
+                            state.selection_drag_start = Some((px, py));
+                            state.creating_selection = false;
+                        } else {
+                            // Click edge = move (lift and drag, like clicking inside)
+                            state.selection_drag_start = Some((px, py));
+                            state.creating_selection = false;
+
+                            // Store original position for cancel
+                            if let Some(ref selection) = state.selection {
+                                state.move_original_pos = Some((selection.x, selection.y));
+                            }
+
+                            // Lift pixels into floating selection if not already floating
+                            if state.selection.as_ref().map_or(false, |s| s.floating.is_none()) {
+                                lift_selection_to_floating(texture, state);
                             }
                         }
-                        state.last_draw_pos = Some((px, py));
+                    } else if let Some(ref selection) = state.selection {
+                        if selection.contains(px, py) {
+                            // Click inside selection - start moving
+                            state.selection_drag_start = Some((px, py));
+                            state.creating_selection = false;
+
+                            // Store original position for cancel
+                            state.move_original_pos = Some((selection.x, selection.y));
+
+                            // Lift pixels into floating selection if not already floating
+                            if selection.floating.is_none() {
+                                lift_selection_to_floating(texture, state);
+                            }
+                        } else {
+                            // Click outside - commit floating and start new selection
+                            if selection.floating.is_some() {
+                                commit_floating_selection(texture, state);
+                            }
+                            state.selection = None;
+                            state.move_original_pos = None;
+                            state.selection_drag_start = Some((px, py));
+                            state.creating_selection = true;
+                        }
+                    } else {
+                        // No selection - start creating one
+                        state.selection_drag_start = Some((px, py));
+                        state.creating_selection = true;
                     }
                 }
-            }
 
-            // Shape preview
-            if state.drawing && state.tool.is_shape_tool() {
-                if let Some((sx, sy)) = state.shape_start {
-                    // Draw preview (using current color as overlay)
-                    let color = texture.get_palette_color(state.selected_index);
-                    let [r, g, b, _] = color.to_rgba();
-                    let preview_color = Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 0.5);
+                // Mouse dragging
+                if ctx.mouse.left_down {
+                    if let Some((start_x, start_y)) = state.selection_drag_start {
+                        if let Some(edge) = state.resizing_edge {
+                            // Resize selection by moving the appropriate edge
+                            if let Some(ref mut selection) = state.selection {
+                                let dx = px - start_x;
+                                let dy = py - start_y;
 
-                    // Simple preview rectangle
-                    let x0 = tex_x + sx.min(px) as f32 * state.zoom;
-                    let y0 = tex_y + sy.min(py) as f32 * state.zoom;
-                    let w = ((sx - px).abs() + 1) as f32 * state.zoom;
-                    let h = ((sy - py).abs() + 1) as f32 * state.zoom;
-                    draw_rectangle_lines(x0, y0, w, h, 2.0, preview_color);
+                                match edge {
+                                    ResizeEdge::Left => {
+                                        let new_x = selection.x + dx;
+                                        let new_w = (selection.width as i32 - dx).max(1) as usize;
+                                        if new_w >= 1 {
+                                            selection.x = new_x;
+                                            selection.width = new_w;
+                                        }
+                                    }
+                                    ResizeEdge::Right => {
+                                        selection.width = (selection.width as i32 + dx).max(1) as usize;
+                                    }
+                                    ResizeEdge::Top => {
+                                        let new_y = selection.y + dy;
+                                        let new_h = (selection.height as i32 - dy).max(1) as usize;
+                                        if new_h >= 1 {
+                                            selection.y = new_y;
+                                            selection.height = new_h;
+                                        }
+                                    }
+                                    ResizeEdge::Bottom => {
+                                        selection.height = (selection.height as i32 + dy).max(1) as usize;
+                                    }
+                                    ResizeEdge::TopLeft => {
+                                        let new_x = selection.x + dx;
+                                        let new_y = selection.y + dy;
+                                        let new_w = (selection.width as i32 - dx).max(1) as usize;
+                                        let new_h = (selection.height as i32 - dy).max(1) as usize;
+                                        if new_w >= 1 && new_h >= 1 {
+                                            selection.x = new_x;
+                                            selection.y = new_y;
+                                            selection.width = new_w;
+                                            selection.height = new_h;
+                                        }
+                                    }
+                                    ResizeEdge::TopRight => {
+                                        let new_y = selection.y + dy;
+                                        let new_w = (selection.width as i32 + dx).max(1) as usize;
+                                        let new_h = (selection.height as i32 - dy).max(1) as usize;
+                                        if new_w >= 1 && new_h >= 1 {
+                                            selection.y = new_y;
+                                            selection.width = new_w;
+                                            selection.height = new_h;
+                                        }
+                                    }
+                                    ResizeEdge::BottomLeft => {
+                                        let new_x = selection.x + dx;
+                                        let new_w = (selection.width as i32 - dx).max(1) as usize;
+                                        let new_h = (selection.height as i32 + dy).max(1) as usize;
+                                        if new_w >= 1 && new_h >= 1 {
+                                            selection.x = new_x;
+                                            selection.width = new_w;
+                                            selection.height = new_h;
+                                        }
+                                    }
+                                    ResizeEdge::BottomRight => {
+                                        selection.width = (selection.width as i32 + dx).max(1) as usize;
+                                        selection.height = (selection.height as i32 + dy).max(1) as usize;
+                                    }
+                                }
+                                state.selection_drag_start = Some((px, py));
+                            }
+                        } else if state.creating_selection {
+                            // Update selection rectangle preview
+                            state.selection = Some(Selection::from_corners(start_x, start_y, px, py));
+                        } else if let Some(ref mut selection) = state.selection {
+                            // Move floating selection
+                            let dx = px - start_x;
+                            let dy = py - start_y;
+                            selection.x += dx;
+                            selection.y += dy;
+                            state.selection_drag_start = Some((px, py));
+                        }
+                    }
                 }
-            }
 
-            // Complete shape on release
-            if !ctx.mouse.left_down && state.drawing {
-                if state.tool.is_shape_tool() {
-                    if let Some((sx, sy)) = state.shape_start {
+                // Mouse released
+                if !ctx.mouse.left_down && state.selection_drag_start.is_some() {
+                    if state.creating_selection {
+                        // Finalize selection creation
+                        if let Some(ref selection) = state.selection {
+                            // If selection is too small (0 or 1 pixel), clear it
+                            if selection.width < 2 && selection.height < 2 {
+                                state.selection = None;
+                            }
+                        }
+                    }
+                    state.selection_drag_start = None;
+                    state.creating_selection = false;
+                    state.resizing_edge = None;
+                    state.move_original_pos = None; // Move committed, clear cancel position
+                }
+            } else {
+                // Non-Select tool behavior
+                // Show cursor preview
+                if px >= 0 && py >= 0 && (px as usize) < texture.width && (py as usize) < texture.height {
+                    let cursor_x = tex_x + px as f32 * state.zoom;
+                    let cursor_y = tex_y + py as f32 * state.zoom;
+
+                    if state.tool.uses_brush_size() {
+                        let size = state.brush_size as f32 * state.zoom;
+                        let half = ((state.brush_size as f32 - 1.0) / 2.0) * state.zoom;
+                        let cursor_color = Color::new(1.0, 1.0, 1.0, 0.5);
+
+                        // Show shape-appropriate cursor
+                        if state.tool == DrawTool::Brush && state.brush_shape == BrushShape::Circle && state.brush_size > 1 {
+                            // Circle cursor
+                            let radius = size / 2.0;
+                            let cx = cursor_x + state.zoom / 2.0;
+                            let cy = cursor_y + state.zoom / 2.0;
+                            draw_circle_lines(cx, cy, radius, 1.0, cursor_color);
+                        } else {
+                            // Square cursor (or single pixel)
+                            draw_rectangle_lines(
+                                cursor_x - half,
+                                cursor_y - half,
+                                size,
+                                size,
+                                1.0,
+                                cursor_color,
+                            );
+                        }
+                    } else {
+                        draw_rectangle_lines(
+                            cursor_x,
+                            cursor_y,
+                            state.zoom,
+                            state.zoom,
+                            1.0,
+                            Color::new(1.0, 1.0, 1.0, 0.5),
+                        );
+                    }
+                }
+
+                // Handle drawing
+                if ctx.mouse.left_pressed && !state.drawing {
+                    state.drawing = true;
+                    state.last_draw_pos = Some((px, py));
+
+                    if state.tool.is_shape_tool() {
+                        state.shape_start = Some((px, py));
+                    } else {
+                        // Save undo state at start of stroke
                         state.save_undo(texture, &format!("{:?}", state.tool));
 
                         match state.tool {
-                            DrawTool::Line => {
-                                // Line uses brush_size as thickness (for now just 1px)
-                                tex_draw_line(texture, sx, sy, px, py, state.selected_index);
+                            DrawTool::Brush => {
+                                tex_draw_brush(texture, px, py, state.brush_size, state.selected_index, state.brush_shape);
                             }
-                            DrawTool::Rectangle => {
-                                if state.fill_shapes {
-                                    tex_draw_rect_filled(texture, sx, sy, px, py, state.selected_index);
-                                } else {
-                                    tex_draw_rect_outline(texture, sx, sy, px, py, state.selected_index);
-                                }
-                            }
-                            DrawTool::Ellipse => {
-                                if state.fill_shapes {
-                                    tex_draw_ellipse_filled(texture, sx, sy, px, py, state.selected_index);
-                                } else {
-                                    tex_draw_ellipse_outline(texture, sx, sy, px, py, state.selected_index);
-                                }
+                            DrawTool::Fill => {
+                                flood_fill(texture, px, py, state.selected_index);
                             }
                             _ => {}
                         }
                     }
                 }
-                state.drawing = false;
-                state.shape_start = None;
-                state.last_draw_pos = None;
+
+                if ctx.mouse.left_down && state.drawing && !state.tool.is_shape_tool() {
+                    // Continue stroke
+                    if let Some((last_x, last_y)) = state.last_draw_pos {
+                        if (px, py) != (last_x, last_y) {
+                            if state.tool == DrawTool::Brush {
+                                // Interpolate brush along line
+                                let dx = (px - last_x).abs();
+                                let dy = (py - last_y).abs();
+                                let steps = dx.max(dy);
+                                for i in 0..=steps {
+                                    let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
+                                    let ix = last_x + ((px - last_x) as f32 * t) as i32;
+                                    let iy = last_y + ((py - last_y) as f32 * t) as i32;
+                                    tex_draw_brush(texture, ix, iy, state.brush_size, state.selected_index, state.brush_shape);
+                                }
+                            }
+                            state.last_draw_pos = Some((px, py));
+                        }
+                    }
+                }
+
+                // Shape preview
+                if state.drawing && state.tool.is_shape_tool() {
+                    if let Some((sx, sy)) = state.shape_start {
+                        // Draw preview (using current color as overlay)
+                        let color = texture.get_palette_color(state.selected_index);
+                        let [r, g, b, _] = color.to_rgba();
+                        let preview_color = Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 0.5);
+
+                        // Simple preview rectangle
+                        let x0 = tex_x + sx.min(px) as f32 * state.zoom;
+                        let y0 = tex_y + sy.min(py) as f32 * state.zoom;
+                        let w = ((sx - px).abs() + 1) as f32 * state.zoom;
+                        let h = ((sy - py).abs() + 1) as f32 * state.zoom;
+                        draw_rectangle_lines(x0, y0, w, h, 2.0, preview_color);
+                    }
+                }
+
+                // Complete shape on release
+                if !ctx.mouse.left_down && state.drawing {
+                    if state.tool.is_shape_tool() {
+                        if let Some((sx, sy)) = state.shape_start {
+                            state.save_undo(texture, &format!("{:?}", state.tool));
+
+                            match state.tool {
+                                DrawTool::Line => {
+                                    // Line uses brush_size as thickness (for now just 1px)
+                                    tex_draw_line(texture, sx, sy, px, py, state.selected_index);
+                                }
+                                DrawTool::Rectangle => {
+                                    if state.fill_shapes {
+                                        tex_draw_rect_filled(texture, sx, sy, px, py, state.selected_index);
+                                    } else {
+                                        tex_draw_rect_outline(texture, sx, sy, px, py, state.selected_index);
+                                    }
+                                }
+                                DrawTool::Ellipse => {
+                                    if state.fill_shapes {
+                                        tex_draw_ellipse_filled(texture, sx, sy, px, py, state.selected_index);
+                                    } else {
+                                        tex_draw_ellipse_outline(texture, sx, sy, px, py, state.selected_index);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    state.drawing = false;
+                    state.shape_start = None;
+                    state.last_draw_pos = None;
+                }
             }
         }
     }
@@ -813,6 +1566,7 @@ pub fn draw_tool_panel(
     // Note: No Eraser tool - just paint with index 0 (transparent) to erase
     let mut clicked_tool: Option<DrawTool> = None;
     let all_tools = [
+        DrawTool::Select,
         DrawTool::Brush,
         DrawTool::Fill,
         DrawTool::Line,
@@ -876,6 +1630,55 @@ pub fn draw_tool_panel(
             state.brush_size = (state.brush_size + 1).min(16);
         }
         y += small_btn + gap;
+
+        // Brush shape toggle (only for Brush tool)
+        if state.tool == DrawTool::Brush {
+            // Square button
+            let sq_rect = Rect::new(col1_x, y, btn_size, btn_size);
+            let sq_hovered = ctx.mouse.inside(&sq_rect);
+            let sq_selected = state.brush_shape == BrushShape::Square;
+            let sq_bg = if sq_selected {
+                ACCENT_COLOR
+            } else if sq_hovered {
+                Color::new(0.35, 0.35, 0.38, 1.0)
+            } else {
+                Color::new(0.22, 0.22, 0.25, 1.0)
+            };
+            draw_rectangle(sq_rect.x, sq_rect.y, sq_rect.w, sq_rect.h, sq_bg);
+            if let Some(font) = icon_font {
+                draw_icon_in_rect(font, icon::SQUARE, &sq_rect, if sq_selected { WHITE } else { TEXT_COLOR });
+            }
+            if sq_hovered {
+                ctx.set_tooltip("Square brush", ctx.mouse.x, ctx.mouse.y);
+            }
+            if ctx.mouse.clicked(&sq_rect) {
+                state.brush_shape = BrushShape::Square;
+            }
+
+            // Circle button
+            let circ_rect = Rect::new(col2_x, y, btn_size, btn_size);
+            let circ_hovered = ctx.mouse.inside(&circ_rect);
+            let circ_selected = state.brush_shape == BrushShape::Circle;
+            let circ_bg = if circ_selected {
+                ACCENT_COLOR
+            } else if circ_hovered {
+                Color::new(0.35, 0.35, 0.38, 1.0)
+            } else {
+                Color::new(0.22, 0.22, 0.25, 1.0)
+            };
+            draw_rectangle(circ_rect.x, circ_rect.y, circ_rect.w, circ_rect.h, circ_bg);
+            if let Some(font) = icon_font {
+                draw_icon_in_rect(font, icon::CIRCLE, &circ_rect, if circ_selected { WHITE } else { TEXT_COLOR });
+            }
+            if circ_hovered {
+                ctx.set_tooltip("Circle brush", ctx.mouse.x, ctx.mouse.y);
+            }
+            if ctx.mouse.clicked(&circ_rect) {
+                state.brush_shape = BrushShape::Circle;
+            }
+
+            y += btn_size + gap;
+        }
 
         // Fill toggle for Rectangle/Ellipse (in the options section, after size)
         if matches!(state.tool, DrawTool::Rectangle | DrawTool::Ellipse) {
