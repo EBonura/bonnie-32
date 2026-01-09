@@ -4980,17 +4980,23 @@ pub fn draw_viewport_3d(
         let blocked_color = RasterColor::new(255, 100, 100); // Red for blocked
 
         for &(room_idx, gx, gz, ref face) in &state.xz_drag_initial_positions {
-            let dst_gx = (gx as i32 + dx) as usize;
-            let dst_gz = (gz as i32 + dz) as usize;
+            // Keep as signed for world position calculation (allows negative/out-of-bounds preview)
+            let dst_gx_signed = gx as i32 + dx;
+            let dst_gz_signed = gz as i32 + dz;
 
-            // Check if destination is blocked (excluding faces that are part of this drag operation)
-            let is_blocked = is_destination_occupied(state, room_idx, dst_gx, dst_gz, face, &state.xz_drag_initial_positions);
+            // Check if destination is blocked (only for valid in-bounds positions)
+            let is_blocked = if dst_gx_signed >= 0 && dst_gz_signed >= 0 {
+                is_destination_occupied(state, room_idx, dst_gx_signed as usize, dst_gz_signed as usize, face, &state.xz_drag_initial_positions)
+            } else {
+                false // Out of bounds positions are not blocked (will expand room)
+            };
             let color = if is_blocked { blocked_color } else { preview_color };
 
             if let Some(room) = state.level.rooms.get(room_idx) {
                 let room_y = room.position.y;
-                let dst_base_x = room.position.x + (dst_gx as f32) * SECTOR_SIZE;
-                let dst_base_z = room.position.z + (dst_gz as f32) * SECTOR_SIZE;
+                // Use signed coordinates for world position - allows preview outside current bounds
+                let dst_base_x = room.position.x + (dst_gx_signed as f32) * SECTOR_SIZE;
+                let dst_base_z = room.position.z + (dst_gz_signed as f32) * SECTOR_SIZE;
 
                 // Get face heights from original position
                 if let Some(sector) = room.get_sector(gx, gz) {
