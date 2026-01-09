@@ -301,7 +301,7 @@ impl Default for TextureEditorState {
     fn default() -> Self {
         Self {
             tool: DrawTool::Brush,
-            brush_size: 1,
+            brush_size: 3,
             brush_shape: BrushShape::Square,
             selected_index: 1, // Default to first non-transparent color
             editing_index: 1,
@@ -356,7 +356,7 @@ impl TextureEditorState {
     /// Reset the editor state for a new texture
     pub fn reset(&mut self) {
         self.tool = DrawTool::Brush;
-        self.brush_size = 1;
+        self.brush_size = 3;
         self.brush_shape = BrushShape::Square;
         self.selected_index = 1;
         self.editing_index = 1;
@@ -485,6 +485,35 @@ fn tex_draw_line(texture: &mut UserTexture, x0: i32, y0: i32, x1: i32, y1: i32, 
 
     loop {
         tex_draw_pixel(texture, x, y, index);
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// Draw a thick line using square brush at each point
+fn tex_draw_line_thick(texture: &mut UserTexture, x0: i32, y0: i32, x1: i32, y1: i32, thickness: u8, index: u8) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    let mut x = x0;
+    let mut y = y0;
+
+    loop {
+        // Draw square brush at each point
+        tex_draw_brush_square(texture, x, y, thickness, index);
         if x == x1 && y == y1 {
             break;
         }
@@ -644,6 +673,125 @@ fn tex_draw_ellipse_filled(texture: &mut UserTexture, x0: i32, y0: i32, x1: i32,
             let x_span = (rx as f32 * dx) as i32;
             for x in (cx - x_span)..=(cx + x_span) {
                 tex_draw_pixel(texture, x, y, index);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Shape Preview Functions (for visual feedback while drawing)
+// ============================================================================
+
+/// Draw a single preview pixel at screen coordinates
+fn draw_preview_pixel(tex_x: f32, tex_y: f32, px: i32, py: i32, pixel_size: f32, color: Color) {
+    draw_rectangle(
+        tex_x + px as f32 * pixel_size,
+        tex_y + py as f32 * pixel_size,
+        pixel_size,
+        pixel_size,
+        color,
+    );
+}
+
+/// Draw thick line preview using square brush at each point
+fn draw_line_preview(tex_x: f32, tex_y: f32, x0: i32, y0: i32, x1: i32, y1: i32, thickness: u8, pixel_size: f32, color: Color) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    let mut x = x0;
+    let mut y = y0;
+    let half = (thickness as i32 - 1) / 2;
+
+    loop {
+        // Draw square brush preview at each point
+        for by in 0..thickness as i32 {
+            for bx in 0..thickness as i32 {
+                draw_preview_pixel(tex_x, tex_y, x - half + bx, y - half + by, pixel_size, color);
+            }
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// Draw rectangle outline preview
+fn draw_rect_outline_preview(tex_x: f32, tex_y: f32, x0: i32, y0: i32, x1: i32, y1: i32, pixel_size: f32, color: Color) {
+    let min_x = x0.min(x1);
+    let max_x = x0.max(x1);
+    let min_y = y0.min(y1);
+    let max_y = y0.max(y1);
+
+    // Top and bottom edges
+    for x in min_x..=max_x {
+        draw_preview_pixel(tex_x, tex_y, x, min_y, pixel_size, color);
+        draw_preview_pixel(tex_x, tex_y, x, max_y, pixel_size, color);
+    }
+    // Left and right edges (excluding corners already drawn)
+    for y in (min_y + 1)..max_y {
+        draw_preview_pixel(tex_x, tex_y, min_x, y, pixel_size, color);
+        draw_preview_pixel(tex_x, tex_y, max_x, y, pixel_size, color);
+    }
+}
+
+/// Draw filled rectangle preview
+fn draw_rect_filled_preview(tex_x: f32, tex_y: f32, x0: i32, y0: i32, x1: i32, y1: i32, pixel_size: f32, color: Color) {
+    let min_x = x0.min(x1);
+    let max_x = x0.max(x1);
+    let min_y = y0.min(y1);
+    let max_y = y0.max(y1);
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            draw_preview_pixel(tex_x, tex_y, x, y, pixel_size, color);
+        }
+    }
+}
+
+/// Draw ellipse outline preview using midpoint algorithm
+fn draw_ellipse_outline_preview(tex_x: f32, tex_y: f32, x0: i32, y0: i32, x1: i32, y1: i32, pixel_size: f32, color: Color) {
+    let cx = (x0 + x1) / 2;
+    let cy = (y0 + y1) / 2;
+    let rx = ((x1 - x0).abs() / 2).max(1);
+    let ry = ((y1 - y0).abs() / 2).max(1);
+
+    // Sample points around the ellipse
+    let steps = ((rx + ry) * 4).max(32) as usize;
+    for i in 0..steps {
+        let t = (i as f32 / steps as f32) * std::f32::consts::TAU;
+        let x = cx + (rx as f32 * t.cos()).round() as i32;
+        let y = cy + (ry as f32 * t.sin()).round() as i32;
+        draw_preview_pixel(tex_x, tex_y, x, y, pixel_size, color);
+    }
+}
+
+/// Draw filled ellipse preview
+fn draw_ellipse_filled_preview(tex_x: f32, tex_y: f32, x0: i32, y0: i32, x1: i32, y1: i32, pixel_size: f32, color: Color) {
+    let cx = (x0 + x1) / 2;
+    let cy = (y0 + y1) / 2;
+    let rx = ((x1 - x0).abs() / 2).max(1);
+    let ry = ((y1 - y0).abs() / 2).max(1);
+
+    // Scan each row
+    for y in (cy - ry)..=(cy + ry) {
+        let dy = (y - cy) as f32 / ry as f32;
+        if dy.abs() <= 1.0 {
+            let dx = (1.0 - dy * dy).sqrt();
+            let x_span = (rx as f32 * dx) as i32;
+            for x in (cx - x_span)..=(cx + x_span) {
+                draw_preview_pixel(tex_x, tex_y, x, y, pixel_size, color);
             }
         }
     }
@@ -1077,10 +1225,10 @@ pub fn draw_texture_canvas(
         }
     }
 
-    // Zoom with scroll wheel (gentle 8% per tick)
+    // Zoom with scroll wheel (gentle 4% per tick)
     if inside && ctx.mouse.scroll != 0.0 {
         let old_zoom = state.zoom;
-        let zoom_factor = 1.08f32;
+        let zoom_factor = 1.04f32;
         if ctx.mouse.scroll > 0.0 {
             state.zoom = (state.zoom * zoom_factor).min(32.0);
         } else {
@@ -1412,11 +1560,12 @@ pub fn draw_texture_canvas(
                     state.drawing = true;
                     state.last_draw_pos = Some((px, py));
 
+                    // Signal to caller to save undo at start of stroke/shape
+                    state.undo_save_pending = Some(format!("{:?}", state.tool));
+
                     if state.tool.is_shape_tool() {
                         state.shape_start = Some((px, py));
                     } else {
-                        // Signal to caller to save undo at start of stroke
-                        state.undo_save_pending = Some(format!("{:?}", state.tool));
 
                         match state.tool {
                             DrawTool::Brush => {
@@ -1451,20 +1600,36 @@ pub fn draw_texture_canvas(
                     }
                 }
 
-                // Shape preview
+                // Shape preview - draw actual shape pixels
                 if state.drawing && state.tool.is_shape_tool() {
                     if let Some((sx, sy)) = state.shape_start {
                         // Draw preview (using current color as overlay)
                         let color = texture.get_palette_color(state.selected_index);
                         let [r, g, b, _] = color.to_rgba();
-                        let preview_color = Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 0.5);
+                        let preview_color = Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 0.7);
+                        let pixel_size = state.zoom;
 
-                        // Simple preview rectangle
-                        let x0 = tex_x + sx.min(px) as f32 * state.zoom;
-                        let y0 = tex_y + sy.min(py) as f32 * state.zoom;
-                        let w = ((sx - px).abs() + 1) as f32 * state.zoom;
-                        let h = ((sy - py).abs() + 1) as f32 * state.zoom;
-                        draw_rectangle_lines(x0, y0, w, h, 2.0, preview_color);
+                        match state.tool {
+                            DrawTool::Line => {
+                                // Draw line preview using Bresenham with brush thickness
+                                draw_line_preview(tex_x, tex_y, sx, sy, px, py, state.brush_size, pixel_size, preview_color);
+                            }
+                            DrawTool::Rectangle => {
+                                if state.fill_shapes {
+                                    draw_rect_filled_preview(tex_x, tex_y, sx, sy, px, py, pixel_size, preview_color);
+                                } else {
+                                    draw_rect_outline_preview(tex_x, tex_y, sx, sy, px, py, pixel_size, preview_color);
+                                }
+                            }
+                            DrawTool::Ellipse => {
+                                if state.fill_shapes {
+                                    draw_ellipse_filled_preview(tex_x, tex_y, sx, sy, px, py, pixel_size, preview_color);
+                                } else {
+                                    draw_ellipse_outline_preview(tex_x, tex_y, sx, sy, px, py, pixel_size, preview_color);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
 
@@ -1472,13 +1637,9 @@ pub fn draw_texture_canvas(
                 if !ctx.mouse.left_down && state.drawing {
                     if state.tool.is_shape_tool() {
                         if let Some((sx, sy)) = state.shape_start {
-                            // Signal to caller to save undo before applying shape
-                            state.undo_save_pending = Some(format!("{:?}", state.tool));
-
                             match state.tool {
                                 DrawTool::Line => {
-                                    // Line uses brush_size as thickness (for now just 1px)
-                                    tex_draw_line(texture, sx, sy, px, py, state.selected_index);
+                                    tex_draw_line_thick(texture, sx, sy, px, py, state.brush_size, state.selected_index);
                                 }
                                 DrawTool::Rectangle => {
                                     if state.fill_shapes {

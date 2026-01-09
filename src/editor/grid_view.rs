@@ -51,7 +51,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     if inside {
         // Zoom with scroll wheel
         if ctx.mouse.scroll != 0.0 {
-            let zoom_factor = 1.0 + ctx.mouse.scroll * 0.02;
+            let zoom_factor = 1.0 + ctx.mouse.scroll * 0.008;
             state.grid_zoom = (state.grid_zoom * zoom_factor).clamp(0.002, 2.0);
         }
 
