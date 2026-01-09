@@ -1569,9 +1569,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 // Cleanup affected rooms
                 for room_idx in affected_rooms {
                     if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                        room.cleanup_empty_sectors();
-                        room.trim_empty_edges();
-                        room.recalculate_bounds();
+                        room.compact();
                     }
                 }
 

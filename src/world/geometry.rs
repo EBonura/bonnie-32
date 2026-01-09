@@ -2672,6 +2672,14 @@ impl Room {
         }
     }
 
+    /// Full cleanup after geometry changes: remove empty sectors, trim edges, recalculate bounds.
+    /// Call this after moving or deleting faces.
+    pub fn compact(&mut self) {
+        self.cleanup_empty_sectors();
+        self.trim_empty_edges();
+        self.recalculate_bounds();
+    }
+
     /// Trim empty rows and columns from the edges of the room grid.
     /// Adjusts room position to keep sectors in the same world position.
     pub fn trim_empty_edges(&mut self) {
