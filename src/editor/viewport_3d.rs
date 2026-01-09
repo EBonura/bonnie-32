@@ -815,8 +815,6 @@ pub fn draw_viewport_3d(
                                         }).collect();
                                         format!("W{}", w_strs.join(","))
                                     };
-                                    let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
-                                    eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
                                 }
                             }
                             let has_existing = !sector.walls(dir).is_empty();
@@ -918,8 +916,6 @@ pub fn draw_viewport_3d(
                                         }).collect();
                                         format!("W{}", w_strs.join(","))
                                     };
-                                    let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
-                                    eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
                                 }
                             }
                             let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
@@ -960,8 +956,6 @@ pub fn draw_viewport_3d(
                 if let Some((room_idx, gx, gz, corner_idx, face, _)) = hovered_vertex {
                     // Create vertex selection (allows proper vertex multi-selection)
                     let new_selection = Selection::Vertex { room: room_idx, x: gx, z: gz, face: face.clone(), corner_idx };
-                    eprintln!("VERTEX CLICK: ({},{}) corner={} face={:?}, shift={}, current_sel={:?}",
-                        gx, gz, corner_idx, face, shift_down, state.selection);
                     if shift_down {
                         // Range selection: if current selection is a vertex on same face type,
                         // select all vertices along the line between them
@@ -970,8 +964,6 @@ pub fn draw_viewport_3d(
                             // Only range select on same room, same face type (floor/ceiling)
                             let same_face_type = matches!((&face, sel_face),
                                 (SectorFace::Floor, SectorFace::Floor) | (SectorFace::Ceiling, SectorFace::Ceiling));
-                            eprintln!("  VERTEX RANGE: sel({},{}) corner {} -> click({},{}) corner {}, same_face={}",
-                                sel_x, sel_z, sel_corner, gx, gz, corner_idx, same_face_type);
                             if *sel_room == room_idx && same_face_type {
                                 // Determine the line direction based on which coordinates differ
                                 // and which corner indices are involved
@@ -991,8 +983,6 @@ pub fn draw_viewport_3d(
                                 let is_south_edge = (*sel_corner == 2 || *sel_corner == 3) && (corner_idx == 2 || corner_idx == 3);
                                 let is_east_edge = (*sel_corner == 1 || *sel_corner == 2) && (corner_idx == 1 || corner_idx == 2);
                                 let is_west_edge = (*sel_corner == 0 || *sel_corner == 3) && (corner_idx == 0 || corner_idx == 3);
-
-                                eprintln!("  edges: N={} S={} E={} W={}", is_north_edge, is_south_edge, is_east_edge, is_west_edge);
 
                                 if is_north_edge || is_south_edge {
                                     // First, add the original selection to multi-selection so it's not lost
@@ -1170,17 +1160,11 @@ pub fn draw_viewport_3d(
                         wall_face: wall_face.clone(),
                     };
 
-                    eprintln!("EDGE CLICK: ({},{}) face={} edge={}, shift={}, current_sel={:?}",
-                        gx, gz, face_idx, edge_idx, shift_down, state.selection);
-
                     if shift_down {
                         // Range selection: if current selection is an edge on same face type,
                         // select all edges in between along the shared axis
                         let mut did_range_select = false;
                         if let Selection::Edge { room: sel_room, x: sel_x, z: sel_z, face_idx: sel_face_idx, edge_idx: sel_edge_idx, wall_face: sel_wall_face } = &state.selection {
-                            eprintln!("  EDGE RANGE: sel({},{}) face={} edge={} -> click({},{}) face={} edge={}",
-                                sel_x, sel_z, sel_face_idx, sel_edge_idx, gx, gz, face_idx, edge_idx);
-
                             // Range select requires same room, same face type, same edge orientation
                             if *sel_room == room_idx && *sel_face_idx == face_idx && *sel_edge_idx == edge_idx {
                                 let mut edges_to_add: Vec<Selection> = Vec::new();
@@ -1217,12 +1201,8 @@ pub fn draw_viewport_3d(
                                     // This follows connected walls regardless of orientation (N/S/E/W/diagonal)
                                     if let Some(room) = state.level.rooms.get(room_idx) {
                                         if let (Some(start_face), Some(end_face)) = (sel_wall_face.clone(), wall_face.clone()) {
-                                            eprintln!("    tracing wall contour from ({},{}) {:?} to ({},{}) {:?}",
-                                                sel_x, sel_z, start_face, gx, gz, end_face);
-
                                             // Use existing find_wall_path function which handles all wall types
                                             if let Some(path) = find_wall_path(room, *sel_x, *sel_z, &start_face, gx, gz, &end_face) {
-                                                eprintln!("    found path with {} walls", path.len());
                                                 for (px, pz, pwf) in path {
                                                     edges_to_add.push(Selection::Edge {
                                                         room: room_idx,
@@ -1233,15 +1213,12 @@ pub fn draw_viewport_3d(
                                                         wall_face: Some(pwf),
                                                     });
                                                 }
-                                            } else {
-                                                eprintln!("    no path found");
                                             }
                                         }
                                     }
                                 }
 
                                 // Add all edges in range to multi-selection
-                                eprintln!("    adding {} edges", edges_to_add.len());
                                 let had_edges = !edges_to_add.is_empty();
                                 // First, add the original selection to multi-selection so it's not lost
                                 // when we change state.selection to the new clicked edge
