@@ -5606,39 +5606,67 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
     draw_rectangle(rect.x.floor(), rect.y.floor(), rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
     // Show status message on the left if available
-    if let Some(msg) = state.get_status() {
-        draw_text(&msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 16.0, Color::from_rgba(100, 255, 100, 255));
-    }
-
-    // Show keyboard shortcuts hint on the right (context-sensitive)
-    let hints = if state.tool == EditorTool::DrawWall {
-        // Wall tool hints - show direction and gap preference
-        let dir = match state.wall_direction {
-            crate::world::Direction::North => "N",
-            crate::world::Direction::East => "E",
-            crate::world::Direction::South => "S",
-            crate::world::Direction::West => "W",
-            crate::world::Direction::NwSe => "NW-SE",
-            crate::world::Direction::NeSw => "NE-SW",
-        };
-        let gap = if state.wall_prefer_high { "High" } else { "Low" };
-        format!("R: Rotate ({}) | F: Gap ({}) | Ctrl+S: Save", dir, gap)
+    let status_end_x = if let Some(msg) = state.get_status() {
+        let msg_dims = measure_text(&msg, None, 14, 1.0);
+        draw_text(&msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 14.0, Color::from_rgba(100, 255, 100, 255));
+        rect.x + 10.0 + msg_dims.width + 20.0
     } else {
-        // Default file shortcuts
-        #[cfg(not(target_arch = "wasm32"))]
-        { "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New".to_string() }
-        #[cfg(target_arch = "wasm32")]
-        { "Ctrl+S: Download | Ctrl+O: Upload | Ctrl+N: New".to_string() }
+        rect.x + 10.0
     };
 
-    let hint_width = hints.len() as f32 * 6.0; // Approximate width
-    draw_text(
-        &hints,
-        (rect.right() - hint_width - 8.0).floor(),
-        (rect.y + 15.0).floor(),
-        14.0,
-        Color::from_rgba(100, 100, 100, 255),
-    );
+    // Context-sensitive shortcuts based on current tool/mode
+    let mut shortcuts: Vec<&str> = Vec::new();
+
+    match state.tool {
+        EditorTool::DrawWall => {
+            let dir = match state.wall_direction {
+                crate::world::Direction::North => "N",
+                crate::world::Direction::East => "E",
+                crate::world::Direction::South => "S",
+                crate::world::Direction::West => "W",
+                crate::world::Direction::NwSe => "NW-SE",
+                crate::world::Direction::NeSw => "NE-SW",
+            };
+            let gap = if state.wall_prefer_high { "High" } else { "Low" };
+            // Build dynamic strings for wall tool
+            let shortcuts_text = format!("[R] Rotate ({})  [F] Gap ({})  [E] Extrude", dir, gap);
+            let text_dims = measure_text(&shortcuts_text, None, 14, 1.0);
+            let text_x = rect.right() - text_dims.width - 10.0;
+            let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+            if text_x > status_end_x {
+                draw_text(&shortcuts_text, text_x.floor(), text_y.floor(), 14.0, Color::from_rgba(180, 180, 190, 255));
+            }
+            return;
+        }
+        EditorTool::Select => {
+            shortcuts.push("[E] Extrude");
+            shortcuts.push("[Del] Delete");
+            shortcuts.push("[.] Focus");
+        }
+        EditorTool::PlaceObject => {
+            shortcuts.push("[Click] Place object");
+            shortcuts.push("[Del] Delete");
+        }
+        _ => {}
+    }
+
+    // Add vertex linking hint
+    if state.link_coincident_vertices {
+        shortcuts.push("[L] Unlink vertices");
+    } else {
+        shortcuts.push("[L] Link vertices");
+    }
+
+    if !shortcuts.is_empty() {
+        let shortcuts_text = shortcuts.join("  ");
+        let text_dims = measure_text(&shortcuts_text, None, 14, 1.0);
+        let text_x = rect.right() - text_dims.width - 10.0;
+        let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+
+        if text_x > status_end_x {
+            draw_text(&shortcuts_text, text_x.floor(), text_y.floor(), 14.0, Color::from_rgba(180, 180, 190, 255));
+        }
+    }
 }
 
 /// Draw a small camera preview showing what the player camera sees

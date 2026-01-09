@@ -622,6 +622,7 @@ pub struct EditorState {
     /// Collapsible right panel sections (both can be open simultaneously)
     pub textures_section_expanded: bool,
     pub properties_section_expanded: bool,
+
 }
 
 impl EditorState {
