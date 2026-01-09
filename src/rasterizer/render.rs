@@ -1836,6 +1836,7 @@ pub fn render_mesh(
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
+    timings.triangles_drawn = surfaces.len() as u32;
 
     // === DRAW PHASE ===
     let draw_start = get_time();
@@ -2205,6 +2206,7 @@ pub fn render_mesh_15(
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
+    timings.triangles_drawn = (opaque_surfaces.len() + transparent_surfaces.len()) as u32;
 
     // === DRAW PHASE (Two-Pass Rendering) ===
     let draw_start = get_time();

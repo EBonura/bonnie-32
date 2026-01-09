@@ -49,6 +49,8 @@ pub struct FrameTimings {
     pub raster_draw_ms: f32,
     /// Wireframe rendering time (ms)
     pub raster_wireframe_ms: f32,
+    /// Total triangles drawn (after culling)
+    pub triangles_drawn: u32,
 }
 
 impl FrameTimings {

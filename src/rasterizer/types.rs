@@ -1447,6 +1447,8 @@ pub struct RasterTimings {
     pub draw_ms: f32,
     /// Wireframe rendering (back-face and front-face) (ms)
     pub wireframe_ms: f32,
+    /// Number of triangles drawn (after culling)
+    pub triangles_drawn: u32,
 }
 
 impl RasterTimings {
@@ -1458,5 +1460,6 @@ impl RasterTimings {
         self.sort_ms += other.sort_ms;
         self.draw_ms += other.draw_ms;
         self.wireframe_ms += other.wireframe_ms;
+        self.triangles_drawn += other.triangles_drawn;
     }
 }

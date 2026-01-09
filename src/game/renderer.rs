@@ -334,6 +334,7 @@ pub fn draw_test_viewport(
         raster_sort_ms: raster_timings.sort_ms,
         raster_draw_ms: raster_timings.draw_ms,
         raster_wireframe_ms: raster_timings.wireframe_ms,
+        triangles_drawn: raster_timings.triangles_drawn,
     };
 }
 
@@ -1006,6 +1007,10 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
         draw_text(name, bar_x + indent2 + 10.0 * scale, y + legend_box_size * 0.3, legend_text_size, label_color);
         draw_text(&format!("{:.2}ms", ms), bar_x + indent2 + 55.0 * scale, y + legend_box_size * 0.3, legend_text_size, value_color);
     }
+
+    // Triangle count (below raster breakdown)
+    let tris_y = raster_y + 7.0 * legend_line_height + 4.0 * scale;
+    draw_text(&format!("Triangles: {}", t.triangles_drawn), bar_x + indent, tris_y, legend_text_size, value_color);
 }
 
 /// Draw a wireframe cylinder in the 3D view
