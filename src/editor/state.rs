@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
-use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode};
+use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode, Color15};
+use crate::texture::{TextureLibrary, TextureEditorState};
 use super::texture_pack::TexturePack;
 
 /// Frame timing breakdown for editor performance debugging
@@ -267,6 +268,8 @@ pub struct GeometryClipboard {
     pub flip_h: bool,
     /// Vertical flip state (toggled with V key)
     pub flip_v: bool,
+    /// Rotation state: 0=0°, 1=90°, 2=180°, 3=270° clockwise (toggled with R key)
+    pub rotation: u8,
 }
 
 impl GeometryClipboard {
@@ -275,6 +278,7 @@ impl GeometryClipboard {
             faces: Vec::new(),
             flip_h: false,
             flip_v: false,
+            rotation: 0,
         }
     }
 
@@ -297,11 +301,17 @@ impl GeometryClipboard {
     }
 }
 
-/// Unified undo event - either a level change or a selection change
+/// Unified undo event - level change, selection change, or texture change
 #[derive(Debug, Clone)]
 pub enum UndoEvent {
     Level(Level),
     Selection(SelectionSnapshot),
+    /// Texture paint edit (name, pixel indices, palette)
+    Texture {
+        name: String,
+        indices: Vec<u8>,
+        palette: Vec<Color15>,
+    },
 }
 
 impl Selection {
@@ -380,6 +390,10 @@ pub struct EditorState {
     /// Selection rectangle state (for drag-to-select)
     pub selection_rect_start: Option<(f32, f32)>, // Start position in viewport coords
     pub selection_rect_end: Option<(f32, f32)>,   // End position in viewport coords
+    /// True while performing box select drag in 3D viewport
+    pub box_selecting: bool,
+    /// Preview of items that would be selected by current box select (for live highlighting)
+    pub box_select_preview: Vec<Selection>,
 
     /// Currently selected room index (for editing)
     pub current_room: usize,
@@ -472,6 +486,17 @@ pub struct EditorState {
     pub dragging_object_initial_y: f32,          // Initial Y when drag started
     pub dragging_object_plane_y: f32,            // Current accumulated drag plane Y
 
+    /// X/Z face relocation drag state
+    pub xz_drag_active: bool,
+    /// Initial positions: (room_idx, gx, gz, SectorFace)
+    pub xz_drag_initial_positions: Vec<(usize, usize, usize, SectorFace)>,
+    /// Current grid delta from initial positions
+    pub xz_drag_delta: (i32, i32),
+    /// World Y level for the drag plane
+    pub xz_drag_plane_y: f32,
+    /// Initial world X/Z when drag started
+    pub xz_drag_start_world: (f32, f32),
+
     /// Texture palette state
     pub texture_packs: Vec<TexturePack>,
     pub selected_pack: usize,
@@ -534,6 +559,9 @@ pub struct EditorState {
     /// Skybox panel: active slider ID
     pub skybox_active_slider: Option<usize>,
 
+    /// Rooms panel: ambient slider active
+    pub ambient_slider_active: bool,
+
     /// Skybox panel: selected color target (for RGB sliders)
     /// 0-3 = gradient colors (zenith, horizon_sky, horizon_ground, nadir)
     /// 10 = horizontal tint, 20 = sun core, 21 = sun glow, 22 = moon core, 23 = moon glow
@@ -583,12 +611,45 @@ pub struct EditorState {
     /// Memory usage statistics for debug panel
     pub memory_stats: MemoryStats,
 
-    /// Cached RGB555 textures (lazy-populated, invalidated when texture count changes)
+    /// Cached RGB555 textures (lazy-populated, invalidated when texture_generation changes)
     pub textures_15_cache: Vec<Texture15>,
+
+    /// Generation counter for texture cache invalidation
+    /// Incremented whenever any user texture content changes
+    pub texture_generation: u64,
+
+    /// Last generation when textures_15_cache was built
+    pub textures_15_cache_generation: u64,
 
     /// Cached GPU textures for palette display (prevents memory leak from repeated uploads)
     /// Key: (pack_index, texture_index), Value: Texture2D
     pub gpu_texture_cache: std::collections::HashMap<(usize, usize), macroquad::prelude::Texture2D>,
+
+    /// User texture library (editable indexed textures)
+    pub user_textures: TextureLibrary,
+
+    /// Texture editor state (when editing a user texture)
+    pub texture_editor: TextureEditorState,
+
+    /// Currently editing texture name (None = not editing)
+    pub editing_texture: Option<String>,
+
+    /// Currently selected user texture name (for single-click selection before editing)
+    pub selected_user_texture: Option<String>,
+
+    /// Texture palette mode: false = source PNGs, true = user/paint textures
+    pub texture_palette_user_mode: bool,
+
+    /// Thumbnail size for source texture grid (32, 48, 64, 96)
+    pub source_thumb_size: f32,
+
+    /// Thumbnail size for paint texture grid (32, 48, 64, 96)
+    pub paint_thumb_size: f32,
+
+    /// Collapsible right panel sections (both can be open simultaneously)
+    pub textures_section_expanded: bool,
+    pub properties_section_expanded: bool,
+
 }
 
 impl EditorState {
@@ -630,6 +691,8 @@ impl EditorState {
             multi_selection: Vec::new(),
             selection_rect_start: None,
             selection_rect_end: None,
+            box_selecting: false,
+            box_select_preview: Vec::new(),
             current_room: 0,
             selected_texture,
             selected_triangle: TriangleSelection::Both,
@@ -673,6 +736,11 @@ impl EditorState {
             dragging_object: None,
             dragging_object_initial_y: 0.0,
             dragging_object_plane_y: 0.0,
+            xz_drag_active: false,
+            xz_drag_initial_positions: Vec::new(),
+            xz_drag_delta: (0, 0),
+            xz_drag_plane_y: 0.0,
+            xz_drag_start_world: (0.0, 0.0),
             texture_packs,
             selected_pack: 0,
             texture_scroll: 0.0,
@@ -702,6 +770,7 @@ impl EditorState {
             light_color_slider: None,
             vertex_color_slider: None,
             skybox_active_slider: None,
+            ambient_slider_active: false,
             skybox_selected_color: None,
             skybox_gradient_expanded: true,  // Start expanded
             skybox_celestial_expanded: false,
@@ -722,7 +791,26 @@ impl EditorState {
             frame_timings: EditorFrameTimings::default(),
             memory_stats: MemoryStats::default(),
             textures_15_cache: Vec::new(),
+            texture_generation: 0,
+            textures_15_cache_generation: 0,
             gpu_texture_cache: std::collections::HashMap::new(),
+            user_textures: {
+                let mut lib = TextureLibrary::new();
+                if let Err(e) = lib.discover() {
+                    eprintln!("Failed to discover user textures: {}", e);
+                }
+                lib
+            },
+            texture_editor: TextureEditorState::new(),
+            editing_texture: None,
+            selected_user_texture: None,
+            texture_palette_user_mode: false,
+            source_thumb_size: 64.0,  // Default thumbnail size
+            paint_thumb_size: 64.0,   // Default thumbnail size
+
+            // Collapsible sections (both can be open simultaneously)
+            textures_section_expanded: true,
+            properties_section_expanded: true,
         }
     }
 
@@ -810,7 +898,26 @@ impl EditorState {
         }
     }
 
-    /// Undo last action (level or selection)
+    /// Save current texture state for undo (before making paint changes)
+    pub fn save_texture_undo(&mut self, name: &str) {
+        // Get current texture state
+        if let Some(tex) = self.user_textures.get(name) {
+            self.undo_stack.push(UndoEvent::Texture {
+                name: name.to_string(),
+                indices: tex.indices.clone(),
+                palette: tex.palette.clone(),
+            });
+            self.redo_stack.clear();
+            self.texture_editor.dirty = true;
+
+            // Limit stack size
+            if self.undo_stack.len() > 100 {
+                self.undo_stack.remove(0);
+            }
+        }
+    }
+
+    /// Undo last action (level, selection, or texture)
     pub fn undo(&mut self) {
         if let Some(event) = self.undo_stack.pop() {
             match event {
@@ -826,11 +933,26 @@ impl EditorState {
                     self.set_selection(prev_sel.selection);
                     self.multi_selection = prev_sel.multi_selection;
                 }
+                UndoEvent::Texture { name, indices, palette } => {
+                    // Save current state to redo stack
+                    if let Some(tex) = self.user_textures.get(&name) {
+                        self.redo_stack.push(UndoEvent::Texture {
+                            name: name.clone(),
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Restore previous state
+                    if let Some(tex) = self.user_textures.get_mut(&name) {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
+                }
             }
         }
     }
 
-    /// Redo last undone action (level or selection)
+    /// Redo last undone action (level, selection, or texture)
     pub fn redo(&mut self) {
         if let Some(event) = self.redo_stack.pop() {
             match event {
@@ -845,6 +967,21 @@ impl EditorState {
                     }));
                     self.set_selection(next_sel.selection);
                     self.multi_selection = next_sel.multi_selection;
+                }
+                UndoEvent::Texture { name, indices, palette } => {
+                    // Save current state to undo stack
+                    if let Some(tex) = self.user_textures.get(&name) {
+                        self.undo_stack.push(UndoEvent::Texture {
+                            name: name.clone(),
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Apply redo state
+                    if let Some(tex) = self.user_textures.get_mut(&name) {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
                 }
             }
         }
@@ -1008,17 +1145,76 @@ impl EditorState {
         }
     }
 
+    /// Center the camera on the current selection, maintaining viewing distance
+    pub fn center_camera_on_selection(&mut self) {
+        // Get selection center - if none, do nothing
+        let Some(center) = self.get_selection_center() else {
+            return;
+        };
+
+        match self.camera_mode {
+            CameraMode::Orbit => {
+                // Simply update the orbit target, keep distance/angles
+                self.orbit_target = center;
+                self.last_orbit_target = center;
+                self.sync_camera_from_orbit();
+            }
+            CameraMode::Free => {
+                // Calculate direction from selection to current camera
+                let to_camera = self.camera_3d.position - center;
+                let distance = to_camera.len();
+
+                // Use current distance, or a reasonable default if camera is at the center
+                let actual_distance = if distance > 0.1 { distance } else { 2000.0 };
+
+                // Keep camera at same distance but centered on selection
+                // The camera's forward direction (-basis_z) points at selection
+                let new_position = center - self.camera_3d.basis_z * actual_distance;
+                self.camera_3d.position = new_position;
+            }
+        }
+    }
+
     /// Mark portals as needing recalculation
     pub fn mark_portals_dirty(&mut self) {
         self.portals_dirty = true;
     }
 
     /// Scroll texture palette to show and highlight a specific texture
-    /// Switches to the correct pack, adjusts scroll position, and sets selection
+    /// Switches to the correct pack/mode, adjusts scroll position, and sets selection
+    /// Supports both source textures (from texture packs) and user textures (from textures-user/)
     pub fn scroll_to_texture(&mut self, tex_ref: &crate::world::TextureRef) {
         if !tex_ref.is_valid() {
             return;
         }
+
+        const THUMB_PADDING: f32 = 4.0;
+
+        // Check if this is a user texture
+        if tex_ref.is_user_texture() {
+            // Switch to Paint mode
+            self.texture_palette_user_mode = true;
+
+            // Select the user texture
+            self.selected_user_texture = Some(tex_ref.name.clone());
+
+            // Calculate scroll position for user texture grid
+            let texture_names: Vec<_> = self.user_textures.names().collect();
+            if let Some(tex_idx) = texture_names.iter().position(|n| *n == tex_ref.name) {
+                let thumb_size = self.paint_thumb_size;
+                let palette_width = self.texture_palette_width;
+                let cols = ((palette_width - THUMB_PADDING) / (thumb_size + THUMB_PADDING)).floor() as usize;
+                let cols = cols.max(1);
+
+                let row = tex_idx / cols;
+                let row_y = row as f32 * (thumb_size + THUMB_PADDING);
+                self.texture_scroll = row_y;
+            }
+            return;
+        }
+
+        // Source texture - switch to Source mode
+        self.texture_palette_user_mode = false;
 
         // Find the pack index
         let pack_idx = self.texture_packs.iter().position(|p| p.name == tex_ref.pack);
@@ -1033,18 +1229,16 @@ impl EditorState {
             if let Some(pack) = self.texture_packs.get(idx) {
                 if let Some(tex_idx) = pack.textures.iter().position(|t| t.name == tex_ref.name) {
                     // Calculate scroll position to show the texture at the top of visible area
-                    // Constants from texture_palette.rs
-                    const THUMB_SIZE: f32 = 48.0;
-                    const THUMB_PADDING: f32 = 4.0;
+                    let thumb_size = self.source_thumb_size;
 
                     // Use actual palette width (updated by draw_texture_palette)
                     let palette_width = self.texture_palette_width;
-                    let cols = ((palette_width - THUMB_PADDING) / (THUMB_SIZE + THUMB_PADDING)).floor() as usize;
+                    let cols = ((palette_width - THUMB_PADDING) / (thumb_size + THUMB_PADDING)).floor() as usize;
                     let cols = cols.max(1);
 
                     let row = tex_idx / cols;
                     // Position this row at top of visible area
-                    let row_y = row as f32 * (THUMB_SIZE + THUMB_PADDING);
+                    let row_y = row as f32 * (thumb_size + THUMB_PADDING);
 
                     // Set scroll to show this row at the top (texture_palette will clamp to valid range)
                     self.texture_scroll = row_y;

@@ -7,7 +7,8 @@
 
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode};
+use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15};
+use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
 use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, TextureAtlas};
 use super::model::Animation;
 use super::drag::DragManager;
@@ -475,36 +476,8 @@ pub enum BrushType {
     Fill,
 }
 
-/// Atlas editing mode - UV vertex editing or painting (with integrated CLUT)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AtlasEditMode {
-    /// Move UV vertices
-    #[default]
-    Uv,
-    /// Paint on the texture atlas (CLUT palette integrated here)
-    Paint,
-}
-
-impl AtlasEditMode {
-    pub fn toggle(&self) -> Self {
-        match self {
-            AtlasEditMode::Uv => AtlasEditMode::Paint,
-            AtlasEditMode::Paint => AtlasEditMode::Uv,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            AtlasEditMode::Uv => "UV",
-            AtlasEditMode::Paint => "Paint",
-        }
-    }
-
-    /// All available modes for tab bar
-    pub fn all() -> [AtlasEditMode; 2] {
-        [AtlasEditMode::Uv, AtlasEditMode::Paint]
-    }
-}
+// Note: AtlasEditMode removed - replaced with collapsible sections
+// (uv_section_expanded, paint_section_expanded in ModelerState)
 
 /// Axis constraint for transforms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -661,10 +634,14 @@ pub struct ModelerState {
     pub brush_size: f32,
     pub brush_type: BrushType,
     pub paint_mode: PaintMode,
-    pub atlas_edit_mode: AtlasEditMode, // UV editing vs painting vs CLUT (V to toggle)
     pub color_picker_slider: Option<usize>, // Active slider in color picker (0=R, 1=G, 2=B)
     pub brush_size_slider_active: bool, // True while dragging brush size slider
     pub paint_stroke_active: bool, // True while painting (for undo grouping)
+
+    // Collapsible panel sections (replaces AtlasEditMode)
+    pub uv_section_expanded: bool,    // UV editing section
+    pub paint_section_expanded: bool, // Paint/texture editor section
+    pub paint_texture_scroll: f32,    // Scroll position in paint texture browser
 
     // CLUT editing state
     pub selected_clut: Option<crate::rasterizer::ClutId>, // Currently selected CLUT in pool
@@ -743,6 +720,25 @@ pub struct ModelerState {
 
     // Tool system (TrenchBroom-inspired)
     pub tool_box: ModelerToolBox,
+
+    // Texture editor state
+    pub texture_editor: TextureEditorState,
+
+    // User texture library (shared with world editor)
+    pub user_textures: TextureLibrary,
+
+    // True when editing the indexed atlas with the texture editor
+    pub editing_indexed_atlas: bool,
+
+    // Temporary UserTexture for editing the indexed atlas
+    // Synced back to IndexedAtlas on close
+    pub editing_texture: Option<crate::texture::UserTexture>,
+
+    // Currently selected user texture name (for single-click selection before editing)
+    pub selected_user_texture: Option<String>,
+
+    // Thumbnail size for paint texture grid (32, 48, 64, 96)
+    pub paint_thumb_size: f32,
 }
 
 /// Context menu for right-click actions
@@ -763,7 +759,7 @@ impl ContextMenu {
     }
 }
 
-/// Unified undo event - either a mesh change or a selection change
+/// Unified undo event - mesh change, selection change, or texture change
 #[derive(Debug, Clone)]
 pub enum UndoEvent {
     /// Mesh edit (geometry, UVs, etc.)
@@ -775,6 +771,11 @@ pub enum UndoEvent {
     },
     /// Selection change only
     Selection(ModelerSelection),
+    /// Texture paint edit (pixel indices, palette)
+    Texture {
+        indices: Vec<u8>,
+        palette: Vec<Color15>,
+    },
 }
 
 impl ModelerState {
@@ -845,10 +846,14 @@ impl ModelerState {
             brush_size: 4.0,
             brush_type: BrushType::Square,
             paint_mode: PaintMode::Texture,
-            atlas_edit_mode: AtlasEditMode::default(),
             color_picker_slider: None,
             brush_size_slider_active: false,
             paint_stroke_active: false,
+
+            // Collapsible sections (both can be open)
+            uv_section_expanded: true,
+            paint_section_expanded: false,
+            paint_texture_scroll: 0.0,
 
             // CLUT editing defaults
             selected_clut: None,
@@ -903,6 +908,20 @@ impl ModelerState {
             drag_manager: DragManager::new(),
 
             tool_box: ModelerToolBox::new(),
+
+            texture_editor: TextureEditorState::new(),
+            user_textures: {
+                let mut lib = TextureLibrary::new();
+                if let Err(e) = lib.discover() {
+                    eprintln!("Failed to discover user textures: {}", e);
+                }
+                lib
+            },
+
+            editing_indexed_atlas: false,
+            editing_texture: None,
+            selected_user_texture: None,
+            paint_thumb_size: 64.0,  // Default thumbnail size
         }
     }
 
@@ -1188,7 +1207,24 @@ impl ModelerState {
         }
     }
 
-    /// Undo last action (mesh edit or selection)
+    /// Save current texture state for undo (before making paint changes)
+    pub fn save_texture_undo(&mut self) {
+        if let Some(ref tex) = self.editing_texture {
+            self.undo_stack.push(UndoEvent::Texture {
+                indices: tex.indices.clone(),
+                palette: tex.palette.clone(),
+            });
+            self.redo_stack.clear();
+            self.texture_editor.dirty = true;
+
+            // Limit stack size
+            if self.undo_stack.len() > self.max_undo_levels {
+                self.undo_stack.remove(0);
+            }
+        }
+    }
+
+    /// Undo last action (mesh edit, selection, or texture)
     pub fn undo(&mut self) -> bool {
         if let Some(event) = self.undo_stack.pop() {
             match event {
@@ -1225,6 +1261,21 @@ impl ModelerState {
                     self.selection = prev_sel;
                     self.set_status("Undo selection", 1.0);
                 }
+                UndoEvent::Texture { indices, palette } => {
+                    // Save current state to redo stack
+                    if let Some(ref tex) = self.editing_texture {
+                        self.redo_stack.push(UndoEvent::Texture {
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Restore previous state
+                    if let Some(ref mut tex) = self.editing_texture {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
+                    self.set_status("Undo paint", 1.0);
+                }
             }
             true
         } else {
@@ -1233,7 +1284,7 @@ impl ModelerState {
         }
     }
 
-    /// Redo last undone action (mesh edit or selection)
+    /// Redo last undone action (mesh edit, selection, or texture)
     pub fn redo(&mut self) -> bool {
         if let Some(event) = self.redo_stack.pop() {
             match event {
@@ -1269,6 +1320,21 @@ impl ModelerState {
                     self.undo_stack.push(UndoEvent::Selection(self.selection.clone()));
                     self.selection = next_sel;
                     self.set_status("Redo selection", 1.0);
+                }
+                UndoEvent::Texture { indices, palette } => {
+                    // Save current state to undo stack
+                    if let Some(ref tex) = self.editing_texture {
+                        self.undo_stack.push(UndoEvent::Texture {
+                            indices: tex.indices.clone(),
+                            palette: tex.palette.clone(),
+                        });
+                    }
+                    // Apply redo state
+                    if let Some(ref mut tex) = self.editing_texture {
+                        tex.indices = indices;
+                        tex.palette = palette;
+                    }
+                    self.set_status("Redo paint", 1.0);
                 }
             }
             true

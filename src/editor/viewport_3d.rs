@@ -11,7 +11,7 @@
 //! - Overlay drawing (selection highlights, etc.)
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext};
+use crate::ui::{Rect, UiContext, drag_tracker::pick_plane};
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
@@ -366,6 +366,13 @@ pub fn draw_viewport_3d(
             state.set_status(status, 1.0);
         }
     }
+    if inside_viewport && is_key_pressed(KeyCode::R) {
+        if let Some(gc) = &mut state.geometry_clipboard {
+            gc.rotation = (gc.rotation + 1) % 4;
+            let degrees = gc.rotation as u16 * 90;
+            state.set_status(&format!("Geometry: rotated {}°", degrees), 1.0);
+        }
+    }
 
     // Clear selection and geometry clipboard with Escape key
     if inside_viewport && is_key_pressed(KeyCode::Escape) && (state.selection != Selection::None || !state.multi_selection.is_empty() || state.geometry_clipboard.is_some()) {
@@ -378,6 +385,80 @@ pub fn draw_viewport_3d(
         } else {
             state.set_status("Selection cleared", 0.5);
         }
+    }
+
+    // Select all faces in room with Ctrl-A
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+    if inside_viewport && ctrl_held && is_key_pressed(KeyCode::A) {
+        // Find which room to select from: current selection's room, or first visible room
+        let room_idx = match &state.selection {
+            Selection::SectorFace { room, .. } => Some(*room),
+            Selection::Vertex { room, .. } => Some(*room),
+            Selection::Object { room, .. } => Some(*room),
+            Selection::Room(room) => Some(*room),
+            Selection::Sector { room, .. } => Some(*room),
+            Selection::Edge { room, .. } => Some(*room),
+            Selection::Portal { room, .. } => Some(*room),
+            Selection::None => {
+                // Find first visible room
+                (0..state.level.rooms.len()).find(|i| !state.hidden_rooms.contains(i))
+            }
+        };
+
+        if let Some(room_idx) = room_idx {
+            // Collect all faces first (immutable borrow of room)
+            let faces: Vec<Selection> = if let Some(room) = state.level.rooms.get(room_idx) {
+                let mut faces = Vec::new();
+                for gz in 0..room.depth {
+                    for gx in 0..room.width {
+                        if let Some(sector) = room.get_sector(gx, gz) {
+                            if sector.floor.is_some() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::Floor });
+                            }
+                            if sector.ceiling.is_some() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::Ceiling });
+                            }
+                            for i in 0..sector.walls_north.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallNorth(i) });
+                            }
+                            for i in 0..sector.walls_south.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallSouth(i) });
+                            }
+                            for i in 0..sector.walls_east.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallEast(i) });
+                            }
+                            for i in 0..sector.walls_west.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallWest(i) });
+                            }
+                        }
+                    }
+                }
+                faces
+            } else {
+                Vec::new()
+            };
+
+            // Now mutate state
+            if !faces.is_empty() {
+                state.save_selection_undo();
+                state.clear_multi_selection();
+
+                let mut iter = faces.into_iter();
+                if let Some(first) = iter.next() {
+                    state.set_selection(first);
+                    state.multi_selection.extend(iter);
+                }
+
+                let count = 1 + state.multi_selection.len();
+                state.set_status(&format!("Selected {} faces", count), 1.0);
+            }
+        }
+    }
+
+    // Center camera on selection with Period key
+    if inside_viewport && is_key_pressed(KeyCode::Period) {
+        state.center_camera_on_selection();
     }
 
     // Delete selected elements with Delete or Backspace key (supports multi-selection)
@@ -438,9 +519,7 @@ pub fn draw_viewport_3d(
                 // Cleanup affected rooms
                 for room_idx in affected_rooms {
                     if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                        room.cleanup_empty_sectors();
-                        room.trim_empty_edges();
-                        room.recalculate_bounds();
+                        room.compact();
                     }
                 }
 
@@ -489,45 +568,30 @@ pub fn draw_viewport_3d(
         && state.tool == EditorTool::Select
         && state.geometry_clipboard.is_some()
     {
-        // Find sector under cursor using similar logic to DrawFloor mode
+        // Find sector under cursor using ray-plane intersection (no distance limit)
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             let detection_y = 0.0;
-            let search_radius = 20;
-            let cam_x = state.camera_3d.position.x;
-            let cam_z = state.camera_3d.position.z;
-            let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            let room_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
 
-            let mut closest: Option<(f32, f32, f32)> = None;
-            for ix in 0..(search_radius * 2) {
-                for iz in 0..(search_radius * 2) {
-                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                    let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, detection_y, grid_z + SECTOR_SIZE / 2.0);
+            if let Some(world_pos) = pick_plane(
+                Vec3::new(0.0, room_y + detection_y, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::ZERO,
+                (mouse_fb_x, mouse_fb_y),
+                &state.camera_3d,
+                fb_width, fb_height,
+            ) {
+                let snapped_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let snapped_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
-                    if let Some((sx, sy)) = world_to_screen(test_pos, state.camera_3d.position,
-                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                        fb_width, fb_height)
-                    {
-                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                        if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                            closest = Some((grid_x, grid_z, dist));
-                        }
-                    }
-                }
-            }
-
-            if let Some((snapped_x, snapped_z, dist)) = closest {
-                if dist < 100.0 {
-                    // Convert world coords to grid coords relative to room position
-                    // Allow negative values and values beyond room bounds (room will expand on paste)
-                    if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
-                        let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
-                        Some((gx, gz))
-                    } else {
-                        None
-                    }
+                // Convert world coords to grid coords relative to room position
+                // Allow negative values and values beyond room bounds (room will expand on paste)
+                if let Some(room) = state.level.rooms.get(state.current_room) {
+                    let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                    let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
+                    Some((gx, gz))
                 } else {
                     None
                 }
@@ -553,45 +617,31 @@ pub fn draw_viewport_3d(
             // This is more intuitive - you click on the floor to place a ceiling above it.
             let detection_y = 0.0;
 
-            // Find closest sector to mouse cursor (only when not in height adjust mode)
+            // Find sector position using ray-plane intersection (no distance limit)
             let (snapped_x, snapped_z) = if let Some((locked_x, locked_z)) = state.height_adjust_locked_pos {
                 // Use locked position when in height adjust mode
                 (locked_x, locked_z)
             } else {
-                // Find closest grid position to mouse
-                let search_radius = 20;
-                let cam_x = state.camera_3d.position.x;
-                let cam_z = state.camera_3d.position.z;
-                let start_x = ((cam_x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-                let start_z = ((cam_z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+                // Get room Y offset for the detection plane
+                let room_y = state.level.rooms.get(state.current_room)
+                    .map(|r| r.position.y)
+                    .unwrap_or(0.0);
 
-                let mut closest: Option<(f32, f32, f32)> = None;
-                for ix in 0..(search_radius * 2) {
-                    for iz in 0..(search_radius * 2) {
-                        let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                        let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                        let test_pos = Vec3::new(grid_x + SECTOR_SIZE / 2.0, detection_y, grid_z + SECTOR_SIZE / 2.0);
-
-                        if let Some((sx, sy)) = world_to_screen(test_pos, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height)
-                        {
-                            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                            if closest.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                                closest = Some((grid_x, grid_z, dist));
-                            }
-                        }
-                    }
-                }
-
-                if let Some((x, z, dist)) = closest {
-                    if dist < 100.0 {
-                        (x, z)
-                    } else {
-                        // Too far from any grid position
-                        (f32::NAN, f32::NAN)
-                    }
+                // Use ray-plane intersection to find where mouse points on floor plane
+                if let Some(world_pos) = pick_plane(
+                    Vec3::new(0.0, room_y + detection_y, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),  // Y-up normal
+                    Vec3::ZERO,
+                    (mouse_fb_x, mouse_fb_y),
+                    &state.camera_3d,
+                    fb.width, fb.height,
+                ) {
+                    // Snap to grid
+                    let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                    let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                    (grid_x, grid_z)
                 } else {
+                    // Ray doesn't hit plane (looking away from floor)
                     (f32::NAN, f32::NAN)
                 }
             };
@@ -662,143 +712,131 @@ pub fn draw_viewport_3d(
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             use super::CEILING_HEIGHT;
 
-            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            // Use room's effective vertical bounds for gap detection
             let (default_y_bottom, default_y_top) = state.level.rooms.get(state.current_room)
-                .map(|r| (r.bounds.min.y, r.bounds.max.y))
+                .map(|r| r.effective_height_bounds())
                 .unwrap_or((0.0, CEILING_HEIGHT));
             let dir = state.wall_direction;
 
-            // Find sector under cursor by checking sector centers
-            let search_radius = 20;
-            let cam = &state.camera_3d.position;
-            let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
+            // Get room Y offset for the detection plane
+            let room_y_offset = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
 
-            let mut closest_sector: Option<(f32, f32, f32)> = None; // (grid_x, grid_z, dist)
+            // Use ray-plane intersection to find sector (no distance limit)
+            let mid_y = (default_y_bottom + default_y_top) / 2.0;
+            let sector_pos = pick_plane(
+                Vec3::new(0.0, room_y_offset + mid_y, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::ZERO,
+                (mouse_fb_x, mouse_fb_y),
+                &state.camera_3d,
+                fb.width, fb.height,
+            );
 
-            for ix in 0..(search_radius * 2) {
-                for iz in 0..(search_radius * 2) {
-                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                    let mid_y = (default_y_bottom + default_y_top) / 2.0;
-                    let center = Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0);
+            if let Some(world_pos) = sector_pos {
+                let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
-                    if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
+                // Estimate mouse world Y for gap selection
+                // Note: diagonal directions filtered out in if condition above
+                let edge_x = match dir {
+                    crate::world::Direction::North | crate::world::Direction::South => grid_x + SECTOR_SIZE / 2.0,
+                    crate::world::Direction::East => grid_x + SECTOR_SIZE,
+                    crate::world::Direction::West => grid_x,
+                    crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
+                };
+                let edge_z = match dir {
+                    crate::world::Direction::North => grid_z,
+                    crate::world::Direction::South => grid_z + SECTOR_SIZE,
+                    crate::world::Direction::East | crate::world::Direction::West => grid_z + SECTOR_SIZE / 2.0,
+                    crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
+                };
+
+                let room_y = state.level.rooms.get(state.current_room)
+                    .map(|r| r.position.y)
+                    .unwrap_or(0.0);
+                let floor_world = Vec3::new(edge_x, room_y + default_y_bottom, edge_z);
+                let ceiling_world = Vec3::new(edge_x, room_y + default_y_top, edge_z);
+
+                let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
+                    world_to_screen(floor_world, state.camera_3d.position,
                         state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                        fb.width, fb.height)
-                    {
-                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                        if closest_sector.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                            closest_sector = Some((grid_x, grid_z, dist));
-                        }
-                    }
-                }
-            }
-
-            if let Some((grid_x, grid_z, dist)) = closest_sector {
-                if dist < 100.0 {
-                    // Estimate mouse world Y for gap selection
-                    // Note: diagonal directions filtered out in if condition above
-                    let edge_x = match dir {
-                        crate::world::Direction::North | crate::world::Direction::South => grid_x + SECTOR_SIZE / 2.0,
-                        crate::world::Direction::East => grid_x + SECTOR_SIZE,
-                        crate::world::Direction::West => grid_x,
-                        crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
-                    };
-                    let edge_z = match dir {
-                        crate::world::Direction::North => grid_z,
-                        crate::world::Direction::South => grid_z + SECTOR_SIZE,
-                        crate::world::Direction::East | crate::world::Direction::West => grid_z + SECTOR_SIZE / 2.0,
-                        crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
-                    };
-
-                    let room_y = state.level.rooms.get(state.current_room)
-                        .map(|r| r.position.y)
-                        .unwrap_or(0.0);
-                    let floor_world = Vec3::new(edge_x, room_y + default_y_bottom, edge_z);
-                    let ceiling_world = Vec3::new(edge_x, room_y + default_y_top, edge_z);
-
-                    let mouse_y_room_relative = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
-                        world_to_screen(floor_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                        world_to_screen(ceiling_world, state.camera_3d.position,
-                            state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                            fb.width, fb.height),
-                    ) {
-                        if (floor_sy - ceiling_sy).abs() > 1.0 {
-                            let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
-                            let t_clamped = t.clamp(0.0, 1.0);
-                            Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
-                        } else {
-                            None
-                        }
+                        fb.width, fb.height),
+                    world_to_screen(ceiling_world, state.camera_3d.position,
+                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
+                        fb.width, fb.height),
+                ) {
+                    if (floor_sy - ceiling_sy).abs() > 1.0 {
+                        let t = (mouse_fb_y - ceiling_sy) / (floor_sy - ceiling_sy);
+                        let t_clamped = t.clamp(0.0, 1.0);
+                        Some(default_y_top + t_clamped * (default_y_bottom - default_y_top))
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
-                    // Calculate where the new wall should be placed
-                    // Use prefer_high setting to select gap (high Y = ceiling, low Y = floor)
-                    let gap_select_y = if state.wall_prefer_high {
-                        Some(default_y_top - 1.0)  // Near ceiling
-                    } else {
-                        Some(default_y_bottom + 1.0)  // Near floor
-                    };
-                    let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
-                        if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
-                            if let Some(sector) = room.get_sector(gx, gz) {
-                                // Debug logging for wall gap detection (only when sector changes)
-                                {
-                                    use std::sync::atomic::{AtomicI32, Ordering};
-                                    static LAST_GX: AtomicI32 = AtomicI32::new(-999);
-                                    static LAST_GZ: AtomicI32 = AtomicI32::new(-999);
-                                    let gx_i = gx as i32;
-                                    let gz_i = gz as i32;
-                                    if LAST_GX.load(Ordering::Relaxed) != gx_i || LAST_GZ.load(Ordering::Relaxed) != gz_i {
-                                        LAST_GX.store(gx_i, Ordering::Relaxed);
-                                        LAST_GZ.store(gz_i, Ordering::Relaxed);
-                                        let floor_info = sector.floor.as_ref().map(|f| {
-                                            let (l, r) = f.edge_heights(dir);
-                                            format!("F[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "F[-]".to_string());
-                                        let ceiling_info = sector.ceiling.as_ref().map(|c| {
-                                            let (l, r) = c.edge_heights(dir);
-                                            format!("C[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "C[-]".to_string());
-                                        let walls = sector.walls(dir);
-                                        let walls_info = if walls.is_empty() {
-                                            "W[]".to_string()
-                                        } else {
-                                            let w_strs: Vec<String> = walls.iter().map(|w| {
-                                                format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
-                                            }).collect();
-                                            format!("W{}", w_strs.join(","))
-                                        };
-                                        let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
-                                        eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
-                                    }
+                // Calculate where the new wall should be placed
+                // Use prefer_high setting to select gap (high Y = ceiling, low Y = floor)
+                let gap_select_y = if state.wall_prefer_high {
+                    Some(default_y_top - 1.0)  // Near ceiling
+                } else {
+                    Some(default_y_bottom + 1.0)  // Near floor
+                };
+                let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    if let Some((gx, gz)) = room.world_to_grid(grid_x + SECTOR_SIZE * 0.5, grid_z + SECTOR_SIZE * 0.5) {
+                        if let Some(sector) = room.get_sector(gx, gz) {
+                            // Debug logging for wall gap detection (only when sector changes)
+                            {
+                                use std::sync::atomic::{AtomicI32, Ordering};
+                                static LAST_GX: AtomicI32 = AtomicI32::new(-999);
+                                static LAST_GZ: AtomicI32 = AtomicI32::new(-999);
+                                let gx_i = gx as i32;
+                                let gz_i = gz as i32;
+                                if LAST_GX.load(Ordering::Relaxed) != gx_i || LAST_GZ.load(Ordering::Relaxed) != gz_i {
+                                    LAST_GX.store(gx_i, Ordering::Relaxed);
+                                    LAST_GZ.store(gz_i, Ordering::Relaxed);
+                                    let floor_info = sector.floor.as_ref().map(|f| {
+                                        let (l, r) = f.edge_heights(dir);
+                                        format!("F[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "F[-]".to_string());
+                                    let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                        let (l, r) = c.edge_heights(dir);
+                                        format!("C[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "C[-]".to_string());
+                                    let walls = sector.walls(dir);
+                                    let walls_info = if walls.is_empty() {
+                                        "W[]".to_string()
+                                    } else {
+                                        let w_strs: Vec<String> = walls.iter().map(|w| {
+                                            format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
+                                        }).collect();
+                                        format!("W{}", w_strs.join(","))
+                                    };
                                 }
-                                let has_existing = !sector.walls(dir).is_empty();
-                                match sector.next_wall_position(dir, default_y_bottom, default_y_top, gap_select_y) {
-                                    Some(corner_heights) => {
-                                        let wall_state = if has_existing { 1u8 } else { 0u8 };
-                                        Some((corner_heights, wall_state))
-                                    }
-                                    None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)),
+                            }
+                            let has_existing = !sector.walls(dir).is_empty();
+                            match sector.next_wall_position(dir, default_y_bottom, default_y_top, gap_select_y) {
+                                Some(corner_heights) => {
+                                    let wall_state = if has_existing { 1u8 } else { 0u8 };
+                                    Some((corner_heights, wall_state))
                                 }
-                            } else {
-                                Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                                None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)),
                             }
                         } else {
                             Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
                         }
                     } else {
                         Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
-                    };
-
-                    if let Some((corner_heights, wall_state)) = wall_info {
-                        preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
                     }
+                } else {
+                    Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                };
+
+                if let Some((corner_heights, wall_state)) = wall_info {
+                    preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
                 }
             }
         }
@@ -809,110 +847,96 @@ pub fn draw_viewport_3d(
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             use super::CEILING_HEIGHT;
 
-            // Find the closest sector center first
-            let search_radius = 20;
-            let cam = &state.camera_3d.position;
-            let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-            let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
-
-            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            // Use room's effective vertical bounds for gap detection
             let (default_y_bottom, default_y_top) = state.level.rooms.get(state.current_room)
-                .map(|r| (r.bounds.min.y, r.bounds.max.y))
+                .map(|r| r.effective_height_bounds())
                 .unwrap_or((0.0, CEILING_HEIGHT));
             let mid_y = (default_y_bottom + default_y_top) / 2.0;
 
-            // Find closest sector center
-            let mut closest_sector: Option<(f32, f32, f32)> = None; // (grid_x, grid_z, screen_dist)
+            // Get room Y offset for the detection plane
+            let room_y_offset = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
 
-            for ix in 0..(search_radius * 2) {
-                for iz in 0..(search_radius * 2) {
-                    let grid_x = start_x + (ix as f32 * SECTOR_SIZE);
-                    let grid_z = start_z + (iz as f32 * SECTOR_SIZE);
-                    let center = Vec3::new(grid_x + SECTOR_SIZE / 2.0, mid_y, grid_z + SECTOR_SIZE / 2.0);
+            // Use ray-plane intersection to find sector (no distance limit)
+            let sector_pos = pick_plane(
+                Vec3::new(0.0, room_y_offset + mid_y, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::ZERO,
+                (mouse_fb_x, mouse_fb_y),
+                &state.camera_3d,
+                fb.width, fb.height,
+            );
 
-                    if let Some((sx, sy)) = world_to_screen(center, state.camera_3d.position,
-                        state.camera_3d.basis_x, state.camera_3d.basis_y, state.camera_3d.basis_z,
-                        fb.width, fb.height)
-                    {
-                        let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                        if closest_sector.map_or(true, |(_, _, best)| dist < best) {
-                            closest_sector = Some((grid_x, grid_z, dist));
-                        }
-                    }
-                }
-            }
+            if let Some(world_pos) = sector_pos {
+                let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                let center_x = grid_x + SECTOR_SIZE / 2.0;
+                let center_z = grid_z + SECTOR_SIZE / 2.0;
 
-            if let Some((grid_x, grid_z, dist)) = closest_sector {
-                if dist < 120.0 {
-                    let center_x = grid_x + SECTOR_SIZE / 2.0;
-                    let center_z = grid_z + SECTOR_SIZE / 2.0;
+                // Use wall_direction to determine diagonal type (NwSe or NeSw)
+                let is_nwse = state.wall_direction == crate::world::Direction::NwSe;
 
-                    // Use wall_direction to determine diagonal type (NwSe or NeSw)
-                    let is_nwse = state.wall_direction == crate::world::Direction::NwSe;
+                // Use prefer_high setting to select gap (same as axis-aligned walls)
+                let gap_select_y = if state.wall_prefer_high {
+                    Some(default_y_top - 1.0)  // Near ceiling
+                } else {
+                    Some(default_y_bottom + 1.0)  // Near floor
+                };
 
-                    // Use prefer_high setting to select gap (same as axis-aligned walls)
-                    let gap_select_y = if state.wall_prefer_high {
-                        Some(default_y_top - 1.0)  // Near ceiling
-                    } else {
-                        Some(default_y_bottom + 1.0)  // Near floor
-                    };
-
-                    // Use gap detection for diagonal walls
-                    let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
-                        if let Some((gx, gz)) = room.world_to_grid(center_x, center_z) {
-                            if let Some(sector) = room.get_sector(gx, gz) {
-                                // Debug logging for diagonal wall gap detection (only when sector changes)
-                                {
-                                    use std::sync::atomic::{AtomicI32, Ordering};
-                                    static LAST_DIAG_GX: AtomicI32 = AtomicI32::new(-999);
-                                    static LAST_DIAG_GZ: AtomicI32 = AtomicI32::new(-999);
-                                    let gx_i = gx as i32;
-                                    let gz_i = gz as i32;
-                                    if LAST_DIAG_GX.load(Ordering::Relaxed) != gx_i || LAST_DIAG_GZ.load(Ordering::Relaxed) != gz_i {
-                                        LAST_DIAG_GX.store(gx_i, Ordering::Relaxed);
-                                        LAST_DIAG_GZ.store(gz_i, Ordering::Relaxed);
-                                        let dir = if is_nwse { crate::world::Direction::NwSe } else { crate::world::Direction::NeSw };
-                                        let floor_info = sector.floor.as_ref().map(|f| {
-                                            let (l, r) = f.edge_heights(dir);
-                                            format!("F[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "F[-]".to_string());
-                                        let ceiling_info = sector.ceiling.as_ref().map(|c| {
-                                            let (l, r) = c.edge_heights(dir);
-                                            format!("C[{:.0},{:.0}]", l, r)
-                                        }).unwrap_or_else(|| "C[-]".to_string());
-                                        let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
-                                        let walls_info = if walls.is_empty() {
-                                            "W[]".to_string()
-                                        } else {
-                                            let w_strs: Vec<String> = walls.iter().map(|w| {
-                                                format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
-                                            }).collect();
-                                            format!("W{}", w_strs.join(","))
-                                        };
-                                        let bounds_info = format!("bounds[{:.0},{:.0}]", room.bounds.min.y, room.bounds.max.y);
-                                        eprintln!("HOVER ({},{}) {:?}: {} {} {} {}", gx, gz, dir, floor_info, ceiling_info, walls_info, bounds_info);
-                                    }
+                // Use gap detection for diagonal walls
+                let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
+                    if let Some((gx, gz)) = room.world_to_grid(center_x, center_z) {
+                        if let Some(sector) = room.get_sector(gx, gz) {
+                            // Debug logging for diagonal wall gap detection (only when sector changes)
+                            {
+                                use std::sync::atomic::{AtomicI32, Ordering};
+                                static LAST_DIAG_GX: AtomicI32 = AtomicI32::new(-999);
+                                static LAST_DIAG_GZ: AtomicI32 = AtomicI32::new(-999);
+                                let gx_i = gx as i32;
+                                let gz_i = gz as i32;
+                                if LAST_DIAG_GX.load(Ordering::Relaxed) != gx_i || LAST_DIAG_GZ.load(Ordering::Relaxed) != gz_i {
+                                    LAST_DIAG_GX.store(gx_i, Ordering::Relaxed);
+                                    LAST_DIAG_GZ.store(gz_i, Ordering::Relaxed);
+                                    let dir = if is_nwse { crate::world::Direction::NwSe } else { crate::world::Direction::NeSw };
+                                    let floor_info = sector.floor.as_ref().map(|f| {
+                                        let (l, r) = f.edge_heights(dir);
+                                        format!("F[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "F[-]".to_string());
+                                    let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                        let (l, r) = c.edge_heights(dir);
+                                        format!("C[{:.0},{:.0}]", l, r)
+                                    }).unwrap_or_else(|| "C[-]".to_string());
+                                    let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
+                                    let walls_info = if walls.is_empty() {
+                                        "W[]".to_string()
+                                    } else {
+                                        let w_strs: Vec<String> = walls.iter().map(|w| {
+                                            format!("[{:.0},{:.0},{:.0},{:.0}]", w.heights[0], w.heights[1], w.heights[2], w.heights[3])
+                                        }).collect();
+                                        format!("W{}", w_strs.join(","))
+                                    };
                                 }
-                                let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
-                                let has_existing = !walls.is_empty();
-                                match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, gap_select_y) {
-                                    Some(heights) => Some((heights, if has_existing { 1u8 } else { 0u8 })),
-                                    None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)), // Fully covered
-                                }
-                            } else {
-                                Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                            }
+                            let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
+                            let has_existing = !walls.is_empty();
+                            match sector.next_diagonal_wall_position(is_nwse, default_y_bottom, default_y_top, gap_select_y) {
+                                Some(heights) => Some((heights, if has_existing { 1u8 } else { 0u8 })),
+                                None => Some(([0.0, 0.0, 0.0, 0.0], 2u8)), // Fully covered
                             }
                         } else {
                             Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
                         }
                     } else {
                         Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
-                    };
+                    }
+                } else {
+                    Some(([default_y_bottom, default_y_bottom, default_y_top, default_y_top], 0u8))
+                };
 
-                    if let Some((corner_heights, wall_state)) = wall_info {
-                        if wall_state < 2 { // Not fully covered
-                            preview_diagonal_wall = Some((grid_x, grid_z, is_nwse, corner_heights));
-                        }
+                if let Some((corner_heights, wall_state)) = wall_info {
+                    if wall_state < 2 { // Not fully covered
+                        preview_diagonal_wall = Some((grid_x, grid_z, is_nwse, corner_heights));
                     }
                 }
             }
@@ -932,8 +956,6 @@ pub fn draw_viewport_3d(
                 if let Some((room_idx, gx, gz, corner_idx, face, _)) = hovered_vertex {
                     // Create vertex selection (allows proper vertex multi-selection)
                     let new_selection = Selection::Vertex { room: room_idx, x: gx, z: gz, face: face.clone(), corner_idx };
-                    eprintln!("VERTEX CLICK: ({},{}) corner={} face={:?}, shift={}, current_sel={:?}",
-                        gx, gz, corner_idx, face, shift_down, state.selection);
                     if shift_down {
                         // Range selection: if current selection is a vertex on same face type,
                         // select all vertices along the line between them
@@ -942,8 +964,6 @@ pub fn draw_viewport_3d(
                             // Only range select on same room, same face type (floor/ceiling)
                             let same_face_type = matches!((&face, sel_face),
                                 (SectorFace::Floor, SectorFace::Floor) | (SectorFace::Ceiling, SectorFace::Ceiling));
-                            eprintln!("  VERTEX RANGE: sel({},{}) corner {} -> click({},{}) corner {}, same_face={}",
-                                sel_x, sel_z, sel_corner, gx, gz, corner_idx, same_face_type);
                             if *sel_room == room_idx && same_face_type {
                                 // Determine the line direction based on which coordinates differ
                                 // and which corner indices are involved
@@ -963,8 +983,6 @@ pub fn draw_viewport_3d(
                                 let is_south_edge = (*sel_corner == 2 || *sel_corner == 3) && (corner_idx == 2 || corner_idx == 3);
                                 let is_east_edge = (*sel_corner == 1 || *sel_corner == 2) && (corner_idx == 1 || corner_idx == 2);
                                 let is_west_edge = (*sel_corner == 0 || *sel_corner == 3) && (corner_idx == 0 || corner_idx == 3);
-
-                                eprintln!("  edges: N={} S={} E={} W={}", is_north_edge, is_south_edge, is_east_edge, is_west_edge);
 
                                 if is_north_edge || is_south_edge {
                                     // First, add the original selection to multi-selection so it's not lost
@@ -1142,17 +1160,11 @@ pub fn draw_viewport_3d(
                         wall_face: wall_face.clone(),
                     };
 
-                    eprintln!("EDGE CLICK: ({},{}) face={} edge={}, shift={}, current_sel={:?}",
-                        gx, gz, face_idx, edge_idx, shift_down, state.selection);
-
                     if shift_down {
                         // Range selection: if current selection is an edge on same face type,
                         // select all edges in between along the shared axis
                         let mut did_range_select = false;
                         if let Selection::Edge { room: sel_room, x: sel_x, z: sel_z, face_idx: sel_face_idx, edge_idx: sel_edge_idx, wall_face: sel_wall_face } = &state.selection {
-                            eprintln!("  EDGE RANGE: sel({},{}) face={} edge={} -> click({},{}) face={} edge={}",
-                                sel_x, sel_z, sel_face_idx, sel_edge_idx, gx, gz, face_idx, edge_idx);
-
                             // Range select requires same room, same face type, same edge orientation
                             if *sel_room == room_idx && *sel_face_idx == face_idx && *sel_edge_idx == edge_idx {
                                 let mut edges_to_add: Vec<Selection> = Vec::new();
@@ -1189,12 +1201,8 @@ pub fn draw_viewport_3d(
                                     // This follows connected walls regardless of orientation (N/S/E/W/diagonal)
                                     if let Some(room) = state.level.rooms.get(room_idx) {
                                         if let (Some(start_face), Some(end_face)) = (sel_wall_face.clone(), wall_face.clone()) {
-                                            eprintln!("    tracing wall contour from ({},{}) {:?} to ({},{}) {:?}",
-                                                sel_x, sel_z, start_face, gx, gz, end_face);
-
                                             // Use existing find_wall_path function which handles all wall types
                                             if let Some(path) = find_wall_path(room, *sel_x, *sel_z, &start_face, gx, gz, &end_face) {
-                                                eprintln!("    found path with {} walls", path.len());
                                                 for (px, pz, pwf) in path {
                                                     edges_to_add.push(Selection::Edge {
                                                         room: room_idx,
@@ -1205,15 +1213,12 @@ pub fn draw_viewport_3d(
                                                         wall_face: Some(pwf),
                                                     });
                                                 }
-                                            } else {
-                                                eprintln!("    no path found");
                                             }
                                         }
                                     }
                                 }
 
                                 // Add all edges in range to multi-selection
-                                eprintln!("    adding {} edges", edges_to_add.len());
                                 let had_edges = !edges_to_add.is_empty();
                                 // First, add the original selection to multi-selection so it's not lost
                                 // when we change state.selection to the new clicked edge
@@ -1687,13 +1692,19 @@ pub fn draw_viewport_3d(
                             state.set_selection(new_selection.clone());
                         }
                     } else {
-                        // Regular click: Deselect all, select just this one
-                        // Only save undo if something actually changes
-                        if state.selection != new_selection || !state.multi_selection.is_empty() {
-                            state.save_selection_undo();
-                            state.clear_multi_selection();
-                            state.set_selection(new_selection.clone());
+                        // Regular click: Check if clicking on an already-selected face
+                        let is_already_selected = state.selection == new_selection ||
+                            state.multi_selection.contains(&new_selection);
+
+                        if !is_already_selected {
+                            // Clicking on unselected face: Deselect all, select just this one
+                            if state.selection != new_selection || !state.multi_selection.is_empty() {
+                                state.save_selection_undo();
+                                state.clear_multi_selection();
+                                state.set_selection(new_selection.clone());
+                            }
                         }
+                        // If already selected, keep current selection intact for dragging
                     }
 
                     // Scroll texture palette to show this face's texture
@@ -1733,6 +1744,9 @@ pub fn draw_viewport_3d(
                         }
                     }
 
+                    // Check if Shift is held for drag mode selection
+                    if shift_down {
+                    // Y-axis drag mode: move faces up/down
                     // Add vertices for all faces to drag
                     for (r_idx, gx, gz, face) in &faces_to_drag {
                         if let Some(room) = state.level.rooms.get(*r_idx) {
@@ -1821,15 +1835,45 @@ pub fn draw_viewport_3d(
                         state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
                             / state.drag_initial_heights.len() as f32;
                     }
-                } else {
-                    // Clicked on nothing - clear selection (unless Shift is held)
-                    if !shift_down {
-                        // Only save undo if something will actually change
-                        if state.selection != Selection::None || !state.multi_selection.is_empty() {
-                            state.save_selection_undo();
-                            state.set_selection(Selection::None);
-                            state.clear_multi_selection();
+                    } else {
+                        // X/Z relocation mode: move faces in the horizontal plane
+                        state.xz_drag_active = true;
+                        state.xz_drag_initial_positions = faces_to_drag;
+                        state.xz_drag_delta = (0, 0);
+
+                        // Calculate average Y for horizontal drag plane
+                        let avg_y = calculate_selection_center_y(state);
+                        state.xz_drag_plane_y = avg_y;
+
+                        // Get initial world position using pick_plane
+                        if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                            if let Some(world_pos) = pick_plane(
+                                Vec3::new(0.0, avg_y, 0.0),
+                                Vec3::new(0.0, 1.0, 0.0),  // Y-up normal
+                                Vec3::ZERO,
+                                (fb_x, fb_y),
+                                &state.camera_3d,
+                                fb.width, fb.height,
+                            ) {
+                                state.xz_drag_start_world = (world_pos.x, world_pos.z);
+                            }
                         }
+                    }
+                } else {
+                    // Clicked on nothing - start box select
+                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                        // If not shift-clicking, clear existing selection
+                        if !shift_down {
+                            if state.selection != Selection::None || !state.multi_selection.is_empty() {
+                                state.save_selection_undo();
+                                state.set_selection(Selection::None);
+                                state.clear_multi_selection();
+                            }
+                        }
+                        // Start box select
+                        state.selection_rect_start = Some((fb_x, fb_y));
+                        state.selection_rect_end = Some((fb_x, fb_y));
+                        state.box_selecting = true;
                     }
                 }
             }
@@ -1903,6 +1947,36 @@ pub fn draw_viewport_3d(
                     state.set_status("Object selected", 1.0);
                 } else {
                     state.set_status("Use 2D grid view to place objects", 2.0);
+                }
+            }
+        }
+
+        // Continue X/Z relocation drag
+        if ctx.mouse.left_down && state.xz_drag_active {
+            if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                if let Some(world_pos) = pick_plane(
+                    Vec3::new(0.0, state.xz_drag_plane_y, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::ZERO,
+                    (fb_x, fb_y),
+                    &state.camera_3d,
+                    fb.width, fb.height,
+                ) {
+                    let world_dx = world_pos.x - state.xz_drag_start_world.0;
+                    let world_dz = world_pos.z - state.xz_drag_start_world.1;
+
+                    // Convert to grid delta (snap to sectors)
+                    let grid_dx = (world_dx / SECTOR_SIZE).round() as i32;
+                    let grid_dz = (world_dz / SECTOR_SIZE).round() as i32;
+
+                    // Save undo on first actual movement (both geometry and selection)
+                    if !state.viewport_drag_started && (grid_dx != 0 || grid_dz != 0) {
+                        state.save_selection_undo();
+                        state.save_undo();
+                        state.viewport_drag_started = true;
+                    }
+
+                    state.xz_drag_delta = (grid_dx, grid_dz);
                 }
             }
         }
@@ -2132,6 +2206,13 @@ pub fn draw_viewport_3d(
             }
         }
 
+        // Update box select rectangle on drag
+        if ctx.mouse.left_down && state.box_selecting {
+            if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                state.selection_rect_end = Some((fb_x, fb_y));
+            }
+        }
+
         // End dragging on release
         if ctx.mouse.left_released {
             // Handle placement drag completion (floor/ceiling)
@@ -2169,6 +2250,10 @@ pub fn draw_viewport_3d(
                             room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
                             room.width += 1;
                             offset_x += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_x += 1;
+                            }
                         }
 
                         // Expand in negative Z direction
@@ -2179,6 +2264,10 @@ pub fn draw_viewport_3d(
                             }
                             room.depth += 1;
                             offset_z += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_z += 1;
+                            }
                         }
 
                         // Expand in positive X direction
@@ -2279,6 +2368,10 @@ pub fn draw_viewport_3d(
                         room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
                         room.width += 1;
                         offset_x += 1;
+                        // Shift all objects to match new grid indices
+                        for obj in &mut room.objects {
+                            obj.sector_x += 1;
+                        }
                     }
 
                     // Expand in negative Z direction
@@ -2289,6 +2382,10 @@ pub fn draw_viewport_3d(
                         }
                         room.depth += 1;
                         offset_z += 1;
+                        // Shift all objects to match new grid indices
+                        for obj in &mut room.objects {
+                            obj.sector_z += 1;
+                        }
                     }
 
                     // Expand in positive X direction
@@ -2317,11 +2414,12 @@ pub fn draw_viewport_3d(
                         let adjusted_gz = (gz + offset_z) as usize;
 
                         // Check if there's a gap to fill (handles both empty edges and gaps between walls)
-                        // Use room's actual vertical bounds for gap detection
+                        // Use room's effective vertical bounds for gap detection
                         // Use the stored mouse_y from drag start for consistent gap selection
                         room.ensure_sector(adjusted_gx, adjusted_gz);
+                        let (fallback_bottom, fallback_top) = room.effective_height_bounds();
                         if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
-                            if let Some(heights) = sector.next_wall_position(dir, room.bounds.min.y, room.bounds.max.y, state.wall_drag_mouse_y) {
+                            if let Some(heights) = sector.next_wall_position(dir, fallback_bottom, fallback_top, state.wall_drag_mouse_y) {
                                 // Calculate wall center position in world space
                                 let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
                                 let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
@@ -2416,6 +2514,10 @@ pub fn draw_viewport_3d(
                             room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
                             room.width += 1;
                             offset_x += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_x += 1;
+                            }
                         }
 
                         // Expand in negative Z direction
@@ -2426,6 +2528,10 @@ pub fn draw_viewport_3d(
                             }
                             room.depth += 1;
                             offset_z += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_z += 1;
+                            }
                         }
 
                         // Expand in positive X direction
@@ -2456,10 +2562,11 @@ pub fn draw_viewport_3d(
                             let adjusted_gz = (gz + offset_z) as usize;
 
                             // Check if there's a gap to fill (handles both empty diagonals and gaps)
-                            // Use room's actual vertical bounds for gap detection
+                            // Use room's effective vertical bounds for gap detection
                             room.ensure_sector(adjusted_gx, adjusted_gz);
+                            let (fallback_bottom, fallback_top) = room.effective_height_bounds();
                             if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
-                                if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, room.bounds.min.y, room.bounds.max.y, state.wall_drag_mouse_y) {
+                                if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, fallback_bottom, fallback_top, state.wall_drag_mouse_y) {
                                     // Calculate diagonal wall center position in world space
                                     let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
                                     let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
@@ -2527,6 +2634,30 @@ pub fn draw_viewport_3d(
                 }
             }
 
+            // Apply X/Z relocation
+            if state.xz_drag_active {
+                let (dx, dz) = state.xz_drag_delta;
+
+                if state.viewport_drag_started && (dx != 0 || dz != 0) {
+                    let faces = state.xz_drag_initial_positions.clone();
+                    let (moved_count, total_dx, total_dz, trim_x, trim_z) = relocate_faces(state, &faces, dx, dz);
+                    // Selection offset = movement delta + expansion offset - trim offset
+                    // (trim shifts all coordinates back by trim amount)
+                    let selection_dx = total_dx - trim_x as i32;
+                    let selection_dz = total_dz - trim_z as i32;
+                    update_selection_positions(state, &faces, selection_dx, selection_dz);
+                    if moved_count > 0 {
+                        state.set_status(&format!("Moved {} face(s)", moved_count), 2.0);
+                    }
+                }
+
+                // Cleanup X/Z drag state
+                state.xz_drag_active = false;
+                state.xz_drag_initial_positions.clear();
+                state.xz_drag_delta = (0, 0);
+                state.viewport_drag_started = false;
+            }
+
             // If we actually dragged geometry, recalculate room bounds
             if state.viewport_drag_started {
                 if let Some(room) = state.level.rooms.get_mut(state.current_room) {
@@ -2538,6 +2669,38 @@ pub fn draw_viewport_3d(
             state.drag_initial_heights.clear();
             state.dragging_object = None;
             state.viewport_drag_started = false;
+
+            // Finalize box select
+            if state.box_selecting {
+                if let (Some((x0, y0)), Some((x1, y1))) = (state.selection_rect_start, state.selection_rect_end) {
+                    let rect_min_x = x0.min(x1);
+                    let rect_max_x = x0.max(x1);
+                    let rect_min_y = y0.min(y1);
+                    let rect_max_y = y0.max(y1);
+
+                    // Only process if box has meaningful size (not just a click)
+                    if (rect_max_x - rect_min_x) > 3.0 || (rect_max_y - rect_min_y) > 3.0 {
+                        let collected = find_selections_in_rect(state, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y);
+                        if !collected.is_empty() {
+                            state.save_selection_undo();
+                            for sel in collected {
+                                state.add_to_multi_selection(sel);
+                            }
+                            // Set primary selection to first item if none set
+                            if state.selection == Selection::None && !state.multi_selection.is_empty() {
+                                state.selection = state.multi_selection[0].clone();
+                            }
+                            let count = state.multi_selection.len();
+                            state.set_status(&format!("Selected {} items", count), 2.0);
+                        }
+                    }
+                }
+
+                // Clear box select state
+                state.selection_rect_start = None;
+                state.selection_rect_end = None;
+                state.box_selecting = false;
+            }
         }
     }
 
@@ -2653,125 +2816,6 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Draw hovering floor grid centered on hovered tile when in floor placement mode
-    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
-        if state.tool == EditorTool::DrawFloor {
-            let inner_color = RasterColor::new(80, 180, 160); // Teal (bright)
-            let outer_color = RasterColor::new(40, 90, 80);   // Teal (dim)
-
-            // Get room Y offset for correct world-space positioning
-            let grid_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.y)
-                .unwrap_or(0.0);
-
-            // Center of the hovered sector (snap to grid)
-            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-
-            let inner_half = SECTOR_SIZE * 1.5; // Inner 3x3
-            let outer_half = SECTOR_SIZE * 2.5; // Outer 5x5
-
-            // Draw grid lines - 6 lines in each direction for 5x5 grid
-            for i in 0..=5 {
-                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
-                let dist_from_center = offset.abs();
-
-                let color = if dist_from_center <= inner_half {
-                    inner_color
-                } else {
-                    outer_color
-                };
-
-                let z = center_z + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(center_x - outer_half, grid_y, z),
-                    Vec3::new(center_x + outer_half, grid_y, z),
-                    &state.camera_3d,
-                    color,
-                );
-
-                let x = center_x + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(x, grid_y, center_z - outer_half),
-                    Vec3::new(x, grid_y, center_z + outer_half),
-                    &state.camera_3d,
-                    color,
-                );
-            }
-
-            // Draw vertex indicators at the 4 corners of the hovered sector
-            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let vertex_color = RasterColor::new(255, 255, 255); // White
-            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-        }
-    }
-
-    // Draw hovering ceiling grid centered on hovered tile when in ceiling placement mode
-    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
-        if state.tool == EditorTool::DrawCeiling {
-            use super::CEILING_HEIGHT;
-
-            let inner_color = RasterColor::new(140, 100, 180); // Purple (bright)
-            let outer_color = RasterColor::new(70, 50, 90);    // Purple (dim)
-
-            // Get room Y offset for correct world-space positioning
-            let room_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.y)
-                .unwrap_or(0.0);
-            let ceiling_y = room_y + CEILING_HEIGHT;
-
-            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-
-            let inner_half = SECTOR_SIZE * 1.5;
-            let outer_half = SECTOR_SIZE * 2.5;
-
-            for i in 0..=5 {
-                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
-                let dist_from_center = offset.abs();
-
-                let color = if dist_from_center <= inner_half {
-                    inner_color
-                } else {
-                    outer_color
-                };
-
-                let z = center_z + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(center_x - outer_half, ceiling_y, z),
-                    Vec3::new(center_x + outer_half, ceiling_y, z),
-                    &state.camera_3d,
-                    color,
-                );
-
-                let x = center_x + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(x, ceiling_y, center_z - outer_half),
-                    Vec3::new(x, ceiling_y, center_z + outer_half),
-                    &state.camera_3d,
-                    color,
-                );
-            }
-
-            // Draw vertex indicators at the 4 corners of the hovered sector
-            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let vertex_color = RasterColor::new(255, 255, 255); // White
-            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-        }
-    }
-
     // Draw drag rectangle preview for floor/ceiling placement
     if let (Some((start_gx, start_gz)), Some((end_gx, end_gz))) = (state.placement_drag_start, state.placement_drag_current) {
         if state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling {
@@ -2878,10 +2922,10 @@ pub fn draw_viewport_3d(
             let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
             // Check if there's a sector with existing walls - use gap heights if so
-            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            // Use room's effective vertical bounds for gap detection
             let (corner_heights, is_gap_fill) = if gx >= 0 && gz >= 0 {
                 if let Some(room) = state.level.rooms.get(state.current_room) {
-                    let (fallback_bottom, fallback_top) = (room.bounds.min.y, room.bounds.max.y);
+                    let (fallback_bottom, fallback_top) = room.effective_height_bounds();
                     if let Some(sector) = room.get_sector(gx as usize, gz as usize) {
                         // Check if edge has walls and find the gap
                         // Use the stored mouse_y from drag start for consistent gap selection
@@ -3000,9 +3044,12 @@ pub fn draw_viewport_3d(
                 let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
                 let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
-                // Use default heights (0 to CEILING_HEIGHT)
-                let floor_y = room_pos.y;
-                let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
+                // Use room's effective vertical bounds
+                let (floor_rel, ceiling_rel) = state.level.rooms.get(state.current_room)
+                    .map(|r| r.effective_height_bounds())
+                    .unwrap_or((0.0, super::CEILING_HEIGHT));
+                let floor_y = room_pos.y + floor_rel;
+                let ceiling_y = room_pos.y + ceiling_rel;
 
                 // Diagonal wall corners
                 let (p0, p1, p2, p3) = if is_nwse {
@@ -3050,7 +3097,7 @@ pub fn draw_viewport_3d(
     // === LIGHTS PHASE ===
     let lights_start = EditorFrameTimings::start();
 
-    // Build texture map from texture packs
+    // Build texture map from texture packs + user textures
     let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     let mut texture_idx = 0;
     for pack in &state.texture_packs {
@@ -3058,6 +3105,11 @@ pub fn draw_viewport_3d(
             texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
             texture_idx += 1;
         }
+    }
+    // Add user textures (using _USER pack name convention)
+    for name in state.user_textures.names() {
+        texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), texture_idx);
+        texture_idx += 1;
     }
 
     // Texture resolver closure
@@ -3095,10 +3147,11 @@ pub fn draw_viewport_3d(
     // === TEXTURE CONVERSION PHASE ===
     let texconv_start = EditorFrameTimings::start();
 
-    // Convert textures to RGB555 if enabled (lazy cache: only convert when texture count changes)
+    // Convert textures to RGB555 if enabled (lazy cache: invalidate when generation changes)
     let use_rgb555 = state.raster_settings.use_rgb555;
-    if use_rgb555 && state.textures_15_cache.len() != textures.len() {
+    if use_rgb555 && (state.textures_15_cache_generation != state.texture_generation || state.textures_15_cache.len() != textures.len()) {
         state.textures_15_cache = textures.iter().map(|t| t.to_15()).collect();
+        state.textures_15_cache_generation = state.texture_generation;
     }
 
     let vp_texconv_ms = EditorFrameTimings::elapsed_ms(texconv_start);
@@ -3139,6 +3192,127 @@ pub fn draw_viewport_3d(
 
     // === PREVIEW/SELECTION PHASE ===
     let preview_start = EditorFrameTimings::start();
+
+    // Draw hovering floor grid centered on hovered tile when in floor placement mode
+    // (Drawn after mesh so it renders on top)
+    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+        if state.tool == EditorTool::DrawFloor {
+            let inner_color = RasterColor::new(80, 180, 160); // Teal (bright)
+            let outer_color = RasterColor::new(40, 90, 80);   // Teal (dim)
+
+            // Get room Y offset for correct world-space positioning
+            let grid_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
+
+            // Center of the hovered sector (snap to grid)
+            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+
+            let inner_half = SECTOR_SIZE * 1.5; // Inner 3x3
+            let outer_half = SECTOR_SIZE * 2.5; // Outer 5x5
+
+            // Draw grid lines - 6 lines in each direction for 5x5 grid
+            for i in 0..=5 {
+                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
+                let dist_from_center = offset.abs();
+
+                let color = if dist_from_center <= inner_half {
+                    inner_color
+                } else {
+                    outer_color
+                };
+
+                let z = center_z + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(center_x - outer_half, grid_y, z),
+                    Vec3::new(center_x + outer_half, grid_y, z),
+                    &state.camera_3d,
+                    color,
+                );
+
+                let x = center_x + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(x, grid_y, center_z - outer_half),
+                    Vec3::new(x, grid_y, center_z + outer_half),
+                    &state.camera_3d,
+                    color,
+                );
+            }
+
+            // Draw vertex indicators at the 4 corners of the hovered sector
+            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+        }
+    }
+
+    // Draw hovering ceiling grid centered on hovered tile when in ceiling placement mode
+    // (Drawn after mesh so it renders on top)
+    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+        if state.tool == EditorTool::DrawCeiling {
+            use super::CEILING_HEIGHT;
+
+            let inner_color = RasterColor::new(140, 100, 180); // Purple (bright)
+            let outer_color = RasterColor::new(70, 50, 90);    // Purple (dim)
+
+            // Get room Y offset for correct world-space positioning
+            let room_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
+            let ceiling_y = room_y + CEILING_HEIGHT;
+
+            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+
+            let inner_half = SECTOR_SIZE * 1.5;
+            let outer_half = SECTOR_SIZE * 2.5;
+
+            for i in 0..=5 {
+                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
+                let dist_from_center = offset.abs();
+
+                let color = if dist_from_center <= inner_half {
+                    inner_color
+                } else {
+                    outer_color
+                };
+
+                let z = center_z + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(center_x - outer_half, ceiling_y, z),
+                    Vec3::new(center_x + outer_half, ceiling_y, z),
+                    &state.camera_3d,
+                    color,
+                );
+
+                let x = center_x + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(x, ceiling_y, center_z - outer_half),
+                    Vec3::new(x, ceiling_y, center_z + outer_half),
+                    &state.camera_3d,
+                    color,
+                );
+            }
+
+            // Draw vertex indicators at the 4 corners of the hovered sector
+            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+        }
+    }
 
     // Draw subtle sector boundary highlight for wall placement
     // Only show if on the drag line (same check as wall preview)
@@ -4116,15 +4290,18 @@ pub fn draw_viewport_3d(
                 let depth = max_z - min_z;
 
                 for copied_face in &gc.faces {
-                    // Apply flip transformations (same logic as paste_geometry_selection)
-                    let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
-                        (width - copied_face.rel_x, depth - copied_face.rel_z)
-                    } else if gc.flip_h {
-                        (width - copied_face.rel_x, copied_face.rel_z)
-                    } else if gc.flip_v {
-                        (copied_face.rel_x, depth - copied_face.rel_z)
-                    } else {
-                        (copied_face.rel_x, copied_face.rel_z)
+                    // Apply rotation first, then flip transformations
+                    let (rx, rz, rw, rd) = match gc.rotation % 4 {
+                        1 => (depth - copied_face.rel_z, copied_face.rel_x, depth, width),
+                        2 => (width - copied_face.rel_x, depth - copied_face.rel_z, width, depth),
+                        3 => (copied_face.rel_z, width - copied_face.rel_x, depth, width),
+                        _ => (copied_face.rel_x, copied_face.rel_z, width, depth),
+                    };
+                    let (rel_x, rel_z) = match (gc.flip_h, gc.flip_v) {
+                        (true, true) => (rw - rx, rd - rz),
+                        (true, false) => (rw - rx, rz),
+                        (false, true) => (rx, rd - rz),
+                        (false, false) => (rx, rz),
                     };
 
                     let target_gx = anchor_gx + rel_x;
@@ -4136,8 +4313,13 @@ pub fn draw_viewport_3d(
 
                     match &copied_face.face {
                         CopiedFaceData::Floor(f) => {
-                            // Apply height flips for preview
-                            let mut heights = f.heights;
+                            // Apply rotation then flips to heights for preview
+                            let mut heights = match gc.rotation % 4 {
+                                1 => [f.heights[3], f.heights[0], f.heights[1], f.heights[2]],
+                                2 => [f.heights[2], f.heights[3], f.heights[0], f.heights[1]],
+                                3 => [f.heights[1], f.heights[2], f.heights[3], f.heights[0]],
+                                _ => f.heights,
+                            };
                             if gc.flip_h {
                                 heights = [heights[1], heights[0], heights[3], heights[2]];
                             }
@@ -4158,7 +4340,12 @@ pub fn draw_viewport_3d(
                             draw_3d_line(fb, corners[0], corners[2], &state.camera_3d, preview_color);
                         }
                         CopiedFaceData::Ceiling(f) => {
-                            let mut heights = f.heights;
+                            let mut heights = match gc.rotation % 4 {
+                                1 => [f.heights[3], f.heights[0], f.heights[1], f.heights[2]],
+                                2 => [f.heights[2], f.heights[3], f.heights[0], f.heights[1]],
+                                3 => [f.heights[1], f.heights[2], f.heights[3], f.heights[0]],
+                                _ => f.heights,
+                            };
                             if gc.flip_h {
                                 heights = [heights[1], heights[0], heights[3], heights[2]];
                             }
@@ -4650,6 +4837,201 @@ pub fn draw_viewport_3d(
         draw_selection(fb, sel);
     }
 
+    // Draw box select preview (live highlighting during drag)
+    if state.box_selecting {
+        if let (Some((x0, y0)), Some((x1, y1))) = (state.selection_rect_start, state.selection_rect_end) {
+            let rect_min_x = x0.min(x1);
+            let rect_max_x = x0.max(x1);
+            let rect_min_y = y0.min(y1);
+            let rect_max_y = y0.max(y1);
+
+            // Only calculate if box has meaningful size
+            if (rect_max_x - rect_min_x) > 3.0 || (rect_max_y - rect_min_y) > 3.0 {
+                let preview_items = find_selections_in_rect(state, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y);
+
+                // Draw preview items with cyan color to distinguish from confirmed selection
+                let preview_color = RasterColor::new(100, 220, 255); // Cyan for preview
+
+                // Create a draw function for preview with different color
+                let draw_preview_selection = |fb: &mut Framebuffer, selection: &Selection| {
+                    match selection {
+                        Selection::SectorFace { room, x, z, face } => {
+                            if let Some(room_data) = state.level.rooms.get(*room) {
+                                if let Some(sector) = room_data.get_sector(*x, *z) {
+                                    let base_x = room_data.position.x + (*x as f32) * SECTOR_SIZE;
+                                    let base_z = room_data.position.z + (*z as f32) * SECTOR_SIZE;
+                                    let room_y = room_data.position.y;
+
+                                    match face {
+                                        SectorFace::Floor => {
+                                            if let Some(floor) = &sector.floor {
+                                                let corners = [
+                                                    Vec3::new(base_x, room_y + floor.heights[0], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
+                                                    Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
+                                                ];
+                                                draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                                            }
+                                        }
+                                        SectorFace::Ceiling => {
+                                            if let Some(ceiling) = &sector.ceiling {
+                                                let corners = [
+                                                    Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
+                                                    Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
+                                                ];
+                                                draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                                            }
+                                        }
+                                        face if is_wall_face(face) => {
+                                            // Get wall corners based on direction
+                                            let (x0, z0, x1, z1) = match face {
+                                                SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
+                                                SectorFace::WallSouth(_) => (base_x, base_z + SECTOR_SIZE, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                SectorFace::WallWest(_) => (base_x, base_z, base_x, base_z + SECTOR_SIZE),
+                                                SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
+                                                _ => return,
+                                            };
+                                            let walls = match face {
+                                                SectorFace::WallNorth(i) => sector.walls_north.get(*i),
+                                                SectorFace::WallEast(i) => sector.walls_east.get(*i),
+                                                SectorFace::WallSouth(i) => sector.walls_south.get(*i),
+                                                SectorFace::WallWest(i) => sector.walls_west.get(*i),
+                                                SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i),
+                                                SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i),
+                                                _ => None,
+                                            };
+                                            if let Some(wall) = walls {
+                                                let corners = [
+                                                    Vec3::new(x0, room_y + wall.heights[0], z0),
+                                                    Vec3::new(x1, room_y + wall.heights[1], z1),
+                                                    Vec3::new(x1, room_y + wall.heights[2], z1),
+                                                    Vec3::new(x0, room_y + wall.heights[3], z0),
+                                                ];
+                                                draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        Selection::Object { room, index } => {
+                            if let Some(room_data) = state.level.rooms.get(*room) {
+                                if let Some(obj) = room_data.objects.get(*index) {
+                                    let world_pos = obj.world_position(room_data);
+                                    // Draw a small cross at object position
+                                    let size = 64.0;
+                                    draw_3d_line(fb, world_pos - Vec3::new(size, 0.0, 0.0), world_pos + Vec3::new(size, 0.0, 0.0), &state.camera_3d, preview_color);
+                                    draw_3d_line(fb, world_pos - Vec3::new(0.0, size, 0.0), world_pos + Vec3::new(0.0, size, 0.0), &state.camera_3d, preview_color);
+                                    draw_3d_line(fb, world_pos - Vec3::new(0.0, 0.0, size), world_pos + Vec3::new(0.0, 0.0, size), &state.camera_3d, preview_color);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                };
+
+                for sel in &preview_items {
+                    draw_preview_selection(fb, sel);
+                }
+            }
+        }
+    }
+
+    // Draw X/Z relocation preview
+    if state.xz_drag_active && state.viewport_drag_started {
+        let (dx, dz) = state.xz_drag_delta;
+        let preview_color = RasterColor::new(100, 220, 255); // Cyan for valid
+        let blocked_color = RasterColor::new(255, 100, 100); // Red for blocked
+
+        for &(room_idx, gx, gz, ref face) in &state.xz_drag_initial_positions {
+            // Keep as signed for world position calculation (allows negative/out-of-bounds preview)
+            let dst_gx_signed = gx as i32 + dx;
+            let dst_gz_signed = gz as i32 + dz;
+
+            // Check if destination is blocked (only for valid in-bounds positions)
+            let is_blocked = if dst_gx_signed >= 0 && dst_gz_signed >= 0 {
+                is_destination_occupied(state, room_idx, dst_gx_signed as usize, dst_gz_signed as usize, face, &state.xz_drag_initial_positions)
+            } else {
+                false // Out of bounds positions are not blocked (will expand room)
+            };
+            let color = if is_blocked { blocked_color } else { preview_color };
+
+            if let Some(room) = state.level.rooms.get(room_idx) {
+                let room_y = room.position.y;
+                // Use signed coordinates for world position - allows preview outside current bounds
+                let dst_base_x = room.position.x + (dst_gx_signed as f32) * SECTOR_SIZE;
+                let dst_base_z = room.position.z + (dst_gz_signed as f32) * SECTOR_SIZE;
+
+                // Get face heights from original position
+                if let Some(sector) = room.get_sector(gx, gz) {
+                    let corners: Option<[Vec3; 4]> = match face {
+                        SectorFace::Floor => sector.floor.as_ref().map(|f| [
+                            Vec3::new(dst_base_x, room_y + f.heights[0], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + f.heights[1], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + f.heights[2], dst_base_z + SECTOR_SIZE),
+                            Vec3::new(dst_base_x, room_y + f.heights[3], dst_base_z + SECTOR_SIZE),
+                        ]),
+                        SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| [
+                            Vec3::new(dst_base_x, room_y + c.heights[0], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + c.heights[1], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + c.heights[2], dst_base_z + SECTOR_SIZE),
+                            Vec3::new(dst_base_x, room_y + c.heights[3], dst_base_z + SECTOR_SIZE),
+                        ]),
+                        _ => {
+                            // Wall faces
+                            let (x0, z0, x1, z1) = match face {
+                                SectorFace::WallNorth(_) => (dst_base_x, dst_base_z, dst_base_x + SECTOR_SIZE, dst_base_z),
+                                SectorFace::WallEast(_) => (dst_base_x + SECTOR_SIZE, dst_base_z, dst_base_x + SECTOR_SIZE, dst_base_z + SECTOR_SIZE),
+                                SectorFace::WallSouth(_) => (dst_base_x + SECTOR_SIZE, dst_base_z + SECTOR_SIZE, dst_base_x, dst_base_z + SECTOR_SIZE),
+                                SectorFace::WallWest(_) => (dst_base_x, dst_base_z + SECTOR_SIZE, dst_base_x, dst_base_z),
+                                SectorFace::WallNwSe(_) => (dst_base_x, dst_base_z, dst_base_x + SECTOR_SIZE, dst_base_z + SECTOR_SIZE),
+                                SectorFace::WallNeSw(_) => (dst_base_x + SECTOR_SIZE, dst_base_z, dst_base_x, dst_base_z + SECTOR_SIZE),
+                                _ => (0.0, 0.0, 0.0, 0.0),
+                            };
+                            let wall_heights = match face {
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.heights),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.heights),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.heights),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.heights),
+                                SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).map(|w| w.heights),
+                                SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).map(|w| w.heights),
+                                _ => None,
+                            };
+                            wall_heights.map(|h| [
+                                Vec3::new(x0, room_y + h[0], z0),
+                                Vec3::new(x1, room_y + h[1], z1),
+                                Vec3::new(x1, room_y + h[2], z1),
+                                Vec3::new(x0, room_y + h[3], z0),
+                            ])
+                        }
+                    };
+
+                    if let Some(c) = corners {
+                        draw_3d_line(fb, c[0], c[1], &state.camera_3d, color);
+                        draw_3d_line(fb, c[1], c[2], &state.camera_3d, color);
+                        draw_3d_line(fb, c[2], c[3], &state.camera_3d, color);
+                        draw_3d_line(fb, c[3], c[0], &state.camera_3d, color);
+                    }
+                }
+            }
+        }
+    }
+
     // Draw floor/ceiling placement preview wireframe with vertical sector boundaries
     if let Some((snapped_x, snapped_z, target_y, occupied)) = preview_sector {
         use super::CEILING_HEIGHT;
@@ -4799,6 +5181,35 @@ pub fn draw_viewport_3d(
 
     // Draw viewport border
     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, Color::from_rgba(60, 60, 60, 255));
+
+    // Draw box select rectangle (if active)
+    if state.box_selecting {
+        if let (Some((fb_x0, fb_y0)), Some((fb_x1, fb_y1))) = (state.selection_rect_start, state.selection_rect_end) {
+            // Convert framebuffer coords back to screen coords
+            let screen_x0 = fb_x0 / fb_width as f32 * draw_w + draw_x;
+            let screen_y0 = fb_y0 / fb_height as f32 * draw_h + draw_y;
+            let screen_x1 = fb_x1 / fb_width as f32 * draw_w + draw_x;
+            let screen_y1 = fb_y1 / fb_height as f32 * draw_h + draw_y;
+
+            let rect_x = screen_x0.min(screen_x1);
+            let rect_y = screen_y0.min(screen_y1);
+            let rect_w = (screen_x1 - screen_x0).abs();
+            let rect_h = (screen_y1 - screen_y0).abs();
+
+            // Only draw if it's a meaningful size
+            if rect_w > 2.0 || rect_h > 2.0 {
+                // Semi-transparent fill
+                draw_rectangle(rect_x, rect_y, rect_w, rect_h, Color::from_rgba(100, 180, 255, 50));
+
+                // Outline
+                let outline_color = Color::from_rgba(100, 180, 255, 200);
+                draw_line(rect_x, rect_y, rect_x + rect_w, rect_y, 1.0, outline_color);
+                draw_line(rect_x + rect_w, rect_y, rect_x + rect_w, rect_y + rect_h, 1.0, outline_color);
+                draw_line(rect_x + rect_w, rect_y + rect_h, rect_x, rect_y + rect_h, 1.0, outline_color);
+                draw_line(rect_x, rect_y + rect_h, rect_x, rect_y, 1.0, outline_color);
+            }
+        }
+    }
 
     // Draw camera info (position and rotation) - top left
     draw_text(
@@ -5087,7 +5498,8 @@ fn clip_line_to_rect(
     let mut code0 = outcode(x0, y0);
     let mut code1 = outcode(x1, y1);
 
-    loop {
+    // Guard against infinite loops from floating-point edge cases
+    for _ in 0..16 {
         if (code0 | code1) == 0 {
             // Both inside
             return Some((x0, y0, x1, y1));
@@ -5127,6 +5539,9 @@ fn clip_line_to_rect(
             code1 = outcode(x1, y1);
         }
     }
+
+    // Failed to converge (floating-point edge case) - reject the line
+    None
 }
 
 /// Draw a 3D point (filled circle) at a world position
@@ -5655,6 +6070,351 @@ fn collect_all_room_vertices(state: &EditorState) -> VertexData {
     all_vertices
 }
 
+/// Calculate the average Y position of all selected faces (for X/Z drag plane)
+fn calculate_selection_center_y(state: &EditorState) -> f32 {
+    let mut total_y = 0.0;
+    let mut count = 0;
+
+    // Helper to get face center Y
+    let get_face_y = |room_idx: usize, gx: usize, gz: usize, face: &SectorFace| -> Option<f32> {
+        let room = state.level.rooms.get(room_idx)?;
+        let sector = room.get_sector(gx, gz)?;
+        let room_y = room.position.y;
+
+        match face {
+            SectorFace::Floor => {
+                sector.floor.as_ref().map(|f| {
+                    room_y + (f.heights[0] + f.heights[1] + f.heights[2] + f.heights[3]) / 4.0
+                })
+            }
+            SectorFace::Ceiling => {
+                sector.ceiling.as_ref().map(|c| {
+                    room_y + (c.heights[0] + c.heights[1] + c.heights[2] + c.heights[3]) / 4.0
+                })
+            }
+            SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+        }
+    };
+
+    // Check primary selection
+    if let Selection::SectorFace { room, x, z, face } = &state.selection {
+        if let Some(y) = get_face_y(*room, *x, *z, face) {
+            total_y += y;
+            count += 1;
+        }
+    }
+
+    // Check multi-selection
+    for sel in &state.multi_selection {
+        if let Selection::SectorFace { room, x, z, face } = sel {
+            if let Some(y) = get_face_y(*room, *x, *z, face) {
+                total_y += y;
+                count += 1;
+            }
+        }
+    }
+
+    if count > 0 {
+        total_y / count as f32
+    } else {
+        0.0
+    }
+}
+
+/// Face data extracted for relocation
+#[derive(Clone)]
+enum FaceData {
+    Floor(crate::world::HorizontalFace),
+    Ceiling(crate::world::HorizontalFace),
+    WallNorth(crate::world::VerticalFace),
+    WallEast(crate::world::VerticalFace),
+    WallSouth(crate::world::VerticalFace),
+    WallWest(crate::world::VerticalFace),
+    WallNwSe(crate::world::VerticalFace),
+    WallNeSw(crate::world::VerticalFace),
+}
+
+/// Relocate faces by dx/dz grid units. Returns (count moved, total_offset_x, total_offset_z).
+/// The total offset includes room expansion offset + movement delta.
+/// Returns (moved_count, total_dx, total_dz, trim_x, trim_z)
+/// - moved_count: number of faces actually moved
+/// - total_dx/dz: total offset including room expansion + movement delta
+/// - trim_x/z: how many columns/rows were trimmed from the start after compacting
+fn relocate_faces(
+    state: &mut EditorState,
+    faces: &[(usize, usize, usize, SectorFace)],
+    dx: i32, dz: i32,
+) -> (usize, i32, i32, usize, usize) {
+    use std::collections::HashSet;
+
+    if faces.is_empty() || (dx == 0 && dz == 0) {
+        return (0, 0, 0, 0, 0);
+    }
+
+    // Phase 1: Calculate destination coordinates and check bounds
+    // We need to potentially expand the room for negative destinations
+    let mut min_dst_gx = i32::MAX;
+    let mut min_dst_gz = i32::MAX;
+    let mut max_dst_gx = i32::MIN;
+    let mut max_dst_gz = i32::MIN;
+
+    for &(_, gx, gz, _) in faces {
+        let dst_gx = gx as i32 + dx;
+        let dst_gz = gz as i32 + dz;
+        min_dst_gx = min_dst_gx.min(dst_gx);
+        min_dst_gz = min_dst_gz.min(dst_gz);
+        max_dst_gx = max_dst_gx.max(dst_gx);
+        max_dst_gz = max_dst_gz.max(dst_gz);
+    }
+
+    // Get the room index (assume all faces are in the same room for now)
+    let room_idx = faces.first().map(|(r, _, _, _)| *r).unwrap_or(0);
+
+    // Phase 2: Expand room if needed
+    let mut offset_x = 0i32;
+    let mut offset_z = 0i32;
+
+    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+        // Expand in negative X direction
+        while min_dst_gx + offset_x < 0 {
+            room.position.x -= SECTOR_SIZE;
+            room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+            room.width += 1;
+            offset_x += 1;
+            // Shift all objects to match new grid indices
+            for obj in &mut room.objects {
+                obj.sector_x += 1;
+            }
+        }
+
+        // Expand in negative Z direction
+        while min_dst_gz + offset_z < 0 {
+            room.position.z -= SECTOR_SIZE;
+            for col in &mut room.sectors {
+                col.insert(0, None);
+            }
+            room.depth += 1;
+            offset_z += 1;
+            // Shift all objects to match new grid indices
+            for obj in &mut room.objects {
+                obj.sector_z += 1;
+            }
+        }
+
+        // Expand in positive X direction
+        while (max_dst_gx + offset_x) as usize >= room.width {
+            room.width += 1;
+            room.sectors.push((0..room.depth).map(|_| None).collect());
+        }
+
+        // Expand in positive Z direction
+        while (max_dst_gz + offset_z) as usize >= room.depth {
+            room.depth += 1;
+            for col in &mut room.sectors {
+                col.push(None);
+            }
+        }
+    }
+
+    // Adjust face coordinates for the expansion offset
+    let adjusted_faces: Vec<(usize, usize, usize, SectorFace)> = faces.iter().map(|&(r, gx, gz, ref face)| {
+        (r, (gx as i32 + offset_x) as usize, (gz as i32 + offset_z) as usize, face.clone())
+    }).collect();
+
+    // Phase 3: Check which faces can actually move (destination not occupied by non-moving faces)
+    let movable: Vec<(usize, usize, usize, SectorFace)> = adjusted_faces.iter().filter(|(room_idx, gx, gz, face)| {
+        let dst_gx = (*gx as i32 + dx) as usize;
+        let dst_gz = (*gz as i32 + dz) as usize;
+        // Pass adjusted_faces as vacating positions - faces in this list will vacate, so don't count them as blocking
+        !is_destination_occupied(state, *room_idx, dst_gx, dst_gz, face, &adjusted_faces)
+    }).cloned().collect();
+
+    if movable.is_empty() {
+        return (0, offset_x + dx, offset_z + dz, 0, 0);
+    }
+
+    // Phase 4: Extract face data from sources
+    let face_data: Vec<Option<FaceData>> = movable.iter().map(|(room_idx, gx, gz, face)| {
+        extract_face_data(&state.level, *room_idx, *gx, *gz, face)
+    }).collect();
+
+    // Phase 5: Delete from sources
+    for (room_idx, gx, gz, face) in &movable {
+        delete_face(&mut state.level, *room_idx, *gx, *gz, face.clone());
+    }
+
+    // Phase 6: Create at destinations
+    let mut moved_count = 0;
+    for (i, (room_idx, gx, gz, _face)) in movable.iter().enumerate() {
+        let dst_gx = (*gx as i32 + dx) as usize;
+        let dst_gz = (*gz as i32 + dz) as usize;
+        if let Some(data) = &face_data[i] {
+            create_face(&mut state.level, *room_idx, dst_gx, dst_gz, data);
+            moved_count += 1;
+        }
+    }
+
+    // Phase 7: Cleanup
+    let affected_rooms: HashSet<usize> = movable.iter().map(|(r, _, _, _)| *r).collect();
+    let mut trim_x = 0usize;
+    let mut trim_z = 0usize;
+    for room_idx in affected_rooms {
+        if let Some(room) = state.level.rooms.get_mut(room_idx) {
+            let (tx, tz) = room.compact();
+            // Accumulate trim offsets (in practice there's usually only one room)
+            trim_x = trim_x.max(tx);
+            trim_z = trim_z.max(tz);
+        }
+    }
+    state.mark_portals_dirty();
+
+    // Return count, total offset (room expansion + movement delta), and trim offset
+    (moved_count, offset_x + dx, offset_z + dz, trim_x, trim_z)
+}
+
+/// Check if destination has a conflicting face
+/// `vacating_positions` is the list of positions being moved - faces at these positions don't count as blocking
+fn is_destination_occupied(
+    state: &EditorState,
+    room_idx: usize,
+    gx: usize,
+    gz: usize,
+    face: &SectorFace,
+    vacating_positions: &[(usize, usize, usize, SectorFace)],
+) -> bool {
+    if let Some(room) = state.level.rooms.get(room_idx) {
+        if let Some(sector) = room.get_sector(gx, gz) {
+            let has_face = match face {
+                SectorFace::Floor => sector.floor.is_some(),
+                SectorFace::Ceiling => sector.ceiling.is_some(),
+                SectorFace::WallNorth(_) => !sector.walls_north.is_empty(),
+                SectorFace::WallEast(_) => !sector.walls_east.is_empty(),
+                SectorFace::WallSouth(_) => !sector.walls_south.is_empty(),
+                SectorFace::WallWest(_) => !sector.walls_west.is_empty(),
+                SectorFace::WallNwSe(_) => !sector.walls_nwse.is_empty(),
+                SectorFace::WallNeSw(_) => !sector.walls_nesw.is_empty(),
+            };
+
+            if !has_face {
+                return false;
+            }
+
+            // Check if the face at this position is being vacated (part of the selection being moved)
+            let is_being_vacated = vacating_positions.iter().any(|(r, x, z, f)| {
+                *r == room_idx && *x == gx && *z == gz && std::mem::discriminant(f) == std::mem::discriminant(face)
+            });
+
+            // Only blocked if there's a face AND it's not being vacated
+            return !is_being_vacated;
+        }
+    }
+    false
+}
+
+/// Extract face data from a sector
+fn extract_face_data(level: &crate::world::Level, room_idx: usize, gx: usize, gz: usize, face: &SectorFace) -> Option<FaceData> {
+    let room = level.rooms.get(room_idx)?;
+    let sector = room.get_sector(gx, gz)?;
+
+    match face {
+        SectorFace::Floor => sector.floor.clone().map(FaceData::Floor),
+        SectorFace::Ceiling => sector.ceiling.clone().map(FaceData::Ceiling),
+        SectorFace::WallNorth(i) => sector.walls_north.get(*i).cloned().map(FaceData::WallNorth),
+        SectorFace::WallEast(i) => sector.walls_east.get(*i).cloned().map(FaceData::WallEast),
+        SectorFace::WallSouth(i) => sector.walls_south.get(*i).cloned().map(FaceData::WallSouth),
+        SectorFace::WallWest(i) => sector.walls_west.get(*i).cloned().map(FaceData::WallWest),
+        SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).cloned().map(FaceData::WallNwSe),
+        SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).cloned().map(FaceData::WallNeSw),
+    }
+}
+
+/// Create a face at a destination sector
+fn create_face(level: &mut crate::world::Level, room_idx: usize, gx: usize, gz: usize, data: &FaceData) {
+    if let Some(room) = level.rooms.get_mut(room_idx) {
+        room.ensure_sector(gx, gz);
+        if let Some(sector) = room.get_sector_mut(gx, gz) {
+            match data {
+                FaceData::Floor(f) => { sector.floor = Some(f.clone()); }
+                FaceData::Ceiling(c) => { sector.ceiling = Some(c.clone()); }
+                FaceData::WallNorth(w) => { sector.walls_north.push(w.clone()); }
+                FaceData::WallEast(w) => { sector.walls_east.push(w.clone()); }
+                FaceData::WallSouth(w) => { sector.walls_south.push(w.clone()); }
+                FaceData::WallWest(w) => { sector.walls_west.push(w.clone()); }
+                FaceData::WallNwSe(w) => { sector.walls_nwse.push(w.clone()); }
+                FaceData::WallNeSw(w) => { sector.walls_nesw.push(w.clone()); }
+            }
+        }
+    }
+}
+
+/// Update selection positions after relocation
+fn update_selection_positions(
+    state: &mut EditorState,
+    original_faces: &[(usize, usize, usize, SectorFace)],
+    dx: i32, dz: i32,
+) {
+    // Build a lookup of original positions that were moved
+    let moved_positions: std::collections::HashSet<(usize, usize, usize)> = original_faces.iter()
+        .map(|(r, x, z, _)| (*r, *x, *z))
+        .collect();
+
+    // Update primary selection
+    if let Selection::SectorFace { room, x, z, face } = &state.selection {
+        if moved_positions.contains(&(*room, *x, *z)) {
+            let new_x = (*x as i32 + dx) as usize;
+            let new_z = (*z as i32 + dz) as usize;
+            // For walls, the index may have changed - use index 0 for the new wall
+            let new_face = match face {
+                SectorFace::WallNorth(_) => SectorFace::WallNorth(0),
+                SectorFace::WallEast(_) => SectorFace::WallEast(0),
+                SectorFace::WallSouth(_) => SectorFace::WallSouth(0),
+                SectorFace::WallWest(_) => SectorFace::WallWest(0),
+                SectorFace::WallNwSe(_) => SectorFace::WallNwSe(0),
+                SectorFace::WallNeSw(_) => SectorFace::WallNeSw(0),
+                _ => *face,
+            };
+            state.selection = Selection::SectorFace { room: *room, x: new_x, z: new_z, face: new_face };
+        }
+    }
+
+    // Update multi-selection
+    for sel in &mut state.multi_selection {
+        if let Selection::SectorFace { room, x, z, face } = sel {
+            if moved_positions.contains(&(*room, *x, *z)) {
+                let new_x = (*x as i32 + dx) as usize;
+                let new_z = (*z as i32 + dz) as usize;
+                let new_face = match face {
+                    SectorFace::WallNorth(_) => SectorFace::WallNorth(0),
+                    SectorFace::WallEast(_) => SectorFace::WallEast(0),
+                    SectorFace::WallSouth(_) => SectorFace::WallSouth(0),
+                    SectorFace::WallWest(_) => SectorFace::WallWest(0),
+                    SectorFace::WallNwSe(_) => SectorFace::WallNwSe(0),
+                    SectorFace::WallNeSw(_) => SectorFace::WallNeSw(0),
+                    _ => *face,
+                };
+                *sel = Selection::SectorFace { room: *room, x: new_x, z: new_z, face: new_face };
+            }
+        }
+    }
+}
+
 /// Find hovered elements in Select mode using depth-based selection.
 /// The element closest to the camera wins, regardless of type (vertex/edge/face).
 fn find_hovered_elements(
@@ -6093,4 +6853,151 @@ fn interpolate_depth_in_triangle(
 
     // Interpolate depth
     w0 * d0 + w1 * d1 + w2 * d2
+}
+
+/// Find all faces and objects within a screen-space rectangle (for box select)
+/// Returns a Vec of selections without modifying state
+fn find_selections_in_rect(
+    state: &EditorState,
+    fb: &Framebuffer,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+) -> Vec<Selection> {
+    let room_idx = state.current_room;
+    let Some(room) = state.level.rooms.get(room_idx) else { return Vec::new() };
+
+    let cam = &state.camera_3d;
+    let mut collected: Vec<Selection> = Vec::new();
+
+    // Check all sectors for faces
+    for x in 0..room.width {
+        for z in 0..room.depth {
+            let Some(sector) = room.get_sector(x, z) else { continue };
+
+            // World position of sector corners
+            let base_x = room.position.x + (x as f32) * SECTOR_SIZE;
+            let base_z = room.position.z + (z as f32) * SECTOR_SIZE;
+
+            // Check floor
+            if let Some(floor) = &sector.floor {
+                if face_center_in_rect(room.position.y, base_x, base_z, floor.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::Floor });
+                }
+            }
+
+            // Check ceiling
+            if let Some(ceiling) = &sector.ceiling {
+                if face_center_in_rect(room.position.y, base_x, base_z, ceiling.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::Ceiling });
+                }
+            }
+
+            // Check cardinal walls
+            for (i, wall) in sector.walls_north.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::North, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallNorth(i) });
+                }
+            }
+            for (i, wall) in sector.walls_east.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::East, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallEast(i) });
+                }
+            }
+            for (i, wall) in sector.walls_south.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::South, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallSouth(i) });
+                }
+            }
+            for (i, wall) in sector.walls_west.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::West, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallWest(i) });
+                }
+            }
+
+            // Check diagonal walls
+            for (i, wall) in sector.walls_nwse.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::NwSe, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallNwSe(i) });
+                }
+            }
+            for (i, wall) in sector.walls_nesw.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::NeSw, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallNeSw(i) });
+                }
+            }
+        }
+    }
+
+    // Check objects
+    for (i, obj) in room.objects.iter().enumerate() {
+        let world_pos = obj.world_position(room);
+        if let Some((sx, sy)) = world_to_screen(world_pos, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+            if sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y {
+                collected.push(Selection::Object { room: room_idx, index: i });
+            }
+        }
+    }
+
+    collected
+}
+
+/// Check if the center of a floor/ceiling face projects into the screen rectangle
+fn face_center_in_rect(
+    room_y: f32,
+    base_x: f32, base_z: f32,
+    heights: [f32; 4],
+    cam: &crate::rasterizer::Camera, fb: &Framebuffer,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+) -> bool {
+    // Calculate center position (average of all 4 corners)
+    let avg_height = (heights[0] + heights[1] + heights[2] + heights[3]) / 4.0;
+    let center = Vec3::new(
+        base_x + SECTOR_SIZE / 2.0,
+        room_y + avg_height,
+        base_z + SECTOR_SIZE / 2.0,
+    );
+
+    if let Some((sx, sy)) = world_to_screen(center, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+        sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y
+    } else {
+        false
+    }
+}
+
+/// Check if the center of a wall face projects into the screen rectangle
+fn wall_center_in_rect(
+    room_y: f32,
+    base_x: f32, base_z: f32,
+    direction: crate::world::Direction,
+    heights: [f32; 4],
+    cam: &crate::rasterizer::Camera, fb: &Framebuffer,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+) -> bool {
+    use crate::world::Direction;
+
+    // Get wall edge positions based on direction
+    let (x0, z0, x1, z1) = match direction {
+        Direction::North => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
+        Direction::South => (base_x, base_z + SECTOR_SIZE, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+        Direction::East => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+        Direction::West => (base_x, base_z, base_x, base_z + SECTOR_SIZE),
+        Direction::NwSe => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+        Direction::NeSw => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
+    };
+
+    // Calculate center position
+    let avg_height = (heights[0] + heights[1] + heights[2] + heights[3]) / 4.0;
+    let center = Vec3::new(
+        (x0 + x1) / 2.0,
+        room_y + avg_height,
+        (z0 + z1) / 2.0,
+    );
+
+    if let Some((sx, sy)) = world_to_screen(center, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+        sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y
+    } else {
+        false
+    }
 }

@@ -261,10 +261,8 @@ pub fn draw_editor(
     // Right split: center viewport | right panels
     let (center_rect, right_rect) = layout.right_split.update(ctx, rest_rect);
 
-    // Right split: texture palette | face properties
-    // Use layout() first to get rects, then handle_input() AFTER drawing contents
-    // This allows widgets inside the panels to claim drags before the divider can
-    let (texture_rect, props_rect) = layout.right_panel_split.layout(right_rect);
+    // Right panel: collapsible sections for Textures and Properties
+    // (Old split panel layout replaced with collapsible sections)
 
     // === LEFT PANEL ===
     let left_start = EditorFrameTimings::start();
@@ -361,17 +359,46 @@ pub fn draw_editor(
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
     let viewport_3d_ms = EditorFrameTimings::elapsed_ms(viewport_start);
 
-    // === RIGHT PANEL ===
+    // === RIGHT PANEL (Collapsible Sections) ===
     let right_start = EditorFrameTimings::start();
-    draw_panel(texture_rect, Some("Textures"), Color::from_rgba(35, 35, 40, 255));
-    draw_texture_palette(ctx, panel_content_rect(texture_rect, true), state, icon_font);
+    let panel_bg = Color::from_rgba(35, 35, 40, 255);
+    let header_h = COLLAPSED_PANEL_HEIGHT;
 
-    draw_panel(props_rect, Some("Properties"), Color::from_rgba(35, 35, 40, 255));
-    draw_properties(ctx, panel_content_rect(props_rect, true), state, icon_font);
+    // Count collapsed panels and calculate available height for expanded ones
+    let textures_collapsed = !state.textures_section_expanded;
+    let properties_collapsed = !state.properties_section_expanded;
+    let num_collapsed = [textures_collapsed, properties_collapsed].iter().filter(|&&c| c).count();
+    let collapsed_height = num_collapsed as f32 * header_h;
+    let available_height = (right_rect.h - collapsed_height).max(0.0);
 
-    // Handle right panel split input AFTER drawing contents
-    // This allows UV controls and other widgets to claim drags first
-    layout.right_panel_split.handle_input(ctx, right_rect);
+    // Calculate heights for expanded panels (equal distribution)
+    let num_expanded = 2 - num_collapsed;
+    let expanded_panel_height = if num_expanded > 0 {
+        available_height / num_expanded as f32
+    } else {
+        0.0
+    };
+
+    // Panel 0: Textures
+    let mut y = right_rect.y;
+    let textures_h = if textures_collapsed { header_h } else { expanded_panel_height };
+    let texture_rect = Rect::new(right_rect.x, y, right_rect.w, textures_h);
+    let (clicked, textures_content) = draw_collapsible_panel(ctx, texture_rect, "Textures", textures_collapsed, panel_bg);
+    if clicked { state.textures_section_expanded = !state.textures_section_expanded; }
+    if let Some(content) = textures_content {
+        draw_texture_palette(ctx, content, state, icon_font);
+    }
+    y += textures_h;
+
+    // Panel 1: Properties
+    let props_h = if properties_collapsed { header_h } else { expanded_panel_height };
+    let props_rect = Rect::new(right_rect.x, y, right_rect.w, props_h);
+    let (clicked, props_content) = draw_collapsible_panel(ctx, props_rect, "Properties", properties_collapsed, panel_bg);
+    if clicked { state.properties_section_expanded = !state.properties_section_expanded; }
+    if let Some(content) = props_content {
+        draw_properties(ctx, content, state, icon_font);
+    }
+
     let right_panel_ms = EditorFrameTimings::elapsed_ms(right_start);
 
     // === STATUS BAR ===
@@ -615,56 +642,6 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             state.raster_settings.backface_cull = false;
             state.set_status("Backfaces: Both Sides Visible", 2.0);
         }
-    }
-
-    toolbar.separator();
-
-    // Room navigation
-    toolbar.label(&format!("Room: {}", state.current_room));
-
-    if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_LEFT, icon_font, "Previous Room") {
-        if !state.level.rooms.is_empty() {
-            if state.current_room > 0 {
-                state.current_room -= 1;
-            } else {
-                // Wrap to last room
-                state.current_room = state.level.rooms.len() - 1;
-            }
-        }
-    }
-    if toolbar.icon_button(ctx, icon::CIRCLE_CHEVRON_RIGHT, icon_font, "Next Room") {
-        if !state.level.rooms.is_empty() {
-            if state.current_room + 1 < state.level.rooms.len() {
-                state.current_room += 1;
-            } else {
-                // Wrap to first room
-                state.current_room = 0;
-            }
-        }
-    }
-    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Add Room") {
-        // Create new room offset from existing rooms
-        let new_id = state.level.rooms.len();
-
-        // Calculate position: offset from the last room or origin
-        let offset_x = if let Some(last_room) = state.level.rooms.last() {
-            // Place new room to the east of the last room
-            last_room.position.x + (last_room.width as f32) * SECTOR_SIZE + SECTOR_SIZE
-        } else {
-            0.0
-        };
-
-        let new_room = crate::world::Room::new(
-            new_id,
-            crate::rasterizer::Vec3::new(offset_x, 0.0, 0.0),
-            1, // 1x1 grid to start
-            1,
-        );
-
-        state.save_undo();
-        state.level.rooms.push(new_room);
-        state.current_room = new_id;
-        state.set_status(&format!("Created Room {}", new_id), 2.0);
     }
 
     toolbar.separator();
@@ -1324,6 +1301,7 @@ fn copy_geometry_selection(state: &mut EditorState) {
             faces: copied_faces,
             flip_h: false,
             flip_v: false,
+            rotation: 0,
         });
         state.set_status(&format!("Copied {} faces to geometry clipboard", count), 2.0);
     }
@@ -1344,6 +1322,115 @@ fn paste_geometry_selection(state: &mut EditorState, gc: &GeometryClipboard) {
     };
 
     paste_geometry_at_impl(state, gc, room_idx, anchor_x, anchor_z);
+}
+
+/// Transform position based on rotation (0-3 = 0°, 90°, 180°, 270° CW) and flips
+/// Returns (new_rel_x, new_rel_z, effective_width, effective_depth)
+fn transform_clipboard_position(
+    rel_x: i32, rel_z: i32,
+    width: i32, depth: i32,
+    rotation: u8, flip_h: bool, flip_v: bool,
+) -> (i32, i32, i32, i32) {
+    // Apply rotation first
+    let (rx, rz, rw, rd) = match rotation {
+        1 => (depth - rel_z, rel_x, depth, width),         // 90° CW
+        2 => (width - rel_x, depth - rel_z, width, depth), // 180°
+        3 => (rel_z, width - rel_x, depth, width),         // 270° CW
+        _ => (rel_x, rel_z, width, depth),                 // 0° (no rotation)
+    };
+
+    // Then apply flips
+    let (fx, fz) = match (flip_h, flip_v) {
+        (true, true) => (rw - rx, rd - rz),
+        (true, false) => (rw - rx, rz),
+        (false, true) => (rx, rd - rz),
+        (false, false) => (rx, rz),
+    };
+
+    (fx, fz, rw, rd)
+}
+
+/// Rotate heights array for horizontal faces (90° CW per step)
+fn rotate_heights(heights: [f32; 4], rotation: u8) -> [f32; 4] {
+    match rotation {
+        1 => [heights[3], heights[0], heights[1], heights[2]], // 90° CW: SW→NW, NW→NE, NE→SE, SE→SW
+        2 => [heights[2], heights[3], heights[0], heights[1]], // 180°
+        3 => [heights[1], heights[2], heights[3], heights[0]], // 270° CW
+        _ => heights,
+    }
+}
+
+/// Rotate colors array for horizontal faces (90° CW per step)
+/// Same corner ordering as heights: [NW, NE, SE, SW]
+fn rotate_colors(colors: [RasterColor; 4], rotation: u8) -> [RasterColor; 4] {
+    match rotation {
+        1 => [colors[3], colors[0], colors[1], colors[2]], // 90° CW
+        2 => [colors[2], colors[3], colors[0], colors[1]], // 180°
+        3 => [colors[1], colors[2], colors[3], colors[0]], // 270° CW
+        _ => colors,
+    }
+}
+
+/// Wall direction for rotation and flip calculations
+#[derive(Clone, Copy, PartialEq)]
+enum WallDir { North, East, South, West, NwSe, NeSw }
+
+/// Transform wall direction based on rotation and flips
+fn transform_wall_direction(dir: WallDir, rotation: u8, flip_h: bool, flip_v: bool) -> WallDir {
+    // First apply rotation (clockwise)
+    let rotated = match rotation % 4 {
+        1 => match dir { // 90° CW
+            WallDir::North => WallDir::East,
+            WallDir::East => WallDir::South,
+            WallDir::South => WallDir::West,
+            WallDir::West => WallDir::North,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+        },
+        2 => match dir { // 180°
+            WallDir::North => WallDir::South,
+            WallDir::East => WallDir::West,
+            WallDir::South => WallDir::North,
+            WallDir::West => WallDir::East,
+            WallDir::NwSe => WallDir::NwSe,
+            WallDir::NeSw => WallDir::NeSw,
+        },
+        3 => match dir { // 270° CW
+            WallDir::North => WallDir::West,
+            WallDir::East => WallDir::North,
+            WallDir::South => WallDir::East,
+            WallDir::West => WallDir::South,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+        },
+        _ => dir, // 0°
+    };
+
+    // Then apply flips
+    match (flip_h, flip_v) {
+        (true, true) => match rotated {
+            WallDir::North => WallDir::South,
+            WallDir::South => WallDir::North,
+            WallDir::East => WallDir::West,
+            WallDir::West => WallDir::East,
+            d => d, // Diagonal: both flips = no change
+        },
+        (true, false) => match rotated {
+            WallDir::East => WallDir::West,
+            WallDir::West => WallDir::East,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+            d => d,
+        },
+        (false, true) => match rotated {
+            WallDir::North => WallDir::South,
+            WallDir::South => WallDir::North,
+            WallDir::NwSe => WallDir::NeSw,
+            WallDir::NeSw => WallDir::NwSe,
+            d => d,
+        },
+        (false, false) => rotated,
+    }
 }
 
 /// Paste geometry from clipboard at specific anchor coordinates (public for viewport click)
@@ -1367,15 +1454,10 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
     let mut target_max_z = i32::MIN;
 
     for face in &gc.faces {
-        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
-            (width - face.rel_x, depth - face.rel_z)
-        } else if gc.flip_h {
-            (width - face.rel_x, face.rel_z)
-        } else if gc.flip_v {
-            (face.rel_x, depth - face.rel_z)
-        } else {
-            (face.rel_x, face.rel_z)
-        };
+        let (rel_x, rel_z, _, _) = transform_clipboard_position(
+            face.rel_x, face.rel_z, width, depth,
+            gc.rotation, gc.flip_h, gc.flip_v,
+        );
         let target_x = anchor_x + rel_x;
         let target_z = anchor_z + rel_z;
         target_min_x = target_min_x.min(target_x);
@@ -1422,18 +1504,21 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
         }
     }
 
+    // Calculate effective split direction change:
+    // - Rotation by odd amount (90° or 270°) flips the diagonal
+    // - Flip H XOR V also flips the diagonal
+    // Combined: XOR of both conditions
+    let rotation_flips_split = gc.rotation % 2 == 1;
+    let flip_flips_split = gc.flip_h != gc.flip_v;
+    let should_flip_split = rotation_flips_split != flip_flips_split;
+
     // Second pass: paste all faces with adjusted coordinates
     for face in &gc.faces {
-        // Apply flip transformations
-        let (rel_x, rel_z) = if gc.flip_h && gc.flip_v {
-            (width - face.rel_x, depth - face.rel_z)
-        } else if gc.flip_h {
-            (width - face.rel_x, face.rel_z)
-        } else if gc.flip_v {
-            (face.rel_x, depth - face.rel_z)
-        } else {
-            (face.rel_x, face.rel_z)
-        };
+        // Apply rotation and flip transformations
+        let (rel_x, rel_z, _, _) = transform_clipboard_position(
+            face.rel_x, face.rel_z, width, depth,
+            gc.rotation, gc.flip_h, gc.flip_v,
+        );
 
         let target_x = (anchor_x + rel_x + offset_x) as usize;
         let target_z = (anchor_z + rel_z + offset_z) as usize;
@@ -1446,7 +1531,12 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
                 match &face.face {
                     CopiedFaceData::Floor(f) => {
                         let mut new_face = f.clone();
-                        // Flip heights if needed
+                        // Apply rotation to heights first
+                        new_face.heights = rotate_heights(new_face.heights, gc.rotation);
+                        if let Some(h2) = new_face.heights_2 {
+                            new_face.heights_2 = Some(rotate_heights(h2, gc.rotation));
+                        }
+                        // Then apply flips to already-rotated heights
                         if gc.flip_h {
                             new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
                             if let Some(h2) = &mut new_face.heights_2 {
@@ -1458,12 +1548,57 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
                             if let Some(h2) = &mut new_face.heights_2 {
                                 *h2 = [h2[3], h2[2], h2[1], h2[0]];
                             }
+                        }
+                        // Apply rotation to colors
+                        new_face.colors = rotate_colors(new_face.colors, gc.rotation);
+                        if let Some(c2) = new_face.colors_2 {
+                            new_face.colors_2 = Some(rotate_colors(c2, gc.rotation));
+                        }
+                        // Apply flips to colors
+                        if gc.flip_h {
+                            new_face.colors = [new_face.colors[1], new_face.colors[0], new_face.colors[3], new_face.colors[2]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[1], c2[0], c2[3], c2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.colors = [new_face.colors[3], new_face.colors[2], new_face.colors[1], new_face.colors[0]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[3], c2[2], c2[1], c2[0]];
+                            }
+                        }
+                        // Flip diagonal split direction when needed
+                        if should_flip_split {
+                            new_face.split_direction = new_face.split_direction.next();
+                            // Also swap triangle 1 and 2 properties since they switch positions
+                            let tex1 = new_face.texture.clone();
+                            let tex2 = new_face.texture_2.take().unwrap_or_else(|| tex1.clone());
+                            new_face.texture = tex2;
+                            new_face.texture_2 = Some(tex1);
+
+                            std::mem::swap(&mut new_face.uv, &mut new_face.uv_2);
+
+                            let colors1 = new_face.colors;
+                            let colors2 = new_face.colors_2.take().unwrap_or(colors1);
+                            new_face.colors = colors2;
+                            new_face.colors_2 = Some(colors1);
+
+                            let heights1 = new_face.heights;
+                            let heights2 = new_face.heights_2.take().unwrap_or(heights1);
+                            new_face.heights = heights2;
+                            new_face.heights_2 = Some(heights1);
                         }
                         sector.floor = Some(new_face);
                         paste_count += 1;
                     }
                     CopiedFaceData::Ceiling(f) => {
                         let mut new_face = f.clone();
+                        // Apply rotation to heights first
+                        new_face.heights = rotate_heights(new_face.heights, gc.rotation);
+                        if let Some(h2) = new_face.heights_2 {
+                            new_face.heights_2 = Some(rotate_heights(h2, gc.rotation));
+                        }
+                        // Then apply flips to already-rotated heights
                         if gc.flip_h {
                             new_face.heights = [new_face.heights[1], new_face.heights[0], new_face.heights[3], new_face.heights[2]];
                             if let Some(h2) = &mut new_face.heights_2 {
@@ -1476,88 +1611,120 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
                                 *h2 = [h2[3], h2[2], h2[1], h2[0]];
                             }
                         }
+                        // Apply rotation to colors
+                        new_face.colors = rotate_colors(new_face.colors, gc.rotation);
+                        if let Some(c2) = new_face.colors_2 {
+                            new_face.colors_2 = Some(rotate_colors(c2, gc.rotation));
+                        }
+                        // Apply flips to colors
+                        if gc.flip_h {
+                            new_face.colors = [new_face.colors[1], new_face.colors[0], new_face.colors[3], new_face.colors[2]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[1], c2[0], c2[3], c2[2]];
+                            }
+                        }
+                        if gc.flip_v {
+                            new_face.colors = [new_face.colors[3], new_face.colors[2], new_face.colors[1], new_face.colors[0]];
+                            if let Some(c2) = &mut new_face.colors_2 {
+                                *c2 = [c2[3], c2[2], c2[1], c2[0]];
+                            }
+                        }
+                        // Flip diagonal split direction when needed
+                        if should_flip_split {
+                            new_face.split_direction = new_face.split_direction.next();
+                            // Also swap triangle 1 and 2 properties since they switch positions
+                            let tex1 = new_face.texture.clone();
+                            let tex2 = new_face.texture_2.take().unwrap_or_else(|| tex1.clone());
+                            new_face.texture = tex2;
+                            new_face.texture_2 = Some(tex1);
+
+                            std::mem::swap(&mut new_face.uv, &mut new_face.uv_2);
+
+                            let colors1 = new_face.colors;
+                            let colors2 = new_face.colors_2.take().unwrap_or(colors1);
+                            new_face.colors = colors2;
+                            new_face.colors_2 = Some(colors1);
+
+                            let heights1 = new_face.heights;
+                            let heights2 = new_face.heights_2.take().unwrap_or(heights1);
+                            new_face.heights = heights2;
+                            new_face.heights_2 = Some(heights1);
+                        }
                         sector.ceiling = Some(new_face);
                         paste_count += 1;
                     }
                     CopiedFaceData::WallNorth(i, w) => {
-                        // Flip N<->S when flipping V
-                        let target_wall = if gc.flip_v {
-                            &mut sector.walls_south
-                        } else {
-                            &mut sector.walls_north
+                        let target_dir = transform_wall_direction(WallDir::North, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_north,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallSouth(i, w) => {
-                        let target_wall = if gc.flip_v {
-                            &mut sector.walls_north
-                        } else {
-                            &mut sector.walls_south
+                        let target_dir = transform_wall_direction(WallDir::South, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_south,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallEast(i, w) => {
-                        // Flip E<->W when flipping H
-                        let target_wall = if gc.flip_h {
-                            &mut sector.walls_west
-                        } else {
-                            &mut sector.walls_east
+                        let target_dir = transform_wall_direction(WallDir::East, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_east,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallWest(i, w) => {
-                        let target_wall = if gc.flip_h {
-                            &mut sector.walls_east
-                        } else {
-                            &mut sector.walls_west
+                        let target_dir = transform_wall_direction(WallDir::West, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = match target_dir {
+                            WallDir::North => &mut sector.walls_north,
+                            WallDir::East => &mut sector.walls_east,
+                            WallDir::South => &mut sector.walls_south,
+                            WallDir::West => &mut sector.walls_west,
+                            _ => &mut sector.walls_west,
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallNwSe(i, w) => {
-                        // Diagonal walls: NW-SE flips to NE-SW when H or V (but not both)
-                        let target_wall = if gc.flip_h != gc.flip_v {
+                        let target_dir = transform_wall_direction(WallDir::NwSe, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = if target_dir == WallDir::NeSw {
                             &mut sector.walls_nesw
                         } else {
                             &mut sector.walls_nwse
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                     CopiedFaceData::WallNeSw(i, w) => {
-                        let target_wall = if gc.flip_h != gc.flip_v {
+                        let target_dir = transform_wall_direction(WallDir::NeSw, gc.rotation, gc.flip_h, gc.flip_v);
+                        let target_wall = if target_dir == WallDir::NwSe {
                             &mut sector.walls_nwse
                         } else {
                             &mut sector.walls_nesw
                         };
-                        if *i < target_wall.len() {
-                            target_wall[*i] = w.clone();
-                        } else {
-                            target_wall.push(w.clone());
-                        }
+                        if *i < target_wall.len() { target_wall[*i] = w.clone(); }
+                        else { target_wall.push(w.clone()); }
                         paste_count += 1;
                     }
                 }
@@ -2721,6 +2888,7 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     let num_rooms = state.level.rooms.len();
     let max_visible_rooms = 6; // Show up to 6 rooms before scrolling would be needed
     let rooms_to_show = num_rooms.min(max_visible_rooms);
+    let mut room_to_delete: Option<usize> = None;
 
     for i in 0..num_rooms {
         if i >= rooms_to_show {
@@ -2755,8 +2923,14 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             }
         }
 
-        // Room row (clickable area to the right of visibility button)
-        let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size - 6.0, LINE_HEIGHT);
+        // Delete button on the right
+        let del_btn_rect = Rect::new(x + rect.w - icon_btn_size - 4.0, y + 1.0, icon_btn_size, icon_btn_size);
+        if crate::ui::icon_button(ctx, del_btn_rect, icon::TRASH, icon_font, "Delete room") {
+            room_to_delete = Some(i);
+        }
+
+        // Room row (clickable area between visibility and delete buttons)
+        let room_btn_rect = Rect::new(x + icon_btn_size + 2.0, y, rect.w - icon_btn_size * 2.0 - 10.0, LINE_HEIGHT);
         if ctx.mouse.clicked(&room_btn_rect) {
             state.current_room = i;
         }
@@ -2770,10 +2944,63 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         y += LINE_HEIGHT;
     }
 
-    if num_rooms == 0 {
+    // Handle room deletion after iteration
+    if let Some(i) = room_to_delete {
+        state.save_undo();
+        state.level.rooms.remove(i);
+        // Update current_room if needed
+        if state.current_room >= state.level.rooms.len() && !state.level.rooms.is_empty() {
+            state.current_room = state.level.rooms.len() - 1;
+        }
+        // Update hidden_rooms: remove this room and shift higher indices down
+        state.hidden_rooms.remove(&i);
+        state.hidden_rooms = state.hidden_rooms.iter()
+            .filter_map(|&idx| if idx > i { Some(idx - 1) } else if idx < i { Some(idx) } else { None })
+            .collect();
+        // Clear selection if it was in the deleted room
+        if let Selection::SectorFace { room, .. } | Selection::Object { room, .. } = &state.selection {
+            if *room == i {
+                state.selection = Selection::None;
+            }
+        }
+        state.multi_selection.clear();
+        state.mark_portals_dirty();
+        state.set_status(&format!("Deleted Room {}", i), 2.0);
+    }
+
+    if state.level.rooms.is_empty() {
         draw_text("No rooms", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
         y += LINE_HEIGHT;
     }
+
+    // Add Room button
+    let add_btn_rect = Rect::new(x, y + 2.0, icon_btn_size, icon_btn_size);
+    if crate::ui::icon_button(ctx, add_btn_rect, icon::PLUS, icon_font, "Add Room") {
+        // Create new room offset from existing rooms
+        let new_id = state.level.rooms.len();
+
+        // Calculate position: offset from the last room or origin
+        let offset_x = if let Some(last_room) = state.level.rooms.last() {
+            // Place new room to the east of the last room
+            last_room.position.x + (last_room.width as f32) * SECTOR_SIZE + SECTOR_SIZE
+        } else {
+            0.0
+        };
+
+        let new_room = crate::world::Room::new(
+            new_id,
+            crate::rasterizer::Vec3::new(offset_x, 0.0, 0.0),
+            1, // 1x1 grid to start
+            1,
+        );
+
+        state.save_undo();
+        state.level.rooms.push(new_room);
+        state.current_room = new_id;
+        state.set_status(&format!("Created Room {}", new_id), 2.0);
+    }
+    draw_text("Add Room", (x + icon_btn_size + 4.0).floor(), (y + 12.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
+    y += LINE_HEIGHT;
 
     // Separator line
     y += 6.0;
@@ -2810,35 +3037,63 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         draw_text(&format!("Lights: {}", light_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
         y += LINE_HEIGHT;
 
-        // Ambient light knob
-        y += 8.0; // Extra space before knob
-        let knob_radius = 20.0;
-        let knob_center_x = x + rect.w / 2.0 - 4.0; // Center in panel
-        let knob_center_y = y + knob_radius + 12.0; // Account for label above
+        // Ambient light slider (0-31 display, maps to 0.0-1.0 internally)
+        y += 8.0;
+        let slider_height = 12.0;
+        let label_width = 55.0;
+        let value_width = 24.0;
+        let slider_x = x + label_width;
+        let slider_width = rect.w - label_width - value_width - 12.0;
 
-        // Convert ambient (0.0-1.0) to knob value (0-127)
-        // Scale so 100% ambient = 127 (max knob position)
-        let ambient_value = (room.ambient * 127.0).round() as u8;
-        let knob_result = draw_knob(
-            ctx,
-            knob_center_x,
-            knob_center_y,
-            knob_radius,
-            ambient_value.min(127),
-            "Ambient",
-            false, // Not bipolar
-            false, // Not editing (no text entry mode for now)
-        );
+        let text_color = Color::new(0.8, 0.8, 0.8, 1.0);
+        let track_bg = Color::new(0.15, 0.15, 0.18, 1.0);
+        let tint = Color::new(0.9, 0.85, 0.4, 1.0); // Yellow/warm for light
 
-        // Apply knob changes
-        if let Some(new_val) = knob_result.value {
-            let clamped: u8 = new_val.min(127);
-            let new_ambient = (clamped as f32) / 127.0;
+        // Label
+        draw_text("Ambient", x, y + slider_height - 2.0, 11.0, text_color);
+
+        // Convert ambient (0.0-1.0) to display value (0-31)
+        let ambient_31 = (room.ambient * 31.0).round() as u8;
+
+        // Slider track background
+        let track_rect = Rect::new(slider_x, y, slider_width, slider_height);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+        // Filled portion
+        let fill_ratio = ambient_31 as f32 / 31.0;
+        let fill_width = fill_ratio * slider_width;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, tint);
+
+        // Thumb indicator
+        let thumb_x = track_rect.x + fill_width - 1.0;
+        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+        // Value text
+        draw_text(&format!("{:2}", ambient_31), slider_x + slider_width + 4.0, y + slider_height - 2.0, 11.0, text_color);
+
+        // Handle slider interaction
+        let hovered = ctx.mouse.inside(&track_rect);
+
+        // Start dragging
+        if hovered && ctx.mouse.left_pressed {
+            state.ambient_slider_active = true;
+        }
+
+        // Continue dragging
+        if state.ambient_slider_active && ctx.mouse.left_down {
+            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+            let new_ambient = new_val as f32 / 31.0;
             if let Some(room) = state.level.rooms.get_mut(state.current_room) {
                 if (room.ambient - new_ambient).abs() > 0.001 {
                     room.ambient = new_ambient;
                 }
             }
+        }
+
+        // End dragging
+        if state.ambient_slider_active && !ctx.mouse.left_down {
+            state.ambient_slider_active = false;
         }
     } else {
         draw_text("No room selected", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
@@ -5306,6 +5561,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                     settings.height,
                                     &state.level,
                                     &state.texture_packs,
+                                    &state.user_textures,
                                 );
 
                                 y += preview_h + 8.0;
@@ -5578,39 +5834,67 @@ fn draw_status_bar(rect: Rect, state: &EditorState) {
     draw_rectangle(rect.x.floor(), rect.y.floor(), rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
     // Show status message on the left if available
-    if let Some(msg) = state.get_status() {
-        draw_text(&msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 16.0, Color::from_rgba(100, 255, 100, 255));
-    }
-
-    // Show keyboard shortcuts hint on the right (context-sensitive)
-    let hints = if state.tool == EditorTool::DrawWall {
-        // Wall tool hints - show direction and gap preference
-        let dir = match state.wall_direction {
-            crate::world::Direction::North => "N",
-            crate::world::Direction::East => "E",
-            crate::world::Direction::South => "S",
-            crate::world::Direction::West => "W",
-            crate::world::Direction::NwSe => "NW-SE",
-            crate::world::Direction::NeSw => "NE-SW",
-        };
-        let gap = if state.wall_prefer_high { "High" } else { "Low" };
-        format!("R: Rotate ({}) | F: Gap ({}) | Ctrl+S: Save", dir, gap)
+    let status_end_x = if let Some(msg) = state.get_status() {
+        let msg_dims = measure_text(&msg, None, 14, 1.0);
+        draw_text(&msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 14.0, Color::from_rgba(100, 255, 100, 255));
+        rect.x + 10.0 + msg_dims.width + 20.0
     } else {
-        // Default file shortcuts
-        #[cfg(not(target_arch = "wasm32"))]
-        { "Ctrl+S: Save | Ctrl+Shift+S: Save As | Ctrl+O: Open | Ctrl+N: New".to_string() }
-        #[cfg(target_arch = "wasm32")]
-        { "Ctrl+S: Download | Ctrl+O: Upload | Ctrl+N: New".to_string() }
+        rect.x + 10.0
     };
 
-    let hint_width = hints.len() as f32 * 6.0; // Approximate width
-    draw_text(
-        &hints,
-        (rect.right() - hint_width - 8.0).floor(),
-        (rect.y + 15.0).floor(),
-        14.0,
-        Color::from_rgba(100, 100, 100, 255),
-    );
+    // Context-sensitive shortcuts based on current tool/mode
+    let mut shortcuts: Vec<&str> = Vec::new();
+
+    match state.tool {
+        EditorTool::DrawWall => {
+            let dir = match state.wall_direction {
+                crate::world::Direction::North => "N",
+                crate::world::Direction::East => "E",
+                crate::world::Direction::South => "S",
+                crate::world::Direction::West => "W",
+                crate::world::Direction::NwSe => "NW-SE",
+                crate::world::Direction::NeSw => "NE-SW",
+            };
+            let gap = if state.wall_prefer_high { "High" } else { "Low" };
+            // Build dynamic strings for wall tool
+            let shortcuts_text = format!("[R] Rotate ({})  [F] Gap ({})  [E] Extrude", dir, gap);
+            let text_dims = measure_text(&shortcuts_text, None, 14, 1.0);
+            let text_x = rect.right() - text_dims.width - 10.0;
+            let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+            if text_x > status_end_x {
+                draw_text(&shortcuts_text, text_x.floor(), text_y.floor(), 14.0, Color::from_rgba(180, 180, 190, 255));
+            }
+            return;
+        }
+        EditorTool::Select => {
+            shortcuts.push("[E] Extrude");
+            shortcuts.push("[Del] Delete");
+            shortcuts.push("[.] Focus");
+        }
+        EditorTool::PlaceObject => {
+            shortcuts.push("[Click] Place object");
+            shortcuts.push("[Del] Delete");
+        }
+        _ => {}
+    }
+
+    // Add vertex linking hint
+    if state.link_coincident_vertices {
+        shortcuts.push("[L] Unlink vertices");
+    } else {
+        shortcuts.push("[L] Link vertices");
+    }
+
+    if !shortcuts.is_empty() {
+        let shortcuts_text = shortcuts.join("  ");
+        let text_dims = measure_text(&shortcuts_text, None, 14, 1.0);
+        let text_x = rect.right() - text_dims.width - 10.0;
+        let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+
+        if text_x > status_end_x {
+            draw_text(&shortcuts_text, text_x.floor(), text_y.floor(), 14.0, Color::from_rgba(180, 180, 190, 255));
+        }
+    }
 }
 
 /// Draw a small camera preview showing what the player camera sees
@@ -5626,6 +5910,7 @@ fn draw_player_camera_preview(
     player_height: f32,
     level: &crate::world::Level,
     texture_packs: &[super::TexturePack],
+    user_textures: &crate::texture::TextureLibrary,
 ) {
     // Create a small framebuffer for the preview
     let fb_w = (width as usize).max(80);
@@ -5683,8 +5968,8 @@ fn draw_player_camera_preview(
         ..RasterSettings::default()
     };
 
-    // Build texture map
-    let textures: Vec<RasterTexture> = texture_packs
+    // Build texture map (packs + user textures)
+    let mut textures: Vec<RasterTexture> = texture_packs
         .iter()
         .flat_map(|pack| &pack.textures)
         .cloned()
@@ -5695,6 +5980,14 @@ fn draw_player_camera_preview(
     for pack in texture_packs {
         for tex in &pack.textures {
             texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
+            texture_idx += 1;
+        }
+    }
+    // Add user textures
+    for name in user_textures.names() {
+        if let Some(user_tex) = user_textures.get(name) {
+            textures.push(user_tex.to_raster_texture());
+            texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), texture_idx);
             texture_idx += 1;
         }
     }

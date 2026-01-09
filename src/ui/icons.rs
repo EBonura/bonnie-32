@@ -13,6 +13,7 @@ pub mod icon {
     pub const SAVE_AS: char = '\u{e40f}';  // save-all (Save As)
     pub const FOLDER_OPEN: char = '\u{e247}';
     pub const FILE_PLUS: char = '\u{e0c9}';
+    pub const DOWNLOAD: char = '\u{e099}';   // download
 
     // Edit operations
     pub const UNDO: char = '\u{e19b}';
@@ -28,6 +29,7 @@ pub mod icon {
     // UI / Navigation
     pub const PLUS: char = '\u{e13d}';
     pub const MINUS: char = '\u{e11c}';
+    pub const TRASH: char = '\u{e18d}';
     pub const MOVE: char = '\u{e121}';
     pub const CIRCLE_CHEVRON_LEFT: char = '\u{e4de}';
     pub const CIRCLE_CHEVRON_RIGHT: char = '\u{e4df}';
@@ -114,12 +116,23 @@ pub mod icon {
     // Input / Controller
     pub const GAMEPAD_2: char = '\u{e0df}';       // Gamepad controller
 
-    // View / Focus
+    // View / Focus / Zoom
     pub const FOCUS: char = '\u{e29e}';           // Focus / crosshair target
     pub const SQUARE_SQUARE: char = '\u{e60e}';   // Nested squares / center on selection
+    pub const ZOOM_IN: char = '\u{e1b6}';         // zoom-in
+    pub const ZOOM_OUT: char = '\u{e1b7}';        // zoom-out
 
-    // Close / Cancel
+    // Close / Cancel / Back
     pub const CIRCLE_X: char = '\u{e084}';        // Circle with X (close button)
+    pub const ARROW_BIG_LEFT: char = '\u{e1e2}';  // arrow-big-left (back button)
+
+    // Drawing tools (texture editor)
+    pub const PENCIL: char = '\u{e1f9}';          // pencil (single pixel / small brush)
+    pub const ERASER: char = '\u{e28f}';          // eraser
+    pub const PENCIL_LINE: char = '\u{e4f0}';     // pencil-line (line tool)
+    pub const RECTANGLE_HORIZONTAL: char = '\u{e376}'; // rectangle-horizontal
+    pub const CIRCLE: char = '\u{e076}';          // circle (ellipse shape)
+    pub const DROPLET: char = '\u{e0b4}';         // droplet (fill toggle)
 }
 
 /// Draw a Lucide icon centered in a rect

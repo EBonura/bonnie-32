@@ -380,6 +380,7 @@ impl TextureAtlas {
             height: self.height,
             pixels,
             name: String::from("atlas"),
+            blend_mode: crate::rasterizer::BlendMode::Opaque,
         }
     }
 
@@ -412,6 +413,7 @@ impl TextureAtlas {
             height: self.height,
             pixels,
             name: String::from("atlas"),
+            blend_mode: crate::rasterizer::BlendMode::Opaque,
         }
     }
 
@@ -670,6 +672,7 @@ impl IndexedAtlas {
             height: self.height,
             pixels,
             name: name.to_string(),
+            blend_mode: crate::rasterizer::BlendMode::Opaque,
         }
     }
 

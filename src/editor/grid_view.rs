@@ -51,7 +51,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     if inside {
         // Zoom with scroll wheel
         if ctx.mouse.scroll != 0.0 {
-            let zoom_factor = 1.0 + ctx.mouse.scroll * 0.02;
+            let zoom_factor = 1.0 + ctx.mouse.scroll * 0.008;
             state.grid_zoom = (state.grid_zoom * zoom_factor).clamp(0.002, 2.0);
         }
 
@@ -1077,8 +1077,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             room.sectors[new_gx][new_gz] = Some(sector);
                         }
 
-                        room.trim_empty_edges();
-                        room.recalculate_bounds();
+                        room.compact();
                         state.set_status(&format!("Moved {} sector(s)", state.grid_dragging_sectors.len()), 2.0);
                         state.mark_portals_dirty();
                     }
@@ -1569,9 +1568,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 // Cleanup affected rooms
                 for room_idx in affected_rooms {
                     if let Some(room) = state.level.rooms.get_mut(room_idx) {
-                        room.cleanup_empty_sectors();
-                        room.trim_empty_edges();
-                        room.recalculate_bounds();
+                        room.compact();
                     }
                 }
 

@@ -21,6 +21,7 @@ mod app;
 mod game;
 mod project;
 mod input;
+mod texture;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -52,6 +53,13 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // Initialize crash logging FIRST (before any other code)
+    #[cfg(not(target_arch = "wasm32"))]
+    crashlog::setup!(crashlog::cargo_metadata!().capitalized(), false);
+
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+
     // Initialize framebuffer (used by 3D viewport in editor)
     let mut fb = Framebuffer::new(WIDTH, HEIGHT);
 
@@ -279,12 +287,20 @@ async fn main() {
                     }
                 }
 
-                // Build textures array from texture packs
-                let editor_textures: Vec<Texture> = ws.editor_state.texture_packs
+                // Build textures array from texture packs + user textures
+                let mut editor_textures: Vec<Texture> = ws.editor_state.texture_packs
                     .iter()
                     .flat_map(|pack| &pack.textures)
                     .cloned()
                     .collect();
+
+                // Append user textures (they'll be indexed after pack textures)
+                // These are updated in real-time when editing, so the 3D view shows live changes
+                for name in ws.editor_state.user_textures.names() {
+                    if let Some(user_tex) = ws.editor_state.user_textures.get(name) {
+                        editor_textures.push(user_tex.to_raster_texture());
+                    }
+                }
 
                 // Draw editor UI
                 let action = draw_editor(

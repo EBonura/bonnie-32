@@ -14,10 +14,13 @@ pub const SECTOR_SIZE: f32 = 1024.0;
 /// 1.0 means one sector uses UV range [0, 1], so a 64x64 texture covers 1 block (64 texels per block)
 pub const UV_SCALE: f32 = 0.5;
 
+/// Reserved pack name for user-created textures (from textures-user/)
+pub const USER_TEXTURE_PACK: &str = "_USER";
+
 /// Texture reference by pack and name
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextureRef {
-    /// Texture pack name (e.g., "SAMPLE")
+    /// Texture pack name (e.g., "SAMPLE" or "_USER" for user textures)
     pub pack: String,
     /// Texture name without extension (e.g., "floor_01")
     pub name: String,
@@ -27,6 +30,14 @@ impl TextureRef {
     pub fn new(pack: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             pack: pack.into(),
+            name: name.into(),
+        }
+    }
+
+    /// Create a reference to a user texture (from textures-user/)
+    pub fn user(name: impl Into<String>) -> Self {
+        Self {
+            pack: USER_TEXTURE_PACK.to_string(),
             name: name.into(),
         }
     }
@@ -42,6 +53,11 @@ impl TextureRef {
     /// Check if this is a valid reference
     pub fn is_valid(&self) -> bool {
         !self.pack.is_empty() && !self.name.is_empty()
+    }
+
+    /// Check if this references a user texture (from textures-user/)
+    pub fn is_user_texture(&self) -> bool {
+        self.pack == USER_TEXTURE_PACK
     }
 }
 
@@ -2547,6 +2563,21 @@ impl Room {
         )
     }
 
+    /// Get effective vertical bounds for wall placement.
+    /// Ensures minimum height of 3072 when room has no vertical extent.
+    pub fn effective_height_bounds(&self) -> (f32, f32) {
+        const MIN_GAP: f32 = 256.0;
+        const DEFAULT_CEILING: f32 = 3072.0;
+
+        let bottom = self.bounds.min.y;
+        let top = if self.bounds.max.y - self.bounds.min.y < MIN_GAP {
+            self.bounds.min.y + DEFAULT_CEILING
+        } else {
+            self.bounds.max.y
+        };
+        (bottom, top)
+    }
+
     /// Recalculate bounds from sectors (call after loading from file)
     pub fn recalculate_bounds(&mut self) {
         self.bounds = Aabb::new(
@@ -2641,11 +2672,22 @@ impl Room {
         }
     }
 
+    /// Full cleanup after geometry changes: remove empty sectors, trim edges, recalculate bounds.
+    /// Call this after moving or deleting faces.
+    /// Returns (trim_x, trim_z) - how many columns/rows were removed from the start.
+    pub fn compact(&mut self) -> (usize, usize) {
+        self.cleanup_empty_sectors();
+        let trim_offset = self.trim_empty_edges();
+        self.recalculate_bounds();
+        trim_offset
+    }
+
     /// Trim empty rows and columns from the edges of the room grid.
     /// Adjusts room position to keep sectors in the same world position.
-    pub fn trim_empty_edges(&mut self) {
+    /// Returns (trim_x, trim_z) - how many columns/rows were removed from the start.
+    pub fn trim_empty_edges(&mut self) -> (usize, usize) {
         if self.sectors.is_empty() || self.width == 0 || self.depth == 0 {
-            return;
+            return (0, 0);
         }
 
         // Find first non-empty column (from left)
@@ -2693,7 +2735,7 @@ impl Room {
             self.width = 1;
             self.depth = 1;
             self.sectors = vec![vec![None]];
-            return;
+            return (0, 0);
         }
 
         // Apply trimming if needed
@@ -2737,7 +2779,11 @@ impl Room {
             self.sectors = new_sectors;
             self.width = new_width;
             self.depth = new_depth;
+
+            return (first_col, first_row);
         }
+
+        (0, 0)
     }
 
     /// Check if a world-space point is inside this room's bounds
