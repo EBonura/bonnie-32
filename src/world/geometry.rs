@@ -2563,6 +2563,21 @@ impl Room {
         )
     }
 
+    /// Get effective vertical bounds for wall placement.
+    /// Ensures minimum height of 3072 when room has no vertical extent.
+    pub fn effective_height_bounds(&self) -> (f32, f32) {
+        const MIN_GAP: f32 = 256.0;
+        const DEFAULT_CEILING: f32 = 3072.0;
+
+        let bottom = self.bounds.min.y;
+        let top = if self.bounds.max.y - self.bounds.min.y < MIN_GAP {
+            self.bounds.min.y + DEFAULT_CEILING
+        } else {
+            self.bounds.max.y
+        };
+        (bottom, top)
+    }
+
     /// Recalculate bounds from sectors (call after loading from file)
     pub fn recalculate_bounds(&mut self) {
         self.bounds = Aabb::new(

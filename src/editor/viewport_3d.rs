@@ -674,9 +674,9 @@ pub fn draw_viewport_3d(
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
             use super::CEILING_HEIGHT;
 
-            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            // Use room's effective vertical bounds for gap detection
             let (default_y_bottom, default_y_top) = state.level.rooms.get(state.current_room)
-                .map(|r| (r.bounds.min.y, r.bounds.max.y))
+                .map(|r| r.effective_height_bounds())
                 .unwrap_or((0.0, CEILING_HEIGHT));
             let dir = state.wall_direction;
 
@@ -827,9 +827,9 @@ pub fn draw_viewport_3d(
             let start_x = ((cam.x / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
             let start_z = ((cam.z / SECTOR_SIZE).floor() as i32 - search_radius) as f32 * SECTOR_SIZE;
 
-            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            // Use room's effective vertical bounds for gap detection
             let (default_y_bottom, default_y_top) = state.level.rooms.get(state.current_room)
-                .map(|r| (r.bounds.min.y, r.bounds.max.y))
+                .map(|r| r.effective_height_bounds())
                 .unwrap_or((0.0, CEILING_HEIGHT));
             let mid_y = (default_y_bottom + default_y_top) / 2.0;
 
@@ -2329,11 +2329,12 @@ pub fn draw_viewport_3d(
                         let adjusted_gz = (gz + offset_z) as usize;
 
                         // Check if there's a gap to fill (handles both empty edges and gaps between walls)
-                        // Use room's actual vertical bounds for gap detection
+                        // Use room's effective vertical bounds for gap detection
                         // Use the stored mouse_y from drag start for consistent gap selection
                         room.ensure_sector(adjusted_gx, adjusted_gz);
+                        let (fallback_bottom, fallback_top) = room.effective_height_bounds();
                         if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
-                            if let Some(heights) = sector.next_wall_position(dir, room.bounds.min.y, room.bounds.max.y, state.wall_drag_mouse_y) {
+                            if let Some(heights) = sector.next_wall_position(dir, fallback_bottom, fallback_top, state.wall_drag_mouse_y) {
                                 // Calculate wall center position in world space
                                 let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
                                 let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
@@ -2468,10 +2469,11 @@ pub fn draw_viewport_3d(
                             let adjusted_gz = (gz + offset_z) as usize;
 
                             // Check if there's a gap to fill (handles both empty diagonals and gaps)
-                            // Use room's actual vertical bounds for gap detection
+                            // Use room's effective vertical bounds for gap detection
                             room.ensure_sector(adjusted_gx, adjusted_gz);
+                            let (fallback_bottom, fallback_top) = room.effective_height_bounds();
                             if let Some(sector) = room.get_sector(adjusted_gx, adjusted_gz) {
-                                if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, room.bounds.min.y, room.bounds.max.y, state.wall_drag_mouse_y) {
+                                if let Some(heights) = sector.next_diagonal_wall_position(is_nwse, fallback_bottom, fallback_top, state.wall_drag_mouse_y) {
                                     // Calculate diagonal wall center position in world space
                                     let base_x = room.position.x + adjusted_gx as f32 * SECTOR_SIZE;
                                     let base_z = room.position.z + adjusted_gz as f32 * SECTOR_SIZE;
@@ -2890,10 +2892,10 @@ pub fn draw_viewport_3d(
             let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
             // Check if there's a sector with existing walls - use gap heights if so
-            // Use room's actual vertical bounds for gap detection (walls can extend beyond floor/ceiling)
+            // Use room's effective vertical bounds for gap detection
             let (corner_heights, is_gap_fill) = if gx >= 0 && gz >= 0 {
                 if let Some(room) = state.level.rooms.get(state.current_room) {
-                    let (fallback_bottom, fallback_top) = (room.bounds.min.y, room.bounds.max.y);
+                    let (fallback_bottom, fallback_top) = room.effective_height_bounds();
                     if let Some(sector) = room.get_sector(gx as usize, gz as usize) {
                         // Check if edge has walls and find the gap
                         // Use the stored mouse_y from drag start for consistent gap selection
@@ -3012,9 +3014,12 @@ pub fn draw_viewport_3d(
                 let grid_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
                 let grid_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
-                // Use default heights (0 to CEILING_HEIGHT)
-                let floor_y = room_pos.y;
-                let ceiling_y = room_pos.y + super::CEILING_HEIGHT;
+                // Use room's effective vertical bounds
+                let (floor_rel, ceiling_rel) = state.level.rooms.get(state.current_room)
+                    .map(|r| r.effective_height_bounds())
+                    .unwrap_or((0.0, super::CEILING_HEIGHT));
+                let floor_y = room_pos.y + floor_rel;
+                let ceiling_y = room_pos.y + ceiling_rel;
 
                 // Diagonal wall corners
                 let (p0, p1, p2, p3) = if is_nwse {
