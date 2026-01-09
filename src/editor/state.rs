@@ -480,6 +480,17 @@ pub struct EditorState {
     pub dragging_object_initial_y: f32,          // Initial Y when drag started
     pub dragging_object_plane_y: f32,            // Current accumulated drag plane Y
 
+    /// X/Z face relocation drag state
+    pub xz_drag_active: bool,
+    /// Initial positions: (room_idx, gx, gz, SectorFace)
+    pub xz_drag_initial_positions: Vec<(usize, usize, usize, SectorFace)>,
+    /// Current grid delta from initial positions
+    pub xz_drag_delta: (i32, i32),
+    /// World Y level for the drag plane
+    pub xz_drag_plane_y: f32,
+    /// Initial world X/Z when drag started
+    pub xz_drag_start_world: (f32, f32),
+
     /// Texture palette state
     pub texture_packs: Vec<TexturePack>,
     pub selected_pack: usize,
@@ -716,6 +727,11 @@ impl EditorState {
             dragging_object: None,
             dragging_object_initial_y: 0.0,
             dragging_object_plane_y: 0.0,
+            xz_drag_active: false,
+            xz_drag_initial_positions: Vec::new(),
+            xz_drag_delta: (0, 0),
+            xz_drag_plane_y: 0.0,
+            xz_drag_start_world: (0.0, 0.0),
             texture_packs,
             selected_pack: 0,
             texture_scroll: 0.0,

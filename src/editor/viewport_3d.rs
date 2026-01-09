@@ -11,7 +11,7 @@
 //! - Overlay drawing (selection highlights, etc.)
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext};
+use crate::ui::{Rect, UiContext, drag_tracker::pick_plane};
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
@@ -1699,13 +1699,19 @@ pub fn draw_viewport_3d(
                             state.set_selection(new_selection.clone());
                         }
                     } else {
-                        // Regular click: Deselect all, select just this one
-                        // Only save undo if something actually changes
-                        if state.selection != new_selection || !state.multi_selection.is_empty() {
-                            state.save_selection_undo();
-                            state.clear_multi_selection();
-                            state.set_selection(new_selection.clone());
+                        // Regular click: Check if clicking on an already-selected face
+                        let is_already_selected = state.selection == new_selection ||
+                            state.multi_selection.contains(&new_selection);
+
+                        if !is_already_selected {
+                            // Clicking on unselected face: Deselect all, select just this one
+                            if state.selection != new_selection || !state.multi_selection.is_empty() {
+                                state.save_selection_undo();
+                                state.clear_multi_selection();
+                                state.set_selection(new_selection.clone());
+                            }
                         }
+                        // If already selected, keep current selection intact for dragging
                     }
 
                     // Scroll texture palette to show this face's texture
@@ -1745,6 +1751,9 @@ pub fn draw_viewport_3d(
                         }
                     }
 
+                    // Check if Shift is held for drag mode selection
+                    if shift_down {
+                    // Y-axis drag mode: move faces up/down
                     // Add vertices for all faces to drag
                     for (r_idx, gx, gz, face) in &faces_to_drag {
                         if let Some(room) = state.level.rooms.get(*r_idx) {
@@ -1832,6 +1841,30 @@ pub fn draw_viewport_3d(
                     if !state.drag_initial_heights.is_empty() {
                         state.viewport_drag_plane_y = state.drag_initial_heights.iter().sum::<f32>()
                             / state.drag_initial_heights.len() as f32;
+                    }
+                    } else {
+                        // X/Z relocation mode: move faces in the horizontal plane
+                        state.xz_drag_active = true;
+                        state.xz_drag_initial_positions = faces_to_drag;
+                        state.xz_drag_delta = (0, 0);
+
+                        // Calculate average Y for horizontal drag plane
+                        let avg_y = calculate_selection_center_y(state);
+                        state.xz_drag_plane_y = avg_y;
+
+                        // Get initial world position using pick_plane
+                        if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                            if let Some(world_pos) = pick_plane(
+                                Vec3::new(0.0, avg_y, 0.0),
+                                Vec3::new(0.0, 1.0, 0.0),  // Y-up normal
+                                Vec3::ZERO,
+                                (fb_x, fb_y),
+                                &state.camera_3d,
+                                fb.width, fb.height,
+                            ) {
+                                state.xz_drag_start_world = (world_pos.x, world_pos.z);
+                            }
+                        }
                     }
                 } else {
                     // Clicked on nothing - start box select
@@ -1921,6 +1954,35 @@ pub fn draw_viewport_3d(
                     state.set_status("Object selected", 1.0);
                 } else {
                     state.set_status("Use 2D grid view to place objects", 2.0);
+                }
+            }
+        }
+
+        // Continue X/Z relocation drag
+        if ctx.mouse.left_down && state.xz_drag_active {
+            if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                if let Some(world_pos) = pick_plane(
+                    Vec3::new(0.0, state.xz_drag_plane_y, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::ZERO,
+                    (fb_x, fb_y),
+                    &state.camera_3d,
+                    fb.width, fb.height,
+                ) {
+                    let world_dx = world_pos.x - state.xz_drag_start_world.0;
+                    let world_dz = world_pos.z - state.xz_drag_start_world.1;
+
+                    // Convert to grid delta (snap to sectors)
+                    let grid_dx = (world_dx / SECTOR_SIZE).round() as i32;
+                    let grid_dz = (world_dz / SECTOR_SIZE).round() as i32;
+
+                    // Save undo on first actual movement
+                    if !state.viewport_drag_started && (grid_dx != 0 || grid_dz != 0) {
+                        state.save_undo();
+                        state.viewport_drag_started = true;
+                    }
+
+                    state.xz_drag_delta = (grid_dx, grid_dz);
                 }
             }
         }
@@ -2552,6 +2614,27 @@ pub fn draw_viewport_3d(
                     state.wall_drag_current = None;
                     state.wall_drag_mouse_y = None;
                 }
+            }
+
+            // Apply X/Z relocation
+            if state.xz_drag_active {
+                let (dx, dz) = state.xz_drag_delta;
+
+                if state.viewport_drag_started && (dx != 0 || dz != 0) {
+                    let faces = state.xz_drag_initial_positions.clone();
+                    let (moved_count, total_dx, total_dz) = relocate_faces(state, &faces, dx, dz);
+                    // Use total offset which includes room expansion + movement delta
+                    update_selection_positions(state, &faces, total_dx, total_dz);
+                    if moved_count > 0 {
+                        state.set_status(&format!("Moved {} face(s)", moved_count), 2.0);
+                    }
+                }
+
+                // Cleanup X/Z drag state
+                state.xz_drag_active = false;
+                state.xz_drag_initial_positions.clear();
+                state.xz_drag_delta = (0, 0);
+                state.viewport_drag_started = false;
             }
 
             // If we actually dragged geometry, recalculate room bounds
@@ -4846,6 +4929,80 @@ pub fn draw_viewport_3d(
         }
     }
 
+    // Draw X/Z relocation preview
+    if state.xz_drag_active && state.viewport_drag_started {
+        let (dx, dz) = state.xz_drag_delta;
+        let preview_color = RasterColor::new(100, 220, 255); // Cyan for valid
+        let blocked_color = RasterColor::new(255, 100, 100); // Red for blocked
+
+        for &(room_idx, gx, gz, ref face) in &state.xz_drag_initial_positions {
+            let dst_gx = (gx as i32 + dx) as usize;
+            let dst_gz = (gz as i32 + dz) as usize;
+
+            // Check if destination is blocked
+            let is_blocked = is_destination_occupied(state, room_idx, dst_gx, dst_gz, face);
+            let color = if is_blocked { blocked_color } else { preview_color };
+
+            if let Some(room) = state.level.rooms.get(room_idx) {
+                let room_y = room.position.y;
+                let dst_base_x = room.position.x + (dst_gx as f32) * SECTOR_SIZE;
+                let dst_base_z = room.position.z + (dst_gz as f32) * SECTOR_SIZE;
+
+                // Get face heights from original position
+                if let Some(sector) = room.get_sector(gx, gz) {
+                    let corners: Option<[Vec3; 4]> = match face {
+                        SectorFace::Floor => sector.floor.as_ref().map(|f| [
+                            Vec3::new(dst_base_x, room_y + f.heights[0], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + f.heights[1], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + f.heights[2], dst_base_z + SECTOR_SIZE),
+                            Vec3::new(dst_base_x, room_y + f.heights[3], dst_base_z + SECTOR_SIZE),
+                        ]),
+                        SectorFace::Ceiling => sector.ceiling.as_ref().map(|c| [
+                            Vec3::new(dst_base_x, room_y + c.heights[0], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + c.heights[1], dst_base_z),
+                            Vec3::new(dst_base_x + SECTOR_SIZE, room_y + c.heights[2], dst_base_z + SECTOR_SIZE),
+                            Vec3::new(dst_base_x, room_y + c.heights[3], dst_base_z + SECTOR_SIZE),
+                        ]),
+                        _ => {
+                            // Wall faces
+                            let (x0, z0, x1, z1) = match face {
+                                SectorFace::WallNorth(_) => (dst_base_x, dst_base_z, dst_base_x + SECTOR_SIZE, dst_base_z),
+                                SectorFace::WallEast(_) => (dst_base_x + SECTOR_SIZE, dst_base_z, dst_base_x + SECTOR_SIZE, dst_base_z + SECTOR_SIZE),
+                                SectorFace::WallSouth(_) => (dst_base_x + SECTOR_SIZE, dst_base_z + SECTOR_SIZE, dst_base_x, dst_base_z + SECTOR_SIZE),
+                                SectorFace::WallWest(_) => (dst_base_x, dst_base_z + SECTOR_SIZE, dst_base_x, dst_base_z),
+                                SectorFace::WallNwSe(_) => (dst_base_x, dst_base_z, dst_base_x + SECTOR_SIZE, dst_base_z + SECTOR_SIZE),
+                                SectorFace::WallNeSw(_) => (dst_base_x + SECTOR_SIZE, dst_base_z, dst_base_x, dst_base_z + SECTOR_SIZE),
+                                _ => (0.0, 0.0, 0.0, 0.0),
+                            };
+                            let wall_heights = match face {
+                                SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.heights),
+                                SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| w.heights),
+                                SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| w.heights),
+                                SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| w.heights),
+                                SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).map(|w| w.heights),
+                                SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).map(|w| w.heights),
+                                _ => None,
+                            };
+                            wall_heights.map(|h| [
+                                Vec3::new(x0, room_y + h[0], z0),
+                                Vec3::new(x1, room_y + h[1], z1),
+                                Vec3::new(x1, room_y + h[2], z1),
+                                Vec3::new(x0, room_y + h[3], z0),
+                            ])
+                        }
+                    };
+
+                    if let Some(c) = corners {
+                        draw_3d_line(fb, c[0], c[1], &state.camera_3d, color);
+                        draw_3d_line(fb, c[1], c[2], &state.camera_3d, color);
+                        draw_3d_line(fb, c[2], c[3], &state.camera_3d, color);
+                        draw_3d_line(fb, c[3], c[0], &state.camera_3d, color);
+                    }
+                }
+            }
+        }
+    }
+
     // Draw floor/ceiling placement preview wireframe with vertical sector boundaries
     if let Some((snapped_x, snapped_z, target_y, occupied)) = preview_sector {
         use super::CEILING_HEIGHT;
@@ -5882,6 +6039,314 @@ fn collect_all_room_vertices(state: &EditorState) -> VertexData {
         all_vertices.extend(collect_single_room_vertices(room, room_idx));
     }
     all_vertices
+}
+
+/// Calculate the average Y position of all selected faces (for X/Z drag plane)
+fn calculate_selection_center_y(state: &EditorState) -> f32 {
+    let mut total_y = 0.0;
+    let mut count = 0;
+
+    // Helper to get face center Y
+    let get_face_y = |room_idx: usize, gx: usize, gz: usize, face: &SectorFace| -> Option<f32> {
+        let room = state.level.rooms.get(room_idx)?;
+        let sector = room.get_sector(gx, gz)?;
+        let room_y = room.position.y;
+
+        match face {
+            SectorFace::Floor => {
+                sector.floor.as_ref().map(|f| {
+                    room_y + (f.heights[0] + f.heights[1] + f.heights[2] + f.heights[3]) / 4.0
+                })
+            }
+            SectorFace::Ceiling => {
+                sector.ceiling.as_ref().map(|c| {
+                    room_y + (c.heights[0] + c.heights[1] + c.heights[2] + c.heights[3]) / 4.0
+                })
+            }
+            SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallEast(i) => sector.walls_east.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallSouth(i) => sector.walls_south.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallWest(i) => sector.walls_west.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+            SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).map(|w| {
+                room_y + (w.heights[0] + w.heights[1] + w.heights[2] + w.heights[3]) / 4.0
+            }),
+        }
+    };
+
+    // Check primary selection
+    if let Selection::SectorFace { room, x, z, face } = &state.selection {
+        if let Some(y) = get_face_y(*room, *x, *z, face) {
+            total_y += y;
+            count += 1;
+        }
+    }
+
+    // Check multi-selection
+    for sel in &state.multi_selection {
+        if let Selection::SectorFace { room, x, z, face } = sel {
+            if let Some(y) = get_face_y(*room, *x, *z, face) {
+                total_y += y;
+                count += 1;
+            }
+        }
+    }
+
+    if count > 0 {
+        total_y / count as f32
+    } else {
+        0.0
+    }
+}
+
+/// Face data extracted for relocation
+#[derive(Clone)]
+enum FaceData {
+    Floor(crate::world::HorizontalFace),
+    Ceiling(crate::world::HorizontalFace),
+    WallNorth(crate::world::VerticalFace),
+    WallEast(crate::world::VerticalFace),
+    WallSouth(crate::world::VerticalFace),
+    WallWest(crate::world::VerticalFace),
+    WallNwSe(crate::world::VerticalFace),
+    WallNeSw(crate::world::VerticalFace),
+}
+
+/// Relocate faces by dx/dz grid units. Returns (count moved, total_offset_x, total_offset_z).
+/// The total offset includes room expansion offset + movement delta.
+fn relocate_faces(
+    state: &mut EditorState,
+    faces: &[(usize, usize, usize, SectorFace)],
+    dx: i32, dz: i32,
+) -> (usize, i32, i32) {
+    use std::collections::HashSet;
+
+    if faces.is_empty() || (dx == 0 && dz == 0) {
+        return (0, 0, 0);
+    }
+
+    // Phase 1: Calculate destination coordinates and check bounds
+    // We need to potentially expand the room for negative destinations
+    let mut min_dst_gx = i32::MAX;
+    let mut min_dst_gz = i32::MAX;
+    let mut max_dst_gx = i32::MIN;
+    let mut max_dst_gz = i32::MIN;
+
+    for &(_, gx, gz, _) in faces {
+        let dst_gx = gx as i32 + dx;
+        let dst_gz = gz as i32 + dz;
+        min_dst_gx = min_dst_gx.min(dst_gx);
+        min_dst_gz = min_dst_gz.min(dst_gz);
+        max_dst_gx = max_dst_gx.max(dst_gx);
+        max_dst_gz = max_dst_gz.max(dst_gz);
+    }
+
+    // Get the room index (assume all faces are in the same room for now)
+    let room_idx = faces.first().map(|(r, _, _, _)| *r).unwrap_or(0);
+
+    // Phase 2: Expand room if needed
+    let mut offset_x = 0i32;
+    let mut offset_z = 0i32;
+
+    if let Some(room) = state.level.rooms.get_mut(room_idx) {
+        // Expand in negative X direction
+        while min_dst_gx + offset_x < 0 {
+            room.position.x -= SECTOR_SIZE;
+            room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
+            room.width += 1;
+            offset_x += 1;
+        }
+
+        // Expand in negative Z direction
+        while min_dst_gz + offset_z < 0 {
+            room.position.z -= SECTOR_SIZE;
+            for col in &mut room.sectors {
+                col.insert(0, None);
+            }
+            room.depth += 1;
+            offset_z += 1;
+        }
+
+        // Expand in positive X direction
+        while (max_dst_gx + offset_x) as usize >= room.width {
+            room.width += 1;
+            room.sectors.push((0..room.depth).map(|_| None).collect());
+        }
+
+        // Expand in positive Z direction
+        while (max_dst_gz + offset_z) as usize >= room.depth {
+            room.depth += 1;
+            for col in &mut room.sectors {
+                col.push(None);
+            }
+        }
+    }
+
+    // Adjust face coordinates for the expansion offset
+    let adjusted_faces: Vec<(usize, usize, usize, SectorFace)> = faces.iter().map(|&(r, gx, gz, ref face)| {
+        (r, (gx as i32 + offset_x) as usize, (gz as i32 + offset_z) as usize, face.clone())
+    }).collect();
+
+    // Phase 3: Check which faces can actually move (destination not occupied)
+    let movable: Vec<(usize, usize, usize, SectorFace)> = adjusted_faces.iter().filter(|(room_idx, gx, gz, face)| {
+        let dst_gx = (*gx as i32 + dx) as usize;
+        let dst_gz = (*gz as i32 + dz) as usize;
+        !is_destination_occupied(state, *room_idx, dst_gx, dst_gz, face)
+    }).cloned().collect();
+
+    if movable.is_empty() {
+        return (0, offset_x + dx, offset_z + dz);
+    }
+
+    // Phase 4: Extract face data from sources
+    let face_data: Vec<Option<FaceData>> = movable.iter().map(|(room_idx, gx, gz, face)| {
+        extract_face_data(&state.level, *room_idx, *gx, *gz, face)
+    }).collect();
+
+    // Phase 5: Delete from sources
+    for (room_idx, gx, gz, face) in &movable {
+        delete_face(&mut state.level, *room_idx, *gx, *gz, face.clone());
+    }
+
+    // Phase 6: Create at destinations
+    let mut moved_count = 0;
+    for (i, (room_idx, gx, gz, _face)) in movable.iter().enumerate() {
+        let dst_gx = (*gx as i32 + dx) as usize;
+        let dst_gz = (*gz as i32 + dz) as usize;
+        if let Some(data) = &face_data[i] {
+            create_face(&mut state.level, *room_idx, dst_gx, dst_gz, data);
+            moved_count += 1;
+        }
+    }
+
+    // Phase 7: Cleanup
+    let affected_rooms: HashSet<usize> = movable.iter().map(|(r, _, _, _)| *r).collect();
+    for room_idx in affected_rooms {
+        if let Some(room) = state.level.rooms.get_mut(room_idx) {
+            room.cleanup_empty_sectors();
+            room.recalculate_bounds();
+        }
+    }
+    state.mark_portals_dirty();
+
+    // Return count and total offset (room expansion + movement delta)
+    (moved_count, offset_x + dx, offset_z + dz)
+}
+
+/// Check if destination has a conflicting face
+fn is_destination_occupied(state: &EditorState, room_idx: usize, gx: usize, gz: usize, face: &SectorFace) -> bool {
+    if let Some(room) = state.level.rooms.get(room_idx) {
+        if let Some(sector) = room.get_sector(gx, gz) {
+            return match face {
+                SectorFace::Floor => sector.floor.is_some(),
+                SectorFace::Ceiling => sector.ceiling.is_some(),
+                SectorFace::WallNorth(_) => !sector.walls_north.is_empty(),
+                SectorFace::WallEast(_) => !sector.walls_east.is_empty(),
+                SectorFace::WallSouth(_) => !sector.walls_south.is_empty(),
+                SectorFace::WallWest(_) => !sector.walls_west.is_empty(),
+                SectorFace::WallNwSe(_) => !sector.walls_nwse.is_empty(),
+                SectorFace::WallNeSw(_) => !sector.walls_nesw.is_empty(),
+            };
+        }
+    }
+    false
+}
+
+/// Extract face data from a sector
+fn extract_face_data(level: &crate::world::Level, room_idx: usize, gx: usize, gz: usize, face: &SectorFace) -> Option<FaceData> {
+    let room = level.rooms.get(room_idx)?;
+    let sector = room.get_sector(gx, gz)?;
+
+    match face {
+        SectorFace::Floor => sector.floor.clone().map(FaceData::Floor),
+        SectorFace::Ceiling => sector.ceiling.clone().map(FaceData::Ceiling),
+        SectorFace::WallNorth(i) => sector.walls_north.get(*i).cloned().map(FaceData::WallNorth),
+        SectorFace::WallEast(i) => sector.walls_east.get(*i).cloned().map(FaceData::WallEast),
+        SectorFace::WallSouth(i) => sector.walls_south.get(*i).cloned().map(FaceData::WallSouth),
+        SectorFace::WallWest(i) => sector.walls_west.get(*i).cloned().map(FaceData::WallWest),
+        SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).cloned().map(FaceData::WallNwSe),
+        SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).cloned().map(FaceData::WallNeSw),
+    }
+}
+
+/// Create a face at a destination sector
+fn create_face(level: &mut crate::world::Level, room_idx: usize, gx: usize, gz: usize, data: &FaceData) {
+    if let Some(room) = level.rooms.get_mut(room_idx) {
+        room.ensure_sector(gx, gz);
+        if let Some(sector) = room.get_sector_mut(gx, gz) {
+            match data {
+                FaceData::Floor(f) => { sector.floor = Some(f.clone()); }
+                FaceData::Ceiling(c) => { sector.ceiling = Some(c.clone()); }
+                FaceData::WallNorth(w) => { sector.walls_north.push(w.clone()); }
+                FaceData::WallEast(w) => { sector.walls_east.push(w.clone()); }
+                FaceData::WallSouth(w) => { sector.walls_south.push(w.clone()); }
+                FaceData::WallWest(w) => { sector.walls_west.push(w.clone()); }
+                FaceData::WallNwSe(w) => { sector.walls_nwse.push(w.clone()); }
+                FaceData::WallNeSw(w) => { sector.walls_nesw.push(w.clone()); }
+            }
+        }
+    }
+}
+
+/// Update selection positions after relocation
+fn update_selection_positions(
+    state: &mut EditorState,
+    original_faces: &[(usize, usize, usize, SectorFace)],
+    dx: i32, dz: i32,
+) {
+    // Build a lookup of original positions that were moved
+    let moved_positions: std::collections::HashSet<(usize, usize, usize)> = original_faces.iter()
+        .map(|(r, x, z, _)| (*r, *x, *z))
+        .collect();
+
+    // Update primary selection
+    if let Selection::SectorFace { room, x, z, face } = &state.selection {
+        if moved_positions.contains(&(*room, *x, *z)) {
+            let new_x = (*x as i32 + dx) as usize;
+            let new_z = (*z as i32 + dz) as usize;
+            // For walls, the index may have changed - use index 0 for the new wall
+            let new_face = match face {
+                SectorFace::WallNorth(_) => SectorFace::WallNorth(0),
+                SectorFace::WallEast(_) => SectorFace::WallEast(0),
+                SectorFace::WallSouth(_) => SectorFace::WallSouth(0),
+                SectorFace::WallWest(_) => SectorFace::WallWest(0),
+                SectorFace::WallNwSe(_) => SectorFace::WallNwSe(0),
+                SectorFace::WallNeSw(_) => SectorFace::WallNeSw(0),
+                _ => *face,
+            };
+            state.selection = Selection::SectorFace { room: *room, x: new_x, z: new_z, face: new_face };
+        }
+    }
+
+    // Update multi-selection
+    for sel in &mut state.multi_selection {
+        if let Selection::SectorFace { room, x, z, face } = sel {
+            if moved_positions.contains(&(*room, *x, *z)) {
+                let new_x = (*x as i32 + dx) as usize;
+                let new_z = (*z as i32 + dz) as usize;
+                let new_face = match face {
+                    SectorFace::WallNorth(_) => SectorFace::WallNorth(0),
+                    SectorFace::WallEast(_) => SectorFace::WallEast(0),
+                    SectorFace::WallSouth(_) => SectorFace::WallSouth(0),
+                    SectorFace::WallWest(_) => SectorFace::WallWest(0),
+                    SectorFace::WallNwSe(_) => SectorFace::WallNwSe(0),
+                    SectorFace::WallNeSw(_) => SectorFace::WallNeSw(0),
+                    _ => *face,
+                };
+                *sel = Selection::SectorFace { room: *room, x: new_x, z: new_z, face: new_face };
+            }
+        }
+    }
 }
 
 /// Find hovered elements in Select mode using depth-based selection.
