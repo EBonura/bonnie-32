@@ -1421,9 +1421,9 @@ impl Default for RasterSettings {
             backface_wireframe: true, // Editor default: show backfaces as wireframe
             lights: vec![Light::directional(Vec3::new(-1.0, -1.0, -1.0), 0.7)],
             ambient: 0.3,
-            low_resolution: true,   // PS1 default: 320x240
+            low_resolution: false,  // High resolution by default
             dithering: true,        // PS1 default: dithering enabled for smooth gradients
-            stretch_to_fill: false, // Default: 4:3 aspect ratio with letterboxing
+            stretch_to_fill: true,  // Default: stretch to fill viewport
             wireframe_overlay: false, // Default: wireframe off
             ortho_projection: None,  // Default: perspective projection
             use_rgb555: true,        // PS1 default: 15-bit color mode
