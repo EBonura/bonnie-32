@@ -2424,6 +2424,39 @@ impl Portal {
     }
 }
 
+/// Per-room fog/depth cueing settings (PS1-style)
+///
+/// Implements linear fog interpolation where vertex colors are blended
+/// toward the fog color based on Z depth. This emulates the PS1 GTE's
+/// depth cueing (DPCS/DPCT) instructions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomFog {
+    /// Whether fog is enabled for this room
+    pub enabled: bool,
+    /// Fog color (RGB 0.0-1.0) - the "far color" vertices blend toward
+    pub color: (f32, f32, f32),
+    /// Z distance where fog starts (0.0 = no fog yet)
+    pub start: f32,
+    /// Distance over which fog transitions from 0% to 100%
+    #[serde(default = "default_fog_falloff", alias = "end")]
+    pub falloff: f32,
+}
+
+fn default_fog_falloff() -> f32 {
+    1500.0
+}
+
+impl Default for RoomFog {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: (0.5, 0.5, 0.5), // Gray fog (PS1 typical)
+            start: 500.0,           // Fog starts at Z=500
+            falloff: 1500.0,        // Full fog 1500 units after start
+        }
+    }
+}
+
 /// A room in the level - contains a 2D grid of sectors
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
@@ -2449,6 +2482,9 @@ pub struct Room {
     /// Tile-based objects in this room (spawns, lights, props, triggers, etc.)
     #[serde(default)]
     pub objects: Vec<LevelObject>,
+    /// Per-room fog settings (PS1-style depth cueing)
+    #[serde(default)]
+    pub fog: RoomFog,
 }
 
 fn default_ambient() -> f32 {
@@ -2473,6 +2509,7 @@ impl Room {
             bounds: Aabb::default(),
             ambient: 0.5,
             objects: Vec::new(),
+            fog: RoomFog::default(),
         }
     }
 

@@ -2468,6 +2468,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         Some(&blend_modes),
                         &ortho_camera,
                         &ortho_settings,
+                        None,
                     );
                 } else {
                     // RGB888 rendering path (original)

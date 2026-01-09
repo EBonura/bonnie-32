@@ -827,7 +827,7 @@ fn draw_orbit_preview(
             if settings.use_rgb555 {
                 let atlas_texture_15 = atlas.to_raster_texture_15();
                 let textures_15 = [atlas_texture_15];
-                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings);
+                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
             } else {
                 let atlas_texture = atlas.to_raster_texture();
                 let textures = [atlas_texture];
@@ -836,7 +836,7 @@ fn draw_orbit_preview(
         } else {
             // Render without texture
             if settings.use_rgb555 {
-                render_mesh_15(fb, &mesh.vertices, &mesh.faces, &[], None, &camera, &settings);
+                render_mesh_15(fb, &mesh.vertices, &mesh.faces, &[], None, &camera, &settings, None);
             } else {
                 render_mesh(fb, &mesh.vertices, &mesh.faces, &[], &camera, &settings);
             }

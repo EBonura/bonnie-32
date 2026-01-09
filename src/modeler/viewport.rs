@@ -710,6 +710,7 @@ pub fn draw_modeler_viewport(
                     Some(&blend_modes),
                     &state.camera,
                     &state.raster_settings,
+                    None,
                 );
             } else {
                 // RGB888 rendering path (original)

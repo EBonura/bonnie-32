@@ -3178,10 +3178,23 @@ pub fn draw_viewport_3d(
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         vp_meshgen_ms += EditorFrameTimings::elapsed_ms(meshgen_start);
 
+        // Build fog parameter from room settings
+        let fog = if room.fog.enabled {
+            let (r, g, b) = room.fog.color;
+            let fog_color = RasterColor::new(
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+            );
+            Some((room.fog.start, room.fog.falloff, fog_color))
+        } else {
+            None
+        };
+
         // Time rasterization
         let raster_start = EditorFrameTimings::start();
         if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, None, &state.camera_3d, &render_settings);
+            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, None, &state.camera_3d, &render_settings, fog);
         } else {
             render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
         }
