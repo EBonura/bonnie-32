@@ -926,8 +926,8 @@ fn draw_paint_header(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, 
     draw_text("New", (new_rect.x + 18.0).floor(), (new_rect.y + new_rect.h / 2.0 + 4.0).floor(), 12.0, if new_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
 
     if ctx.mouse.clicked(&new_rect) {
-        // Create a new texture with default name
-        let name = state.user_textures.generate_unique_name("texture");
+        // Create a new texture with auto-numbered name (texture_001, texture_002, etc.)
+        let name = state.user_textures.next_available_name();
         let tex = UserTexture::new(&name, TextureSize::Size64x64, ClutDepth::Bpp4);
         state.user_textures.add(tex);
         state.editing_texture = Some(state.user_textures.get(&name).unwrap().clone());

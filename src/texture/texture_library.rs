@@ -48,7 +48,9 @@ impl TextureLibrary {
         }
     }
 
-    /// Discover and load all textures from the base directory
+    /// Discover and load all textures from the base directory (native only)
+    ///
+    /// On WASM, this is a no-op - use upload functionality instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover(&mut self) -> Result<usize, TextureError> {
         self.textures.clear();
@@ -89,6 +91,16 @@ impl TextureLibrary {
         }
 
         Ok(loaded)
+    }
+
+    /// Discover textures (WASM stub - no filesystem access)
+    ///
+    /// On WASM, textures must be uploaded by the user. This returns Ok(0).
+    /// Use `add()` to add uploaded textures to the library.
+    #[cfg(target_arch = "wasm32")]
+    pub fn discover(&mut self) -> Result<usize, TextureError> {
+        // No filesystem on WASM - textures must be uploaded by user
+        Ok(0)
     }
 
     /// Load textures from manifest (for WASM)
@@ -224,6 +236,16 @@ impl TextureLibrary {
         tex.save(&path)
     }
 
+    /// Save a texture (WASM stub - use download instead)
+    ///
+    /// On WASM, textures cannot be saved to filesystem. Use the download
+    /// functionality to export textures as .ron files.
+    #[cfg(target_arch = "wasm32")]
+    pub fn save_texture(&self, _name: &str) -> Result<(), TextureError> {
+        // No filesystem on WASM - use download functionality instead
+        Ok(())
+    }
+
     /// Save all textures to disk (native only)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_all(&self) -> Result<usize, TextureError> {
@@ -249,7 +271,25 @@ impl TextureLibrary {
         Ok(())
     }
 
-    /// Generate a unique name based on a base name
+    /// Generate the next available texture name with format "texture_001", "texture_002", etc.
+    ///
+    /// Follows the same numbering convention as levels and models.
+    pub fn next_available_name(&self) -> String {
+        // Find the highest existing texture_XXX number
+        let mut highest = 0u32;
+        for name in self.texture_names.iter() {
+            if let Some(num_str) = name.strip_prefix("texture_") {
+                if let Ok(num) = num_str.parse::<u32>() {
+                    highest = highest.max(num);
+                }
+            }
+        }
+
+        // Generate next name
+        format!("texture_{:03}", highest + 1)
+    }
+
+    /// Generate a unique name based on a base name (legacy, use next_available_name for new textures)
     pub fn generate_unique_name(&self, base: &str) -> String {
         if !self.contains(base) {
             return base.to_string();
@@ -336,5 +376,38 @@ mod tests {
             ClutDepth::Bpp4,
         ));
         assert_eq!(lib.generate_unique_name("texture"), "texture_2");
+    }
+
+    #[test]
+    fn test_next_available_name() {
+        let mut lib = TextureLibrary::new();
+
+        // Empty library should start at texture_001
+        assert_eq!(lib.next_available_name(), "texture_001");
+
+        // Add texture_001
+        lib.add(UserTexture::new(
+            "texture_001",
+            TextureSize::Size64x64,
+            ClutDepth::Bpp4,
+        ));
+        assert_eq!(lib.next_available_name(), "texture_002");
+
+        // Add texture_005 (gap)
+        lib.add(UserTexture::new(
+            "texture_005",
+            TextureSize::Size64x64,
+            ClutDepth::Bpp4,
+        ));
+        // Should use highest + 1, so texture_006
+        assert_eq!(lib.next_available_name(), "texture_006");
+
+        // Non-numbered textures should be ignored
+        lib.add(UserTexture::new(
+            "my_custom_texture",
+            TextureSize::Size64x64,
+            ClutDepth::Bpp4,
+        ));
+        assert_eq!(lib.next_available_name(), "texture_006");
     }
 }

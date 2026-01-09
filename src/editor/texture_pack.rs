@@ -269,6 +269,7 @@ mod wasm {
                 height,
                 pixels,
                 name,
+                blend_mode: crate::rasterizer::BlendMode::Opaque,
             })
         }
     }
