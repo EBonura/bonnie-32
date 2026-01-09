@@ -2663,9 +2663,12 @@ pub fn draw_viewport_3d(
 
                 if state.viewport_drag_started && (dx != 0 || dz != 0) {
                     let faces = state.xz_drag_initial_positions.clone();
-                    let (moved_count, total_dx, total_dz) = relocate_faces(state, &faces, dx, dz);
-                    // Use total offset which includes room expansion + movement delta
-                    update_selection_positions(state, &faces, total_dx, total_dz);
+                    let (moved_count, total_dx, total_dz, trim_x, trim_z) = relocate_faces(state, &faces, dx, dz);
+                    // Selection offset = movement delta + expansion offset - trim offset
+                    // (trim shifts all coordinates back by trim amount)
+                    let selection_dx = total_dx - trim_x as i32;
+                    let selection_dz = total_dz - trim_z as i32;
+                    update_selection_positions(state, &faces, selection_dx, selection_dz);
                     if moved_count > 0 {
                         state.set_status(&format!("Moved {} face(s)", moved_count), 2.0);
                     }
@@ -6173,15 +6176,19 @@ enum FaceData {
 
 /// Relocate faces by dx/dz grid units. Returns (count moved, total_offset_x, total_offset_z).
 /// The total offset includes room expansion offset + movement delta.
+/// Returns (moved_count, total_dx, total_dz, trim_x, trim_z)
+/// - moved_count: number of faces actually moved
+/// - total_dx/dz: total offset including room expansion + movement delta
+/// - trim_x/z: how many columns/rows were trimmed from the start after compacting
 fn relocate_faces(
     state: &mut EditorState,
     faces: &[(usize, usize, usize, SectorFace)],
     dx: i32, dz: i32,
-) -> (usize, i32, i32) {
+) -> (usize, i32, i32, usize, usize) {
     use std::collections::HashSet;
 
     if faces.is_empty() || (dx == 0 && dz == 0) {
-        return (0, 0, 0);
+        return (0, 0, 0, 0, 0);
     }
 
     // Phase 1: Calculate destination coordinates and check bounds
@@ -6263,7 +6270,7 @@ fn relocate_faces(
     }).cloned().collect();
 
     if movable.is_empty() {
-        return (0, offset_x + dx, offset_z + dz);
+        return (0, offset_x + dx, offset_z + dz, 0, 0);
     }
 
     // Phase 4: Extract face data from sources
@@ -6289,15 +6296,20 @@ fn relocate_faces(
 
     // Phase 7: Cleanup
     let affected_rooms: HashSet<usize> = movable.iter().map(|(r, _, _, _)| *r).collect();
+    let mut trim_x = 0usize;
+    let mut trim_z = 0usize;
     for room_idx in affected_rooms {
         if let Some(room) = state.level.rooms.get_mut(room_idx) {
-            room.compact();
+            let (tx, tz) = room.compact();
+            // Accumulate trim offsets (in practice there's usually only one room)
+            trim_x = trim_x.max(tx);
+            trim_z = trim_z.max(tz);
         }
     }
     state.mark_portals_dirty();
 
-    // Return count and total offset (room expansion + movement delta)
-    (moved_count, offset_x + dx, offset_z + dz)
+    // Return count, total offset (room expansion + movement delta), and trim offset
+    (moved_count, offset_x + dx, offset_z + dz, trim_x, trim_z)
 }
 
 /// Check if destination has a conflicting face

@@ -2674,17 +2674,20 @@ impl Room {
 
     /// Full cleanup after geometry changes: remove empty sectors, trim edges, recalculate bounds.
     /// Call this after moving or deleting faces.
-    pub fn compact(&mut self) {
+    /// Returns (trim_x, trim_z) - how many columns/rows were removed from the start.
+    pub fn compact(&mut self) -> (usize, usize) {
         self.cleanup_empty_sectors();
-        self.trim_empty_edges();
+        let trim_offset = self.trim_empty_edges();
         self.recalculate_bounds();
+        trim_offset
     }
 
     /// Trim empty rows and columns from the edges of the room grid.
     /// Adjusts room position to keep sectors in the same world position.
-    pub fn trim_empty_edges(&mut self) {
+    /// Returns (trim_x, trim_z) - how many columns/rows were removed from the start.
+    pub fn trim_empty_edges(&mut self) -> (usize, usize) {
         if self.sectors.is_empty() || self.width == 0 || self.depth == 0 {
-            return;
+            return (0, 0);
         }
 
         // Find first non-empty column (from left)
@@ -2732,7 +2735,7 @@ impl Room {
             self.width = 1;
             self.depth = 1;
             self.sectors = vec![vec![None]];
-            return;
+            return (0, 0);
         }
 
         // Apply trimming if needed
@@ -2776,7 +2779,11 @@ impl Room {
             self.sectors = new_sectors;
             self.width = new_width;
             self.depth = new_depth;
+
+            return (first_col, first_row);
         }
+
+        (0, 0)
     }
 
     /// Check if a world-space point is inside this room's bounds
