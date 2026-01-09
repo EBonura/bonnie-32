@@ -384,6 +384,8 @@ pub struct EditorState {
     /// Selection rectangle state (for drag-to-select)
     pub selection_rect_start: Option<(f32, f32)>, // Start position in viewport coords
     pub selection_rect_end: Option<(f32, f32)>,   // End position in viewport coords
+    /// True while performing box select drag in 3D viewport
+    pub box_selecting: bool,
 
     /// Currently selected room index (for editing)
     pub current_room: usize,
@@ -667,6 +669,7 @@ impl EditorState {
             multi_selection: Vec::new(),
             selection_rect_start: None,
             selection_rect_end: None,
+            box_selecting: false,
             current_room: 0,
             selected_texture,
             selected_triangle: TriangleSelection::Both,

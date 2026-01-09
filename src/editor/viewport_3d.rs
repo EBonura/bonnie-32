@@ -1834,14 +1834,20 @@ pub fn draw_viewport_3d(
                             / state.drag_initial_heights.len() as f32;
                     }
                 } else {
-                    // Clicked on nothing - clear selection (unless Shift is held)
-                    if !shift_down {
-                        // Only save undo if something will actually change
-                        if state.selection != Selection::None || !state.multi_selection.is_empty() {
-                            state.save_selection_undo();
-                            state.set_selection(Selection::None);
-                            state.clear_multi_selection();
+                    // Clicked on nothing - start box select
+                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                        // If not shift-clicking, clear existing selection
+                        if !shift_down {
+                            if state.selection != Selection::None || !state.multi_selection.is_empty() {
+                                state.save_selection_undo();
+                                state.set_selection(Selection::None);
+                                state.clear_multi_selection();
+                            }
                         }
+                        // Start box select
+                        state.selection_rect_start = Some((fb_x, fb_y));
+                        state.selection_rect_end = Some((fb_x, fb_y));
+                        state.box_selecting = true;
                     }
                 }
             }
@@ -2141,6 +2147,13 @@ pub fn draw_viewport_3d(
                         state.wall_drag_current = Some((final_gx, final_gz, start_dir));
                     }
                 }
+            }
+        }
+
+        // Update box select rectangle on drag
+        if ctx.mouse.left_down && state.box_selecting {
+            if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                state.selection_rect_end = Some((fb_x, fb_y));
             }
         }
 
@@ -2552,6 +2565,26 @@ pub fn draw_viewport_3d(
             state.drag_initial_heights.clear();
             state.dragging_object = None;
             state.viewport_drag_started = false;
+
+            // Finalize box select
+            if state.box_selecting {
+                if let (Some((x0, y0)), Some((x1, y1))) = (state.selection_rect_start, state.selection_rect_end) {
+                    let rect_min_x = x0.min(x1);
+                    let rect_max_x = x0.max(x1);
+                    let rect_min_y = y0.min(y1);
+                    let rect_max_y = y0.max(y1);
+
+                    // Only process if box has meaningful size (not just a click)
+                    if (rect_max_x - rect_min_x) > 3.0 || (rect_max_y - rect_min_y) > 3.0 {
+                        collect_selections_in_rect(state, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y);
+                    }
+                }
+
+                // Clear box select state
+                state.selection_rect_start = None;
+                state.selection_rect_end = None;
+                state.box_selecting = false;
+            }
         }
     }
 
@@ -4836,6 +4869,35 @@ pub fn draw_viewport_3d(
     // Draw viewport border
     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, Color::from_rgba(60, 60, 60, 255));
 
+    // Draw box select rectangle (if active)
+    if state.box_selecting {
+        if let (Some((fb_x0, fb_y0)), Some((fb_x1, fb_y1))) = (state.selection_rect_start, state.selection_rect_end) {
+            // Convert framebuffer coords back to screen coords
+            let screen_x0 = fb_x0 / fb_width as f32 * draw_w + draw_x;
+            let screen_y0 = fb_y0 / fb_height as f32 * draw_h + draw_y;
+            let screen_x1 = fb_x1 / fb_width as f32 * draw_w + draw_x;
+            let screen_y1 = fb_y1 / fb_height as f32 * draw_h + draw_y;
+
+            let rect_x = screen_x0.min(screen_x1);
+            let rect_y = screen_y0.min(screen_y1);
+            let rect_w = (screen_x1 - screen_x0).abs();
+            let rect_h = (screen_y1 - screen_y0).abs();
+
+            // Only draw if it's a meaningful size
+            if rect_w > 2.0 || rect_h > 2.0 {
+                // Semi-transparent fill
+                draw_rectangle(rect_x, rect_y, rect_w, rect_h, Color::from_rgba(100, 180, 255, 50));
+
+                // Outline
+                let outline_color = Color::from_rgba(100, 180, 255, 200);
+                draw_line(rect_x, rect_y, rect_x + rect_w, rect_y, 1.0, outline_color);
+                draw_line(rect_x + rect_w, rect_y, rect_x + rect_w, rect_y + rect_h, 1.0, outline_color);
+                draw_line(rect_x + rect_w, rect_y + rect_h, rect_x, rect_y + rect_h, 1.0, outline_color);
+                draw_line(rect_x, rect_y + rect_h, rect_x, rect_y, 1.0, outline_color);
+            }
+        }
+    }
+
     // Draw camera info (position and rotation) - top left
     draw_text(
         &format!(
@@ -6133,4 +6195,164 @@ fn interpolate_depth_in_triangle(
 
     // Interpolate depth
     w0 * d0 + w1 * d1 + w2 * d2
+}
+
+/// Collect all faces and objects within a screen-space rectangle (for box select)
+fn collect_selections_in_rect(
+    state: &mut EditorState,
+    fb: &Framebuffer,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+) {
+    let room_idx = state.current_room;
+    let Some(room) = state.level.rooms.get(room_idx) else { return };
+
+    let cam = &state.camera_3d;
+    let mut collected: Vec<Selection> = Vec::new();
+
+    // Check all sectors for faces
+    for x in 0..room.width {
+        for z in 0..room.depth {
+            let Some(sector) = room.get_sector(x, z) else { continue };
+
+            // World position of sector corners
+            let base_x = room.position.x + (x as f32) * SECTOR_SIZE;
+            let base_z = room.position.z + (z as f32) * SECTOR_SIZE;
+
+            // Check floor
+            if let Some(floor) = &sector.floor {
+                if face_center_in_rect(room.position.y, base_x, base_z, floor.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::Floor });
+                }
+            }
+
+            // Check ceiling
+            if let Some(ceiling) = &sector.ceiling {
+                if face_center_in_rect(room.position.y, base_x, base_z, ceiling.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::Ceiling });
+                }
+            }
+
+            // Check cardinal walls
+            for (i, wall) in sector.walls_north.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::North, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallNorth(i) });
+                }
+            }
+            for (i, wall) in sector.walls_east.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::East, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallEast(i) });
+                }
+            }
+            for (i, wall) in sector.walls_south.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::South, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallSouth(i) });
+                }
+            }
+            for (i, wall) in sector.walls_west.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::West, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallWest(i) });
+                }
+            }
+
+            // Check diagonal walls
+            for (i, wall) in sector.walls_nwse.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::NwSe, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallNwSe(i) });
+                }
+            }
+            for (i, wall) in sector.walls_nesw.iter().enumerate() {
+                if wall_center_in_rect(room.position.y, base_x, base_z, crate::world::Direction::NeSw, wall.heights, cam, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y) {
+                    collected.push(Selection::SectorFace { room: room_idx, x, z, face: SectorFace::WallNeSw(i) });
+                }
+            }
+        }
+    }
+
+    // Check objects
+    for (i, obj) in room.objects.iter().enumerate() {
+        let world_pos = obj.world_position(room);
+        if let Some((sx, sy)) = world_to_screen(world_pos, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+            if sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y {
+                collected.push(Selection::Object { room: room_idx, index: i });
+            }
+        }
+    }
+
+    // Add all collected to multi-selection
+    if !collected.is_empty() {
+        state.save_selection_undo();
+        for sel in collected {
+            state.add_to_multi_selection(sel);
+        }
+
+        // Set primary selection to first item if none set
+        if state.selection == Selection::None && !state.multi_selection.is_empty() {
+            state.selection = state.multi_selection[0].clone();
+        }
+
+        let count = state.multi_selection.len();
+        state.set_status(&format!("Selected {} items", count), 2.0);
+    }
+}
+
+/// Check if the center of a floor/ceiling face projects into the screen rectangle
+fn face_center_in_rect(
+    room_y: f32,
+    base_x: f32, base_z: f32,
+    heights: [f32; 4],
+    cam: &crate::rasterizer::Camera, fb: &Framebuffer,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+) -> bool {
+    // Calculate center position (average of all 4 corners)
+    let avg_height = (heights[0] + heights[1] + heights[2] + heights[3]) / 4.0;
+    let center = Vec3::new(
+        base_x + SECTOR_SIZE / 2.0,
+        room_y + avg_height,
+        base_z + SECTOR_SIZE / 2.0,
+    );
+
+    if let Some((sx, sy)) = world_to_screen(center, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+        sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y
+    } else {
+        false
+    }
+}
+
+/// Check if the center of a wall face projects into the screen rectangle
+fn wall_center_in_rect(
+    room_y: f32,
+    base_x: f32, base_z: f32,
+    direction: crate::world::Direction,
+    heights: [f32; 4],
+    cam: &crate::rasterizer::Camera, fb: &Framebuffer,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+) -> bool {
+    use crate::world::Direction;
+
+    // Get wall edge positions based on direction
+    let (x0, z0, x1, z1) = match direction {
+        Direction::North => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
+        Direction::South => (base_x, base_z + SECTOR_SIZE, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+        Direction::East => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+        Direction::West => (base_x, base_z, base_x, base_z + SECTOR_SIZE),
+        Direction::NwSe => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+        Direction::NeSw => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
+    };
+
+    // Calculate center position
+    let avg_height = (heights[0] + heights[1] + heights[2] + heights[3]) / 4.0;
+    let center = Vec3::new(
+        (x0 + x1) / 2.0,
+        room_y + avg_height,
+        (z0 + z1) / 2.0,
+    );
+
+    if let Some((sx, sy)) = world_to_screen(center, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+        sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y
+    } else {
+        false
+    }
 }
