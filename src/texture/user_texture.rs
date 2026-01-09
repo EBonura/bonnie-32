@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use crate::rasterizer::{ClutDepth, Color15};
+use crate::rasterizer::{BlendMode, ClutDepth, Color15};
 
 /// Valid texture sizes for user textures
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -162,6 +162,10 @@ pub struct UserTexture {
     /// RGB555 color palette (16 entries for 4-bit, 256 for 8-bit)
     /// Index 0 is typically transparent (0x0000)
     pub palette: Vec<Color15>,
+    /// Default blend mode for this texture (PS1 semi-transparency)
+    /// Applies to pixels where palette entry has bit 15 (STP) set
+    #[serde(default)]
+    pub blend_mode: BlendMode,
 }
 
 impl UserTexture {
@@ -189,6 +193,7 @@ impl UserTexture {
             depth,
             indices,
             palette,
+            blend_mode: BlendMode::Opaque,
         }
     }
 
@@ -461,9 +466,69 @@ impl UserTexture {
         rgba
     }
 
+    /// Convert texture to 4-bit CLUT (16 colors)
+    ///
+    /// If already 4-bit, returns the count of indices that would be lost (always 0).
+    /// If 8-bit, remaps indices using modulo 16 and truncates palette.
+    /// Returns the count of pixels that used indices > 15 (potential data loss).
+    pub fn convert_to_4bit(&mut self) -> usize {
+        if self.depth == ClutDepth::Bpp4 {
+            return 0;
+        }
+
+        // Count how many pixels will lose color info (indices > 15)
+        let affected = self.indices.iter().filter(|&&i| i > 15).count();
+
+        // Remap indices: modulo 16
+        for idx in &mut self.indices {
+            *idx = *idx % 16;
+        }
+
+        // Truncate palette to 16 colors
+        self.palette.truncate(16);
+        self.depth = ClutDepth::Bpp4;
+
+        affected
+    }
+
+    /// Convert texture to 8-bit CLUT (256 colors)
+    ///
+    /// If already 8-bit, does nothing.
+    /// If 4-bit, expands palette with grayscale ramp for unused slots.
+    /// Indices remain unchanged (0-15 is valid for both depths).
+    pub fn convert_to_8bit(&mut self) {
+        if self.depth == ClutDepth::Bpp8 {
+            return;
+        }
+
+        // Expand palette from 16 to 256 colors
+        // Keep existing 16 colors, fill rest with grayscale ramp
+        while self.palette.len() < 256 {
+            let i = self.palette.len();
+            // Create grayscale for indices 16-255
+            let v = ((i - 16) * 31 / 239) as u8;
+            self.palette.push(Color15::new(v, v, v));
+        }
+
+        self.depth = ClutDepth::Bpp8;
+    }
+
+    /// Check if downgrading to 4-bit would lose data
+    /// Returns count of pixels using indices > 15
+    pub fn count_high_indices(&self) -> usize {
+        if self.depth == ClutDepth::Bpp4 {
+            return 0;
+        }
+        self.indices.iter().filter(|&&i| i > 15).count()
+    }
+
     /// Convert to rasterizer Texture for 3D rendering
+    ///
+    /// Uses the texture's blend_mode for pixels where the palette color has STP bit set.
     pub fn to_raster_texture(&self) -> crate::rasterizer::Texture {
-        use crate::rasterizer::{Texture as RasterTexture, Color as RasterColor, BlendMode};
+        use crate::rasterizer::{Texture as RasterTexture, Color as RasterColor};
+
+        let tex_blend = self.blend_mode;
 
         let pixels: Vec<RasterColor> = (0..self.height)
             .flat_map(|y| {
@@ -474,7 +539,12 @@ impl UserTexture {
                         RasterColor::with_blend(0, 0, 0, BlendMode::Erase)
                     } else {
                         let [r, g, b, _] = color.to_rgba();
-                        RasterColor::new(r, g, b)
+                        // If palette color has STP bit set, use texture's blend mode
+                        if color.is_semi_transparent() {
+                            RasterColor::with_blend(r, g, b, tex_blend)
+                        } else {
+                            RasterColor::new(r, g, b)
+                        }
                     }
                 })
             })
@@ -485,6 +555,28 @@ impl UserTexture {
             height: self.height,
             pixels,
             name: self.name.clone(),
+            blend_mode: self.blend_mode,
+        }
+    }
+
+    /// Convert to rasterizer Texture15 for PS1-authentic RGB555 rendering
+    ///
+    /// Includes the texture's blend_mode for semi-transparent pixels.
+    pub fn to_raster_texture_15(&self) -> crate::rasterizer::Texture15 {
+        use crate::rasterizer::Texture15;
+
+        let pixels: Vec<Color15> = (0..self.height)
+            .flat_map(|y| {
+                (0..self.width).map(move |x| self.get_color(x, y))
+            })
+            .collect();
+
+        Texture15 {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: self.name.clone(),
+            blend_mode: self.blend_mode,
         }
     }
 }

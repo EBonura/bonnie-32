@@ -7,7 +7,7 @@
 //! - Undo/redo support
 
 use macroquad::prelude::*;
-use crate::rasterizer::{ClutDepth, Color15};
+use crate::rasterizer::{BlendMode, ClutDepth, Color15};
 use crate::ui::{Rect, UiContext, icon};
 use super::user_texture::UserTexture;
 
@@ -282,6 +282,8 @@ pub struct TextureEditorState {
     /// Signal to caller that undo should be saved (description of the action)
     /// Caller should check this after draw_texture_canvas and call global save_texture_undo
     pub undo_save_pending: Option<String>,
+    /// Blend mode dropdown is open
+    pub blend_dropdown_open: bool,
 }
 
 /// Edge or corner being resized
@@ -333,6 +335,7 @@ impl Default for TextureEditorState {
             status_message: None,
             move_original_pos: None,
             undo_save_pending: None,
+            blend_dropdown_open: false,
         }
     }
 }
@@ -2091,6 +2094,56 @@ pub fn draw_palette_panel(
     let padding = 4.0;
     let mut y = rect.y + padding;
 
+    // CLUT depth toggle buttons
+    let btn_w = (rect.w - padding * 3.0) / 2.0;
+    let btn_h = 18.0;
+
+    let btn_4bit = Rect::new(rect.x + padding, y, btn_w, btn_h);
+    let btn_8bit = Rect::new(rect.x + padding * 2.0 + btn_w, y, btn_w, btn_h);
+
+    let is_4bit = texture.depth == ClutDepth::Bpp4;
+
+    // 4-bit button
+    let bg_4bit = if is_4bit { ACCENT_COLOR } else { Color::new(0.22, 0.22, 0.24, 1.0) };
+    let hover_4bit = ctx.mouse.inside(&btn_4bit) && !is_4bit;
+    draw_rectangle(btn_4bit.x, btn_4bit.y, btn_4bit.w, btn_4bit.h,
+        if hover_4bit { Color::new(0.28, 0.28, 0.30, 1.0) } else { bg_4bit });
+    let text_4bit = "4-bit";
+    let tw = text_4bit.len() as f32 * 4.5;
+    draw_text(text_4bit, btn_4bit.x + (btn_4bit.w - tw) / 2.0, btn_4bit.y + 13.0, 12.0,
+        if is_4bit { WHITE } else { TEXT_COLOR });
+
+    // 8-bit button
+    let bg_8bit = if !is_4bit { ACCENT_COLOR } else { Color::new(0.22, 0.22, 0.24, 1.0) };
+    let hover_8bit = ctx.mouse.inside(&btn_8bit) && is_4bit;
+    draw_rectangle(btn_8bit.x, btn_8bit.y, btn_8bit.w, btn_8bit.h,
+        if hover_8bit { Color::new(0.28, 0.28, 0.30, 1.0) } else { bg_8bit });
+    let text_8bit = "8-bit";
+    draw_text(text_8bit, btn_8bit.x + (btn_8bit.w - tw) / 2.0, btn_8bit.y + 13.0, 12.0,
+        if !is_4bit { WHITE } else { TEXT_COLOR });
+
+    // Handle depth toggle clicks
+    if ctx.mouse.clicked(&btn_4bit) && !is_4bit {
+        let affected = texture.convert_to_4bit();
+        if affected > 0 {
+            // Could show a status message about data loss
+        }
+        state.dirty = true;
+        // Clamp selected index to valid range
+        if state.selected_index > 15 {
+            state.selected_index = state.selected_index % 16;
+        }
+        if state.editing_index > 15 {
+            state.editing_index = state.editing_index % 16;
+        }
+    }
+    if ctx.mouse.clicked(&btn_8bit) && is_4bit {
+        texture.convert_to_8bit();
+        state.dirty = true;
+    }
+
+    y += btn_h + 6.0;
+
     // Palette grid
     let grid_size = match texture.depth {
         ClutDepth::Bpp4 => 4,  // 4x4 = 16 colors
@@ -2142,6 +2195,20 @@ pub fn draw_palette_panel(
                     cell_size,
                     cell_size,
                     Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0),
+                );
+            }
+
+            // STP indicator (small triangle in top-right corner for semi-transparent colors)
+            if color15.is_semi_transparent() {
+                let tri_size = (cell_size * 0.4).min(8.0);
+                let tri_x = cell_x + cell_size - tri_size;
+                let tri_y = cell_y;
+                // Draw small cyan triangle indicator
+                draw_triangle(
+                    Vec2::new(tri_x, tri_y),
+                    Vec2::new(tri_x + tri_size, tri_y),
+                    Vec2::new(tri_x + tri_size, tri_y + tri_size),
+                    Color::new(0.3, 0.8, 0.9, 0.9),
                 );
             }
 
@@ -2245,6 +2312,108 @@ pub fn draw_palette_panel(
             }
 
             y += slider_h + 4.0;
+        }
+
+        // Effect checkbox + blend mode dropdown - only if there's space
+        if y + 16.0 <= rect.bottom() - padding {
+            let checkbox_size = 12.0;
+            let checkbox_rect = Rect::new(rect.x + padding, y, checkbox_size, checkbox_size);
+            let is_stp = color.is_semi_transparent();
+
+            // Checkbox background
+            draw_rectangle(checkbox_rect.x, checkbox_rect.y, checkbox_rect.w, checkbox_rect.h,
+                Color::new(0.12, 0.12, 0.14, 1.0));
+            draw_rectangle_lines(checkbox_rect.x, checkbox_rect.y, checkbox_rect.w, checkbox_rect.h,
+                1.0, Color::new(0.4, 0.4, 0.42, 1.0));
+
+            // Checkmark if checked
+            if is_stp {
+                draw_rectangle(checkbox_rect.x + 2.0, checkbox_rect.y + 2.0,
+                    checkbox_rect.w - 4.0, checkbox_rect.h - 4.0, ACCENT_COLOR);
+            }
+
+            // Label "Effect:"
+            draw_text("Effect:", checkbox_rect.right() + 4.0, y + 9.0, 10.0, TEXT_COLOR);
+
+            // Blend mode dropdown (right next to checkbox)
+            let dropdown_x = checkbox_rect.right() + 42.0;
+            let dropdown_w = rect.right() - dropdown_x - padding;
+            let dropdown_h = 14.0;
+            let dropdown_rect = Rect::new(dropdown_x, y - 1.0, dropdown_w.max(50.0), dropdown_h);
+
+            let blend_names = ["Opaque", "Average", "Add", "Subtract", "Add 25%"];
+            let current_idx = match texture.blend_mode {
+                BlendMode::Opaque => 0,
+                BlendMode::Average => 1,
+                BlendMode::Add => 2,
+                BlendMode::Subtract => 3,
+                BlendMode::AddQuarter => 4,
+                BlendMode::Erase => 0,
+            };
+            let current_name = blend_names[current_idx];
+
+            let hover_dropdown = ctx.mouse.inside(&dropdown_rect);
+            let dropdown_bg = if state.blend_dropdown_open || hover_dropdown {
+                Color::new(0.28, 0.28, 0.30, 1.0)
+            } else {
+                Color::new(0.22, 0.22, 0.24, 1.0)
+            };
+            draw_rectangle(dropdown_rect.x, dropdown_rect.y, dropdown_rect.w, dropdown_rect.h, dropdown_bg);
+            draw_text(current_name, dropdown_rect.x + 4.0, dropdown_rect.y + 10.0, 10.0, TEXT_COLOR);
+
+            // Dropdown arrow
+            draw_text("\u{25BC}", dropdown_rect.right() - 10.0, dropdown_rect.y + 9.0, 7.0, TEXT_DIM);
+
+            // Click handlers
+            let checkbox_click_area = Rect::new(checkbox_rect.x, y, 54.0, 14.0);
+            if ctx.mouse.clicked(&checkbox_click_area) {
+                texture.palette[state.editing_index].set_semi_transparent(!is_stp);
+                state.dirty = true;
+            }
+
+            if ctx.mouse.clicked(&dropdown_rect) {
+                state.blend_dropdown_open = !state.blend_dropdown_open;
+            }
+
+            // Draw dropdown options if open
+            if state.blend_dropdown_open {
+                let option_h = 18.0;
+                let menu_y = dropdown_rect.bottom();
+                let menu_h = blend_names.len() as f32 * option_h;
+
+                draw_rectangle(dropdown_rect.x, menu_y, dropdown_rect.w, menu_h, Color::new(0.16, 0.16, 0.18, 1.0));
+                draw_rectangle_lines(dropdown_rect.x, menu_y, dropdown_rect.w, menu_h, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+
+                for (i, name) in blend_names.iter().enumerate() {
+                    let opt_rect = Rect::new(dropdown_rect.x, menu_y + i as f32 * option_h, dropdown_rect.w, option_h);
+                    if ctx.mouse.inside(&opt_rect) {
+                        draw_rectangle(opt_rect.x, opt_rect.y, opt_rect.w, opt_rect.h, ACCENT_COLOR);
+                    }
+                    let text_color = if i == current_idx { WHITE } else { TEXT_COLOR };
+                    draw_text(name, opt_rect.x + 4.0, opt_rect.y + 12.0, 10.0, text_color);
+
+                    if ctx.mouse.clicked(&opt_rect) {
+                        texture.blend_mode = match i {
+                            0 => BlendMode::Opaque,
+                            1 => BlendMode::Average,
+                            2 => BlendMode::Add,
+                            3 => BlendMode::Subtract,
+                            4 => BlendMode::AddQuarter,
+                            _ => BlendMode::Opaque,
+                        };
+                        state.dirty = true;
+                        state.blend_dropdown_open = false;
+                    }
+                }
+
+                // Close dropdown if clicking outside
+                if ctx.mouse.left_pressed && !ctx.mouse.inside(&dropdown_rect) {
+                    let menu_rect = Rect::new(dropdown_rect.x, menu_y, dropdown_rect.w, menu_h);
+                    if !ctx.mouse.inside(&menu_rect) {
+                        state.blend_dropdown_open = false;
+                    }
+                }
+            }
         }
     }
 }

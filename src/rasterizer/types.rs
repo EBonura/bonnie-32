@@ -505,6 +505,7 @@ impl IndexedTexture {
             height: self.height,
             pixels,
             name: self.name.clone(),
+            blend_mode: BlendMode::Opaque,
         }
     }
 }
@@ -527,6 +528,8 @@ pub struct Texture15 {
     pub height: usize,
     pub pixels: Vec<Color15>,
     pub name: String,
+    /// Blend mode for semi-transparent pixels (STP bit set)
+    pub blend_mode: BlendMode,
 }
 
 impl Texture15 {
@@ -537,6 +540,7 @@ impl Texture15 {
             height,
             pixels: vec![Color15::WHITE; width * height],
             name: String::new(),
+            blend_mode: BlendMode::Opaque,
         }
     }
 
@@ -547,6 +551,7 @@ impl Texture15 {
             height,
             pixels: vec![color; width * height],
             name: String::new(),
+            blend_mode: BlendMode::Opaque,
         }
     }
 
@@ -584,6 +589,7 @@ impl Texture15 {
             height: height as usize,
             pixels,
             name,
+            blend_mode: BlendMode::Opaque,
         })
     }
 
@@ -613,6 +619,7 @@ impl Texture15 {
             height: height as usize,
             pixels,
             name,
+            blend_mode: BlendMode::Opaque,
         })
     }
 
@@ -624,6 +631,19 @@ impl Texture15 {
             height: tex.height,
             pixels,
             name: tex.name.clone(),
+            blend_mode: BlendMode::Opaque,
+        }
+    }
+
+    /// Convert from an 8-bit Texture with blend mode
+    pub fn from_texture_with_blend(tex: &Texture, blend_mode: BlendMode) -> Self {
+        let pixels: Vec<Color15> = tex.pixels.iter().map(|c| Color15::from_color(*c)).collect();
+        Self {
+            width: tex.width,
+            height: tex.height,
+            pixels,
+            name: tex.name.clone(),
+            blend_mode,
         }
     }
 
@@ -635,6 +655,7 @@ impl Texture15 {
             height: self.height,
             pixels,
             name: self.name.clone(),
+            blend_mode: self.blend_mode,
         }
     }
 
@@ -676,7 +697,7 @@ impl Texture15 {
                 pixels.push(if checker { color1 } else { color2 });
             }
         }
-        Self { width, height, pixels, name: "checkerboard".to_string() }
+        Self { width, height, pixels, name: "checkerboard".to_string(), blend_mode: BlendMode::Opaque }
     }
 }
 
@@ -1012,6 +1033,8 @@ pub struct Texture {
     pub height: usize,
     pub pixels: Vec<Color>,
     pub name: String,
+    /// Global blend mode for semi-transparent pixels (default Opaque)
+    pub blend_mode: BlendMode,
 }
 
 impl Texture {
@@ -1021,6 +1044,7 @@ impl Texture {
             height,
             pixels: vec![Color::WHITE; width * height],
             name: String::new(),
+            blend_mode: BlendMode::Opaque,
         }
     }
 
@@ -1055,6 +1079,7 @@ impl Texture {
             height: height as usize,
             pixels,
             name,
+            blend_mode: BlendMode::Opaque,
         })
     }
 
@@ -1169,6 +1194,7 @@ impl Texture {
             height: height as usize,
             pixels,
             name,
+            blend_mode: BlendMode::Opaque,
         })
     }
 
@@ -1181,7 +1207,7 @@ impl Texture {
                 pixels.push(if checker { color1 } else { color2 });
             }
         }
-        Self { width, height, pixels, name: "checkerboard".to_string() }
+        Self { width, height, pixels, name: "checkerboard".to_string(), blend_mode: BlendMode::Opaque }
     }
 
     /// Sample texture at UV coordinates (no filtering - PS1 style)
@@ -1222,6 +1248,7 @@ impl Texture {
             height: self.height,
             pixels,
             name: self.name.clone(),
+            blend_mode: self.blend_mode,
         }
     }
 }

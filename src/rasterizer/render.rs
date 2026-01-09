@@ -1184,7 +1184,8 @@ fn rasterize_triangle(
 
 /// Rasterize a single triangle using RGB555 (PS1-authentic mode)
 /// Uses Color15 for texture sampling and Color15 for pixel output
-/// Face blend mode is used when texture pixel has semi-transparency bit set
+/// Texture's blend_mode is used when texture pixel has semi-transparency bit set
+/// Falls back to face_blend_mode if texture has no blend mode
 /// black_transparent: if true, pure black pixels (before shading) are skipped as transparent
 fn rasterize_triangle_15(
     fb: &mut Framebuffer,
@@ -1194,6 +1195,11 @@ fn rasterize_triangle_15(
     black_transparent: bool,
     settings: &RasterSettings,
 ) {
+    // Use texture's blend mode if available, otherwise face_blend_mode
+    let blend_mode = texture
+        .map(|t| t.blend_mode)
+        .unwrap_or(face_blend_mode);
+
     // Bounding box
     let min_x = surface.v1.x.min(surface.v2.x).min(surface.v3.x).max(0.0) as usize;
     let max_x = (surface.v1.x.max(surface.v2.x).max(surface.v3.x) + 1.0).min(fb.width as f32) as usize;
@@ -1390,12 +1396,12 @@ fn rasterize_triangle_15(
                 let color = Color15::new_semi(r5, g5, b5, semi);
 
                 // Write pixel with PS1-authentic semi-transparency handling
-                // If pixel's semi-transparency bit is set, use face_blend_mode
+                // If pixel's semi-transparency bit is set, use texture's blend_mode
                 let idx = y * fb.width + x;
                 if z < fb.zbuffer[idx] {
                     fb.zbuffer[idx] = z;
-                    if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
-                        fb.set_pixel_blended_15(x, y, color, face_blend_mode);
+                    if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, blend_mode);
                     } else {
                         fb.set_pixel_15(x, y, color);
                     }

@@ -828,6 +828,7 @@ fn create_editing_texture(state: &ModelerState) -> UserTexture {
             depth: indexed.depth,
             indices: indexed.indices.clone(),
             palette: clut.colors.clone(),
+            blend_mode: crate::rasterizer::BlendMode::Opaque,
         }
     } else {
         // Create new indexed texture from atlas dimensions

@@ -387,6 +387,75 @@ pub fn draw_viewport_3d(
         }
     }
 
+    // Select all faces in room with Ctrl-A
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+    if inside_viewport && ctrl_held && is_key_pressed(KeyCode::A) {
+        // Find which room to select from: current selection's room, or first visible room
+        let room_idx = match &state.selection {
+            Selection::SectorFace { room, .. } => Some(*room),
+            Selection::Vertex { room, .. } => Some(*room),
+            Selection::Object { room, .. } => Some(*room),
+            Selection::Room(room) => Some(*room),
+            Selection::Sector { room, .. } => Some(*room),
+            Selection::Edge { room, .. } => Some(*room),
+            Selection::Portal { room, .. } => Some(*room),
+            Selection::None => {
+                // Find first visible room
+                (0..state.level.rooms.len()).find(|i| !state.hidden_rooms.contains(i))
+            }
+        };
+
+        if let Some(room_idx) = room_idx {
+            // Collect all faces first (immutable borrow of room)
+            let faces: Vec<Selection> = if let Some(room) = state.level.rooms.get(room_idx) {
+                let mut faces = Vec::new();
+                for gz in 0..room.depth {
+                    for gx in 0..room.width {
+                        if let Some(sector) = room.get_sector(gx, gz) {
+                            if sector.floor.is_some() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::Floor });
+                            }
+                            if sector.ceiling.is_some() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::Ceiling });
+                            }
+                            for i in 0..sector.walls_north.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallNorth(i) });
+                            }
+                            for i in 0..sector.walls_south.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallSouth(i) });
+                            }
+                            for i in 0..sector.walls_east.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallEast(i) });
+                            }
+                            for i in 0..sector.walls_west.len() {
+                                faces.push(Selection::SectorFace { room: room_idx, x: gx, z: gz, face: SectorFace::WallWest(i) });
+                            }
+                        }
+                    }
+                }
+                faces
+            } else {
+                Vec::new()
+            };
+
+            // Now mutate state
+            if !faces.is_empty() {
+                state.save_selection_undo();
+                state.clear_multi_selection();
+
+                let mut iter = faces.into_iter();
+                if let Some(first) = iter.next() {
+                    state.set_selection(first);
+                    state.multi_selection.extend(iter);
+                }
+
+                let count = 1 + state.multi_selection.len();
+                state.set_status(&format!("Selected {} faces", count), 1.0);
+            }
+        }
+    }
+
     // Center camera on selection with Period key
     if inside_viewport && is_key_pressed(KeyCode::Period) {
         state.center_camera_on_selection();
