@@ -2837,125 +2837,6 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Draw hovering floor grid centered on hovered tile when in floor placement mode
-    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
-        if state.tool == EditorTool::DrawFloor {
-            let inner_color = RasterColor::new(80, 180, 160); // Teal (bright)
-            let outer_color = RasterColor::new(40, 90, 80);   // Teal (dim)
-
-            // Get room Y offset for correct world-space positioning
-            let grid_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.y)
-                .unwrap_or(0.0);
-
-            // Center of the hovered sector (snap to grid)
-            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-
-            let inner_half = SECTOR_SIZE * 1.5; // Inner 3x3
-            let outer_half = SECTOR_SIZE * 2.5; // Outer 5x5
-
-            // Draw grid lines - 6 lines in each direction for 5x5 grid
-            for i in 0..=5 {
-                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
-                let dist_from_center = offset.abs();
-
-                let color = if dist_from_center <= inner_half {
-                    inner_color
-                } else {
-                    outer_color
-                };
-
-                let z = center_z + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(center_x - outer_half, grid_y, z),
-                    Vec3::new(center_x + outer_half, grid_y, z),
-                    &state.camera_3d,
-                    color,
-                );
-
-                let x = center_x + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(x, grid_y, center_z - outer_half),
-                    Vec3::new(x, grid_y, center_z + outer_half),
-                    &state.camera_3d,
-                    color,
-                );
-            }
-
-            // Draw vertex indicators at the 4 corners of the hovered sector
-            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let vertex_color = RasterColor::new(255, 255, 255); // White
-            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-        }
-    }
-
-    // Draw hovering ceiling grid centered on hovered tile when in ceiling placement mode
-    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
-        if state.tool == EditorTool::DrawCeiling {
-            use super::CEILING_HEIGHT;
-
-            let inner_color = RasterColor::new(140, 100, 180); // Purple (bright)
-            let outer_color = RasterColor::new(70, 50, 90);    // Purple (dim)
-
-            // Get room Y offset for correct world-space positioning
-            let room_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.y)
-                .unwrap_or(0.0);
-            let ceiling_y = room_y + CEILING_HEIGHT;
-
-            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-
-            let inner_half = SECTOR_SIZE * 1.5;
-            let outer_half = SECTOR_SIZE * 2.5;
-
-            for i in 0..=5 {
-                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
-                let dist_from_center = offset.abs();
-
-                let color = if dist_from_center <= inner_half {
-                    inner_color
-                } else {
-                    outer_color
-                };
-
-                let z = center_z + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(center_x - outer_half, ceiling_y, z),
-                    Vec3::new(center_x + outer_half, ceiling_y, z),
-                    &state.camera_3d,
-                    color,
-                );
-
-                let x = center_x + offset;
-                draw_3d_line(
-                    fb,
-                    Vec3::new(x, ceiling_y, center_z - outer_half),
-                    Vec3::new(x, ceiling_y, center_z + outer_half),
-                    &state.camera_3d,
-                    color,
-                );
-            }
-
-            // Draw vertex indicators at the 4 corners of the hovered sector
-            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let vertex_color = RasterColor::new(255, 255, 255); // White
-            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
-        }
-    }
-
     // Draw drag rectangle preview for floor/ceiling placement
     if let (Some((start_gx, start_gz)), Some((end_gx, end_gz))) = (state.placement_drag_start, state.placement_drag_current) {
         if state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling {
@@ -3332,6 +3213,127 @@ pub fn draw_viewport_3d(
 
     // === PREVIEW/SELECTION PHASE ===
     let preview_start = EditorFrameTimings::start();
+
+    // Draw hovering floor grid centered on hovered tile when in floor placement mode
+    // (Drawn after mesh so it renders on top)
+    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+        if state.tool == EditorTool::DrawFloor {
+            let inner_color = RasterColor::new(80, 180, 160); // Teal (bright)
+            let outer_color = RasterColor::new(40, 90, 80);   // Teal (dim)
+
+            // Get room Y offset for correct world-space positioning
+            let grid_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
+
+            // Center of the hovered sector (snap to grid)
+            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+
+            let inner_half = SECTOR_SIZE * 1.5; // Inner 3x3
+            let outer_half = SECTOR_SIZE * 2.5; // Outer 5x5
+
+            // Draw grid lines - 6 lines in each direction for 5x5 grid
+            for i in 0..=5 {
+                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
+                let dist_from_center = offset.abs();
+
+                let color = if dist_from_center <= inner_half {
+                    inner_color
+                } else {
+                    outer_color
+                };
+
+                let z = center_z + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(center_x - outer_half, grid_y, z),
+                    Vec3::new(center_x + outer_half, grid_y, z),
+                    &state.camera_3d,
+                    color,
+                );
+
+                let x = center_x + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(x, grid_y, center_z - outer_half),
+                    Vec3::new(x, grid_y, center_z + outer_half),
+                    &state.camera_3d,
+                    color,
+                );
+            }
+
+            // Draw vertex indicators at the 4 corners of the hovered sector
+            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+        }
+    }
+
+    // Draw hovering ceiling grid centered on hovered tile when in ceiling placement mode
+    // (Drawn after mesh so it renders on top)
+    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+        if state.tool == EditorTool::DrawCeiling {
+            use super::CEILING_HEIGHT;
+
+            let inner_color = RasterColor::new(140, 100, 180); // Purple (bright)
+            let outer_color = RasterColor::new(70, 50, 90);    // Purple (dim)
+
+            // Get room Y offset for correct world-space positioning
+            let room_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
+            let ceiling_y = room_y + CEILING_HEIGHT;
+
+            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+
+            let inner_half = SECTOR_SIZE * 1.5;
+            let outer_half = SECTOR_SIZE * 2.5;
+
+            for i in 0..=5 {
+                let offset = -outer_half + (i as f32 * SECTOR_SIZE);
+                let dist_from_center = offset.abs();
+
+                let color = if dist_from_center <= inner_half {
+                    inner_color
+                } else {
+                    outer_color
+                };
+
+                let z = center_z + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(center_x - outer_half, ceiling_y, z),
+                    Vec3::new(center_x + outer_half, ceiling_y, z),
+                    &state.camera_3d,
+                    color,
+                );
+
+                let x = center_x + offset;
+                draw_3d_line(
+                    fb,
+                    Vec3::new(x, ceiling_y, center_z - outer_half),
+                    Vec3::new(x, ceiling_y, center_z + outer_half),
+                    &state.camera_3d,
+                    color,
+                );
+            }
+
+            // Draw vertex indicators at the 4 corners of the hovered sector
+            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+            let vertex_color = RasterColor::new(255, 255, 255); // White
+            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+            draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z + SECTOR_SIZE), &state.camera_3d, 3, vertex_color);
+        }
+    }
 
     // Draw subtle sector boundary highlight for wall placement
     // Only show if on the drag line (same check as wall preview)
