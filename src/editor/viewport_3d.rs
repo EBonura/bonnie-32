@@ -6293,6 +6293,7 @@ fn relocate_faces(
     for room_idx in affected_rooms {
         if let Some(room) = state.level.rooms.get_mut(room_idx) {
             room.cleanup_empty_sectors();
+            room.trim_empty_edges(); // Shrink room grid if edges are now empty
             room.recalculate_bounds();
         }
     }
