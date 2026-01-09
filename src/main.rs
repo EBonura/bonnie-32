@@ -53,6 +53,13 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // Initialize crash logging FIRST (before any other code)
+    #[cfg(not(target_arch = "wasm32"))]
+    crashlog::setup!(crashlog::cargo_metadata!().capitalized(), false);
+
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+
     // Initialize framebuffer (used by 3D viewport in editor)
     let mut fb = Framebuffer::new(WIDTH, HEIGHT);
 

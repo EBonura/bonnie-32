@@ -30,6 +30,10 @@ cpal = "0.15"
 gilrs = "0.11"  # Native gamepad input
 webbrowser = "1.0"
 indicatif = "0.17"
+crashlog = "0.1"  # Panic logging with backtrace
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"  # Panics to browser console
 
 [profile.release]
 opt-level = 3
