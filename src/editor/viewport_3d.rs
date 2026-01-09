@@ -2205,6 +2205,10 @@ pub fn draw_viewport_3d(
                             room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
                             room.width += 1;
                             offset_x += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_x += 1;
+                            }
                         }
 
                         // Expand in negative Z direction
@@ -2215,6 +2219,10 @@ pub fn draw_viewport_3d(
                             }
                             room.depth += 1;
                             offset_z += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_z += 1;
+                            }
                         }
 
                         // Expand in positive X direction
@@ -2315,6 +2323,10 @@ pub fn draw_viewport_3d(
                         room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
                         room.width += 1;
                         offset_x += 1;
+                        // Shift all objects to match new grid indices
+                        for obj in &mut room.objects {
+                            obj.sector_x += 1;
+                        }
                     }
 
                     // Expand in negative Z direction
@@ -2325,6 +2337,10 @@ pub fn draw_viewport_3d(
                         }
                         room.depth += 1;
                         offset_z += 1;
+                        // Shift all objects to match new grid indices
+                        for obj in &mut room.objects {
+                            obj.sector_z += 1;
+                        }
                     }
 
                     // Expand in positive X direction
@@ -2453,6 +2469,10 @@ pub fn draw_viewport_3d(
                             room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
                             room.width += 1;
                             offset_x += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_x += 1;
+                            }
                         }
 
                         // Expand in negative Z direction
@@ -2463,6 +2483,10 @@ pub fn draw_viewport_3d(
                             }
                             room.depth += 1;
                             offset_z += 1;
+                            // Shift all objects to match new grid indices
+                            for obj in &mut room.objects {
+                                obj.sector_z += 1;
+                            }
                         }
 
                         // Expand in positive X direction
@@ -6114,6 +6138,10 @@ fn relocate_faces(
             room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
             room.width += 1;
             offset_x += 1;
+            // Shift all objects to match new grid indices
+            for obj in &mut room.objects {
+                obj.sector_x += 1;
+            }
         }
 
         // Expand in negative Z direction
@@ -6124,6 +6152,10 @@ fn relocate_faces(
             }
             room.depth += 1;
             offset_z += 1;
+            // Shift all objects to match new grid indices
+            for obj in &mut room.objects {
+                obj.sector_z += 1;
+            }
         }
 
         // Expand in positive X direction
