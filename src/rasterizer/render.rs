@@ -783,6 +783,7 @@ struct Surface {
     pub normal: Vec3, // Face normal (camera space)
     pub face_idx: usize,
     pub black_transparent: bool, // If true, black pixels are transparent (PS1 CLUT-style)
+    pub has_transparency: bool,  // True if this face uses semi-transparency (for two-pass rendering)
 }
 
 /// Calculate shading intensity from a single directional light
@@ -1194,6 +1195,7 @@ fn rasterize_triangle_15(
     face_blend_mode: BlendMode,
     black_transparent: bool,
     settings: &RasterSettings,
+    skip_z_write: bool,  // If true, don't update z-buffer (for semi-transparent pass)
 ) {
     // Use texture's blend mode if available, otherwise face_blend_mode
     let blend_mode = texture
@@ -1399,7 +1401,10 @@ fn rasterize_triangle_15(
                 // If pixel's semi-transparency bit is set, use texture's blend_mode
                 let idx = y * fb.width + x;
                 if z < fb.zbuffer[idx] {
-                    fb.zbuffer[idx] = z;
+                    // Only update z-buffer if not skipping (opaque pass updates, transparent pass doesn't)
+                    if !skip_z_write {
+                        fb.zbuffer[idx] = z;
+                    }
                     if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
                         fb.set_pixel_blended_15(x, y, color, blend_mode);
                     } else {
@@ -1745,6 +1750,12 @@ pub fn render_mesh(
         let edge2 = cv3 - cv1;
         let normal = edge1.cross(edge2).normalize();
 
+        // Determine if this face uses semi-transparency (8-bit path: check texture's blend_mode)
+        let has_transparency = face.texture_id
+            .and_then(|id| textures.get(id))
+            .map(|t| t.blend_mode != BlendMode::Opaque)
+            .unwrap_or(false);
+
         if is_backface {
             // Back-face: collect for wireframe rendering
             backface_wireframes.push((v1, v2, v3));
@@ -1773,6 +1784,7 @@ pub fn render_mesh(
                     normal: normal.scale(-1.0),
                     face_idx,
                     black_transparent: face.black_transparent,
+                    has_transparency,
                 });
             }
         } else {
@@ -1799,6 +1811,7 @@ pub fn render_mesh(
                 normal,
                 face_idx,
                 black_transparent: face.black_transparent,
+                has_transparency,
             });
 
             // Collect for wireframe overlay
@@ -2016,6 +2029,24 @@ pub fn render_mesh_15(
         let edge2 = cv3 - cv1;
         let normal = edge1.cross(edge2).normalize();
 
+        // Determine if this face uses semi-transparency (for two-pass rendering)
+        // Check texture's blend_mode first, then face blend mode
+        let has_transparency = {
+            let tex_blend = face.texture_id
+                .and_then(|id| textures.get(id))
+                .map(|t| t.blend_mode);
+            let face_blend = face_blend_modes
+                .and_then(|modes| modes.get(face_idx))
+                .copied();
+
+            // Face is transparent if texture or face has non-Opaque blend mode
+            match (tex_blend, face_blend) {
+                (Some(b), _) if b != BlendMode::Opaque => true,
+                (None, Some(b)) if b != BlendMode::Opaque => true,
+                _ => false,
+            }
+        };
+
         if is_backface {
             backface_wireframes.push((v1, v2, v3));
 
@@ -2042,6 +2073,7 @@ pub fn render_mesh_15(
                     normal: normal.scale(-1.0),
                     face_idx,
                     black_transparent: face.black_transparent,
+                    has_transparency,
                 });
             }
         } else {
@@ -2067,6 +2099,7 @@ pub fn render_mesh_15(
                 normal,
                 face_idx,
                 black_transparent: face.black_transparent,
+                has_transparency,
             });
 
             if settings.wireframe_overlay {
@@ -2077,35 +2110,64 @@ pub fn render_mesh_15(
 
     timings.cull_ms = ((get_time() - cull_start) * 1000.0) as f32;
 
-    // === SORT PHASE ===
+    // === SORT PHASE (Two-Pass: Separate Opaque & Transparent) ===
     let sort_start = get_time();
 
+    // Partition surfaces into opaque and semi-transparent
+    let (mut opaque_surfaces, mut transparent_surfaces): (Vec<_>, Vec<_>) =
+        surfaces.into_iter().partition(|s| !s.has_transparency);
+
+    // Sort transparent surfaces back-to-front (always, regardless of z-buffer mode)
+    // This is required for correct blending order (PS1 Ordering Table style)
+    transparent_surfaces.sort_by(|a, b| {
+        let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
+        let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
+        b_max_z.partial_cmp(&a_max_z).unwrap()  // Back-to-front (far first)
+    });
+
+    // Sort opaque surfaces only if using painter's algorithm (no z-buffer)
     if !settings.use_zbuffer {
-        surfaces.sort_by(|a, b| {
+        opaque_surfaces.sort_by(|a, b| {
             let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
             let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
-            b_max_z.partial_cmp(&a_max_z).unwrap()
+            b_max_z.partial_cmp(&a_max_z).unwrap()  // Back-to-front
         });
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
 
-    // === DRAW PHASE ===
+    // === DRAW PHASE (Two-Pass Rendering) ===
     let draw_start = get_time();
 
     if !settings.wireframe_overlay {
-        for surface in &surfaces {
+        // PASS 1: Render opaque surfaces (z-buffer writes enabled)
+        // Establishes depth buffer for correct occlusion
+        for surface in &opaque_surfaces {
             let texture = faces[surface.face_idx]
                 .texture_id
                 .and_then(|id| textures.get(id));
 
-            // Get face blend mode (default to Opaque if not provided)
             let blend_mode = face_blend_modes
                 .and_then(|modes| modes.get(surface.face_idx))
                 .copied()
                 .unwrap_or(BlendMode::Opaque);
 
-            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings);
+            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, false);
+        }
+
+        // PASS 2: Render semi-transparent surfaces (z-buffer writes DISABLED)
+        // Sorted back-to-front for correct blending, depth-tested but doesn't occlude
+        for surface in &transparent_surfaces {
+            let texture = faces[surface.face_idx]
+                .texture_id
+                .and_then(|id| textures.get(id));
+
+            let blend_mode = face_blend_modes
+                .and_then(|modes| modes.get(surface.face_idx))
+                .copied()
+                .unwrap_or(BlendMode::Opaque);
+
+            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, true);
         }
     }
 
