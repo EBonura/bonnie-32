@@ -2576,7 +2576,19 @@ pub fn draw_viewport_3d(
 
                     // Only process if box has meaningful size (not just a click)
                     if (rect_max_x - rect_min_x) > 3.0 || (rect_max_y - rect_min_y) > 3.0 {
-                        collect_selections_in_rect(state, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y);
+                        let collected = find_selections_in_rect(state, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y);
+                        if !collected.is_empty() {
+                            state.save_selection_undo();
+                            for sel in collected {
+                                state.add_to_multi_selection(sel);
+                            }
+                            // Set primary selection to first item if none set
+                            if state.selection == Selection::None && !state.multi_selection.is_empty() {
+                                state.selection = state.multi_selection[0].clone();
+                            }
+                            let count = state.multi_selection.len();
+                            state.set_status(&format!("Selected {} items", count), 2.0);
+                        }
                     }
                 }
 
@@ -4719,6 +4731,121 @@ pub fn draw_viewport_3d(
         draw_selection(fb, sel);
     }
 
+    // Draw box select preview (live highlighting during drag)
+    if state.box_selecting {
+        if let (Some((x0, y0)), Some((x1, y1))) = (state.selection_rect_start, state.selection_rect_end) {
+            let rect_min_x = x0.min(x1);
+            let rect_max_x = x0.max(x1);
+            let rect_min_y = y0.min(y1);
+            let rect_max_y = y0.max(y1);
+
+            // Only calculate if box has meaningful size
+            if (rect_max_x - rect_min_x) > 3.0 || (rect_max_y - rect_min_y) > 3.0 {
+                let preview_items = find_selections_in_rect(state, fb, rect_min_x, rect_min_y, rect_max_x, rect_max_y);
+
+                // Draw preview items with cyan color to distinguish from confirmed selection
+                let preview_color = RasterColor::new(100, 220, 255); // Cyan for preview
+
+                // Create a draw function for preview with different color
+                let draw_preview_selection = |fb: &mut Framebuffer, selection: &Selection| {
+                    match selection {
+                        Selection::SectorFace { room, x, z, face } => {
+                            if let Some(room_data) = state.level.rooms.get(*room) {
+                                if let Some(sector) = room_data.get_sector(*x, *z) {
+                                    let base_x = room_data.position.x + (*x as f32) * SECTOR_SIZE;
+                                    let base_z = room_data.position.z + (*z as f32) * SECTOR_SIZE;
+                                    let room_y = room_data.position.y;
+
+                                    match face {
+                                        SectorFace::Floor => {
+                                            if let Some(floor) = &sector.floor {
+                                                let corners = [
+                                                    Vec3::new(base_x, room_y + floor.heights[0], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2], base_z + SECTOR_SIZE),
+                                                    Vec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE),
+                                                ];
+                                                draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                                            }
+                                        }
+                                        SectorFace::Ceiling => {
+                                            if let Some(ceiling) = &sector.ceiling {
+                                                let corners = [
+                                                    Vec3::new(base_x, room_y + ceiling.heights[0], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1], base_z),
+                                                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2], base_z + SECTOR_SIZE),
+                                                    Vec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE),
+                                                ];
+                                                draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                                            }
+                                        }
+                                        face if is_wall_face(face) => {
+                                            // Get wall corners based on direction
+                                            let (x0, z0, x1, z1) = match face {
+                                                SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
+                                                SectorFace::WallSouth(_) => (base_x, base_z + SECTOR_SIZE, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                SectorFace::WallWest(_) => (base_x, base_z, base_x, base_z + SECTOR_SIZE),
+                                                SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
+                                                SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
+                                                _ => return,
+                                            };
+                                            let walls = match face {
+                                                SectorFace::WallNorth(i) => sector.walls_north.get(*i),
+                                                SectorFace::WallEast(i) => sector.walls_east.get(*i),
+                                                SectorFace::WallSouth(i) => sector.walls_south.get(*i),
+                                                SectorFace::WallWest(i) => sector.walls_west.get(*i),
+                                                SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i),
+                                                SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i),
+                                                _ => None,
+                                            };
+                                            if let Some(wall) = walls {
+                                                let corners = [
+                                                    Vec3::new(x0, room_y + wall.heights[0], z0),
+                                                    Vec3::new(x1, room_y + wall.heights[1], z1),
+                                                    Vec3::new(x1, room_y + wall.heights[2], z1),
+                                                    Vec3::new(x0, room_y + wall.heights[3], z0),
+                                                ];
+                                                draw_3d_line(fb, corners[0], corners[1], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[1], corners[2], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[2], corners[3], &state.camera_3d, preview_color);
+                                                draw_3d_line(fb, corners[3], corners[0], &state.camera_3d, preview_color);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        Selection::Object { room, index } => {
+                            if let Some(room_data) = state.level.rooms.get(*room) {
+                                if let Some(obj) = room_data.objects.get(*index) {
+                                    let world_pos = obj.world_position(room_data);
+                                    // Draw a small cross at object position
+                                    let size = 64.0;
+                                    draw_3d_line(fb, world_pos - Vec3::new(size, 0.0, 0.0), world_pos + Vec3::new(size, 0.0, 0.0), &state.camera_3d, preview_color);
+                                    draw_3d_line(fb, world_pos - Vec3::new(0.0, size, 0.0), world_pos + Vec3::new(0.0, size, 0.0), &state.camera_3d, preview_color);
+                                    draw_3d_line(fb, world_pos - Vec3::new(0.0, 0.0, size), world_pos + Vec3::new(0.0, 0.0, size), &state.camera_3d, preview_color);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                };
+
+                for sel in &preview_items {
+                    draw_preview_selection(fb, sel);
+                }
+            }
+        }
+    }
+
     // Draw floor/ceiling placement preview wireframe with vertical sector boundaries
     if let Some((snapped_x, snapped_z, target_y, occupied)) = preview_sector {
         use super::CEILING_HEIGHT;
@@ -6197,15 +6324,16 @@ fn interpolate_depth_in_triangle(
     w0 * d0 + w1 * d1 + w2 * d2
 }
 
-/// Collect all faces and objects within a screen-space rectangle (for box select)
-fn collect_selections_in_rect(
-    state: &mut EditorState,
+/// Find all faces and objects within a screen-space rectangle (for box select)
+/// Returns a Vec of selections without modifying state
+fn find_selections_in_rect(
+    state: &EditorState,
     fb: &Framebuffer,
     rect_min_x: f32, rect_min_y: f32,
     rect_max_x: f32, rect_max_y: f32,
-) {
+) -> Vec<Selection> {
     let room_idx = state.current_room;
-    let Some(room) = state.level.rooms.get(room_idx) else { return };
+    let Some(room) = state.level.rooms.get(room_idx) else { return Vec::new() };
 
     let cam = &state.camera_3d;
     let mut collected: Vec<Selection> = Vec::new();
@@ -6279,21 +6407,7 @@ fn collect_selections_in_rect(
         }
     }
 
-    // Add all collected to multi-selection
-    if !collected.is_empty() {
-        state.save_selection_undo();
-        for sel in collected {
-            state.add_to_multi_selection(sel);
-        }
-
-        // Set primary selection to first item if none set
-        if state.selection == Selection::None && !state.multi_selection.is_empty() {
-            state.selection = state.multi_selection[0].clone();
-        }
-
-        let count = state.multi_selection.len();
-        state.set_status(&format!("Selected {} items", count), 2.0);
-    }
+    collected
 }
 
 /// Check if the center of a floor/ceiling face projects into the screen rectangle

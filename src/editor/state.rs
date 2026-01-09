@@ -386,6 +386,8 @@ pub struct EditorState {
     pub selection_rect_end: Option<(f32, f32)>,   // End position in viewport coords
     /// True while performing box select drag in 3D viewport
     pub box_selecting: bool,
+    /// Preview of items that would be selected by current box select (for live highlighting)
+    pub box_select_preview: Vec<Selection>,
 
     /// Currently selected room index (for editing)
     pub current_room: usize,
@@ -670,6 +672,7 @@ impl EditorState {
             selection_rect_start: None,
             selection_rect_end: None,
             box_selecting: false,
+            box_select_preview: Vec::new(),
             current_room: 0,
             selected_texture,
             selected_triangle: TriangleSelection::Both,
