@@ -1077,8 +1077,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             room.sectors[new_gx][new_gz] = Some(sector);
                         }
 
-                        room.trim_empty_edges();
-                        room.recalculate_bounds();
+                        room.compact();
                         state.set_status(&format!("Moved {} sector(s)", state.grid_dragging_sectors.len()), 2.0);
                         state.mark_portals_dirty();
                     }
