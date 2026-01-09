@@ -380,6 +380,11 @@ pub fn draw_viewport_3d(
         }
     }
 
+    // Center camera on selection with Period key
+    if inside_viewport && is_key_pressed(KeyCode::Period) {
+        state.center_camera_on_selection();
+    }
+
     // Delete selected elements with Delete or Backspace key (supports multi-selection)
     if inside_viewport && (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) {
         // Collect all selections (primary + multi)
@@ -5093,7 +5098,8 @@ fn clip_line_to_rect(
     let mut code0 = outcode(x0, y0);
     let mut code1 = outcode(x1, y1);
 
-    loop {
+    // Guard against infinite loops from floating-point edge cases
+    for _ in 0..16 {
         if (code0 | code1) == 0 {
             // Both inside
             return Some((x0, y0, x1, y1));
@@ -5133,6 +5139,9 @@ fn clip_line_to_rect(
             code1 = outcode(x1, y1);
         }
     }
+
+    // Failed to converge (floating-point edge case) - reject the line
+    None
 }
 
 /// Draw a 3D point (filled circle) at a world position

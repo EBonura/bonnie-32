@@ -1061,6 +1061,36 @@ impl EditorState {
         }
     }
 
+    /// Center the camera on the current selection, maintaining viewing distance
+    pub fn center_camera_on_selection(&mut self) {
+        // Get selection center - if none, do nothing
+        let Some(center) = self.get_selection_center() else {
+            return;
+        };
+
+        match self.camera_mode {
+            CameraMode::Orbit => {
+                // Simply update the orbit target, keep distance/angles
+                self.orbit_target = center;
+                self.last_orbit_target = center;
+                self.sync_camera_from_orbit();
+            }
+            CameraMode::Free => {
+                // Calculate direction from selection to current camera
+                let to_camera = self.camera_3d.position - center;
+                let distance = to_camera.len();
+
+                // Use current distance, or a reasonable default if camera is at the center
+                let actual_distance = if distance > 0.1 { distance } else { 2000.0 };
+
+                // Keep camera at same distance but centered on selection
+                // The camera's forward direction (-basis_z) points at selection
+                let new_position = center - self.camera_3d.basis_z * actual_distance;
+                self.camera_3d.position = new_position;
+            }
+        }
+    }
+
     /// Mark portals as needing recalculation
     pub fn mark_portals_dirty(&mut self) {
         self.portals_dirty = true;
