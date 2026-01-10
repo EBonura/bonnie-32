@@ -686,6 +686,8 @@ pub struct ModelerState {
     // Pending drag start positions (for detecting drag vs click)
     // Actual drag state is in DragManager
     pub box_select_pending_start: Option<(f32, f32)>,
+    /// Which viewport started the box select (for unified viewport handling)
+    pub box_select_viewport: Option<ViewportId>,
     pub free_drag_pending_start: Option<(f32, f32)>,
     pub ortho_drag_pending_start: Option<(f32, f32)>,
     /// Pending start for ortho box selection (clicked on empty space)
@@ -892,6 +894,7 @@ impl ModelerState {
             ortho_last_mouse: (0.0, 0.0),
 
             box_select_pending_start: None,
+            box_select_viewport: None,
             free_drag_pending_start: None,
             ortho_drag_pending_start: None,
             ortho_box_select_pending_start: None,

@@ -281,6 +281,12 @@ fn handle_drag_move(
     let is_free_moving = state.drag_manager.active.is_free_move();
     let is_ortho = viewport_id != ViewportId::Perspective;
 
+    // DEBUG: Log entry into this function
+    if ctx.mouse.left_pressed || ctx.mouse.left_down {
+        eprintln!("[DEBUG handle_drag_move] viewport={:?} is_ortho={} is_free_moving={} inside={} mouse={:?}",
+            viewport_id, is_ortho, is_free_moving, inside_viewport, mouse_pos);
+    }
+
     // Check if this viewport owns the ortho drag
     let owns_ortho_drag = state.ortho_drag_viewport == Some(viewport_id);
     // Skip if another ortho viewport owns this drag
@@ -289,8 +295,10 @@ fn handle_drag_move(
     }
 
     if is_free_moving {
+        eprintln!("[DEBUG] is_free_moving=true, owns_ortho_drag={} ortho_drag_viewport={:?}", owns_ortho_drag, state.ortho_drag_viewport);
         if ctx.mouse.left_down {
             if is_ortho && owns_ortho_drag {
+                eprintln!("[DEBUG] ORTHO DRAG UPDATE for {:?}", viewport_id);
                 // Ortho mode: use screen-to-world delta conversion
                 let drag_zoom = state.ortho_drag_zoom;
 
@@ -309,6 +317,10 @@ fn handle_drag_move(
                         ViewportId::Side => Vec3::new(0.0, world_dy, world_dx),   // ZY plane
                         ViewportId::Perspective => Vec3::ZERO,
                     };
+
+                    if dx.abs() > 0.1 || dy.abs() > 0.1 {
+                        eprintln!("[DEBUG ORTHO DRAG] screen_delta=({:.1}, {:.1}) zoom={} world_delta={:?}", dx, dy, drag_zoom, delta);
+                    }
 
                     // Apply delta to initial positions
                     if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
@@ -365,6 +377,7 @@ fn handle_drag_move(
             }
         } else {
             // End drag on mouse release
+            eprintln!("[DEBUG] DRAG END - mouse released, owns_ortho_drag={}", owns_ortho_drag);
             state.drag_manager.end();
             if owns_ortho_drag {
                 state.ortho_drag_viewport = None;
@@ -414,9 +427,13 @@ fn handle_drag_move(
                         .collect();
 
                     if !initial_positions.is_empty() {
+                        eprintln!("[DEBUG] STARTING DRAG: viewport={:?} initial_positions={} mouse={:?}",
+                            viewport_id, initial_positions.len(), mouse_pos);
+
                         // Calculate center
                         let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
                         let center = sum * (1.0 / initial_positions.len() as f32);
+                        eprintln!("[DEBUG] center={:?}", center);
 
                         // Save undo state before starting
                         state.push_undo("Drag move");
@@ -430,6 +447,7 @@ fn handle_drag_move(
                         if is_ortho {
                             state.ortho_drag_viewport = Some(viewport_id);
                             state.ortho_drag_zoom = state.get_ortho_camera(viewport_id).zoom;
+                            eprintln!("[DEBUG] Setting ortho_drag_viewport={:?} zoom={}", viewport_id, state.ortho_drag_zoom);
                         }
 
                         // Start free move drag (axis = None for screen-space movement)
@@ -444,6 +462,8 @@ fn handle_drag_move(
                         );
 
                         state.set_status("Drag to move (hold Shift for fine)", 3.0);
+                    } else {
+                        eprintln!("[DEBUG] NO initial_positions - nothing selected?");
                     }
 
                     state.free_drag_pending_start = None;
@@ -1020,7 +1040,7 @@ pub fn draw_modeler_viewport_ext(
     // Handle box selection (left-drag without hitting an element or gizmo)
     // Uses DragManager for tracking
     if state.gizmo_hovered_axis.is_none() {
-        handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+        handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
     }
 
     // Draw box selection overlay if DragManager has active box select
@@ -1062,6 +1082,7 @@ fn handle_box_selection(
     draw_h: f32,
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     // Don't start box select during modal transforms or other drags
     if state.modal_transform != ModalTransform::None {
@@ -1071,7 +1092,14 @@ fn handle_box_selection(
     // Check if we're already in a box select drag
     let is_box_selecting = state.drag_manager.active.is_box_select();
 
-    if is_box_selecting {
+    // DEBUG: Log box selection activity
+    if ctx.mouse.left_pressed && inside_viewport {
+        eprintln!("[DEBUG BOX SELECT] viewport={:?} left_pressed inside_viewport pending={:?} is_dragging={}",
+            viewport_id, state.box_select_pending_start, state.drag_manager.is_dragging());
+    }
+
+    // Only process active box select for the viewport that owns it
+    if is_box_selecting && state.box_select_viewport == Some(viewport_id) {
         // Update the box select tracker with current mouse position
         if let ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
             tracker.current_mouse = mouse_pos;
@@ -1093,11 +1121,14 @@ fn handle_box_selection(
                 let fb_x1 = (x1 - draw_x) / draw_w * fb_width as f32;
                 let fb_y1 = (y1 - draw_y) / draw_h * fb_height as f32;
 
-                apply_box_selection(state, fb_x0, fb_y0, fb_x1, fb_y1, fb_width, fb_height);
+                eprintln!("[DEBUG BOX SELECT] Applying! screen=({:.0},{:.0})-({:.0},{:.0}) fb=({:.0},{:.0})-({:.0},{:.0}) viewport={:?}",
+                    x0, y0, x1, y1, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id);
+                apply_box_selection(state, fb_x0, fb_y0, fb_x1, fb_y1, fb_width, fb_height, viewport_id);
             }
 
-            // End the drag
+            // End the drag and clear viewport ownership
             state.drag_manager.end();
+            state.box_select_viewport = None;
         }
     } else if !state.drag_manager.is_dragging() {
         // Not in any drag - check for box select start
@@ -1105,25 +1136,34 @@ fn handle_box_selection(
         if ctx.mouse.left_pressed && inside_viewport {
             // Store potential start position (will become box select if dragged far enough)
             state.box_select_pending_start = Some(mouse_pos);
+            state.box_select_viewport = Some(viewport_id);
         }
 
         // Check if we should convert pending start to actual box select
-        if let Some(start_pos) = state.box_select_pending_start {
-            if ctx.mouse.left_down {
-                let dx = (mouse_pos.0 - start_pos.0).abs();
-                let dy = (mouse_pos.1 - start_pos.1).abs();
-                // Only become box select if moved at least 5 pixels
-                if dx > 5.0 || dy > 5.0 {
-                    state.drag_manager.start_box_select(start_pos);
-                    // Update with current position
-                    if let ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
-                        tracker.current_mouse = mouse_pos;
+        // IMPORTANT: Only process if this viewport owns the pending box select
+        if state.box_select_viewport == Some(viewport_id) {
+            if let Some(start_pos) = state.box_select_pending_start {
+                if ctx.mouse.left_down {
+                    let dx = (mouse_pos.0 - start_pos.0).abs();
+                    let dy = (mouse_pos.1 - start_pos.1).abs();
+                    eprintln!("[DEBUG BOX SELECT DRAG] viewport={:?} start={:?} current={:?} dx={:.1} dy={:.1}",
+                        viewport_id, start_pos, mouse_pos, dx, dy);
+                    // Only become box select if moved at least 5 pixels
+                    if dx > 5.0 || dy > 5.0 {
+                        eprintln!("[DEBUG BOX SELECT] Starting box select! dx={} dy={}", dx, dy);
+                        state.drag_manager.start_box_select(start_pos);
+                        // Update with current position
+                        if let ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
+                            tracker.current_mouse = mouse_pos;
+                        }
+                        state.box_select_pending_start = None;
+                        // Note: box_select_viewport stays set to track which viewport owns the active drag
                     }
+                } else {
+                    // Mouse released without dragging - clear pending
                     state.box_select_pending_start = None;
+                    state.box_select_viewport = None;
                 }
-            } else {
-                // Mouse released without dragging - clear pending
-                state.box_select_pending_start = None;
             }
         }
     }
@@ -1140,10 +1180,42 @@ fn apply_box_selection(
     fb_y1: f32,
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) {
-    let camera = &state.camera;
+    // For ortho viewports, we need to set up the ortho projection from the viewport's camera
+    // The raster_settings.ortho_projection is None at this point because it gets reset after rendering
+    let is_ortho = matches!(viewport_id, ViewportId::Top | ViewportId::Front | ViewportId::Side);
+
+    // Create a temporary ortho projection for ortho viewports
+    let ortho_proj_temp;
+    let ortho = if is_ortho {
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        ortho_proj_temp = Some(OrthoProjection {
+            zoom: ortho_cam.zoom,
+            center_x: ortho_cam.center.x,
+            center_y: ortho_cam.center.y,
+        });
+        ortho_proj_temp.as_ref()
+    } else {
+        state.raster_settings.ortho_projection.as_ref()
+    };
+
+    // For ortho viewports, we need to use the appropriate camera orientation
+    let camera = if is_ortho {
+        match viewport_id {
+            ViewportId::Top => Camera::ortho_top(),
+            ViewportId::Front => Camera::ortho_front(),
+            ViewportId::Side => Camera::ortho_side(),
+            ViewportId::Perspective => state.camera.clone(),
+        }
+    } else {
+        state.camera.clone()
+    };
+
     let mesh = state.mesh();
-    let ortho = state.raster_settings.ortho_projection.as_ref();
+
+    eprintln!("[DEBUG apply_box_selection] viewport={:?} is_ortho={} ortho={:?} mesh_verts={} select_mode={:?}",
+        viewport_id, is_ortho, ortho, mesh.vertices.len(), state.select_mode);
 
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)

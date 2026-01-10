@@ -2706,16 +2706,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         }
     }
 
-    // Draw box selection overlay if active for this ortho viewport
-    if state.ortho_box_select_viewport == Some(viewport_id) {
-        if let super::drag::ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
-            let (min_x, min_y, max_x, max_y) = tracker.bounds();
-            // Semi-transparent fill
-            draw_rectangle(min_x, min_y, max_x - min_x, max_y - min_y, Color::from_rgba(100, 150, 255, 50));
-            // Border
-            draw_rectangle_lines(min_x, min_y, max_x - min_x, max_y - min_y, 1.0, Color::from_rgba(100, 150, 255, 200));
-        }
-    }
+    // Box selection overlay is now drawn by the unified viewport.rs handler
 
     // Disable scissor clipping
     unsafe {
@@ -2782,6 +2773,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             state.select_mode = SelectMode::Face;
         } else if !is_key_down(KeyCode::X) {
             // Clicked on nothing - start potential box select (don't clear selection yet)
+            eprintln!("[DEBUG] Clicked empty space in {:?} - setting box_select_pending_start", viewport_id);
             state.ortho_box_select_pending_start = Some((ctx.mouse.x, ctx.mouse.y));
             state.ortho_box_select_viewport = Some(viewport_id);
         }
@@ -2797,6 +2789,9 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
         // Check if we're already in box select mode
         let is_box_selecting = state.drag_manager.active.is_box_select();
+
+        eprintln!("[DEBUG ORTHO BOX] viewport={:?} is_box_selecting={} pending={:?} mouse=({}, {})",
+            viewport_id, is_box_selecting, state.ortho_box_select_pending_start, ctx.mouse.x, ctx.mouse.y);
 
         if is_box_selecting {
             // Update the box select tracker with current mouse position
@@ -2814,6 +2809,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 };
 
                 if let Some((x0, y0, x1, y1)) = bounds {
+                    eprintln!("[DEBUG] Applying ortho box selection: bounds=({}, {}) to ({}, {})", x0, y0, x1, y1);
                     // Apply box selection for ortho views
                     apply_ortho_box_selection(state, viewport_id, x0, y0, x1, y1, rect.x, rect.y, rect.w, rect.h, ortho_zoom, ortho_center);
                 }
@@ -2829,6 +2825,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 let dy = (ctx.mouse.y - start_pos.1).abs();
                 // Only become box select if moved at least 5 pixels
                 if dx > 5.0 || dy > 5.0 {
+                    eprintln!("[DEBUG] Starting ortho box select! dx={} dy={}", dx, dy);
                     state.drag_manager.start_box_select(start_pos);
                     // Update with current position
                     if let super::drag::ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
@@ -3049,6 +3046,8 @@ fn apply_ortho_box_selection(
     ortho_zoom: f32,
     ortho_center: crate::rasterizer::Vec2,
 ) {
+    eprintln!("[DEBUG apply_ortho_box_selection] viewport={:?} screen=({}, {})-({}, {}) rect=({}, {}, {}, {}) zoom={} center={:?}",
+        viewport_id, screen_x0, screen_y0, screen_x1, screen_y1, rect_x, rect_y, rect_w, rect_h, ortho_zoom, ortho_center);
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
         || is_key_down(KeyCode::X);
@@ -3083,6 +3082,8 @@ fn apply_ortho_box_selection(
 
     let mesh = state.mesh();
 
+    eprintln!("[DEBUG] select_mode={:?} mesh has {} vertices", state.select_mode, mesh.vertices.len());
+
     match state.select_mode {
         SelectMode::Vertex => {
             let mut selected = if add_to_selection {
@@ -3092,7 +3093,12 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
-                if is_in_box(vert.pos) && !selected.contains(&idx) {
+                let (sx, sy) = world_to_screen(vert.pos);
+                let in_box = is_in_box(vert.pos);
+                if idx < 3 {
+                    eprintln!("[DEBUG] vertex {} pos={:?} -> screen=({}, {}) in_box={}", idx, vert.pos, sx, sy, in_box);
+                }
+                if in_box && !selected.contains(&idx) {
                     selected.push(idx);
                 }
             }
