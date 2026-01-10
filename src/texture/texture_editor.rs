@@ -284,6 +284,14 @@ pub struct TextureEditorState {
     pub undo_save_pending: Option<String>,
     /// Blend mode dropdown is open
     pub blend_dropdown_open: bool,
+    /// Palette generator: 3 key colors for ramp generation
+    pub palette_gen_colors: [(u8, u8, u8); 3],
+    /// Palette generator: brightness range (0.3 = subtle, 1.0 = full range)
+    pub palette_gen_brightness: f32,
+    /// Palette generator: hue shift per step in degrees (0 = monochrome, 10-20 = natural)
+    pub palette_gen_hue_shift: f32,
+    /// Which palette generator color is being edited (0-2), None if not editing
+    pub palette_gen_editing: Option<usize>,
 }
 
 /// Edge or corner being resized
@@ -336,6 +344,11 @@ impl Default for TextureEditorState {
             move_original_pos: None,
             undo_save_pending: None,
             blend_dropdown_open: false,
+            // Palette generator defaults: warm skin, cool blue, earthy green
+            palette_gen_colors: [(24, 16, 12), (8, 12, 20), (12, 18, 8)],
+            palette_gen_brightness: 0.7,
+            palette_gen_hue_shift: 10.0,
+            palette_gen_editing: None,
         }
     }
 }
@@ -378,7 +391,8 @@ impl TextureEditorState {
         self.selection = None;
         self.selection_drag_start = None;
         self.creating_selection = false;
-        // Note: clipboard is NOT reset - allow paste across textures
+        self.palette_gen_editing = None;
+        // Note: clipboard and palette_gen_colors are NOT reset - allow reuse across textures
     }
 
     /// Reset zoom and pan to fit texture in view
@@ -1026,6 +1040,142 @@ pub fn screen_to_texture(
     let py = ((screen_y - tex_y) / state.zoom).floor() as i32;
 
     Some((px, py))
+}
+
+// =============================================================================
+// Palette Generation (Color Ramps from Key Colors)
+// =============================================================================
+
+/// Convert RGB (0-31 per channel) to HSL (h: 0-360, s: 0-1, l: 0-1)
+fn rgb5_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let r = r as f32 / 31.0;
+    let g = g as f32 / 31.0;
+    let b = b as f32 / 31.0;
+
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+
+    if (max - min).abs() < 0.0001 {
+        return (0.0, 0.0, l); // Achromatic
+    }
+
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+
+    let h = if (max - r).abs() < 0.0001 {
+        let mut h = (g - b) / d;
+        if g < b { h += 6.0; }
+        h * 60.0
+    } else if (max - g).abs() < 0.0001 {
+        ((b - r) / d + 2.0) * 60.0
+    } else {
+        ((r - g) / d + 4.0) * 60.0
+    };
+
+    (h, s, l)
+}
+
+/// Convert HSL to RGB (0-31 per channel)
+fn hsl_to_rgb5(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    if s.abs() < 0.0001 {
+        let v = (l * 31.0).round() as u8;
+        return (v, v, v);
+    }
+
+    let h = h % 360.0;
+    let h = if h < 0.0 { h + 360.0 } else { h };
+
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+
+    fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+        if t < 0.0 { t += 1.0; }
+        if t > 1.0 { t -= 1.0; }
+        if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
+        if t < 0.5 { return q; }
+        if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+        p
+    }
+
+    let r = hue_to_rgb(p, q, h / 360.0 + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h / 360.0);
+    let b = hue_to_rgb(p, q, h / 360.0 - 1.0 / 3.0);
+
+    (
+        (r * 31.0).round().clamp(0.0, 31.0) as u8,
+        (g * 31.0).round().clamp(0.0, 31.0) as u8,
+        (b * 31.0).round().clamp(0.0, 31.0) as u8,
+    )
+}
+
+/// Generate a 5-color ramp from a key color
+///
+/// - `key_color`: RGB values (0-31 per channel)
+/// - `brightness_range`: 0.0-1.0, how much lightness varies across the ramp
+/// - `hue_shift`: degrees to shift hue per step (0 = monochrome, 10-20 = natural)
+///
+/// Returns 5 colors: dark → key (mid) → light
+fn generate_ramp(
+    key_color: (u8, u8, u8),
+    brightness_range: f32,
+    hue_shift: f32,
+) -> [Color15; 5] {
+    let (h, s, l) = rgb5_to_hsl(key_color.0, key_color.1, key_color.2);
+
+    // Key color sits at index 2 (middle)
+    // Dark shades: decrease lightness, optionally shift hue toward warm
+    // Light shades: increase lightness, decrease saturation, optionally shift hue toward cool
+
+    let l_range = brightness_range * 0.4; // How much lightness varies from mid
+
+    let mut colors = [Color15::default(); 5];
+    for i in 0..5 {
+        let step = i as f32 - 2.0; // -2, -1, 0, 1, 2
+
+        // Lightness: darker for negative steps, lighter for positive
+        let new_l = (l + step * l_range / 2.0).clamp(0.05, 0.95);
+
+        // Saturation: decrease for light colors to avoid neon look
+        let sat_factor = if step > 0.0 { 1.0 - step * 0.15 } else { 1.0 };
+        let new_s = (s * sat_factor).clamp(0.0, 1.0);
+
+        // Hue shift: warm for shadows, cool for highlights
+        let new_h = h + step * hue_shift;
+
+        let (r, g, b) = hsl_to_rgb5(new_h, new_s, new_l);
+        colors[i] = Color15::new(r, g, b);
+    }
+
+    colors
+}
+
+/// Generate a complete 16-color palette from 3 key colors
+///
+/// Layout:
+/// - Index 0: Transparent
+/// - Indices 1-5: Ramp from key color 1
+/// - Indices 6-10: Ramp from key color 2
+/// - Indices 11-15: Ramp from key color 3
+pub fn generate_palette_from_keys(
+    key_colors: [(u8, u8, u8); 3],
+    brightness_range: f32,
+    hue_shift: f32,
+) -> [Color15; 16] {
+    let mut palette = [Color15::TRANSPARENT; 16];
+
+    // Index 0 stays transparent
+
+    // Generate 3 ramps of 5 colors each
+    for (ramp_idx, key_color) in key_colors.iter().enumerate() {
+        let ramp = generate_ramp(*key_color, brightness_range, hue_shift);
+        let start_idx = 1 + ramp_idx * 5;
+        for (i, color) in ramp.iter().enumerate() {
+            palette[start_idx + i] = *color;
+        }
+    }
+
+    palette
 }
 
 /// Draw the texture canvas
@@ -2142,103 +2292,254 @@ pub fn draw_palette_panel(
         state.dirty = true;
     }
 
-    y += btn_h + 6.0;
+    y += btn_h + 4.0;
 
-    // Palette grid
-    let grid_size = match texture.depth {
-        ClutDepth::Bpp4 => 4,  // 4x4 = 16 colors
-        ClutDepth::Bpp8 => 16, // 16x16 = 256 colors
-    };
+    // Palette generator section (only for 4-bit mode)
+    if is_4bit {
+        let gen_h = 20.0;
+        let swatch_size = 16.0;
+        let swatch_gap = 2.0;
 
-    // Make palette cells bigger - use available width, max 24px per cell
-    let cell_size = ((rect.w - padding * 2.0) / grid_size as f32).min(24.0);
-    let grid_w = cell_size * grid_size as f32;
-    let grid_x = rect.x + (rect.w - grid_w) / 2.0;
+        // Three key color swatches
+        let swatches_w = 3.0 * swatch_size + 2.0 * swatch_gap;
+        let swatch_x = rect.x + padding;
 
-    for gy in 0..grid_size {
-        for gx in 0..grid_size {
-            let idx = gy * grid_size + gx;
-            if idx >= texture.palette.len() {
-                break;
+        for i in 0..3 {
+            let sx = swatch_x + i as f32 * (swatch_size + swatch_gap);
+            let swatch_rect = Rect::new(sx, y, swatch_size, swatch_size);
+
+            let (r, g, b) = state.palette_gen_colors[i];
+            let rgb = Color::new(r as f32 / 31.0, g as f32 / 31.0, b as f32 / 31.0, 1.0);
+            draw_rectangle(sx, y, swatch_size, swatch_size, rgb);
+
+            // Selection highlight if editing this color
+            if state.palette_gen_editing == Some(i) {
+                draw_rectangle_lines(sx - 1.0, y - 1.0, swatch_size + 2.0, swatch_size + 2.0, 2.0, WHITE);
+            } else if ctx.mouse.inside(&swatch_rect) {
+                draw_rectangle_lines(sx, y, swatch_size, swatch_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.5));
             }
 
-            let cell_x = grid_x + gx as f32 * cell_size;
-            let cell_y = y + gy as f32 * cell_size;
-            let cell_rect = Rect::new(cell_x, cell_y, cell_size, cell_size);
-
-            let color15 = texture.palette[idx];
-
-            // Draw color or checkerboard for transparent
-            if color15.is_transparent() {
-                let check = cell_size / 2.0;
-                for cy in 0..2 {
-                    for cx in 0..2 {
-                        let c = if (cx + cy) % 2 == 0 {
-                            Color::new(0.25, 0.25, 0.27, 1.0)
-                        } else {
-                            Color::new(0.15, 0.15, 0.17, 1.0)
-                        };
-                        draw_rectangle(
-                            cell_x + cx as f32 * check,
-                            cell_y + cy as f32 * check,
-                            check,
-                            check,
-                            c,
-                        );
+            // Click to toggle editing (picks color from currently editing_index)
+            if ctx.mouse.clicked(&swatch_rect) {
+                if state.palette_gen_editing == Some(i) {
+                    // Already editing, deselect
+                    state.palette_gen_editing = None;
+                } else {
+                    // Copy current editing color to this key color
+                    if state.editing_index < texture.palette.len() {
+                        let c = texture.palette[state.editing_index];
+                        state.palette_gen_colors[i] = (c.r5(), c.g5(), c.b5());
                     }
+                    state.palette_gen_editing = Some(i);
                 }
-            } else {
-                let [r, g, b, _] = color15.to_rgba();
-                draw_rectangle(
-                    cell_x,
-                    cell_y,
-                    cell_size,
-                    cell_size,
-                    Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0),
-                );
+            }
+        }
+
+        // "Gen" button
+        let btn_gen_w = rect.w - swatches_w - padding * 3.0 - 4.0;
+        let btn_gen_x = swatch_x + swatches_w + 4.0;
+        let btn_gen = Rect::new(btn_gen_x, y, btn_gen_w.max(30.0), swatch_size);
+        let gen_hover = ctx.mouse.inside(&btn_gen);
+        let gen_bg = if gen_hover { Color::new(0.35, 0.50, 0.35, 1.0) } else { Color::new(0.25, 0.40, 0.25, 1.0) };
+        draw_rectangle(btn_gen.x, btn_gen.y, btn_gen.w, btn_gen.h, gen_bg);
+        let gen_text = "Gen";
+        let tw = gen_text.len() as f32 * 4.5;
+        draw_text(gen_text, btn_gen.x + (btn_gen.w - tw) / 2.0, btn_gen.y + 12.0, 11.0, WHITE);
+
+        if ctx.mouse.clicked(&btn_gen) {
+            // Generate palette from key colors
+            let new_palette = generate_palette_from_keys(
+                state.palette_gen_colors,
+                state.palette_gen_brightness,
+                state.palette_gen_hue_shift,
+            );
+            // Apply to texture
+            for (i, color) in new_palette.iter().enumerate() {
+                if i < texture.palette.len() {
+                    texture.palette[i] = *color;
+                }
+            }
+            state.dirty = true;
+            state.palette_gen_editing = None;
+        }
+
+        y += gen_h + 4.0;
+    } else {
+        y += 2.0;
+    }
+
+    // Palette grid - custom layout for 4-bit (ramp-based), regular grid for 8-bit
+    let grid_height: f32;
+
+    if is_4bit {
+        // 4-bit layout: Transparent square on left, 3 rows of 5 colors on right
+        // Layout: [T] [1 2 3 4 5]
+        //             [6 7 8 9 10]
+        //             [11 12 13 14 15]
+        let cell_size = ((rect.w - padding * 2.0 - 4.0) / 6.0).min(20.0);
+        let trans_size = cell_size * 3.0; // Transparent cell spans 3 rows
+        let grid_x = rect.x + padding;
+
+        // Draw transparent cell (index 0) - large square on the left
+        {
+            let cell_x = grid_x;
+            let cell_y = y;
+            let cell_rect = Rect::new(cell_x, cell_y, trans_size, trans_size);
+
+            // Checkerboard for transparent
+            let check = trans_size / 4.0;
+            for cy in 0..4 {
+                for cx in 0..4 {
+                    let c = if (cx + cy) % 2 == 0 {
+                        Color::new(0.25, 0.25, 0.27, 1.0)
+                    } else {
+                        Color::new(0.15, 0.15, 0.17, 1.0)
+                    };
+                    draw_rectangle(cell_x + cx as f32 * check, cell_y + cy as f32 * check, check, check, c);
+                }
             }
 
-            // STP indicator (small triangle in top-right corner for semi-transparent colors)
-            if color15.is_semi_transparent() {
-                let tri_size = (cell_size * 0.4).min(8.0);
-                let tri_x = cell_x + cell_size - tri_size;
-                let tri_y = cell_y;
-                // Draw small cyan triangle indicator
-                draw_triangle(
-                    Vec2::new(tri_x, tri_y),
-                    Vec2::new(tri_x + tri_size, tri_y),
-                    Vec2::new(tri_x + tri_size, tri_y + tri_size),
-                    Color::new(0.3, 0.8, 0.9, 0.9),
-                );
-            }
-
-            // Selection highlight
-            let is_selected = state.selected_index == idx as u8;
-            let is_editing = state.editing_index == idx;
+            // Selection/editing highlight
+            let is_selected = state.selected_index == 0;
+            let is_editing = state.editing_index == 0;
             let hovered = ctx.mouse.inside(&cell_rect);
 
             if is_selected {
-                draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 2.0, WHITE);
+                draw_rectangle_lines(cell_x, cell_y, trans_size, trans_size, 2.0, WHITE);
             } else if is_editing {
-                draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 0.8, 0.2, 1.0));
+                draw_rectangle_lines(cell_x, cell_y, trans_size, trans_size, 1.0, Color::new(1.0, 0.8, 0.2, 1.0));
             } else if hovered {
-                draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.3));
+                draw_rectangle_lines(cell_x, cell_y, trans_size, trans_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.3));
             }
 
-            // Click to select for drawing
             if ctx.mouse.clicked(&cell_rect) {
-                state.selected_index = idx as u8;
-                state.editing_index = idx;
+                state.selected_index = 0;
+                state.editing_index = 0;
             }
-
-            // Right-click to edit color
             if hovered && ctx.mouse.right_pressed {
-                state.editing_index = idx;
+                state.editing_index = 0;
             }
         }
+
+        // Draw 3 ramps (5 colors each) to the right of transparent
+        let ramp_x = grid_x + trans_size + 4.0;
+        for row in 0..3 {
+            for col in 0..5 {
+                let idx = 1 + row * 5 + col;
+                if idx >= texture.palette.len() {
+                    break;
+                }
+
+                let cell_x = ramp_x + col as f32 * cell_size;
+                let cell_y = y + row as f32 * cell_size;
+                let cell_rect = Rect::new(cell_x, cell_y, cell_size, cell_size);
+                let color15 = texture.palette[idx];
+
+                // Draw color
+                let [r, g, b, _] = color15.to_rgba();
+                draw_rectangle(cell_x, cell_y, cell_size, cell_size,
+                    Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0));
+
+                // STP indicator
+                if color15.is_semi_transparent() {
+                    let tri_size = (cell_size * 0.4).min(6.0);
+                    draw_triangle(
+                        Vec2::new(cell_x + cell_size - tri_size, cell_y),
+                        Vec2::new(cell_x + cell_size, cell_y),
+                        Vec2::new(cell_x + cell_size, cell_y + tri_size),
+                        Color::new(0.3, 0.8, 0.9, 0.9),
+                    );
+                }
+
+                // Selection highlight
+                let is_selected = state.selected_index == idx as u8;
+                let is_editing = state.editing_index == idx;
+                let hovered = ctx.mouse.inside(&cell_rect);
+
+                if is_selected {
+                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 2.0, WHITE);
+                } else if is_editing {
+                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 0.8, 0.2, 1.0));
+                } else if hovered {
+                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.3));
+                }
+
+                if ctx.mouse.clicked(&cell_rect) {
+                    state.selected_index = idx as u8;
+                    state.editing_index = idx;
+                }
+                if hovered && ctx.mouse.right_pressed {
+                    state.editing_index = idx;
+                }
+            }
+        }
+
+        grid_height = trans_size;
+    } else {
+        // 8-bit: regular 16x16 grid
+        let grid_size = 16;
+        let cell_size = ((rect.w - padding * 2.0) / grid_size as f32).min(12.0);
+        let grid_w = cell_size * grid_size as f32;
+        let grid_x = rect.x + (rect.w - grid_w) / 2.0;
+
+        for gy in 0..grid_size {
+            for gx in 0..grid_size {
+                let idx = gy * grid_size + gx;
+                if idx >= texture.palette.len() {
+                    break;
+                }
+
+                let cell_x = grid_x + gx as f32 * cell_size;
+                let cell_y = y + gy as f32 * cell_size;
+                let cell_rect = Rect::new(cell_x, cell_y, cell_size, cell_size);
+                let color15 = texture.palette[idx];
+
+                // Draw color or checkerboard for transparent
+                if color15.is_transparent() {
+                    let check = cell_size / 2.0;
+                    for cy in 0..2 {
+                        for cx in 0..2 {
+                            let c = if (cx + cy) % 2 == 0 {
+                                Color::new(0.25, 0.25, 0.27, 1.0)
+                            } else {
+                                Color::new(0.15, 0.15, 0.17, 1.0)
+                            };
+                            draw_rectangle(cell_x + cx as f32 * check, cell_y + cy as f32 * check, check, check, c);
+                        }
+                    }
+                } else {
+                    let [r, g, b, _] = color15.to_rgba();
+                    draw_rectangle(cell_x, cell_y, cell_size, cell_size,
+                        Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0));
+                }
+
+                // Selection highlight
+                let is_selected = state.selected_index == idx as u8;
+                let is_editing = state.editing_index == idx;
+                let hovered = ctx.mouse.inside(&cell_rect);
+
+                if is_selected {
+                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 2.0, WHITE);
+                } else if is_editing {
+                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 0.8, 0.2, 1.0));
+                } else if hovered {
+                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.3));
+                }
+
+                if ctx.mouse.clicked(&cell_rect) {
+                    state.selected_index = idx as u8;
+                    state.editing_index = idx;
+                }
+                if hovered && ctx.mouse.right_pressed {
+                    state.editing_index = idx;
+                }
+            }
+        }
+
+        grid_height = grid_size as f32 * cell_size;
     }
 
-    y += grid_size as f32 * cell_size + 8.0;
+    y += grid_height + 8.0;
 
     // Color editor for editing_index - only show if there's enough space
     let remaining_height = rect.bottom() - y;
