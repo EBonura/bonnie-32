@@ -766,8 +766,8 @@ fn toggle_pressed(input: &InputState) -> bool {
 
 /// Draw debug overlay HUD (top-right, shows player/collision stats)
 fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, level: &Level) {
-    // Scale factor for the entire overlay (2x = twice as big)
-    let scale = 2.0;
+    // Scale factor for the entire overlay (1.5x for compact display)
+    let scale = 1.5;
 
     let line_height = 12.0 * scale;
     let text_size = 10.0 * scale;
@@ -903,8 +903,8 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     let bar_w = overlay_w - 12.0 * scale;
     let bar_x = overlay_x + 6.0 * scale;
 
-    // Background (taller to fit stacked legend with render breakdown + raster breakdown)
-    let legend_height = 222.0 * scale; // 4 main items + 5 render items + 5 raster items + 2 headers + padding
+    // Background (taller to fit stacked legend with render breakdown + raster breakdown + triangle count)
+    let legend_height = 250.0 * scale; // 4 main + 5 render + 6 raster + 2 headers + triangle count + padding
     draw_rectangle(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, Color::from_rgba(20, 22, 28, 200));
     draw_rectangle_lines(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, 1.0, Color::from_rgba(60, 65, 75, 255));
 
