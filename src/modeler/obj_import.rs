@@ -2,8 +2,8 @@
 //! Supports basic OBJ format: vertices (v), texture coords (vt), normals (vn), faces (f)
 //! Also includes MTL parsing and PNG texture loading with quantization.
 
-use crate::rasterizer::{Vec2, Vec3, Face, Vertex, ClutDepth, Clut};
-use super::mesh_editor::{EditableMesh, IndexedAtlas, TextureAtlas};
+use crate::rasterizer::{Vec2, Vec3, Vertex, ClutDepth, Clut};
+use super::mesh_editor::{EditableMesh, IndexedAtlas, TextureAtlas, EditFace};
 use std::path::Path;
 
 /// OBJ file importer
@@ -25,7 +25,7 @@ impl ObjImporter {
         let mut normals: Vec<Vec3> = Vec::new();
 
         let mut vertices: Vec<Vertex> = Vec::new();
-        let mut faces: Vec<Face> = Vec::new();
+        let mut faces: Vec<EditFace> = Vec::new();
 
         // Track unique vertex combinations (pos_idx, tc_idx, norm_idx) -> vertex_idx
         let mut vertex_cache: std::collections::HashMap<(usize, usize, usize), usize> =
@@ -114,7 +114,7 @@ impl ObjImporter {
                     // Fan triangulation from first vertex
                     // Note: OBJ uses CCW winding, but our rasterizer expects CW, so we swap v1/v2
                     for i in 1..(face_verts.len() - 1) {
-                        faces.push(Face::new(
+                        faces.push(EditFace::tri(
                             face_verts[0],
                             face_verts[i + 1],  // swapped to flip winding
                             face_verts[i],      // swapped to flip winding
@@ -545,27 +545,34 @@ impl ObjImporter {
 
     /// Compute face normals for meshes that don't have them
     pub fn compute_face_normals(mesh: &mut EditableMesh) {
-        for face in &mesh.faces {
-            let v0 = &mesh.vertices[face.v0];
-            let v1 = &mesh.vertices[face.v1];
-            let v2 = &mesh.vertices[face.v2];
+        // First pass: collect normals for each face
+        let face_normals: Vec<(Vec<usize>, Vec3)> = mesh.faces.iter()
+            .filter(|face| face.vertices.len() >= 3)
+            .map(|face| {
+                let v0 = &mesh.vertices[face.vertices[0]];
+                let v1 = &mesh.vertices[face.vertices[1]];
+                let v2 = &mesh.vertices[face.vertices[2]];
 
-            // Compute face normal via cross product
-            let edge1 = Vec3::new(
-                v1.pos.x - v0.pos.x,
-                v1.pos.y - v0.pos.y,
-                v1.pos.z - v0.pos.z,
-            );
-            let edge2 = Vec3::new(
-                v2.pos.x - v0.pos.x,
-                v2.pos.y - v0.pos.y,
-                v2.pos.z - v0.pos.z,
-            );
+                // Compute face normal via cross product
+                let edge1 = Vec3::new(
+                    v1.pos.x - v0.pos.x,
+                    v1.pos.y - v0.pos.y,
+                    v1.pos.z - v0.pos.z,
+                );
+                let edge2 = Vec3::new(
+                    v2.pos.x - v0.pos.x,
+                    v2.pos.y - v0.pos.y,
+                    v2.pos.z - v0.pos.z,
+                );
 
-            let normal = edge1.cross(edge2).normalize();
+                let normal = edge1.cross(edge2).normalize();
+                (face.vertices.clone(), normal)
+            })
+            .collect();
 
-            // Set normal on all vertices if they don't have one
-            for &v_idx in &[face.v0, face.v1, face.v2] {
+        // Second pass: apply normals to vertices that don't have one
+        for (vertices, normal) in face_normals {
+            for v_idx in vertices {
                 let vertex = &mut mesh.vertices[v_idx];
                 if vertex.normal.x == 0.0 && vertex.normal.y == 0.0 && vertex.normal.z == 0.0 {
                     vertex.normal = normal;

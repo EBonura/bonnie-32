@@ -7,9 +7,10 @@ use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
-    world_to_screen, draw_floor_grid, point_in_triangle_2d,
+    world_to_screen, world_to_screen_with_ortho, draw_floor_grid, point_in_triangle_2d,
+    OrthoProjection, Camera,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode};
+use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
 use super::drag::{DragUpdateResult, ActiveDrag};
 use super::tools::ModelerToolId;
 
@@ -57,14 +58,10 @@ fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
         ModelerSelection::Faces(faces) => {
             for &face_idx in faces {
                 if let Some(face) = mesh.faces.get(face_idx) {
-                    if let Some(v0) = mesh.vertices.get(face.v0) {
-                        positions.push(v0.pos);
-                    }
-                    if let Some(v1) = mesh.vertices.get(face.v1) {
-                        positions.push(v1.pos);
-                    }
-                    if let Some(v2) = mesh.vertices.get(face.v2) {
-                        positions.push(v2.pos);
+                    for &vi in &face.vertices {
+                        if let Some(v) = mesh.vertices.get(vi) {
+                            positions.push(v.pos);
+                        }
                     }
                 }
             }
@@ -119,23 +116,13 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
             ModelerSelection::Faces(faces) => {
                 for &face_idx in faces {
                     if let Some(face) = mesh.faces.get(face_idx).cloned() {
-                        if let Some(vert) = mesh.vertices.get(face.v0) {
-                            if let Some(&new_pos) = positions.get(pos_idx) {
-                                movements.push((face.v0, vert.pos, new_pos));
+                        for &vi in &face.vertices {
+                            if let Some(vert) = mesh.vertices.get(vi) {
+                                if let Some(&new_pos) = positions.get(pos_idx) {
+                                    movements.push((vi, vert.pos, new_pos));
+                                }
+                                pos_idx += 1;
                             }
-                            pos_idx += 1;
-                        }
-                        if let Some(vert) = mesh.vertices.get(face.v1) {
-                            if let Some(&new_pos) = positions.get(pos_idx) {
-                                movements.push((face.v1, vert.pos, new_pos));
-                            }
-                            pos_idx += 1;
-                        }
-                        if let Some(vert) = mesh.vertices.get(face.v2) {
-                            if let Some(&new_pos) = positions.get(pos_idx) {
-                                movements.push((face.v2, vert.pos, new_pos));
-                            }
-                            pos_idx += 1;
                         }
                     }
                 }
@@ -278,6 +265,7 @@ fn handle_drag_move(
     inside_viewport: bool,
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     // Don't interfere with modal transforms
     if state.modal_transform != ModalTransform::None {
@@ -291,43 +279,109 @@ fn handle_drag_move(
 
     // Check if we're already in a free move drag
     let is_free_moving = state.drag_manager.active.is_free_move();
+    let is_ortho = viewport_id != ViewportId::Perspective;
 
-    // Skip if ortho viewport owns this drag (ortho handles it directly)
-    if state.ortho_drag_viewport.is_some() {
+    // DEBUG: Log entry into this function
+    if ctx.mouse.left_pressed || ctx.mouse.left_down {
+        eprintln!("[DEBUG handle_drag_move] viewport={:?} is_ortho={} is_free_moving={} inside={} mouse={:?}",
+            viewport_id, is_ortho, is_free_moving, inside_viewport, mouse_pos);
+    }
+
+    // Check if this viewport owns the ortho drag
+    let owns_ortho_drag = state.ortho_drag_viewport == Some(viewport_id);
+    // Skip if another ortho viewport owns this drag
+    if state.ortho_drag_viewport.is_some() && !owns_ortho_drag {
         return;
     }
 
     if is_free_moving {
+        eprintln!("[DEBUG] is_free_moving=true, owns_ortho_drag={} ortho_drag_viewport={:?}", owns_ortho_drag, state.ortho_drag_viewport);
         if ctx.mouse.left_down {
-            // Update the drag with current mouse position
-            let result = state.drag_manager.update(
-                mouse_pos,
-                &state.camera,
-                fb_width,
-                fb_height,
-            );
+            if is_ortho && owns_ortho_drag {
+                eprintln!("[DEBUG] ORTHO DRAG UPDATE for {:?}", viewport_id);
+                // Ortho mode: use screen-to-world delta conversion
+                let drag_zoom = state.ortho_drag_zoom;
 
-            if let DragUpdateResult::Move { positions, .. } = result {
-                let snap_disabled = is_key_down(KeyCode::Z);
-                // Capture snap settings before borrowing mesh
-                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
-                let snap_settings = state.snap_settings.clone();
-                if let Some(mesh) = state.mesh_mut() {
-                    for (vert_idx, new_pos) in positions {
-                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                            vert.pos = if snap_enabled {
-                                snap_settings.snap_vec3(new_pos)
-                            } else {
-                                new_pos
-                            };
+                if let Some(drag_state) = &state.drag_manager.state {
+                    let dx = mouse_pos.0 - drag_state.initial_mouse.0;
+                    let dy = mouse_pos.1 - drag_state.initial_mouse.1;
+
+                    // Convert screen delta to world delta based on viewport
+                    let world_dx = dx / drag_zoom;
+                    let world_dy = -dy / drag_zoom; // Y inverted
+
+                    // Free move: movement on viewport plane (no axis constraint)
+                    let delta = match viewport_id {
+                        ViewportId::Top => Vec3::new(world_dx, 0.0, world_dy),    // XZ plane
+                        ViewportId::Front => Vec3::new(world_dx, world_dy, 0.0),  // XY plane
+                        ViewportId::Side => Vec3::new(0.0, world_dy, world_dx),   // ZY plane
+                        ViewportId::Perspective => Vec3::ZERO,
+                    };
+
+                    if dx.abs() > 0.1 || dy.abs() > 0.1 {
+                        eprintln!("[DEBUG ORTHO DRAG] screen_delta=({:.1}, {:.1}) zoom={} world_delta={:?}", dx, dy, drag_zoom, delta);
+                    }
+
+                    // Apply delta to initial positions
+                    if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
+                        let snap_disabled = is_key_down(KeyCode::Z);
+                        let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                        let snap_size = state.snap_settings.grid_size;
+
+                        let updates: Vec<_> = tracker.initial_positions.iter()
+                            .map(|(idx, start_pos)| (*idx, *start_pos + delta))
+                            .collect();
+
+                        if let Some(mesh) = state.mesh_mut() {
+                            for (idx, mut new_pos) in updates {
+                                if snap_enabled {
+                                    new_pos.x = (new_pos.x / snap_size).round() * snap_size;
+                                    new_pos.y = (new_pos.y / snap_size).round() * snap_size;
+                                    new_pos.z = (new_pos.z / snap_size).round() * snap_size;
+                                }
+                                if let Some(vert) = mesh.vertices.get_mut(idx) {
+                                    vert.pos = new_pos;
+                                }
+                            }
                         }
+                        state.dirty = true;
                     }
                 }
-                state.dirty = true;
+            } else {
+                // Perspective mode: use ray casting via DragManager
+                let result = state.drag_manager.update(
+                    mouse_pos,
+                    &state.camera,
+                    fb_width,
+                    fb_height,
+                );
+
+                if let DragUpdateResult::Move { positions, .. } = result {
+                    let snap_disabled = is_key_down(KeyCode::Z);
+                    // Capture snap settings before borrowing mesh
+                    let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                    let snap_settings = state.snap_settings.clone();
+                    if let Some(mesh) = state.mesh_mut() {
+                        for (vert_idx, new_pos) in positions {
+                            if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                                vert.pos = if snap_enabled {
+                                    snap_settings.snap_vec3(new_pos)
+                                } else {
+                                    new_pos
+                                };
+                            }
+                        }
+                    }
+                    state.dirty = true;
+                }
             }
         } else {
             // End drag on mouse release
+            eprintln!("[DEBUG] DRAG END - mouse released, owns_ortho_drag={}", owns_ortho_drag);
             state.drag_manager.end();
+            if owns_ortho_drag {
+                state.ortho_drag_viewport = None;
+            }
             state.set_status("Moved", 0.5);
         }
 
@@ -341,6 +395,9 @@ fn handle_drag_move(
                         }
                     }
                 }
+            }
+            if owns_ortho_drag {
+                state.ortho_drag_viewport = None;
             }
             state.set_status("Move cancelled", 0.5);
         }
@@ -370,9 +427,13 @@ fn handle_drag_move(
                         .collect();
 
                     if !initial_positions.is_empty() {
+                        eprintln!("[DEBUG] STARTING DRAG: viewport={:?} initial_positions={} mouse={:?}",
+                            viewport_id, initial_positions.len(), mouse_pos);
+
                         // Calculate center
                         let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
                         let center = sum * (1.0 / initial_positions.len() as f32);
+                        eprintln!("[DEBUG] center={:?}", center);
 
                         // Save undo state before starting
                         state.push_undo("Drag move");
@@ -380,6 +441,14 @@ fn handle_drag_move(
                         // Use CURRENT mouse position as reference, not original click position.
                         // This prevents snapping - delta starts at 0 and accumulates from here.
                         let drag_start_mouse = mouse_pos;
+
+                        // For ortho viewports, capture zoom and set ortho_drag_viewport
+                        let is_ortho = viewport_id != ViewportId::Perspective;
+                        if is_ortho {
+                            state.ortho_drag_viewport = Some(viewport_id);
+                            state.ortho_drag_zoom = state.get_ortho_camera(viewport_id).zoom;
+                            eprintln!("[DEBUG] Setting ortho_drag_viewport={:?} zoom={}", viewport_id, state.ortho_drag_zoom);
+                        }
 
                         // Start free move drag (axis = None for screen-space movement)
                         state.drag_manager.start_move(
@@ -393,6 +462,8 @@ fn handle_drag_move(
                         );
 
                         state.set_status("Drag to move (hold Shift for fine)", 3.0);
+                    } else {
+                        eprintln!("[DEBUG] NO initial_positions - nothing selected?");
                     }
 
                     state.free_drag_pending_start = None;
@@ -405,13 +476,94 @@ fn handle_drag_move(
     }
 }
 
-/// Draw the 3D modeler viewport
+/// Draw a 2D grid for orthographic views that respects pan and zoom
+fn draw_ortho_grid(
+    fb: &mut Framebuffer,
+    state: &ModelerState,
+    viewport_id: ViewportId,
+    grid_color: RasterColor,
+    x_axis_color: RasterColor,
+    z_axis_color: RasterColor,
+) {
+    let ortho_cam = state.get_ortho_camera(viewport_id);
+    let zoom = ortho_cam.zoom;
+    let center = ortho_cam.center;
+
+    let grid_size = crate::world::SECTOR_SIZE;
+    let fb_w = fb.width as f32;
+    let fb_h = fb.height as f32;
+
+    // Calculate visible range in world units
+    let half_w = fb_w / (2.0 * zoom);
+    let half_h = fb_h / (2.0 * zoom);
+
+    // World to framebuffer coords for this ortho view
+    let world_to_fb = |wx: f32, wy: f32| -> (f32, f32) {
+        let sx = (wx - center.x) * zoom + fb_w / 2.0;
+        let sy = -(wy - center.y) * zoom + fb_h / 2.0; // Y flipped for screen coords
+        (sx, sy)
+    };
+
+    // Calculate grid line range
+    let start_x = ((center.x - half_w) / grid_size).floor() as i32;
+    let end_x = ((center.x + half_w) / grid_size).ceil() as i32;
+    let start_y = ((center.y - half_h) / grid_size).floor() as i32;
+    let end_y = ((center.y + half_h) / grid_size).ceil() as i32;
+
+    // Determine which world axis maps to screen X and Y for axis coloring
+    // Top: X->screen_x, Z->screen_y (Y axis points out of screen)
+    // Front: X->screen_x, Y->screen_y (Z axis points out of screen)
+    // Side: Z->screen_x, Y->screen_y (X axis points out of screen)
+    let (h_axis_color, v_axis_color) = match viewport_id {
+        ViewportId::Top => (x_axis_color, z_axis_color),   // H=X axis, V=Z axis
+        ViewportId::Front => (x_axis_color, grid_color),   // H=X axis, V=Y (no special color)
+        ViewportId::Side => (z_axis_color, grid_color),    // H=Z axis, V=Y (no special color)
+        ViewportId::Perspective => (grid_color, grid_color),
+    };
+
+    // Vertical lines (constant world X or Z depending on view)
+    for i in start_x..=end_x {
+        let wx = i as f32 * grid_size;
+        let (sx, _) = world_to_fb(wx, 0.0);
+        if sx >= 0.0 && sx < fb_w {
+            let color = if i == 0 { v_axis_color } else { grid_color };
+            fb.draw_line(sx as i32, 0, sx as i32, fb_h as i32, color);
+        }
+    }
+
+    // Horizontal lines (constant world Y or Z depending on view)
+    for i in start_y..=end_y {
+        let wy = i as f32 * grid_size;
+        let (_, sy) = world_to_fb(0.0, wy);
+        if sy >= 0.0 && sy < fb_h {
+            let color = if i == 0 { h_axis_color } else { grid_color };
+            fb.draw_line(0, sy as i32, fb_w as i32, sy as i32, color);
+        }
+    }
+}
+
+/// Draw the 3D modeler viewport (perspective mode - backwards compatible)
 pub fn draw_modeler_viewport(
     ctx: &mut UiContext,
     rect: Rect,
     state: &mut ModelerState,
     fb: &mut Framebuffer,
 ) {
+    draw_modeler_viewport_ext(ctx, rect, state, fb, ViewportId::Perspective);
+}
+
+/// Draw the modeler viewport with configurable view type
+///
+/// This unified function handles both perspective and orthographic views.
+/// For ortho views (Top/Front/Side), it sets up the appropriate camera and projection.
+pub fn draw_modeler_viewport_ext(
+    ctx: &mut UiContext,
+    rect: Rect,
+    state: &mut ModelerState,
+    fb: &mut Framebuffer,
+    viewport_id: ViewportId,
+) {
+    let is_ortho = viewport_id != ViewportId::Perspective;
     // Resize framebuffer based on resolution setting
     let (target_w, target_h) = if state.raster_settings.stretch_to_fill {
         let base_w = if state.raster_settings.low_resolution { WIDTH } else { crate::rasterizer::WIDTH_HI };
@@ -447,9 +599,116 @@ pub fn draw_modeler_viewport(
         }
     };
 
-    // Camera controls (free or orbit mode)
+    // =========================================================================
+    // Ortho view setup and camera controls
+    // =========================================================================
+
+    // For ortho views, set up orthographic camera and projection
+    let (ortho_camera, saved_ortho_projection) = if is_ortho {
+        // Get ortho camera settings from state
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        let zoom = ortho_cam.zoom;
+        let center = ortho_cam.center;
+
+        // Create camera with appropriate orientation for this view
+        let mut cam = match viewport_id {
+            ViewportId::Top => Camera::ortho_top(),
+            ViewportId::Front => Camera::ortho_front(),
+            ViewportId::Side => Camera::ortho_side(),
+            ViewportId::Perspective => unreachable!(),
+        };
+
+        // Position camera at a fixed distance along its view axis, looking toward origin
+        // The camera looks along +basis_z, so position it behind the origin
+        let view_distance = 50000.0; // Far enough to not clip anything
+        match viewport_id {
+            ViewportId::Top => {
+                // Looking down -Y at XZ plane, camera above origin
+                cam.position = Vec3::new(0.0, view_distance, 0.0);
+            }
+            ViewportId::Front => {
+                // Looking down -Z at XY plane, camera in front of origin
+                cam.position = Vec3::new(0.0, 0.0, view_distance);
+            }
+            ViewportId::Side => {
+                // Looking down -X at ZY plane, camera to the right of origin
+                cam.position = Vec3::new(view_distance, 0.0, 0.0);
+            }
+            ViewportId::Perspective => unreachable!(),
+        }
+
+        // Set up ortho projection - center values control panning
+        // These are in camera-space coordinates:
+        // - For Top view:   cam_x = world_x, cam_y = world_z, so center = (world_x_offset, world_z_offset)
+        // - For Front view: cam_x = world_x, cam_y = world_y, so center = (world_x_offset, world_y_offset)
+        // - For Side view:  cam_x = world_z, cam_y = world_y, so center = (world_z_offset, world_y_offset)
+        // The ortho_cam.center stores (horizontal_offset, vertical_offset) which maps correctly
+        let ortho_proj = OrthoProjection {
+            zoom,
+            center_x: center.x,
+            center_y: center.y,
+        };
+
+        // Save current ortho_projection to restore later
+        let saved = state.raster_settings.ortho_projection.take();
+        state.raster_settings.ortho_projection = Some(ortho_proj);
+
+        (Some(cam), saved)
+    } else {
+        (None, None)
+    };
+
+    // Handle ortho-specific camera controls (pan and zoom)
+    // Use dedicated ortho_pan_viewport to track which viewport owns the pan drag
+    if is_ortho {
+        let owns_pan = state.ortho_pan_viewport == Some(viewport_id);
+        let scroll = ctx.mouse.scroll;
+
+        // Right-drag to pan
+        if ctx.mouse.right_down {
+            // Start capture if clicking inside viewport and no pan active
+            if inside_viewport && state.ortho_pan_viewport.is_none() {
+                state.ortho_pan_viewport = Some(viewport_id);
+                state.ortho_last_mouse = (ctx.mouse.x, ctx.mouse.y);
+            }
+
+            // If this viewport owns the pan, continue panning (even if mouse left viewport)
+            if owns_pan || (inside_viewport && state.ortho_pan_viewport == Some(viewport_id)) {
+                let dx = ctx.mouse.x - state.ortho_last_mouse.0;
+                let dy = ctx.mouse.y - state.ortho_last_mouse.1;
+                // Pan in world units (inverse of zoom)
+                let ortho_cam = state.get_ortho_camera_mut(viewport_id);
+                ortho_cam.center.x -= dx / ortho_cam.zoom;
+                ortho_cam.center.y += dy / ortho_cam.zoom; // Y inverted for screen coords
+                state.ortho_last_mouse = (ctx.mouse.x, ctx.mouse.y);
+            }
+        } else {
+            // Release pan capture when right mouse released
+            if state.ortho_pan_viewport == Some(viewport_id) {
+                state.ortho_pan_viewport = None;
+            }
+        }
+
+        // Mouse wheel to zoom (only when inside this viewport)
+        if inside_viewport && scroll != 0.0 {
+            let zoom_factor = if scroll > 0.0 { 1.1 } else { 0.9 };
+            let ortho_cam = state.get_ortho_camera_mut(viewport_id);
+            ortho_cam.zoom = (ortho_cam.zoom * zoom_factor).clamp(0.001, 10.0);
+        }
+
+        // Update ortho_projection with new pan/zoom values so mesh and grid stay in sync
+        let updated_cam = state.get_ortho_camera(viewport_id);
+        state.raster_settings.ortho_projection = Some(OrthoProjection {
+            zoom: updated_cam.zoom,
+            center_x: updated_cam.center.x,
+            center_y: updated_cam.center.y,
+        });
+    }
+
+    // Perspective camera controls (free or orbit mode) - skip for ortho views
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
+    if !is_ortho {
     match state.camera_mode {
         CameraMode::Free => {
             // Free camera: right-drag to look around, WASD to move
@@ -529,8 +788,19 @@ pub fn draw_modeler_viewport(
             }
         }
     }
+    } // end if !is_ortho
 
     state.viewport_last_mouse = mouse_pos;
+
+    // Use ortho camera for rendering if in ortho mode
+    // We need to temporarily swap in the ortho camera for the rendering pass
+    let original_camera = if let Some(ref ortho_cam) = ortho_camera {
+        let original = state.camera.clone();
+        state.camera = ortho_cam.clone();
+        Some(original)
+    } else {
+        None
+    };
 
     // Modal transforms: G = Grab, S = Scale, R = Rotate (now using DragManager)
     // Note: G/S/R keys are now handled through ActionRegistry in handle_actions()
@@ -614,17 +884,23 @@ pub fn draw_modeler_viewport(
     handle_modal_transform(state, mouse_pos, ctx);
 
     // Handle left-click drag to move selection (if not in modal transform)
-    handle_drag_move(ctx, state, mouse_pos, inside_viewport, fb_width, fb_height);
+    handle_drag_move(ctx, state, mouse_pos, inside_viewport, fb_width, fb_height, viewport_id);
 
     // Clear and render
     fb.clear(RasterColor::new(30, 30, 35));
 
-    // Draw grid (using shared function from rasterizer)
+    // Draw grid
     let grid_color = RasterColor::new(50, 50, 60);
     let x_axis_color = RasterColor::new(100, 60, 60); // Red-ish for X axis
     let z_axis_color = RasterColor::new(60, 60, 100); // Blue-ish for Z axis
-    // Use SECTOR_SIZE (1024 units) per grid cell - same scale as world editor
-    draw_floor_grid(fb, &state.camera, 0.0, crate::world::SECTOR_SIZE, crate::world::SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
+
+    if is_ortho {
+        // For ortho views, draw a 2D grid that respects pan and zoom
+        draw_ortho_grid(fb, state, viewport_id, grid_color, x_axis_color, z_axis_color);
+    } else {
+        // For perspective, use the 3D floor grid
+        draw_floor_grid(fb, &state.camera, 0.0, crate::world::SECTOR_SIZE, crate::world::SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
+    }
 
     // Render all visible objects
     // Convert atlas to rasterizer texture (shared by all objects)
@@ -680,17 +956,20 @@ pub fn draw_modeler_viewport(
             }
         }).collect();
 
-        // All faces use texture 0 (the atlas)
-        let faces: Vec<RasterFace> = mesh.faces.iter().map(|f| {
-            RasterFace {
-                v0: f.v0,
-                v1: f.v1,
-                v2: f.v2,
-                texture_id: Some(0),
-                black_transparent: f.black_transparent,
-                blend_mode: f.blend_mode,
+        // Triangulate n-gon faces for rendering (all use texture 0 - the atlas)
+        let mut faces: Vec<RasterFace> = Vec::new();
+        for edit_face in &mesh.faces {
+            for [v0, v1, v2] in edit_face.triangulate() {
+                faces.push(RasterFace {
+                    v0,
+                    v1,
+                    v2,
+                    texture_id: Some(0),
+                    black_transparent: edit_face.black_transparent,
+                    blend_mode: edit_face.blend_mode,
+                });
             }
-        }).collect();
+        }
 
         if !vertices.is_empty() && !faces.is_empty() {
             // Collect per-face blend modes
@@ -710,6 +989,7 @@ pub fn draw_modeler_viewport(
                     Some(&blend_modes),
                     &state.camera,
                     &state.raster_settings,
+                    None,
                 );
             } else {
                 // RGB888 rendering path (original)
@@ -748,17 +1028,19 @@ pub fn draw_modeler_viewport(
     );
 
     // Draw and handle transform gizmo (on top of the framebuffer)
-    handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+    handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
 
     // Update hover state every frame (like world editor) - but not when gizmo is active
-    if !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
+    // Only update for the active viewport to prevent viewports from overwriting each other's hover state
+    let is_active_viewport = state.active_viewport == viewport_id;
+    if is_active_viewport && !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
         update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
     }
 
     // Handle box selection (left-drag without hitting an element or gizmo)
     // Uses DragManager for tracking
     if state.gizmo_hovered_axis.is_none() {
-        handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+        handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
     }
 
     // Draw box selection overlay if DragManager has active box select
@@ -780,6 +1062,12 @@ pub fn draw_modeler_viewport(
     {
         handle_hover_click(state);
     }
+
+    // Restore original camera and ortho settings after ortho rendering
+    if let Some(original) = original_camera {
+        state.camera = original;
+    }
+    state.raster_settings.ortho_projection = saved_ortho_projection;
 }
 
 /// Handle box/rectangle selection using DragManager
@@ -794,6 +1082,7 @@ fn handle_box_selection(
     draw_h: f32,
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     // Don't start box select during modal transforms or other drags
     if state.modal_transform != ModalTransform::None {
@@ -803,7 +1092,14 @@ fn handle_box_selection(
     // Check if we're already in a box select drag
     let is_box_selecting = state.drag_manager.active.is_box_select();
 
-    if is_box_selecting {
+    // DEBUG: Log box selection activity
+    if ctx.mouse.left_pressed && inside_viewport {
+        eprintln!("[DEBUG BOX SELECT] viewport={:?} left_pressed inside_viewport pending={:?} is_dragging={}",
+            viewport_id, state.box_select_pending_start, state.drag_manager.is_dragging());
+    }
+
+    // Only process active box select for the viewport that owns it
+    if is_box_selecting && state.box_select_viewport == Some(viewport_id) {
         // Update the box select tracker with current mouse position
         if let ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
             tracker.current_mouse = mouse_pos;
@@ -825,11 +1121,14 @@ fn handle_box_selection(
                 let fb_x1 = (x1 - draw_x) / draw_w * fb_width as f32;
                 let fb_y1 = (y1 - draw_y) / draw_h * fb_height as f32;
 
-                apply_box_selection(state, fb_x0, fb_y0, fb_x1, fb_y1, fb_width, fb_height);
+                eprintln!("[DEBUG BOX SELECT] Applying! screen=({:.0},{:.0})-({:.0},{:.0}) fb=({:.0},{:.0})-({:.0},{:.0}) viewport={:?}",
+                    x0, y0, x1, y1, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id);
+                apply_box_selection(state, fb_x0, fb_y0, fb_x1, fb_y1, fb_width, fb_height, viewport_id);
             }
 
-            // End the drag
+            // End the drag and clear viewport ownership
             state.drag_manager.end();
+            state.box_select_viewport = None;
         }
     } else if !state.drag_manager.is_dragging() {
         // Not in any drag - check for box select start
@@ -837,25 +1136,34 @@ fn handle_box_selection(
         if ctx.mouse.left_pressed && inside_viewport {
             // Store potential start position (will become box select if dragged far enough)
             state.box_select_pending_start = Some(mouse_pos);
+            state.box_select_viewport = Some(viewport_id);
         }
 
         // Check if we should convert pending start to actual box select
-        if let Some(start_pos) = state.box_select_pending_start {
-            if ctx.mouse.left_down {
-                let dx = (mouse_pos.0 - start_pos.0).abs();
-                let dy = (mouse_pos.1 - start_pos.1).abs();
-                // Only become box select if moved at least 5 pixels
-                if dx > 5.0 || dy > 5.0 {
-                    state.drag_manager.start_box_select(start_pos);
-                    // Update with current position
-                    if let ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
-                        tracker.current_mouse = mouse_pos;
+        // IMPORTANT: Only process if this viewport owns the pending box select
+        if state.box_select_viewport == Some(viewport_id) {
+            if let Some(start_pos) = state.box_select_pending_start {
+                if ctx.mouse.left_down {
+                    let dx = (mouse_pos.0 - start_pos.0).abs();
+                    let dy = (mouse_pos.1 - start_pos.1).abs();
+                    eprintln!("[DEBUG BOX SELECT DRAG] viewport={:?} start={:?} current={:?} dx={:.1} dy={:.1}",
+                        viewport_id, start_pos, mouse_pos, dx, dy);
+                    // Only become box select if moved at least 5 pixels
+                    if dx > 5.0 || dy > 5.0 {
+                        eprintln!("[DEBUG BOX SELECT] Starting box select! dx={} dy={}", dx, dy);
+                        state.drag_manager.start_box_select(start_pos);
+                        // Update with current position
+                        if let ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
+                            tracker.current_mouse = mouse_pos;
+                        }
+                        state.box_select_pending_start = None;
+                        // Note: box_select_viewport stays set to track which viewport owns the active drag
                     }
+                } else {
+                    // Mouse released without dragging - clear pending
                     state.box_select_pending_start = None;
+                    state.box_select_viewport = None;
                 }
-            } else {
-                // Mouse released without dragging - clear pending
-                state.box_select_pending_start = None;
             }
         }
     }
@@ -872,9 +1180,42 @@ fn apply_box_selection(
     fb_y1: f32,
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) {
-    let camera = &state.camera;
+    // For ortho viewports, we need to set up the ortho projection from the viewport's camera
+    // The raster_settings.ortho_projection is None at this point because it gets reset after rendering
+    let is_ortho = matches!(viewport_id, ViewportId::Top | ViewportId::Front | ViewportId::Side);
+
+    // Create a temporary ortho projection for ortho viewports
+    let ortho_proj_temp;
+    let ortho = if is_ortho {
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        ortho_proj_temp = Some(OrthoProjection {
+            zoom: ortho_cam.zoom,
+            center_x: ortho_cam.center.x,
+            center_y: ortho_cam.center.y,
+        });
+        ortho_proj_temp.as_ref()
+    } else {
+        state.raster_settings.ortho_projection.as_ref()
+    };
+
+    // For ortho viewports, we need to use the appropriate camera orientation
+    let camera = if is_ortho {
+        match viewport_id {
+            ViewportId::Top => Camera::ortho_top(),
+            ViewportId::Front => Camera::ortho_front(),
+            ViewportId::Side => Camera::ortho_side(),
+            ViewportId::Perspective => state.camera.clone(),
+        }
+    } else {
+        state.camera.clone()
+    };
+
     let mesh = state.mesh();
+
+    eprintln!("[DEBUG apply_box_selection] viewport={:?} is_ortho={} ortho={:?} mesh_verts={} select_mode={:?}",
+        viewport_id, is_ortho, ortho, mesh.vertices.len(), state.select_mode);
 
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
@@ -889,7 +1230,7 @@ fn apply_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
-                if let Some((sx, sy)) = world_to_screen(
+                if let Some((sx, sy)) = world_to_screen_with_ortho(
                     vert.pos,
                     camera.position,
                     camera.basis_x,
@@ -897,6 +1238,7 @@ fn apply_box_selection(
                     camera.basis_z,
                     fb_width,
                     fb_height,
+                    ortho,
                 ) {
                     if sx >= fb_x0 && sx <= fb_x1 && sy >= fb_y0 && sy <= fb_y1 {
                         if !selected.contains(&idx) {
@@ -922,14 +1264,13 @@ fn apply_box_selection(
             };
 
             for (idx, face) in mesh.faces.iter().enumerate() {
-                // Use face center for box selection
-                if let (Some(v0), Some(v1), Some(v2)) = (
-                    mesh.vertices.get(face.v0),
-                    mesh.vertices.get(face.v1),
-                    mesh.vertices.get(face.v2),
-                ) {
-                    let center = (v0.pos + v1.pos + v2.pos) * (1.0 / 3.0);
-                    if let Some((sx, sy)) = world_to_screen(
+                // Use face center for box selection (average of all vertices)
+                let verts: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi))
+                    .collect();
+                if !verts.is_empty() {
+                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                    if let Some((sx, sy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
                         camera.basis_x,
@@ -937,6 +1278,7 @@ fn apply_box_selection(
                         camera.basis_z,
                         fb_width,
                         fb_height,
+                        ortho,
                     ) {
                         if sx >= fb_x0 && sx <= fb_x1 && sy >= fb_y0 && sy <= fb_y1 {
                             if !selected.contains(&idx) {
@@ -963,6 +1305,7 @@ fn apply_box_selection(
 fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     let mesh = state.mesh();
     let camera = &state.camera;
+    let ortho = state.raster_settings.ortho_projection.as_ref();
 
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
     let select_color = RasterColor::new(100, 180, 255);  // Blue for selection
@@ -972,7 +1315,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // =========================================================================
     if let Some(hovered_idx) = state.hovered_vertex {
         if let Some(vert) = mesh.vertices.get(hovered_idx) {
-            if let Some((sx, sy)) = world_to_screen(
+            if let Some((sx, sy)) = world_to_screen_with_ortho(
                 vert.pos,
                 camera.position,
                 camera.basis_x,
@@ -980,6 +1323,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
                 camera.basis_z,
                 fb.width,
                 fb.height,
+                ortho,
             ) {
                 fb.draw_circle(sx as i32, sy as i32, 5, hover_color);
             }
@@ -992,8 +1336,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let Some((v0_idx, v1_idx)) = state.hovered_edge {
         if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
             if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                world_to_screen(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height),
-                world_to_screen(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height),
+                world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
             ) {
                 fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, hover_color);
                 // Draw thicker by drawing adjacent lines
@@ -1008,24 +1352,21 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // =========================================================================
     if let Some(hovered_idx) = state.hovered_face {
         if let Some(face) = mesh.faces.get(hovered_idx) {
-            if let (Some(v0), Some(v1), Some(v2)) = (
-                mesh.vertices.get(face.v0),
-                mesh.vertices.get(face.v1),
-                mesh.vertices.get(face.v2),
-            ) {
-                // Draw face edges
-                let positions = [v0.pos, v1.pos, v2.pos];
-                let screen_positions: Vec<_> = positions.iter().filter_map(|p|
-                    world_to_screen(*p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height)
-                ).collect();
+            // Draw face edges (all edges of n-gon)
+            let screen_positions: Vec<_> = face.vertices.iter()
+                .filter_map(|&vi| mesh.vertices.get(vi))
+                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                .collect();
 
-                if screen_positions.len() == 3 {
-                    for i in 0..3 {
-                        let (sx0, sy0) = screen_positions[i];
-                        let (sx1, sy1) = screen_positions[(i + 1) % 3];
-                        fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, hover_color);
-                    }
-                    // Draw diagonal to indicate it's a face
+            let n = screen_positions.len();
+            if n >= 3 {
+                for i in 0..n {
+                    let (sx0, sy0) = screen_positions[i];
+                    let (sx1, sy1) = screen_positions[(i + 1) % n];
+                    fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, hover_color);
+                }
+                // For quads+, draw diagonals to indicate it's a face
+                if n >= 4 {
                     let (sx0, sy0) = screen_positions[0];
                     let (sx2, sy2) = screen_positions[2];
                     fb.draw_line(sx0 as i32, sy0 as i32, sx2 as i32, sy2 as i32, hover_color);
@@ -1040,7 +1381,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let ModelerSelection::Vertices(selected_verts) = &state.selection {
         for &idx in selected_verts {
             if let Some(vert) = mesh.vertices.get(idx) {
-                if let Some((sx, sy)) = world_to_screen(
+                if let Some((sx, sy)) = world_to_screen_with_ortho(
                     vert.pos,
                     camera.position,
                     camera.basis_x,
@@ -1048,6 +1389,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
                     camera.basis_z,
                     fb.width,
                     fb.height,
+                    ortho,
                 ) {
                     fb.draw_circle(sx as i32, sy as i32, 4, select_color);
                 }
@@ -1062,8 +1404,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
         for (v0_idx, v1_idx) in selected_edges {
             if let (Some(v0), Some(v1)) = (mesh.vertices.get(*v0_idx), mesh.vertices.get(*v1_idx)) {
                 if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                    world_to_screen(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height),
-                    world_to_screen(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height),
+                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                 ) {
                     fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, select_color);
                     fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
@@ -1081,37 +1423,36 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let ModelerSelection::Faces(selected_faces) = &state.selection {
         for &face_idx in selected_faces {
             if let Some(face) = mesh.faces.get(face_idx) {
-                if let (Some(v0), Some(v1), Some(v2)) = (
-                    mesh.vertices.get(face.v0),
-                    mesh.vertices.get(face.v1),
-                    mesh.vertices.get(face.v2),
-                ) {
-                    let positions = [v0.pos, v1.pos, v2.pos];
-                    let screen_positions: Vec<_> = positions.iter().filter_map(|p|
-                        world_to_screen(*p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height)
-                    ).collect();
+                // Collect world positions and screen positions
+                let world_positions: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| v.pos))
+                    .collect();
+                let screen_positions: Vec<_> = world_positions.iter()
+                    .filter_map(|&p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                    .collect();
 
-                    if screen_positions.len() == 3 {
-                        for i in 0..3 {
-                            let (sx0, sy0) = screen_positions[i];
-                            let (sx1, sy1) = screen_positions[(i + 1) % 3];
-                            fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, select_color);
-                            // Thicker line
-                            fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
-                        }
-                        // Draw center dot
-                        let center = (v0.pos + v1.pos + v2.pos) * (1.0 / 3.0);
-                        if let Some((cx, cy)) = world_to_screen(
-                            center,
-                            camera.position,
-                            camera.basis_x,
-                            camera.basis_y,
-                            camera.basis_z,
-                            fb.width,
-                            fb.height,
-                        ) {
-                            fb.draw_circle(cx as i32, cy as i32, 4, select_color);
-                        }
+                let n = screen_positions.len();
+                if n >= 3 {
+                    for i in 0..n {
+                        let (sx0, sy0) = screen_positions[i];
+                        let (sx1, sy1) = screen_positions[(i + 1) % n];
+                        fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, select_color);
+                        // Thicker line
+                        fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
+                    }
+                    // Draw center dot
+                    let center = world_positions.iter().copied().fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / n as f32);
+                    if let Some((cx, cy)) = world_to_screen_with_ortho(
+                        center,
+                        camera.position,
+                        camera.basis_x,
+                        camera.basis_y,
+                        camera.basis_z,
+                        fb.width,
+                        fb.height,
+                        ortho,
+                    ) {
+                        fb.draw_circle(cx as i32, cy as i32, 4, select_color);
                     }
                 }
             }
@@ -1133,6 +1474,7 @@ fn handle_mesh_selection_click(
 
     let camera = &state.camera;
     let mesh = state.mesh();
+    let ortho = state.raster_settings.ortho_projection.as_ref();
 
     match state.select_mode {
         SelectMode::Vertex => {
@@ -1141,7 +1483,7 @@ fn handle_mesh_selection_click(
             let mut best_dist = 20.0_f32; // Max distance in pixels
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
-                if let Some((sx, sy)) = world_to_screen(
+                if let Some((sx, sy)) = world_to_screen_with_ortho(
                     vert.pos,
                     camera.position,
                     camera.basis_x,
@@ -1149,6 +1491,7 @@ fn handle_mesh_selection_click(
                     camera.basis_z,
                     fb_width,
                     fb_height,
+                    ortho,
                 ) {
                     let dist = ((sx - fb_x).powi(2) + (sy - fb_y).powi(2)).sqrt();
                     if dist < best_dist {
@@ -1188,13 +1531,13 @@ fn handle_mesh_selection_click(
             let mut best_dist = 30.0_f32;
 
             for (idx, face) in mesh.faces.iter().enumerate() {
-                if let (Some(v0), Some(v1), Some(v2)) = (
-                    mesh.vertices.get(face.v0),
-                    mesh.vertices.get(face.v1),
-                    mesh.vertices.get(face.v2),
-                ) {
-                    let center = (v0.pos + v1.pos + v2.pos) * (1.0 / 3.0);
-                    if let Some((sx, sy)) = world_to_screen(
+                // Calculate center from all vertices of n-gon
+                let verts: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi))
+                    .collect();
+                if !verts.is_empty() {
+                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                    if let Some((sx, sy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
                         camera.basis_x,
@@ -1202,6 +1545,7 @@ fn handle_mesh_selection_click(
                         camera.basis_z,
                         fb_width,
                         fb_height,
+                        ortho,
                     ) {
                         let dist = ((sx - fb_x).powi(2) + (sy - fb_y).powi(2)).sqrt();
                         if dist < best_dist {
@@ -1255,6 +1599,7 @@ fn find_hovered_element(
     let (mouse_fb_x, mouse_fb_y) = mouse_fb;
     let camera = &state.camera;
     let mesh = state.mesh();
+    let ortho = state.raster_settings.ortho_projection.as_ref();
 
     const VERTEX_THRESHOLD: f32 = 6.0;
     const EDGE_THRESHOLD: f32 = 4.0;
@@ -1268,33 +1613,36 @@ fn find_hovered_element(
     let mut edge_on_front_face = std::collections::HashSet::<(usize, usize)>::new();
 
     for face in &mesh.faces {
-        if let (Some(v0), Some(v1), Some(v2)) = (
-            mesh.vertices.get(face.v0),
-            mesh.vertices.get(face.v1),
-            mesh.vertices.get(face.v2),
-        ) {
-            // Use screen-space signed area for backface culling (same as rasterizer)
-            if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                world_to_screen(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                world_to_screen(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                world_to_screen(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
+        // For backface culling, use first 3 vertices (like face_normal calculation)
+        if face.vertices.len() >= 3 {
+            if let (Some(v0), Some(v1), Some(v2)) = (
+                mesh.vertices.get(face.vertices[0]),
+                mesh.vertices.get(face.vertices[1]),
+                mesh.vertices.get(face.vertices[2]),
             ) {
-                // 2D screen-space signed area (PS1-style) - positive = front-facing
-                let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
+                // Use screen-space signed area for backface culling (same as rasterizer)
+                if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
+                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                ) {
+                    // 2D screen-space signed area (PS1-style) - positive = front-facing
+                    let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
 
-                if signed_area > 0.0 {
-                    // Front-facing: mark vertices and edges
-                    vertex_on_front_face[face.v0] = true;
-                    vertex_on_front_face[face.v1] = true;
-                    vertex_on_front_face[face.v2] = true;
+                    if signed_area > 0.0 {
+                        // Front-facing: mark all vertices and edges of n-gon
+                        for &vi in &face.vertices {
+                            if vi < vertex_on_front_face.len() {
+                                vertex_on_front_face[vi] = true;
+                            }
+                        }
 
-                    // Normalize edge order for consistency
-                    let e0 = (face.v0.min(face.v1), face.v0.max(face.v1));
-                    let e1 = (face.v1.min(face.v2), face.v1.max(face.v2));
-                    let e2 = (face.v2.min(face.v0), face.v2.max(face.v0));
-                    edge_on_front_face.insert(e0);
-                    edge_on_front_face.insert(e1);
-                    edge_on_front_face.insert(e2);
+                        // Add all edges of n-gon (normalized order)
+                        for (v0_idx, v1_idx) in face.edges() {
+                            let e = (v0_idx.min(v1_idx), v0_idx.max(v1_idx));
+                            edge_on_front_face.insert(e);
+                        }
+                    }
                 }
             }
         }
@@ -1305,7 +1653,7 @@ fn find_hovered_element(
         if !vertex_on_front_face[idx] {
             continue; // Skip vertices only on backfaces
         }
-        if let Some((sx, sy)) = world_to_screen(
+        if let Some((sx, sy)) = world_to_screen_with_ortho(
             vert.pos,
             camera.position,
             camera.basis_x,
@@ -1313,6 +1661,7 @@ fn find_hovered_element(
             camera.basis_z,
             fb_width,
             fb_height,
+            ortho,
         ) {
             let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
             if dist < VERTEX_THRESHOLD {
@@ -1325,10 +1674,9 @@ fn find_hovered_element(
 
     // If no vertex hovered, check edges - only if on front-facing face
     if hovered_vertex.is_none() {
-        // Collect edges from faces
+        // Collect edges from faces (iterate over n-gon edges)
         for face in &mesh.faces {
-            let edges = [(face.v0, face.v1), (face.v1, face.v2), (face.v2, face.v0)];
-            for (v0_idx, v1_idx) in edges {
+            for (v0_idx, v1_idx) in face.edges() {
                 // Normalize edge order for consistency
                 let edge = if v0_idx < v1_idx { (v0_idx, v1_idx) } else { (v1_idx, v0_idx) };
 
@@ -1339,8 +1687,8 @@ fn find_hovered_element(
 
                 if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                        world_to_screen(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                        world_to_screen(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
+                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         let dist = point_to_line_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
                         if dist < EDGE_THRESHOLD {
@@ -1354,38 +1702,41 @@ fn find_hovered_element(
         }
     }
 
-    // If no vertex or edge hovered, check faces using point-in-triangle
+    // If no vertex or edge hovered, check faces using point-in-triangle (triangulate n-gons)
     if hovered_vertex.is_none() && hovered_edge.is_none() {
         for (idx, face) in mesh.faces.iter().enumerate() {
-            if let (Some(v0), Some(v1), Some(v2)) = (
-                mesh.vertices.get(face.v0),
-                mesh.vertices.get(face.v1),
-                mesh.vertices.get(face.v2),
-            ) {
-                // Use screen-space signed area for backface culling (same as rasterizer)
-                if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                    world_to_screen(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                    world_to_screen(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
-                    world_to_screen(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height),
+            // Triangulate the n-gon face and check each triangle
+            for [i0, i1, i2] in face.triangulate() {
+                if let (Some(v0), Some(v1), Some(v2)) = (
+                    mesh.vertices.get(i0),
+                    mesh.vertices.get(i1),
+                    mesh.vertices.get(i2),
                 ) {
-                    // 2D screen-space signed area (PS1-style) - positive = front-facing
-                    let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
-                    if signed_area <= 0.0 {
-                        continue; // Backface - skip
-                    }
+                    // Use screen-space signed area for backface culling (same as rasterizer)
+                    if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
+                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    ) {
+                        // 2D screen-space signed area (PS1-style) - positive = front-facing
+                        let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
+                        if signed_area <= 0.0 {
+                            continue; // Backface - skip
+                        }
 
-                    // Check if mouse is inside the triangle
-                    if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) {
-                        // Calculate depth at mouse position for Z-ordering
-                        let depth = interpolate_depth_in_triangle(
-                            mouse_fb_x, mouse_fb_y,
-                            sx0, sy0, (v0.pos - camera.position).dot(camera.basis_z),
-                            sx1, sy1, (v1.pos - camera.position).dot(camera.basis_z),
-                            sx2, sy2, (v2.pos - camera.position).dot(camera.basis_z),
-                        );
-                        // Pick the closest (smallest depth) face
-                        if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {
-                            hovered_face = Some((idx, depth));
+                        // Check if mouse is inside the triangle
+                        if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) {
+                            // Calculate depth at mouse position for Z-ordering
+                            let depth = interpolate_depth_in_triangle(
+                                mouse_fb_x, mouse_fb_y,
+                                sx0, sy0, (v0.pos - camera.position).dot(camera.basis_z),
+                                sx1, sy1, (v1.pos - camera.position).dot(camera.basis_z),
+                                sx2, sy2, (v2.pos - camera.position).dot(camera.basis_z),
+                            );
+                            // Pick the closest (smallest depth) face
+                            if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {
+                                hovered_face = Some((idx, depth));
+                            }
                         }
                     }
                 }
@@ -1582,12 +1933,13 @@ fn handle_transform_gizmo(
     draw_h: f32,
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     // Use new tool system - check which transform tool is active
     match state.tool_box.active_transform_tool() {
-        Some(ModelerToolId::Move) => handle_move_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
-        Some(ModelerToolId::Scale) => handle_scale_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
-        Some(ModelerToolId::Rotate) => handle_rotate_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height),
+        Some(ModelerToolId::Move) => handle_move_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id),
+        Some(ModelerToolId::Scale) => handle_scale_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id),
+        Some(ModelerToolId::Rotate) => handle_rotate_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id),
         _ => {
             // Select/Extrude modes or no tool active - no gizmos
             state.gizmo_hovered_axis = None;
@@ -1614,8 +1966,9 @@ fn setup_gizmo(
 ) -> Option<GizmoSetup> {
     let center = state.selection.compute_center(state.mesh())?;
     let camera = &state.camera;
+    let ortho = state.raster_settings.ortho_projection.as_ref();
 
-    let center_screen = match world_to_screen(center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height) {
+    let center_screen = match world_to_screen_with_ortho(center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho) {
         Some((sx, sy)) => (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h),
         None => return None,
     };
@@ -1626,8 +1979,15 @@ fn setup_gizmo(
         (Axis::Z, Vec3::new(0.0, 0.0, 1.0), BLUE),
     ];
 
-    let dist_to_camera = (center - camera.position).len();
-    let world_length = dist_to_camera * 0.1;
+    // In ortho mode, use a fixed world-space size scaled by zoom
+    // In perspective mode, scale by distance to camera
+    let world_length = if let Some(ortho) = ortho {
+        // Fixed size in screen pixels, converted to world units
+        50.0 / ortho.zoom
+    } else {
+        let dist_to_camera = (center - camera.position).len();
+        dist_to_camera * 0.1
+    };
 
     let mut axis_screen_ends: [(Axis, (f32, f32), Color); 3] = [
         (Axis::X, (0.0, 0.0), RED),
@@ -1637,7 +1997,7 @@ fn setup_gizmo(
 
     for (i, (axis, dir, color)) in axis_dirs.iter().enumerate() {
         let end_world = center + *dir * world_length;
-        if let Some((sx, sy)) = world_to_screen(end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height) {
+        if let Some((sx, sy)) = world_to_screen_with_ortho(end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho) {
             let screen_end = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
             axis_screen_ends[i] = (*axis, screen_end, *color);
         }
@@ -1682,6 +2042,7 @@ fn handle_move_gizmo(
     draw_h: f32,
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     let setup = match setup_gizmo(state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height) {
         Some(s) => s,
@@ -1691,52 +2052,114 @@ fn handle_move_gizmo(
         }
     };
 
+    let is_ortho = viewport_id != ViewportId::Perspective;
+
     // Check if DragManager has an active move drag
     let is_dragging = state.drag_manager.is_dragging() && state.drag_manager.active.is_move();
 
-    // Skip if ortho viewport owns this drag
-    if state.ortho_drag_viewport.is_some() {
+    // Check if this viewport owns the drag
+    let owns_drag = state.ortho_drag_viewport == Some(viewport_id) ||
+                   (state.ortho_drag_viewport.is_none() && !is_ortho);
+
+    // Skip if another viewport owns this drag
+    if !owns_drag && is_dragging {
         return;
     }
 
-    // Handle ongoing drag with DragManager
-    if is_dragging {
+    // Handle ongoing drag
+    if is_dragging && owns_drag {
         if ctx.mouse.left_down {
-            // Convert screen coords to framebuffer coords for ray casting
-            let fb_mouse = (
-                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-            );
+            if is_ortho {
+                // Ortho mode: use screen-to-world delta (simpler, more precise)
+                let drag_zoom = state.ortho_drag_zoom;
 
-            let result = state.drag_manager.update(
-                fb_mouse,
-                &state.camera,
-                fb_width,
-                fb_height,
-            );
+                // Get mouse delta from drag start
+                if let Some(drag_state) = &state.drag_manager.state {
+                    let dx = mouse_pos.0 - drag_state.initial_mouse.0;
+                    let dy = mouse_pos.1 - drag_state.initial_mouse.1;
 
-            if let DragUpdateResult::Move { positions, .. } = result {
-                let snap_disabled = is_key_down(KeyCode::Z);
-                // Capture snap settings before borrowing mesh
-                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
-                let snap_settings = state.snap_settings.clone();
-                if let Some(mesh) = state.mesh_mut() {
-                    for (vert_idx, new_pos) in positions {
-                        if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                            vert.pos = if snap_enabled {
-                                snap_settings.snap_vec3(new_pos)
-                            } else {
-                                new_pos
-                            };
+                    // Convert screen delta to world delta based on viewport
+                    let world_dx = dx / drag_zoom;
+                    let world_dy = -dy / drag_zoom; // Y inverted
+
+                    let mut delta = match viewport_id {
+                        ViewportId::Top => Vec3::new(world_dx, 0.0, world_dy),    // XZ plane
+                        ViewportId::Front => Vec3::new(world_dx, world_dy, 0.0),  // XY plane
+                        ViewportId::Side => Vec3::new(0.0, world_dy, world_dx),   // ZY plane
+                        ViewportId::Perspective => Vec3::ZERO,
+                    };
+
+                    // Apply axis constraint if present
+                    if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
+                        if let Some(axis) = &tracker.axis {
+                            match axis {
+                                crate::ui::drag_tracker::Axis::X => { delta.y = 0.0; delta.z = 0.0; }
+                                crate::ui::drag_tracker::Axis::Y => { delta.x = 0.0; delta.z = 0.0; }
+                                crate::ui::drag_tracker::Axis::Z => { delta.x = 0.0; delta.y = 0.0; }
+                            }
                         }
+
+                        // Apply delta to initial positions
+                        let snap_disabled = is_key_down(KeyCode::Z);
+                        let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                        let snap_size = state.snap_settings.grid_size;
+
+                        let updates: Vec<_> = tracker.initial_positions.iter()
+                            .map(|(idx, start_pos)| (*idx, *start_pos + delta))
+                            .collect();
+
+                        if let Some(mesh) = state.mesh_mut() {
+                            for (idx, mut new_pos) in updates {
+                                if snap_enabled {
+                                    new_pos.x = (new_pos.x / snap_size).round() * snap_size;
+                                    new_pos.y = (new_pos.y / snap_size).round() * snap_size;
+                                    new_pos.z = (new_pos.z / snap_size).round() * snap_size;
+                                }
+                                if let Some(vert) = mesh.vertices.get_mut(idx) {
+                                    vert.pos = new_pos;
+                                }
+                            }
+                        }
+                        state.dirty = true;
                     }
                 }
-                state.dirty = true;
+            } else {
+                // Perspective mode: use ray casting via DragManager
+                let fb_mouse = (
+                    (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+                    (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+                );
+
+                let result = state.drag_manager.update(
+                    fb_mouse,
+                    &state.camera,
+                    fb_width,
+                    fb_height,
+                );
+
+                if let DragUpdateResult::Move { positions, .. } = result {
+                    let snap_disabled = is_key_down(KeyCode::Z);
+                    let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                    let snap_settings = state.snap_settings.clone();
+                    if let Some(mesh) = state.mesh_mut() {
+                        for (vert_idx, new_pos) in positions {
+                            if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
+                                vert.pos = if snap_enabled {
+                                    snap_settings.snap_vec3(new_pos)
+                                } else {
+                                    new_pos
+                                };
+                            }
+                        }
+                    }
+                    state.dirty = true;
+                }
             }
         } else {
             // End drag - sync tool state
             state.tool_box.tools.move_tool.end_drag();
             state.drag_manager.end();
+            state.ortho_drag_viewport = None;
         }
     }
 
@@ -1773,31 +2196,50 @@ fn handle_move_gizmo(
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
-        // Convert screen coords to framebuffer coords
-        let fb_mouse = (
-            (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-            (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-        );
-
         // Save undo state BEFORE starting the gizmo drag
         state.push_undo("Gizmo Move");
 
+        // Set up ortho-specific tracking
+        if is_ortho {
+            state.ortho_drag_viewport = Some(viewport_id);
+            let ortho_cam = state.get_ortho_camera(viewport_id);
+            state.ortho_drag_zoom = ortho_cam.zoom;
+        }
+
         // Start drag with DragManager and sync tool state
-        // Use start_move_3d to calculate proper handle_offset (prevents snap on click)
         let ui_axis = to_ui_axis(axis);
         state.tool_box.tools.move_tool.start_drag(Some(ui_axis));
-        state.drag_manager.start_move_3d(
-            setup.center,
-            fb_mouse,
-            Some(ui_axis),
-            indices,
-            initial_positions,
-            state.snap_settings.enabled,
-            state.snap_settings.grid_size,
-            &state.camera,
-            fb_width,
-            fb_height,
-        );
+
+        if is_ortho {
+            // For ortho, use screen coordinates (we calculate delta from screen, not ray casting)
+            state.drag_manager.start_move(
+                setup.center,
+                mouse_pos,  // Use screen coordinates directly
+                Some(ui_axis),
+                indices,
+                initial_positions,
+                state.snap_settings.enabled,
+                state.snap_settings.grid_size,
+            );
+        } else {
+            // For perspective, use framebuffer coordinates for ray casting
+            let fb_mouse = (
+                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+            );
+            state.drag_manager.start_move_3d(
+                setup.center,
+                fb_mouse,
+                Some(ui_axis),
+                indices,
+                initial_positions,
+                state.snap_settings.enabled,
+                state.snap_settings.grid_size,
+                &state.camera,
+                fb_width,
+                fb_height,
+            );
+        }
     }
 
     // Draw move gizmo (arrows)
@@ -1851,6 +2293,7 @@ fn handle_scale_gizmo(
     draw_h: f32,
     fb_width: usize,
     fb_height: usize,
+    _viewport_id: ViewportId,  // TODO: add ortho-specific scale handling
 ) {
     let setup = match setup_gizmo(state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height) {
         Some(s) => s,
@@ -1995,6 +2438,7 @@ fn handle_rotate_gizmo(
     draw_h: f32,
     fb_width: usize,
     fb_height: usize,
+    _viewport_id: ViewportId,  // TODO: add ortho-specific rotate handling
 ) {
     let setup = match setup_gizmo(state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height) {
         Some(s) => s,
@@ -2009,6 +2453,7 @@ fn handle_rotate_gizmo(
     let camera_basis_x = state.camera.basis_x;
     let camera_basis_y = state.camera.basis_y;
     let camera_basis_z = state.camera.basis_z;
+    let ortho = state.raster_settings.ortho_projection.clone();
 
     // Check if DragManager has an active rotate drag
     let is_dragging = state.drag_manager.is_dragging() && state.drag_manager.active.is_rotate();
@@ -2077,7 +2522,7 @@ fn handle_rotate_gizmo(
                 let t = i as f32 / segments as f32 * std::f32::consts::TAU;
                 let world_point = setup.center + *perp1 * (t.cos() * setup.world_length) + *perp2 * (t.sin() * setup.world_length);
 
-                if let Some((sx, sy)) = world_to_screen(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height) {
+                if let Some((sx, sy)) = world_to_screen_with_ortho(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height, ortho.as_ref()) {
                     let screen_pos = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
                     let dist = ((mouse_pos.0 - screen_pos.0).powi(2) + (mouse_pos.1 - screen_pos.1).powi(2)).sqrt();
                     if dist < best_dist {
@@ -2171,7 +2616,7 @@ fn handle_rotate_gizmo(
                 let t = i as f32 / segments as f32 * std::f32::consts::TAU;
                 let world_point = setup.center + perp1 * (t.cos() * setup.world_length) + perp2 * (t.sin() * setup.world_length);
 
-                if let Some((sx, sy)) = world_to_screen(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height) {
+                if let Some((sx, sy)) = world_to_screen_with_ortho(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height, ortho.as_ref()) {
                     let screen_pos = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
 
                     if let Some(prev) = prev_screen {

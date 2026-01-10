@@ -160,8 +160,24 @@ pub fn draw_test_viewport(
 
         // Time actual rasterization (returns detailed sub-timings)
         let raster_start = FrameTimings::start();
+
+        // Convert room fog to render parameter (8-bit Color for vertex color fog)
+        let fog = if room.fog.enabled {
+            let (r, g, b) = room.fog.color;
+            // Convert f32 (0.0-1.0) to u8 (0-255)
+            let fog_color = RasterColor::new(
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+            );
+            let cull_distance = room.fog.start + room.fog.falloff + room.fog.cull_offset;
+            Some((room.fog.start, room.fog.falloff, cull_distance, fog_color))
+        } else {
+            None
+        };
+
         let room_timings = if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &game.textures_15_cache, None, &game.camera, &render_settings)
+            render_mesh_15(fb, &vertices, &faces, &game.textures_15_cache, None, &game.camera, &render_settings, fog)
         } else {
             render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings)
         };
@@ -313,10 +329,12 @@ pub fn draw_test_viewport(
         render_upload_ms,
         // Raster sub-timings (breakdown of render_raster_ms)
         raster_transform_ms: raster_timings.transform_ms,
+        raster_fog_ms: raster_timings.fog_ms,
         raster_cull_ms: raster_timings.cull_ms,
         raster_sort_ms: raster_timings.sort_ms,
         raster_draw_ms: raster_timings.draw_ms,
         raster_wireframe_ms: raster_timings.wireframe_ms,
+        triangles_drawn: raster_timings.triangles_drawn,
     };
 }
 
@@ -748,8 +766,8 @@ fn toggle_pressed(input: &InputState) -> bool {
 
 /// Draw debug overlay HUD (top-right, shows player/collision stats)
 fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, level: &Level) {
-    // Scale factor for the entire overlay (2x = twice as big)
-    let scale = 2.0;
+    // Scale factor for the entire overlay (1.5x for compact display)
+    let scale = 1.5;
 
     let line_height = 12.0 * scale;
     let text_size = 10.0 * scale;
@@ -777,6 +795,7 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
 
     // Raster sub-timing colors (shades of maroon/brown)
     let transform_color = Color::from_rgba(180, 100, 100, 255); // Transform
+    let fog_timing_color = Color::from_rgba(170, 90, 130, 255); // Fog (purple tint)
     let cull_color = Color::from_rgba(160, 80, 80, 255);        // Cull
     let sort_color = Color::from_rgba(140, 60, 60, 255);        // Sort
     let draw_color = Color::from_rgba(120, 40, 40, 255);        // Draw (main)
@@ -884,8 +903,8 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     let bar_w = overlay_w - 12.0 * scale;
     let bar_x = overlay_x + 6.0 * scale;
 
-    // Background (taller to fit stacked legend with render breakdown + raster breakdown)
-    let legend_height = 222.0 * scale; // 4 main items + 5 render items + 5 raster items + 2 headers + padding
+    // Background (taller to fit stacked legend with render breakdown + raster breakdown + triangle count)
+    let legend_height = 250.0 * scale; // 4 main + 5 render + 6 raster + 2 headers + triangle count + padding
     draw_rectangle(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, Color::from_rgba(20, 22, 28, 200));
     draw_rectangle_lines(overlay_x, bar_y - 4.0 * scale, overlay_w, bar_h + legend_height, 1.0, Color::from_rgba(60, 65, 75, 255));
 
@@ -972,8 +991,9 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
     let raster_y = render_y + 6.0 * legend_line_height + 4.0 * scale;
     draw_text("Raster breakdown:", bar_x + indent, raster_y, legend_text_size * 0.9, label_color);
 
-    let raster_items: [(Color, &str, f32); 5] = [
+    let raster_items: [(Color, &str, f32); 6] = [
         (transform_color, "Transform", t.raster_transform_ms),
+        (fog_timing_color, "Fog", t.raster_fog_ms),
         (cull_color, "Cull", t.raster_cull_ms),
         (sort_color, "Sort", t.raster_sort_ms),
         (draw_color, "Draw", t.raster_draw_ms),
@@ -987,6 +1007,10 @@ fn draw_debug_overlay(game: &GameToolState, rect: &Rect, input: &InputState, lev
         draw_text(name, bar_x + indent2 + 10.0 * scale, y + legend_box_size * 0.3, legend_text_size, label_color);
         draw_text(&format!("{:.2}ms", ms), bar_x + indent2 + 55.0 * scale, y + legend_box_size * 0.3, legend_text_size, value_color);
     }
+
+    // Triangle count (below raster breakdown)
+    let tris_y = raster_y + 7.0 * legend_line_height + 4.0 * scale;
+    draw_text(&format!("Triangles: {}", t.triangles_drawn), bar_x + indent, tris_y, legend_text_size, value_color);
 }
 
 /// Draw a wireframe cylinder in the 3D view

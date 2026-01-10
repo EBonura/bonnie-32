@@ -167,6 +167,14 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .checked_when(|ctx| ctx.has_flag(flags::FACE_MODE)),
     );
 
+    registry.register(
+        Action::new("select.all")
+            .label("Select All")
+            .shortcut(Shortcut::ctrl(KeyCode::A))
+            .status_tip("Select all elements in current mode")
+            .category("Selection"),
+    );
+
     // ========================================================================
     // Transform Actions (G/R/T - similar to Blender but T for scale since S is camera strafe)
     // ========================================================================

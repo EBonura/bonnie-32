@@ -533,6 +533,47 @@ pub fn world_to_screen(
     Some((sx, sy))
 }
 
+/// Project a world-space point to framebuffer coordinates with optional ortho projection.
+/// Used for UI overlays (gizmos, etc.) that need to match the rasterizer's projection.
+pub fn world_to_screen_with_ortho(
+    world_pos: Vec3,
+    camera_pos: Vec3,
+    basis_x: Vec3,
+    basis_y: Vec3,
+    basis_z: Vec3,
+    fb_width: usize,
+    fb_height: usize,
+    ortho: Option<&super::OrthoProjection>,
+) -> Option<(f32, f32)> {
+    let rel = world_pos - camera_pos;
+    let cam_x = rel.dot(basis_x);
+    let cam_y = rel.dot(basis_y);
+    let cam_z = rel.dot(basis_z);
+
+    if let Some(ortho) = ortho {
+        // Orthographic projection - use same formula as project_ortho
+        let sx = (cam_x - ortho.center_x) * ortho.zoom + (fb_width as f32 / 2.0);
+        let sy = -(cam_y - ortho.center_y) * ortho.zoom + (fb_height as f32 / 2.0);
+        Some((sx, sy))
+    } else {
+        // Perspective projection - same as world_to_screen
+        if cam_z <= 0.1 {
+            return None;
+        }
+
+        const SCALE: f32 = 0.75;
+        let vs = (fb_width.min(fb_height) as f32 / 2.0) * SCALE;
+        let ud = 5.0;
+        let us = ud - 1.0;
+
+        let denom = cam_z + ud;
+        let sx = (cam_x * us / denom) * vs + (fb_width as f32 / 2.0);
+        let sy = (cam_y * us / denom) * vs + (fb_height as f32 / 2.0);
+
+        Some((sx, sy))
+    }
+}
+
 /// Project a world-space point to framebuffer coordinates with depth.
 /// Returns (screen_x, screen_y, depth) where depth is camera-space Z.
 pub fn world_to_screen_with_depth(

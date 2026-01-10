@@ -463,7 +463,7 @@ fn draw_orbit_preview(
             if !vertices.is_empty() {
                 if use_rgb555 {
                     let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
-                    render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings);
+                    render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
                 } else {
                     let textures = [atlas_texture.clone()];
                     render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);

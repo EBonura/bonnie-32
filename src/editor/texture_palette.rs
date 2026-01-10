@@ -969,11 +969,13 @@ fn draw_texture_editor_panel(
     // Layout: Canvas (square, expands with sidebar) + Tool panel (right), Palette panel (below)
     let tool_panel_w = 66.0;  // 2-column layout: 2 * 28px buttons + 2px gap + 4px padding each side
     let canvas_w = content_rect.w - tool_panel_w;
-    // Canvas should be square based on available width, but leave minimum space for palette
-    let min_palette_h = 120.0;  // Minimum palette panel height
-    let max_canvas_h = (content_rect.h - min_palette_h).max(100.0);  // Leave room for palette
-    let canvas_h = canvas_w.min(max_canvas_h);  // Square, but capped to leave palette space
-    let palette_panel_h = content_rect.h - canvas_h;  // Remaining space goes to palette
+    // Tool panel needs ~280px height (6 tools + undo/redo/zoom/grid + size/shape options)
+    // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190
+    let min_canvas_h = 280.0;  // Minimum for tool panel to fit all buttons
+    let min_palette_h = 190.0;  // Minimum palette panel height
+    let max_canvas_h = (content_rect.h - min_palette_h).max(min_canvas_h);  // Leave room for palette
+    let canvas_h = canvas_w.min(max_canvas_h).max(min_canvas_h);  // Square when possible, but enforce minimum for tool panel
+    let palette_panel_h = (content_rect.h - canvas_h).max(min_palette_h);  // Remaining space goes to palette
 
     let canvas_rect = Rect::new(content_rect.x, content_rect.y, canvas_w, canvas_h);
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);

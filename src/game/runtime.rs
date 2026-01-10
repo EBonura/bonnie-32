@@ -39,6 +39,8 @@ pub struct FrameTimings {
     // === Raster sub-timings (breakdown of render_raster_ms) ===
     /// Vertex transform and projection time (ms)
     pub raster_transform_ms: f32,
+    /// PS1-style fog/depth cueing time (ms)
+    pub raster_fog_ms: f32,
     /// Surface building and backface culling time (ms)
     pub raster_cull_ms: f32,
     /// Depth sorting time (ms) - painter's algorithm
@@ -47,6 +49,8 @@ pub struct FrameTimings {
     pub raster_draw_ms: f32,
     /// Wireframe rendering time (ms)
     pub raster_wireframe_ms: f32,
+    /// Total triangles drawn (after culling)
+    pub triangles_drawn: u32,
 }
 
 impl FrameTimings {

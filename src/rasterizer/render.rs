@@ -660,6 +660,7 @@ impl Framebuffer {
 }
 
 /// Camera state
+#[derive(Clone)]
 pub struct Camera {
     pub position: Vec3,
     pub rotation_x: f32, // Pitch
@@ -1836,6 +1837,7 @@ pub fn render_mesh(
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
+    timings.triangles_drawn = surfaces.len() as u32;
 
     // === DRAW PHASE ===
     let draw_start = get_time();
@@ -1931,8 +1933,47 @@ pub fn render_mesh(
     timings
 }
 
+// === FOG HELPER FUNCTIONS (PS1-style depth cueing) ===
+
+/// Calculate fog factor for a vertex depth (PS1-style depth cueing)
+/// Returns 0.0 (no fog) to 1.0 (full fog)
+#[inline]
+fn calculate_fog_factor(z: f32, fog_start: f32, fog_falloff: f32) -> f32 {
+    if z <= fog_start {
+        0.0
+    } else if fog_falloff <= 0.0 {
+        1.0
+    } else {
+        ((z - fog_start) / fog_falloff).min(1.0)
+    }
+}
+
+/// Apply fog to a vertex color (linear interpolation toward fog color)
+/// Works with 8-bit Color (Surface vertex colors)
+#[inline]
+fn apply_fog_to_color(color: Color, fog_color: Color, fog_factor: f32) -> Color {
+    if fog_factor <= 0.0 {
+        return color;
+    }
+    if fog_factor >= 1.0 {
+        return fog_color;
+    }
+
+    let inv_factor = 1.0 - fog_factor;
+    let r = (color.r as f32 * inv_factor + fog_color.r as f32 * fog_factor) as u8;
+    let g = (color.g as f32 * inv_factor + fog_color.g as f32 * fog_factor) as u8;
+    let b = (color.b as f32 * inv_factor + fog_color.b as f32 * fog_factor) as u8;
+
+    Color::new(r, g, b)
+}
+
 /// Render a mesh using RGB555 textures (PS1-authentic mode)
 /// Uses Texture15 for texture sampling with proper semi-transparency handling
+///
+/// The `fog` parameter enables PS1-style depth cueing: (start, falloff, cull_distance, fog_color)
+/// - Vertices closer than start have no fog
+/// - Fog increases linearly over falloff distance
+/// - Faces with all vertices beyond cull_distance are culled entirely
 pub fn render_mesh_15(
     fb: &mut Framebuffer,
     vertices: &[Vertex],
@@ -1941,6 +1982,7 @@ pub fn render_mesh_15(
     face_blend_modes: Option<&[BlendMode]>,
     camera: &Camera,
     settings: &RasterSettings,
+    fog: Option<(f32, f32, f32, Color)>,
 ) -> RasterTimings {
     let mut timings = RasterTimings::default();
 
@@ -1995,6 +2037,7 @@ pub fn render_mesh_15(
 
     // === CULL PHASE ===
     let cull_start = get_time();
+    let mut fog_total_time = 0.0f64;
 
     // Build surfaces for front-faces and collect back-faces for wireframe
     let mut surfaces: Vec<Surface> = Vec::with_capacity(faces.len());
@@ -2047,6 +2090,34 @@ pub fn render_mesh_15(
             }
         };
 
+        // Apply PS1-style fog to vertex colors (depth cueing) and distance culling
+        let fog_start_time = get_time();
+        let (vc1, vc2, vc3) = if let Some((fog_start, fog_falloff, cull_distance, fog_color)) = fog {
+            // Cull faces where all vertices are beyond cull distance
+            if cv1.z > cull_distance && cv2.z > cull_distance && cv3.z > cull_distance {
+                fog_total_time += get_time() - fog_start_time;
+                continue;
+            }
+
+            // Calculate fog factor for each vertex based on camera-space Z
+            let f1 = calculate_fog_factor(cv1.z, fog_start, fog_falloff);
+            let f2 = calculate_fog_factor(cv2.z, fog_start, fog_falloff);
+            let f3 = calculate_fog_factor(cv3.z, fog_start, fog_falloff);
+
+            (
+                apply_fog_to_color(vertices[face.v0].color, fog_color, f1),
+                apply_fog_to_color(vertices[face.v1].color, fog_color, f2),
+                apply_fog_to_color(vertices[face.v2].color, fog_color, f3),
+            )
+        } else {
+            (
+                vertices[face.v0].color,
+                vertices[face.v1].color,
+                vertices[face.v2].color,
+            )
+        };
+        fog_total_time += get_time() - fog_start_time;
+
         if is_backface {
             backface_wireframes.push((v1, v2, v3));
 
@@ -2067,9 +2138,9 @@ pub fn render_mesh_15(
                     uv1: vertices[face.v0].uv,
                     uv2: vertices[face.v1].uv,
                     uv3: vertices[face.v2].uv,
-                    vc1: vertices[face.v0].color,
-                    vc2: vertices[face.v1].color,
-                    vc3: vertices[face.v2].color,
+                    vc1,
+                    vc2,
+                    vc3,
                     normal: normal.scale(-1.0),
                     face_idx,
                     black_transparent: face.black_transparent,
@@ -2093,9 +2164,9 @@ pub fn render_mesh_15(
                 uv1: vertices[face.v0].uv,
                 uv2: vertices[face.v1].uv,
                 uv3: vertices[face.v2].uv,
-                vc1: vertices[face.v0].color,
-                vc2: vertices[face.v1].color,
-                vc3: vertices[face.v2].color,
+                vc1,
+                vc2,
+                vc3,
                 normal,
                 face_idx,
                 black_transparent: face.black_transparent,
@@ -2109,6 +2180,7 @@ pub fn render_mesh_15(
     }
 
     timings.cull_ms = ((get_time() - cull_start) * 1000.0) as f32;
+    timings.fog_ms = (fog_total_time * 1000.0) as f32;
 
     // === SORT PHASE (Two-Pass: Separate Opaque & Transparent) ===
     let sort_start = get_time();
@@ -2135,6 +2207,7 @@ pub fn render_mesh_15(
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
+    timings.triangles_drawn = (opaque_surfaces.len() + transparent_surfaces.len()) as u32;
 
     // === DRAW PHASE (Two-Pass Rendering) ===
     let draw_start = get_time();

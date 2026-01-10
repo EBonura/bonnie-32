@@ -3008,32 +3008,44 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     y += 10.0;
 
     // Properties for selected room
-    if let Some(room) = state.current_room() {
+    // Extract values first to avoid borrow conflicts with mutations
+    let room_data = state.current_room().map(|room| {
+        (
+            room.position,
+            room.width,
+            room.depth,
+            room.iter_sectors().count(),
+            room.portals.len(),
+            room.objects.iter().filter(|obj| obj.is_light()).count(),
+            room.ambient,
+            room.fog.enabled,
+            room.fog.color,
+            room.fog.start,
+            room.fog.falloff,
+            room.fog.cull_offset,
+        )
+    });
+
+    if let Some((position, width, depth, sector_count, portal_count, light_count, ambient, fog_enabled, fog_color, fog_start, fog_falloff, fog_cull_offset)) = room_data {
         // Section header
         draw_text("Properties", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
         y += LINE_HEIGHT;
 
         draw_text(
-            &format!("Pos: ({:.0}, {:.0}, {:.0})", room.position.x, room.position.y, room.position.z),
+            &format!("Pos: ({:.0}, {:.0}, {:.0})", position.x, position.y, position.z),
             x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE,
         );
         y += LINE_HEIGHT;
 
-        draw_text(&format!("Size: {}x{}", room.width, room.depth), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        draw_text(&format!("Size: {}x{}", width, depth), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
         y += LINE_HEIGHT;
 
-        // Count sectors
-        let sector_count = room.iter_sectors().count();
         draw_text(&format!("Sectors: {}", sector_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
         y += LINE_HEIGHT;
 
-        draw_text(&format!("Portals: {}", room.portals.len()), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        draw_text(&format!("Portals: {}", portal_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
         y += LINE_HEIGHT;
 
-        // Count lights in this room from room objects
-        let light_count = room.objects.iter()
-            .filter(|obj| obj.is_light())
-            .count();
         draw_text(&format!("Lights: {}", light_count), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
         y += LINE_HEIGHT;
 
@@ -3053,7 +3065,7 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         draw_text("Ambient", x, y + slider_height - 2.0, 11.0, text_color);
 
         // Convert ambient (0.0-1.0) to display value (0-31)
-        let ambient_31 = (room.ambient * 31.0).round() as u8;
+        let ambient_31 = (ambient * 31.0).round() as u8;
 
         // Slider track background
         let track_rect = Rect::new(slider_x, y, slider_width, slider_height);
@@ -3094,6 +3106,150 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         // End dragging
         if state.ambient_slider_active && !ctx.mouse.left_down {
             state.ambient_slider_active = false;
+        }
+
+        // === FOG SETTINGS (PS1-style depth cueing) ===
+        y += LINE_HEIGHT + 4.0;
+        draw_text("Fog (Depth Cueing)", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+        y += LINE_HEIGHT;
+
+        // Fog enable checkbox
+        let checkbox_size = 12.0;
+        let checkbox_rect = Rect::new(x, y, checkbox_size, checkbox_size);
+        let checkbox_bg = Color::new(0.2, 0.2, 0.25, 1.0);
+        let checkbox_check = Color::new(0.4, 0.8, 1.0, 1.0);
+
+        draw_rectangle(checkbox_rect.x, checkbox_rect.y, checkbox_rect.w, checkbox_rect.h, checkbox_bg);
+        if fog_enabled {
+            draw_rectangle(checkbox_rect.x + 2.0, checkbox_rect.y + 2.0, checkbox_rect.w - 4.0, checkbox_rect.h - 4.0, checkbox_check);
+        }
+        draw_text("Enabled", x + checkbox_size + 6.0, y + checkbox_size - 2.0, 11.0, text_color);
+
+        // Handle fog enable checkbox click
+        if ctx.mouse.inside(&checkbox_rect) && ctx.mouse.left_pressed {
+            if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                room.fog.enabled = !room.fog.enabled;
+            }
+        }
+
+        y += LINE_HEIGHT;
+
+        // Only show fog controls if fog is enabled
+        if fog_enabled {
+            let fog_tint = Color::new(0.6, 0.7, 0.9, 1.0);
+            let r_label_w = 12.0;
+
+            // Fog color RGB sliders
+            draw_text("Color", x, y + slider_height - 2.0, 11.0, text_color);
+            y += LINE_HEIGHT - 2.0;
+
+            // R slider
+            draw_text("R", x + 4.0, y + slider_height - 2.0, 10.0, Color::new(1.0, 0.5, 0.5, 1.0));
+            let r_track = Rect::new(x + r_label_w + 4.0, y, slider_width - r_label_w, slider_height);
+            draw_rectangle(r_track.x, r_track.y, r_track.w, r_track.h, track_bg);
+            let r_fill = fog_color.0 * r_track.w;
+            draw_rectangle(r_track.x, r_track.y, r_fill, r_track.h, Color::new(1.0, 0.3, 0.3, 1.0));
+            draw_rectangle(r_track.x + r_fill - 1.0, r_track.y, 3.0, r_track.h, WHITE);
+            draw_text(&format!("{:.0}", fog_color.0 * 31.0), r_track.x + r_track.w + 4.0, y + slider_height - 2.0, 10.0, text_color);
+
+            if ctx.mouse.inside(&r_track) && ctx.mouse.left_down {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    room.fog.color.0 = ((ctx.mouse.x - r_track.x) / r_track.w).clamp(0.0, 1.0);
+                }
+            }
+            y += LINE_HEIGHT - 4.0;
+
+            // G slider
+            draw_text("G", x + 4.0, y + slider_height - 2.0, 10.0, Color::new(0.5, 1.0, 0.5, 1.0));
+            let g_track = Rect::new(x + r_label_w + 4.0, y, slider_width - r_label_w, slider_height);
+            draw_rectangle(g_track.x, g_track.y, g_track.w, g_track.h, track_bg);
+            let g_fill = fog_color.1 * g_track.w;
+            draw_rectangle(g_track.x, g_track.y, g_fill, g_track.h, Color::new(0.3, 1.0, 0.3, 1.0));
+            draw_rectangle(g_track.x + g_fill - 1.0, g_track.y, 3.0, g_track.h, WHITE);
+            draw_text(&format!("{:.0}", fog_color.1 * 31.0), g_track.x + g_track.w + 4.0, y + slider_height - 2.0, 10.0, text_color);
+
+            if ctx.mouse.inside(&g_track) && ctx.mouse.left_down {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    room.fog.color.1 = ((ctx.mouse.x - g_track.x) / g_track.w).clamp(0.0, 1.0);
+                }
+            }
+            y += LINE_HEIGHT - 4.0;
+
+            // B slider
+            draw_text("B", x + 4.0, y + slider_height - 2.0, 10.0, Color::new(0.5, 0.5, 1.0, 1.0));
+            let b_track = Rect::new(x + r_label_w + 4.0, y, slider_width - r_label_w, slider_height);
+            draw_rectangle(b_track.x, b_track.y, b_track.w, b_track.h, track_bg);
+            let b_fill = fog_color.2 * b_track.w;
+            draw_rectangle(b_track.x, b_track.y, b_fill, b_track.h, Color::new(0.3, 0.3, 1.0, 1.0));
+            draw_rectangle(b_track.x + b_fill - 1.0, b_track.y, 3.0, b_track.h, WHITE);
+            draw_text(&format!("{:.0}", fog_color.2 * 31.0), b_track.x + b_track.w + 4.0, y + slider_height - 2.0, 10.0, text_color);
+
+            if ctx.mouse.inside(&b_track) && ctx.mouse.left_down {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    room.fog.color.2 = ((ctx.mouse.x - b_track.x) / b_track.w).clamp(0.0, 1.0);
+                }
+            }
+            y += LINE_HEIGHT;
+
+            // Fog start distance slider (0-50000) - world units, SECTOR_SIZE=1024
+            let fog_max = 50000.0;
+            draw_text("Start", x, y + slider_height - 2.0, 11.0, text_color);
+            let start_track = Rect::new(slider_x, y, slider_width, slider_height);
+            draw_rectangle(start_track.x, start_track.y, start_track.w, start_track.h, track_bg);
+            let start_fill = (fog_start / fog_max).min(1.0) * start_track.w;
+            draw_rectangle(start_track.x, start_track.y, start_fill, start_track.h, fog_tint);
+            draw_rectangle(start_track.x + start_fill - 1.0, start_track.y, 3.0, start_track.h, WHITE);
+            draw_text(&format!("{:.0}", fog_start), slider_x + slider_width + 4.0, y + slider_height - 2.0, 10.0, text_color);
+
+            if ctx.mouse.inside(&start_track) && ctx.mouse.left_down {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    let step = 512.0;
+                    let raw = (ctx.mouse.x - start_track.x) / start_track.w * fog_max;
+                    let new_start = (raw / step).round() * step;
+                    room.fog.start = new_start.clamp(0.0, fog_max);
+                }
+            }
+            y += LINE_HEIGHT;
+
+            // Fog falloff distance slider (512-50000) - distance from start to full fog
+            let falloff_max = 50000.0;
+            let falloff_min = 512.0;
+            draw_text("Falloff", x, y + slider_height - 2.0, 11.0, text_color);
+            let falloff_track = Rect::new(slider_x, y, slider_width, slider_height);
+            draw_rectangle(falloff_track.x, falloff_track.y, falloff_track.w, falloff_track.h, track_bg);
+            let falloff_fill = (fog_falloff / falloff_max).min(1.0) * falloff_track.w;
+            draw_rectangle(falloff_track.x, falloff_track.y, falloff_fill, falloff_track.h, fog_tint);
+            draw_rectangle(falloff_track.x + falloff_fill - 1.0, falloff_track.y, 3.0, falloff_track.h, WHITE);
+            draw_text(&format!("{:.0}", fog_falloff), slider_x + slider_width + 4.0, y + slider_height - 2.0, 10.0, text_color);
+
+            if ctx.mouse.inside(&falloff_track) && ctx.mouse.left_down {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    let step = 512.0;
+                    let raw = (ctx.mouse.x - falloff_track.x) / falloff_track.w * falloff_max;
+                    let new_falloff = (raw / step).round() * step;
+                    room.fog.falloff = new_falloff.clamp(falloff_min, falloff_max);
+                }
+            }
+            y += LINE_HEIGHT;
+
+            // Fog cull offset slider (0-10000) - additional distance after full fog before culling
+            let cull_max = 10000.0;
+            draw_text("Cull +", x, y + slider_height - 2.0, 11.0, text_color);
+            let cull_track = Rect::new(slider_x, y, slider_width, slider_height);
+            draw_rectangle(cull_track.x, cull_track.y, cull_track.w, cull_track.h, track_bg);
+            let cull_fill = (fog_cull_offset / cull_max).min(1.0) * cull_track.w;
+            draw_rectangle(cull_track.x, cull_track.y, cull_fill, cull_track.h, fog_tint);
+            draw_rectangle(cull_track.x + cull_fill - 1.0, cull_track.y, 3.0, cull_track.h, WHITE);
+            draw_text(&format!("{:.0}", fog_cull_offset), slider_x + slider_width + 4.0, y + slider_height - 2.0, 10.0, text_color);
+
+            if ctx.mouse.inside(&cull_track) && ctx.mouse.left_down {
+                if let Some(room) = state.level.rooms.get_mut(state.current_room) {
+                    let step = 512.0;
+                    let raw = (ctx.mouse.x - cull_track.x) / cull_track.w * cull_max;
+                    let new_cull = (raw / step).round() * step;
+                    room.fog.cull_offset = new_cull.clamp(0.0, cull_max);
+                }
+            }
         }
     } else {
         draw_text("No room selected", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));

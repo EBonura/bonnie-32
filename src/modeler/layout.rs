@@ -8,7 +8,7 @@ use crate::rasterizer::{ClutDepth, Clut, Color15};
 use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, CameraMode};
 use crate::texture::{UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel};
 use super::tools::ModelerToolId;
-use super::viewport::draw_modeler_viewport;
+use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
 use super::mesh_editor::EditableMesh;
 use super::actions::{create_modeler_actions, build_context};
 use crate::rasterizer::Vec3;
@@ -249,6 +249,34 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.raster_settings.wireframe_overlay { "Wireframe" } else { "Solid" };
         state.set_status(&format!("Render: {}", mode), 1.5);
     }
+    // Backface culling toggle (cycles through 3 states like world editor)
+    // State 0: Both sides visible (backface_cull=false)
+    // State 1: Wireframe on back (backface_cull=true, backface_wireframe=true)
+    // State 2: Hidden (backface_cull=true, backface_wireframe=false)
+    let (backface_icon, backface_tooltip) = if !state.raster_settings.backface_cull {
+        (icon::EYE, "Backfaces: Both Sides Visible")
+    } else if state.raster_settings.backface_wireframe {
+        (icon::SCAN, "Backfaces: Wireframe")
+    } else {
+        (icon::EYE_OFF, "Backfaces: Hidden")
+    };
+    if toolbar.icon_button(ctx, backface_icon, icon_font, backface_tooltip) {
+        // Cycle to next state
+        if !state.raster_settings.backface_cull {
+            // Was: both visible → Now: wireframe on back
+            state.raster_settings.backface_cull = true;
+            state.raster_settings.backface_wireframe = true;
+            state.set_status("Backfaces: Wireframe", 1.5);
+        } else if state.raster_settings.backface_wireframe {
+            // Was: wireframe → Now: hidden
+            state.raster_settings.backface_wireframe = false;
+            state.set_status("Backfaces: Hidden", 1.5);
+        } else {
+            // Was: hidden → Now: both visible
+            state.raster_settings.backface_cull = false;
+            state.set_status("Backfaces: Both Sides Visible", 1.5);
+        }
+    }
     // Z-buffer toggle (ON = z-buffer, OFF = painter's algorithm)
     if toolbar.icon_button_active(ctx, icon::ARROW_DOWN_UP, icon_font, "Z-Buffer (OFF = painter's algorithm)", state.raster_settings.use_zbuffer) {
         state.raster_settings.use_zbuffer = !state.raster_settings.use_zbuffer;
@@ -478,7 +506,7 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 /// Draw a simple section label (non-collapsible)
 fn draw_section_label(x: f32, y: &mut f32, width: f32, label: &str) {
     draw_rectangle(x, *y, width, 18.0, Color::from_rgba(45, 45, 52, 255));
-    draw_text(label, x + 4.0, *y + 13.0, 11.0, TEXT_COLOR);
+    draw_text(label, x + 4.0, *y + 13.0, 13.0, TEXT_COLOR);
     *y += 20.0;
 }
 
@@ -548,7 +576,7 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         // Object name with face count
         let fc = obj.mesh.face_count();
         let name_color = poly_count_color(fc);
-        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, 11.0, name_color);
+        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, 13.0, name_color);
 
         // Handle selection click (not on visibility toggle)
         let name_rect = Rect::new(rect.x + 20.0, y, rect.w - 20.0, line_height);
@@ -580,7 +608,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         super::state::ModelerSelection::Edges(e) => format!("{} edge(s)", e.len()),
         super::state::ModelerSelection::Faces(f) => format!("{} face(s)", f.len()),
     };
-    draw_text(&sel_text, x + 4.0, *y + 12.0, 11.0, TEXT_COLOR);
+    draw_text(&sel_text, x + 4.0, *y + 12.0, 13.0, TEXT_COLOR);
     *y += line_height;
 
     // Current tool
@@ -590,7 +618,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         Some(ModelerToolId::Scale) => "Tool: Scale (S)",
         _ => "Tool: Select",
     };
-    draw_text(tool_label, x + 4.0, *y + 12.0, 11.0, TEXT_DIM);
+    draw_text(tool_label, x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
     *y += line_height;
 
     // Select mode
@@ -599,7 +627,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         super::state::SelectMode::Edge => "Mode: Edge (2)",
         super::state::SelectMode::Face => "Mode: Face (3)",
     };
-    draw_text(mode_label, x + 4.0, *y + 12.0, 11.0, TEXT_DIM);
+    draw_text(mode_label, x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
     *y += line_height;
 
     // Note: Face Properties (blend mode) is now in the right panel texture section
@@ -612,7 +640,7 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
 
     // Light count and add/remove buttons
     let light_count = state.raster_settings.lights.len();
-    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, 11.0, TEXT_COLOR);
+    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, 13.0, TEXT_COLOR);
 
     // Add button
     let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
@@ -647,14 +675,14 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
             crate::rasterizer::LightType::Point { .. } => "Pt",
             crate::rasterizer::LightType::Spot { .. } => "Sp",
         };
-        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, 9.0, TEXT_COLOR);
+        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, 13.0, TEXT_COLOR);
 
         if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
             toggle_idx = Some(i);
         }
 
         // Intensity
-        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, 9.0, TEXT_DIM);
+        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, 13.0, TEXT_DIM);
 
         *y += line_height;
     }
@@ -680,7 +708,7 @@ fn draw_shortcuts_section(x: f32, y: &mut f32, _width: f32, max_y: f32) {
         if *y + 14.0 > max_y {
             break;
         }
-        draw_text(&format!("{}: {}", key, desc), x + 4.0, *y + 10.0, 9.0, TEXT_DIM);
+        draw_text(&format!("{}: {}", key, desc), x + 4.0, *y + 10.0, 13.0, TEXT_DIM);
         *y += 14.0;
     }
 }
@@ -1143,7 +1171,7 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
         // Draw texture name (truncated if needed)
         if y + thumb_size - 2.0 >= content_rect.y && y + thumb_size - 2.0 <= content_rect.bottom() {
             let display_name = if name.len() > 8 { &name[..8] } else { name };
-            draw_text(display_name, (x + 2.0).floor(), (y + thumb_size - 2.0).floor(), 10.0, Color::from_rgba(255, 255, 255, 200));
+            draw_text(display_name, (x + 2.0).floor(), (y + thumb_size - 2.0).floor(), 12.0, Color::from_rgba(255, 255, 255, 200));
         }
     }
 
@@ -1248,10 +1276,13 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     // This matches the World Editor's texture_palette.rs layout exactly
     let tool_panel_w = 36.0;  // Vertical toolbar (32px buttons + padding)
     let canvas_w = content_rect.w - tool_panel_w;
-    // Canvas should be square and capped at a reasonable size (leave room for palette)
-    let max_canvas_h = (content_rect.h * 0.5).min(canvas_w).max(100.0);  // 50% of height or square, whichever is smaller
+    // Tool panel needs ~280px height (6 tools + undo/redo/zoom/grid + size/shape options)
+    // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190
+    let min_canvas_h = 280.0;  // Minimum for tool panel to fit all buttons
+    let min_palette_h = 190.0;
+    let max_canvas_h = (content_rect.h - min_palette_h).min(canvas_w).max(min_canvas_h);
     let canvas_h = max_canvas_h;
-    let palette_panel_h = content_rect.h - canvas_h;  // Remaining space goes to palette
+    let palette_panel_h = (content_rect.h - canvas_h).max(min_palette_h);  // Remaining space goes to palette
 
     let canvas_rect = Rect::new(content_rect.x, content_rect.y, canvas_w, canvas_h);
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
@@ -1373,19 +1404,16 @@ fn draw_atlas_preview(
         if let super::state::ModelerSelection::Faces(selected_faces) = &state.selection {
             for &fi in selected_faces {
                 if let Some(face) = obj.mesh.faces.get(fi) {
-                    let v0 = &obj.mesh.vertices[face.v0];
-                    let v1 = &obj.mesh.vertices[face.v1];
-                    let v2 = &obj.mesh.vertices[face.v2];
+                    // Collect screen UVs for all vertices of n-gon
+                    let screen_uvs: Vec<_> = face.vertices.iter()
+                        .filter_map(|&vi| obj.mesh.vertices.get(vi))
+                        .map(|v| uv_to_screen(v.uv.x, v.uv.y))
+                        .collect();
 
-                    let screen_uvs = [
-                        uv_to_screen(v0.uv.x, v0.uv.y),
-                        uv_to_screen(v1.uv.x, v1.uv.y),
-                        uv_to_screen(v2.uv.x, v2.uv.y),
-                    ];
-
-                    // Draw edges
-                    for i in 0..3 {
-                        let j = (i + 1) % 3;
+                    // Draw edges (all edges of n-gon)
+                    let n = screen_uvs.len();
+                    for i in 0..n {
+                        let j = (i + 1) % n;
                         draw_line(
                             screen_uvs[i].0, screen_uvs[i].1,
                             screen_uvs[j].0, screen_uvs[j].1,
@@ -1395,11 +1423,13 @@ fn draw_atlas_preview(
 
                     // Draw vertices (only when UV section is expanded)
                     if state.uv_section_expanded {
-                        for (vi, (sx, sy)) in [(face.v0, screen_uvs[0]), (face.v1, screen_uvs[1]), (face.v2, screen_uvs[2])] {
-                            let is_selected = state.uv_selection.contains(&vi);
-                            let color = if is_selected { selected_vertex_color } else { vertex_color };
-                            let size = if is_selected { 8.0 } else { 6.0 };
-                            draw_rectangle(sx - size * 0.5, sy - size * 0.5, size, size, color);
+                        for (i, &vi) in face.vertices.iter().enumerate() {
+                            if let Some((sx, sy)) = screen_uvs.get(i) {
+                                let is_selected = state.uv_selection.contains(&vi);
+                                let color = if is_selected { selected_vertex_color } else { vertex_color };
+                                let size = if is_selected { 8.0 } else { 6.0 };
+                                draw_rectangle(sx - size * 0.5, sy - size * 0.5, size, size, color);
+                            }
                         }
                     }
                 }
@@ -1414,7 +1444,7 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
     let btn_h = 18.0;
     let btn_spacing = 2.0;
 
-    draw_text("Size:", x + 4.0, *y + 12.0, 10.0, TEXT_DIM);
+    draw_text("Size:", x + 4.0, *y + 12.0, 12.0, TEXT_DIM);
 
     let mut btn_x = x + 32.0;
     for (size, label) in sizes {
@@ -1433,7 +1463,7 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
         draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
 
         let text_color = if is_current { WHITE } else { TEXT_DIM };
-        draw_text(label, btn_x + 3.0, *y + 12.0, 10.0, text_color);
+        draw_text(label, btn_x + 3.0, *y + 12.0, 12.0, text_color);
 
         if hovered && ctx.mouse.left_pressed && !is_current {
             state.push_undo_with_atlas("Resize Atlas");
@@ -1533,7 +1563,7 @@ fn draw_paint_tools_content(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32
         let fill_width = fill_ratio * track_rect.w;
         draw_rectangle(track_rect.x, track_rect.y, fill_width, slider_h, ACCENT_COLOR);
 
-        draw_text(&format!("{}", state.brush_size as i32), slider_x + track_rect.w + 4.0, *y + 14.0, 10.0, TEXT_DIM);
+        draw_text(&format!("{}", state.brush_size as i32), slider_x + track_rect.w + 4.0, *y + 14.0, 12.0, TEXT_DIM);
 
         // Handle slider interaction
         if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && !state.brush_size_slider_active {
@@ -1585,7 +1615,7 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         .all(|f| f.blend_mode == current_blend);
 
     // Blend mode label
-    draw_text("Blend:", x + 4.0, *y + 12.0, 11.0, TEXT_DIM);
+    draw_text("Blend:", x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
 
     // Blend mode buttons (inline row)
     let btn_modes = [
@@ -1619,7 +1649,7 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         // Draw label
         let text_color = if is_selected { WHITE } else { TEXT_COLOR };
         let text_x = btn_rect.x + (btn_rect.w - measure_text(label, None, 10, 1.0).width) / 2.0;
-        draw_text(label, text_x, btn_rect.y + 13.0, 10.0, text_color);
+        draw_text(label, text_x, btn_rect.y + 13.0, 12.0, text_color);
 
         // Tooltip
         if hovered {
@@ -1646,7 +1676,7 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
 
     // Show "Mixed" indicator if faces have different blend modes
     if !all_same {
-        draw_text("(Mixed)", x + 4.0, *y + 10.0, 10.0, Color::from_rgba(180, 140, 60, 255));
+        draw_text("(Mixed)", x + 4.0, *y + 10.0, 12.0, Color::from_rgba(180, 140, 60, 255));
         *y += 14.0;
     }
 }
@@ -1679,7 +1709,7 @@ fn draw_clut_editor_panel(
     // ========================================================================
     // Section 1: CLUT Pool List with buttons
     // ========================================================================
-    draw_text("CLUT Pool", x + padding, cur_y + 10.0, 11.0, TEXT_DIM);
+    draw_text("CLUT Pool", x + padding, cur_y + 10.0, 13.0, TEXT_DIM);
     cur_y += 14.0;
 
     // Buttons to add new CLUTs
@@ -1695,7 +1725,7 @@ fn draw_clut_editor_panel(
         Color::from_rgba(50, 50, 55, 255)
     };
     draw_rectangle(btn_4bit_rect.x, btn_4bit_rect.y, btn_4bit_rect.w, btn_4bit_rect.h, bg_4bit);
-    draw_text("+ 4-bit", x + padding + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+    draw_text("+ 4-bit", x + padding + 4.0, cur_y + 13.0, 12.0, TEXT_COLOR);
     if hovered_4bit {
         ctx.set_tooltip("Add 4-bit CLUT (16 colors)", ctx.mouse.x, ctx.mouse.y);
     }
@@ -1716,7 +1746,7 @@ fn draw_clut_editor_panel(
         Color::from_rgba(50, 50, 55, 255)
     };
     draw_rectangle(btn_8bit_rect.x, btn_8bit_rect.y, btn_8bit_rect.w, btn_8bit_rect.h, bg_8bit);
-    draw_text("+ 8-bit", btn_8bit_rect.x + 4.0, cur_y + 13.0, 10.0, TEXT_COLOR);
+    draw_text("+ 8-bit", btn_8bit_rect.x + 4.0, cur_y + 13.0, 12.0, TEXT_COLOR);
     if hovered_8bit {
         ctx.set_tooltip("Add 8-bit CLUT (256 colors)", ctx.mouse.x, ctx.mouse.y);
     }
@@ -1740,7 +1770,7 @@ fn draw_clut_editor_panel(
     // Draw CLUT items
     let clut_count = state.project.clut_pool.len();
     if clut_count == 0 {
-        draw_text("(empty)", x + padding + 4.0, cur_y + 12.0, 10.0, TEXT_DIM);
+        draw_text("(empty)", x + padding + 4.0, cur_y + 12.0, 12.0, TEXT_DIM);
     } else {
         let mut item_y = cur_y + 2.0;
         for clut in state.project.clut_pool.iter() {
@@ -1764,13 +1794,13 @@ fn draw_clut_editor_panel(
 
             // Name + depth badge
             let text_color = if is_selected { WHITE } else { TEXT_COLOR };
-            draw_text(&clut.name, item_rect.x + 2.0, item_y + 11.0, 10.0, text_color);
+            draw_text(&clut.name, item_rect.x + 2.0, item_y + 11.0, 12.0, text_color);
 
             // Depth badge
             let badge_text = clut.depth.short_label();
             let badge_x = item_rect.x + item_rect.w - 24.0;
             draw_rectangle(badge_x, item_y + 2.0, 20.0, 12.0, Color::from_rgba(60, 60, 70, 255));
-            draw_text(badge_text, badge_x + 2.0, item_y + 11.0, 9.0, TEXT_DIM);
+            draw_text(badge_text, badge_x + 2.0, item_y + 11.0, 13.0, TEXT_DIM);
 
             // Handle click
             if hovered && ctx.mouse.left_pressed {
@@ -1883,9 +1913,9 @@ fn draw_clut_editor_panel(
                 let semi_bg = if is_semi { ACCENT_COLOR } else { Color::from_rgba(50, 50, 55, 255) };
                 draw_rectangle(semi_rect.x, semi_rect.y, semi_rect.w, semi_rect.h, semi_bg);
                 if is_semi {
-                    draw_text("✓", semi_x + 2.0, cur_y + 11.0, 10.0, WHITE);
+                    draw_text("✓", semi_x + 2.0, cur_y + 11.0, 12.0, WHITE);
                 }
-                draw_text("Semi-trans", semi_x + 18.0, cur_y + 10.0, 10.0, TEXT_COLOR);
+                draw_text("Semi-trans", semi_x + 18.0, cur_y + 10.0, 12.0, TEXT_COLOR);
 
                 if ctx.mouse.inside(&semi_rect) && ctx.mouse.left_pressed {
                     // Toggle semi-transparent bit
@@ -1913,7 +1943,7 @@ fn draw_clut_editor_panel(
                     let track_rect = Rect::new(slider_x, cur_y, slider_w, slider_h);
 
                     // Label
-                    draw_text(label, x + padding, cur_y + 8.0, 10.0, tint);
+                    draw_text(label, x + padding, cur_y + 8.0, 12.0, tint);
 
                     // Track background
                     draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::from_rgba(30, 30, 35, 255));
@@ -1927,7 +1957,7 @@ fn draw_clut_editor_panel(
                     draw_rectangle(handle_x.max(track_rect.x), track_rect.y, 4.0, slider_h, WHITE);
 
                     // Value
-                    draw_text(&format!("{}", value), track_rect.x + track_rect.w + 4.0, cur_y + 8.0, 10.0, TEXT_DIM);
+                    draw_text(&format!("{}", value), track_rect.x + track_rect.w + 4.0, cur_y + 8.0, 12.0, TEXT_DIM);
 
                     // Handle slider interaction
                     let hovered = ctx.mouse.inside(&track_rect);
@@ -1962,7 +1992,7 @@ fn draw_clut_editor_panel(
         }
     } else {
         // No CLUT selected - show hint
-        draw_text("Select or create a CLUT", x + padding, cur_y + 10.0, 10.0, TEXT_DIM);
+        draw_text("Select or create a CLUT", x + padding, cur_y + 10.0, 12.0, TEXT_DIM);
     }
 }
 
@@ -2037,33 +2067,29 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
         let face_color = Color::from_rgba(100, 200, 255, 180);
         let selected_color = Color::from_rgba(255, 200, 100, 255);
 
+        // Convert UVs to screen coordinates (snapped to pixel centers)
+        let uv_to_screen = |uv: crate::rasterizer::Vec2| {
+            let px = (uv.x * atlas_w).floor();
+            let py = ((1.0 - uv.y) * atlas_h).floor();
+            let sx = atlas_x + (px + 0.5) * scale;
+            let sy = atlas_y + (py + 0.5) * scale;
+            (sx, sy)
+        };
+
         for (fi, face) in obj.mesh.faces.iter().enumerate() {
             let is_selected = matches!(&state.selection, super::state::ModelerSelection::Faces(faces) if faces.contains(&fi));
 
-            // Get UV coordinates from vertices
-            let v0 = &obj.mesh.vertices[face.v0];
-            let v1 = &obj.mesh.vertices[face.v1];
-            let v2 = &obj.mesh.vertices[face.v2];
+            // Collect screen UVs for all vertices of n-gon
+            let screen_uvs: Vec<_> = face.vertices.iter()
+                .filter_map(|&vi| obj.mesh.vertices.get(vi))
+                .map(|v| uv_to_screen(v.uv))
+                .collect();
 
-            // Convert UVs to screen coordinates (snapped to pixel centers)
-            let uv_to_screen = |uv: crate::rasterizer::Vec2| {
-                let px = (uv.x * atlas_w).floor();
-                let py = ((1.0 - uv.y) * atlas_h).floor();
-                let sx = atlas_x + (px + 0.5) * scale;
-                let sy = atlas_y + (py + 0.5) * scale;
-                (sx, sy)
-            };
-
-            let screen_uvs = [
-                uv_to_screen(v0.uv),
-                uv_to_screen(v1.uv),
-                uv_to_screen(v2.uv),
-            ];
-
-            // Draw edges of the UV triangle
+            // Draw edges of the UV face (n-gon)
             let color = if is_selected { selected_color } else { face_color };
-            for i in 0..3 {
-                let j = (i + 1) % 3;
+            let n = screen_uvs.len();
+            for i in 0..n {
+                let j = (i + 1) % n;
                 draw_line(
                     screen_uvs[i].0, screen_uvs[i].1,
                     screen_uvs[j].0, screen_uvs[j].1,
@@ -2092,7 +2118,7 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
     // Mode indicator
     let mode_text = if state.view_mode == ViewMode::Texture { "EDIT MODE" } else { "VIEW ONLY" };
     let mode_color = if state.view_mode == ViewMode::Texture { ACCENT_COLOR } else { TEXT_DIM };
-    draw_text(mode_text, rect.x + rect.w - 70.0, rect.y + 12.0, 11.0, mode_color);
+    draw_text(mode_text, rect.x + rect.w - 70.0, rect.y + 12.0, 13.0, mode_color);
 }
 
 /// Draw PicoCAD-style 4-panel viewport layout with resizable splits
@@ -2178,14 +2204,8 @@ fn draw_single_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
     // Content area (inset for border)
     let content = rect.pad(1.0);
 
-    // Draw the actual 3D content
-    if viewport_id == ViewportId::Perspective {
-        // Perspective view uses the existing orbit camera
-        draw_modeler_viewport(ctx, content, state, fb);
-    } else {
-        // Ortho views use rasterizer with orthographic projection
-        draw_ortho_viewport(ctx, content, state, viewport_id, fb);
-    }
+    // Draw the actual 3D content - unified for both perspective and ortho views
+    draw_modeler_viewport_ext(ctx, content, state, fb, viewport_id);
 
     // Label in top-left corner
     let label = viewport_id.label();
@@ -2309,12 +2329,11 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 }
             }
 
-            // Check edges if no vertex hovered
+            // Check edges if no vertex hovered (iterate over n-gon edges)
             if hovered_vertex.is_none() {
                 let mut best_edge_dist = EDGE_THRESHOLD;
                 for face in &mesh.faces {
-                    let edges = [(face.v0, face.v1), (face.v1, face.v2), (face.v2, face.v0)];
-                    for (v0_idx, v1_idx) in edges {
+                    for (v0_idx, v1_idx) in face.edges() {
                         if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                             let (sx0, sy0) = project_vertex(v0);
                             let (sx1, sy1) = project_vertex(v1);
@@ -2328,24 +2347,27 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 }
             }
 
-            // Check faces if no vertex or edge hovered - use point-in-triangle
+            // Check faces if no vertex or edge hovered - triangulate n-gons for hit testing
             if hovered_vertex.is_none() && hovered_edge.is_none() {
-                for (idx, face) in mesh.faces.iter().enumerate() {
-                    if let (Some(v0), Some(v1), Some(v2)) = (
-                        mesh.vertices.get(face.v0),
-                        mesh.vertices.get(face.v1),
-                        mesh.vertices.get(face.v2),
-                    ) {
-                        let (sx0, sy0) = project_vertex(v0);
-                        let (sx1, sy1) = project_vertex(v1);
-                        let (sx2, sy2) = project_vertex(v2);
+                'face_loop: for (idx, face) in mesh.faces.iter().enumerate() {
+                    // Triangulate the face and check each triangle
+                    for [i0, i1, i2] in face.triangulate() {
+                        if let (Some(v0), Some(v1), Some(v2)) = (
+                            mesh.vertices.get(i0),
+                            mesh.vertices.get(i1),
+                            mesh.vertices.get(i2),
+                        ) {
+                            let (sx0, sy0) = project_vertex(v0);
+                            let (sx1, sy1) = project_vertex(v1);
+                            let (sx2, sy2) = project_vertex(v2);
 
-                        // Check if mouse is inside the triangle
-                        if point_in_triangle_2d(mouse_pos.0, mouse_pos.1, sx0, sy0, sx1, sy1, sx2, sy2) {
-                            // In ortho view, just pick the first matching face
-                            // (no depth ordering needed as we see orthographically)
-                            hovered_face = Some(idx);
-                            break;
+                            // Check if mouse is inside the triangle
+                            if point_in_triangle_2d(mouse_pos.0, mouse_pos.1, sx0, sy0, sx1, sy1, sx2, sy2) {
+                                // In ortho view, just pick the first matching face
+                                // (no depth ordering needed as we see orthographically)
+                                hovered_face = Some(idx);
+                                break 'face_loop;
+                            }
                         }
                     }
                 }
@@ -2440,16 +2462,20 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 }
             }).collect();
 
-            let faces: Vec<RasterFace> = obj_mesh.faces.iter().map(|f| {
-                RasterFace {
-                    v0: f.v0,
-                    v1: f.v1,
-                    v2: f.v2,
-                    texture_id: Some(0),
-                    black_transparent: f.black_transparent,
-                    blend_mode: f.blend_mode,
+            // Triangulate n-gon faces for rendering
+            let mut faces: Vec<RasterFace> = Vec::new();
+            for edit_face in &obj_mesh.faces {
+                for [v0, v1, v2] in edit_face.triangulate() {
+                    faces.push(RasterFace {
+                        v0,
+                        v1,
+                        v2,
+                        texture_id: Some(0),
+                        black_transparent: edit_face.black_transparent,
+                        blend_mode: edit_face.blend_mode,
+                    });
                 }
-            }).collect();
+            }
 
             if !vertices.is_empty() && !faces.is_empty() {
                 // Collect per-face blend modes
@@ -2468,6 +2494,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         Some(&blend_modes),
                         &ortho_camera,
                         &ortho_settings,
+                        None,
                     );
                 } else {
                     // RGB888 rendering path (original)
@@ -2508,7 +2535,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     }
 
     if !mesh.vertices.is_empty() {
-        // Draw wireframe edges
+        // Draw wireframe edges (n-gon edges)
         // In wireframe mode: draw all edges
         // In solid mode: only draw hovered/selected faces
         for (idx, face) in mesh.faces.iter().enumerate() {
@@ -2520,22 +2547,17 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 continue;
             }
 
-            if let (Some(v0), Some(v1), Some(v2)) = (
-                mesh.vertices.get(face.v0),
-                mesh.vertices.get(face.v1),
-                mesh.vertices.get(face.v2),
-            ) {
-                let (x0, y0) = project_vertex(v0);
-                let (x1, y1) = project_vertex(v1);
-                let (x2, y2) = project_vertex(v2);
+            // Choose color based on hover/selection
+            let color = if is_hovered { hover_color } else if is_selected { select_color } else { wire_color };
+            let thickness = if is_hovered || is_selected { 2.0 } else { 1.0 };
 
-                // Choose color based on hover/selection
-                let color = if is_hovered { hover_color } else if is_selected { select_color } else { wire_color };
-                let thickness = if is_hovered || is_selected { 2.0 } else { 1.0 };
-
-                draw_line(x0, y0, x1, y1, thickness, color);
-                draw_line(x1, y1, x2, y2, thickness, color);
-                draw_line(x2, y2, x0, y0, thickness, color);
+            // Draw all edges of n-gon
+            for (v0_idx, v1_idx) in face.edges() {
+                if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                    let (x0, y0) = project_vertex(v0);
+                    let (x1, y1) = project_vertex(v1);
+                    draw_line(x0, y0, x1, y1, thickness, color);
+                }
             }
         }
 
@@ -2684,6 +2706,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         }
     }
 
+    // Box selection overlay is now drawn by the unified viewport.rs handler
+
     // Disable scissor clipping
     unsafe {
         get_internal_gl().quad_gl.scissor(None);
@@ -2748,22 +2772,91 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             }
             state.select_mode = SelectMode::Face;
         } else if !is_key_down(KeyCode::X) {
-            // Clicked on nothing - clear selection
-            state.set_selection(super::state::ModelerSelection::None);
+            // Clicked on nothing - start potential box select (don't clear selection yet)
+            eprintln!("[DEBUG] Clicked empty space in {:?} - setting box_select_pending_start", viewport_id);
+            state.ortho_box_select_pending_start = Some((ctx.mouse.x, ctx.mouse.y));
+            state.ortho_box_select_viewport = Some(viewport_id);
+        }
+    }
+
+    // =========================================================================
+    // Handle ortho box selection (click+drag on empty space)
+    // =========================================================================
+    if state.ortho_box_select_viewport == Some(viewport_id) {
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        let ortho_zoom = ortho_cam.zoom;
+        let ortho_center = ortho_cam.center;
+
+        // Check if we're already in box select mode
+        let is_box_selecting = state.drag_manager.active.is_box_select();
+
+        eprintln!("[DEBUG ORTHO BOX] viewport={:?} is_box_selecting={} pending={:?} mouse=({}, {})",
+            viewport_id, is_box_selecting, state.ortho_box_select_pending_start, ctx.mouse.x, ctx.mouse.y);
+
+        if is_box_selecting {
+            // Update the box select tracker with current mouse position
+            if let super::drag::ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
+                tracker.current_mouse = (ctx.mouse.x, ctx.mouse.y);
+            }
+
+            // On mouse release, apply the selection
+            if !ctx.mouse.left_down {
+                // Get bounds from tracker before ending drag
+                let bounds = if let super::drag::ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
+                    Some(tracker.bounds())
+                } else {
+                    None
+                };
+
+                if let Some((x0, y0, x1, y1)) = bounds {
+                    eprintln!("[DEBUG] Applying ortho box selection: bounds=({}, {}) to ({}, {})", x0, y0, x1, y1);
+                    // Apply box selection for ortho views
+                    apply_ortho_box_selection(state, viewport_id, x0, y0, x1, y1, rect.x, rect.y, rect.w, rect.h, ortho_zoom, ortho_center);
+                }
+
+                // End the drag
+                state.drag_manager.end();
+                state.ortho_box_select_viewport = None;
+            }
+        } else if let Some(start_pos) = state.ortho_box_select_pending_start {
+            // Check if we should convert pending start to actual box select
+            if ctx.mouse.left_down {
+                let dx = (ctx.mouse.x - start_pos.0).abs();
+                let dy = (ctx.mouse.y - start_pos.1).abs();
+                // Only become box select if moved at least 5 pixels
+                if dx > 5.0 || dy > 5.0 {
+                    eprintln!("[DEBUG] Starting ortho box select! dx={} dy={}", dx, dy);
+                    state.drag_manager.start_box_select(start_pos);
+                    // Update with current position
+                    if let super::drag::ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
+                        tracker.current_mouse = (ctx.mouse.x, ctx.mouse.y);
+                    }
+                    state.ortho_box_select_pending_start = None;
+                }
+            } else {
+                // Mouse released without dragging far enough - clear selection (this was the original click)
+                if !is_key_down(KeyCode::X) && !is_key_down(KeyCode::LeftShift) && !is_key_down(KeyCode::RightShift) {
+                    state.set_selection(super::state::ModelerSelection::None);
+                }
+                state.ortho_box_select_pending_start = None;
+                state.ortho_box_select_viewport = None;
+            }
         }
     }
 
     // =========================================================================
     // Handle left-drag to move selection in ortho views
     // =========================================================================
-    if inside_viewport && state.active_viewport == viewport_id && !state.selection.is_empty() && state.modal_transform == ModalTransform::None {
+    // Don't start move if box select is pending (user clicked on empty space for box select)
+    if inside_viewport && state.active_viewport == viewport_id && !state.selection.is_empty() && state.modal_transform == ModalTransform::None && state.ortho_box_select_pending_start.is_none() {
         // Get zoom value before any mutable borrows
         let ortho_zoom = state.get_ortho_camera(viewport_id).zoom;
 
         // Start drag on left-down (when we have selection and not clicking to select)
         // Use ortho_drag_pending_start to detect drag vs click, similar to box select
-        // Only start if gizmo is hovered OR if there's a selection (free move)
-        if ctx.mouse.left_pressed && inside_viewport && !state.drag_manager.is_dragging() {
+        // Only start if gizmo is hovered OR clicking on a selected/hovered element (not empty space)
+        let has_hovered = state.hovered_vertex.is_some() || state.hovered_edge.is_some() || state.hovered_face.is_some() || state.ortho_gizmo_hovered_axis.is_some();
+        if ctx.mouse.left_pressed && inside_viewport && !state.drag_manager.is_dragging() && has_hovered {
             // Store the gizmo axis that was clicked (if any)
             // Convert from state::Axis to ui::drag_tracker::Axis
             state.ortho_drag_pending_start = Some((ctx.mouse.x, ctx.mouse.y));
@@ -2934,6 +3027,156 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     } else if !ctx.mouse.right_down && is_our_pan {
         // Release pan capture
         state.ortho_pan_viewport = None;
+    }
+}
+
+/// Apply box selection to mesh elements in ortho views
+/// Uses same approach as perspective view - project vertices to screen and check bounds
+fn apply_ortho_box_selection(
+    state: &mut ModelerState,
+    viewport_id: ViewportId,
+    screen_x0: f32,
+    screen_y0: f32,
+    screen_x1: f32,
+    screen_y1: f32,
+    rect_x: f32,
+    rect_y: f32,
+    rect_w: f32,
+    rect_h: f32,
+    ortho_zoom: f32,
+    ortho_center: crate::rasterizer::Vec2,
+) {
+    eprintln!("[DEBUG apply_ortho_box_selection] viewport={:?} screen=({}, {})-({}, {}) rect=({}, {}, {}, {}) zoom={} center={:?}",
+        viewport_id, screen_x0, screen_y0, screen_x1, screen_y1, rect_x, rect_y, rect_w, rect_h, ortho_zoom, ortho_center);
+    // Check if adding to selection (Shift or X held)
+    let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
+        || is_key_down(KeyCode::X);
+
+    // Get min/max screen bounds
+    let (min_sx, max_sx) = if screen_x0 < screen_x1 { (screen_x0, screen_x1) } else { (screen_x1, screen_x0) };
+    let (min_sy, max_sy) = if screen_y0 < screen_y1 { (screen_y0, screen_y1) } else { (screen_y1, screen_y0) };
+
+    // Project 3D position to screen coordinates (same math as draw_ortho_viewport)
+    let world_to_screen = |pos: crate::rasterizer::Vec3| -> (f32, f32) {
+        // Extract the 2D coordinates based on view
+        let (wx, wy) = match viewport_id {
+            ViewportId::Top => (pos.x, pos.z),    // Top: X,Z plane
+            ViewportId::Front => (pos.x, pos.y),  // Front: X,Y plane
+            ViewportId::Side => (pos.z, pos.y),   // Side: Z,Y plane
+            ViewportId::Perspective => (0.0, 0.0),
+        };
+
+        // Convert to screen coordinates
+        let screen_center_x = rect_x + rect_w / 2.0;
+        let screen_center_y = rect_y + rect_h / 2.0;
+        let sx = screen_center_x + (wx - ortho_center.x) * ortho_zoom;
+        let sy = screen_center_y - (wy - ortho_center.y) * ortho_zoom; // Y flipped
+        (sx, sy)
+    };
+
+    // Check if screen position is within selection box
+    let is_in_box = |pos: crate::rasterizer::Vec3| -> bool {
+        let (sx, sy) = world_to_screen(pos);
+        sx >= min_sx && sx <= max_sx && sy >= min_sy && sy <= max_sy
+    };
+
+    let mesh = state.mesh();
+
+    eprintln!("[DEBUG] select_mode={:?} mesh has {} vertices", state.select_mode, mesh.vertices.len());
+
+    match state.select_mode {
+        SelectMode::Vertex => {
+            let mut selected = if add_to_selection {
+                if let super::state::ModelerSelection::Vertices(v) = &state.selection { v.clone() } else { Vec::new() }
+            } else {
+                Vec::new()
+            };
+
+            for (idx, vert) in mesh.vertices.iter().enumerate() {
+                let (sx, sy) = world_to_screen(vert.pos);
+                let in_box = is_in_box(vert.pos);
+                if idx < 3 {
+                    eprintln!("[DEBUG] vertex {} pos={:?} -> screen=({}, {}) in_box={}", idx, vert.pos, sx, sy, in_box);
+                }
+                if in_box && !selected.contains(&idx) {
+                    selected.push(idx);
+                }
+            }
+
+            if !selected.is_empty() {
+                let count = selected.len();
+                state.set_selection(super::state::ModelerSelection::Vertices(selected));
+                state.set_status(&format!("Selected {} vertex(es)", count), 0.5);
+            } else if !add_to_selection {
+                state.set_selection(super::state::ModelerSelection::None);
+            }
+        }
+        SelectMode::Edge => {
+            let mut selected = if add_to_selection {
+                if let super::state::ModelerSelection::Edges(e) = &state.selection { e.clone() } else { Vec::new() }
+            } else {
+                Vec::new()
+            };
+
+            // Get all unique edges from mesh
+            let mut edges_checked: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+            for face in &mesh.faces {
+                for i in 0..face.vertices.len() {
+                    let v0 = face.vertices[i];
+                    let v1 = face.vertices[(i + 1) % face.vertices.len()];
+                    let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                    if edges_checked.insert(edge) {
+                        // Check if edge center is in box
+                        if let (Some(p0), Some(p1)) = (mesh.vertices.get(v0), mesh.vertices.get(v1)) {
+                            let center = (p0.pos + p1.pos) * 0.5;
+                            if is_in_box(center) {
+                                let e = (v0, v1);
+                                if !selected.iter().any(|&(a, b)| (a, b) == e || (b, a) == e) {
+                                    selected.push(e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !selected.is_empty() {
+                let count = selected.len();
+                state.set_selection(super::state::ModelerSelection::Edges(selected));
+                state.set_status(&format!("Selected {} edge(s)", count), 0.5);
+            } else if !add_to_selection {
+                state.set_selection(super::state::ModelerSelection::None);
+            }
+        }
+        SelectMode::Face => {
+            let mut selected = if add_to_selection {
+                if let super::state::ModelerSelection::Faces(f) = &state.selection { f.clone() } else { Vec::new() }
+            } else {
+                Vec::new()
+            };
+
+            for (idx, face) in mesh.faces.iter().enumerate() {
+                // Calculate face center
+                let verts: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi))
+                    .collect();
+                if !verts.is_empty() {
+                    let center = verts.iter().map(|v| v.pos).fold(crate::rasterizer::Vec3::ZERO, |acc, p| acc + p)
+                        * (1.0 / verts.len() as f32);
+                    if is_in_box(center) && !selected.contains(&idx) {
+                        selected.push(idx);
+                    }
+                }
+            }
+
+            if !selected.is_empty() {
+                let count = selected.len();
+                state.set_selection(super::state::ModelerSelection::Faces(selected));
+                state.set_status(&format!("Selected {} face(s)", count), 0.5);
+            } else if !add_to_selection {
+                state.set_selection(super::state::ModelerSelection::None);
+            }
+        }
     }
 }
 
@@ -3154,7 +3397,7 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         if y + line_height > rect.bottom() {
             break;
         }
-        draw_text(&format!("{}: {}", key, desc), rect.x, y + 12.0, 10.0, TEXT_DIM);
+        draw_text(&format!("{}: {}", key, desc), rect.x, y + 12.0, 12.0, TEXT_DIM);
         y += line_height * 0.8;
     }
     y += line_height;
@@ -3212,7 +3455,7 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             let toggle_rect = Rect::new(rect.x, y, 50.0, 16.0);
             let toggle_color = if light.enabled { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
             draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
-            draw_text(&format!("{} {}", light_type_str, i + 1), toggle_rect.x + 4.0, toggle_rect.y + 12.0, 10.0, TEXT_COLOR);
+            draw_text(&format!("{} {}", light_type_str, i + 1), toggle_rect.x + 4.0, toggle_rect.y + 12.0, 12.0, TEXT_COLOR);
 
             if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
                 toggle_light = Some(i);
@@ -3220,7 +3463,7 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
             // Intensity indicator
             let intensity_str = format!("{:.0}%", light.intensity * 100.0);
-            draw_text(&intensity_str, rect.x + 55.0, y + 12.0, 10.0, TEXT_DIM);
+            draw_text(&intensity_str, rect.x + 55.0, y + 12.0, 12.0, TEXT_DIM);
 
             y += line_height;
         }
@@ -3270,9 +3513,10 @@ fn get_uv_vertices_from_selection(state: &ModelerState) -> Vec<usize> {
         if let super::state::ModelerSelection::Faces(faces) = &state.selection {
             for &fi in faces {
                 if let Some(face) = obj.mesh.faces.get(fi) {
-                    verts.insert(face.v0);
-                    verts.insert(face.v1);
-                    verts.insert(face.v2);
+                    // Add all vertices of n-gon face
+                    for &vi in &face.vertices {
+                        verts.insert(vi);
+                    }
                 }
             }
         }
@@ -3407,17 +3651,17 @@ fn reset_selected_uvs(state: &mut ModelerState) {
 
         if let Some(obj) = state.project.selected_mut() {
             for &fi in faces {
-                if let Some(face) = obj.mesh.faces.get(fi) {
-                    let v0_idx = face.v0;
-                    let v1_idx = face.v1;
-                    let v2_idx = face.v2;
+                if let Some(face) = obj.mesh.faces.get(fi).cloned() {
+                    if face.vertices.len() < 3 {
+                        continue;
+                    }
 
-                    // Get vertex positions
-                    let p0 = obj.mesh.vertices[v0_idx].pos;
-                    let p1 = obj.mesh.vertices[v1_idx].pos;
-                    let p2 = obj.mesh.vertices[v2_idx].pos;
+                    // Get first 3 vertex positions for normal calculation
+                    let p0 = obj.mesh.vertices[face.vertices[0]].pos;
+                    let p1 = obj.mesh.vertices[face.vertices[1]].pos;
+                    let p2 = obj.mesh.vertices[face.vertices[2]].pos;
 
-                    // Compute face normal
+                    // Compute face normal from first 3 vertices
                     let edge1 = p1 - p0;
                     let edge2 = p2 - p0;
                     let normal = edge1.cross(edge2).normalize();
@@ -3437,16 +3681,9 @@ fn reset_selected_uvs(state: &mut ModelerState) {
                         (crate::rasterizer::Vec3::new(1.0, 0.0, 0.0), crate::rasterizer::Vec3::new(0.0, 1.0, 0.0))
                     };
 
-                    // Project vertices onto UV plane
+                    // Project all vertices of n-gon onto UV plane
                     // Scale factor: 1 world unit = 1/64 of texture (adjustable)
                     let uv_scale = 1.0 / 64.0;
-
-                    let u0 = p0.dot(u_axis) * uv_scale;
-                    let v0 = p0.dot(v_axis) * uv_scale;
-                    let u1 = p1.dot(u_axis) * uv_scale;
-                    let v1 = p1.dot(v_axis) * uv_scale;
-                    let u2 = p2.dot(u_axis) * uv_scale;
-                    let v2 = p2.dot(v_axis) * uv_scale;
 
                     // Normalize to 0-1 range by taking fractional part
                     let norm_uv = |u: f32, v: f32| {
@@ -3455,13 +3692,13 @@ fn reset_selected_uvs(state: &mut ModelerState) {
                         snap_uv(u, v, atlas_size)
                     };
 
-                    let (su0, sv0) = norm_uv(u0, v0);
-                    let (su1, sv1) = norm_uv(u1, v1);
-                    let (su2, sv2) = norm_uv(u2, v2);
-
-                    obj.mesh.vertices[v0_idx].uv = crate::rasterizer::Vec2::new(su0, sv0);
-                    obj.mesh.vertices[v1_idx].uv = crate::rasterizer::Vec2::new(su1, sv1);
-                    obj.mesh.vertices[v2_idx].uv = crate::rasterizer::Vec2::new(su2, sv2);
+                    for &vi in &face.vertices {
+                        let pos = obj.mesh.vertices[vi].pos;
+                        let u = pos.dot(u_axis) * uv_scale;
+                        let v = pos.dot(v_axis) * uv_scale;
+                        let (su, sv) = norm_uv(u, v);
+                        obj.mesh.vertices[vi].uv = crate::rasterizer::Vec2::new(su, sv);
+                    }
                 }
             }
         }
@@ -3557,6 +3794,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         state.select_mode = SelectMode::Face;
         state.set_selection(super::state::ModelerSelection::None);
         state.set_status("Face mode", 1.0);
+    }
+    if actions.triggered("select.all", &ctx) {
+        select_all(state);
     }
 
     // ========================================================================
@@ -3901,6 +4141,42 @@ fn handle_arrow_key_movement(state: &mut ModelerState, shift: bool, snap_disable
     state.set_status(&format!("Moved {} vert(s){}", vertex_indices.len(), snap_status), 0.5);
 }
 
+/// Select all elements based on current selection mode
+fn select_all(state: &mut ModelerState) {
+    let mesh = state.mesh();
+
+    match state.select_mode {
+        SelectMode::Vertex => {
+            let all_verts: Vec<usize> = (0..mesh.vertices.len()).collect();
+            let count = all_verts.len();
+            state.set_selection(super::state::ModelerSelection::Vertices(all_verts));
+            state.set_status(&format!("Selected {} vertices", count), 1.0);
+        }
+        SelectMode::Edge => {
+            // Collect all unique edges from all faces
+            let mut all_edges: Vec<(usize, usize)> = Vec::new();
+            for face in &mesh.faces {
+                for edge in face.edges() {
+                    // Normalize edge (smaller index first)
+                    let norm = if edge.0 < edge.1 { edge } else { (edge.1, edge.0) };
+                    if !all_edges.contains(&norm) {
+                        all_edges.push(norm);
+                    }
+                }
+            }
+            let count = all_edges.len();
+            state.set_selection(super::state::ModelerSelection::Edges(all_edges));
+            state.set_status(&format!("Selected {} edges", count), 1.0);
+        }
+        SelectMode::Face => {
+            let all_faces: Vec<usize> = (0..mesh.faces.len()).collect();
+            let count = all_faces.len();
+            state.set_selection(super::state::ModelerSelection::Faces(all_faces));
+            state.set_status(&format!("Selected {} faces", count), 1.0);
+        }
+    }
+}
+
 /// Delete the current selection (faces, edges, or vertices)
 fn delete_selection(state: &mut ModelerState) {
     // Clone selection to avoid borrow issues
@@ -3923,6 +4199,32 @@ fn delete_selection(state: &mut ModelerState) {
                 for fi in indices {
                     if fi < mesh.faces.len() {
                         mesh.faces.remove(fi);
+                    }
+                }
+
+                // Clean up orphaned vertices (vertices not referenced by any face)
+                let mut referenced: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for face in &mesh.faces {
+                    for &vi in &face.vertices {
+                        referenced.insert(vi);
+                    }
+                }
+
+                // Find orphaned vertices (in reverse order for safe removal)
+                let mut orphaned: Vec<usize> = (0..mesh.vertices.len())
+                    .filter(|vi| !referenced.contains(vi))
+                    .collect();
+                orphaned.sort();
+                orphaned.reverse();
+
+                // Remove orphaned vertices and update face indices
+                for vi in orphaned {
+                    mesh.vertices.remove(vi);
+                    // Update face vertex indices that are higher than the removed vertex
+                    for face in &mut mesh.faces {
+                        for v in &mut face.vertices {
+                            if *v > vi { *v -= 1; }
+                        }
                     }
                 }
             }
@@ -3948,19 +4250,20 @@ fn delete_selection(state: &mut ModelerState) {
             indices.reverse();
 
             if let Some(mesh) = state.mesh_mut() {
+                // Remove faces that reference any of the deleted vertices
                 mesh.faces.retain(|f| {
-                    !vert_set.contains(&f.v0) && !vert_set.contains(&f.v1) && !vert_set.contains(&f.v2)
+                    !f.vertices.iter().any(|&vi| vert_set.contains(&vi))
                 });
 
                 for vi in &indices {
                     if *vi < mesh.vertices.len() {
                         mesh.vertices.remove(*vi);
 
-                        // Update face indices that are higher than the removed vertex
+                        // Update face vertex indices that are higher than the removed vertex
                         for face in &mut mesh.faces {
-                            if face.v0 > *vi { face.v0 -= 1; }
-                            if face.v1 > *vi { face.v1 -= 1; }
-                            if face.v2 > *vi { face.v2 -= 1; }
+                            for v in &mut face.vertices {
+                                if *v > *vi { *v -= 1; }
+                            }
                         }
                     }
                 }
@@ -3985,12 +4288,37 @@ fn delete_selection(state: &mut ModelerState) {
 
             let deleted = if let Some(mesh) = state.mesh_mut() {
                 let faces_before = mesh.faces.len();
+                // Retain faces that don't contain any of the deleted edges
                 mesh.faces.retain(|f| {
-                    let e1 = (f.v0.min(f.v1), f.v0.max(f.v1));
-                    let e2 = (f.v1.min(f.v2), f.v1.max(f.v2));
-                    let e3 = (f.v2.min(f.v0), f.v2.max(f.v0));
-                    !edge_set.contains(&e1) && !edge_set.contains(&e2) && !edge_set.contains(&e3)
+                    !f.edges().any(|(v0, v1)| {
+                        let e = (v0.min(v1), v0.max(v1));
+                        edge_set.contains(&e)
+                    })
                 });
+
+                // Clean up orphaned vertices (vertices not referenced by any face)
+                let mut referenced: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for face in &mesh.faces {
+                    for &vi in &face.vertices {
+                        referenced.insert(vi);
+                    }
+                }
+
+                let mut orphaned: Vec<usize> = (0..mesh.vertices.len())
+                    .filter(|vi| !referenced.contains(vi))
+                    .collect();
+                orphaned.sort();
+                orphaned.reverse();
+
+                for vi in orphaned {
+                    mesh.vertices.remove(vi);
+                    for face in &mut mesh.faces {
+                        for v in &mut face.vertices {
+                            if *v > vi { *v -= 1; }
+                        }
+                    }
+                }
+
                 faces_before - mesh.faces.len()
             } else {
                 0
@@ -4020,11 +4348,11 @@ fn get_selected_vertex_indices(state: &ModelerState) -> Vec<usize> {
             verts
         }
         super::state::ModelerSelection::Faces(face_indices) => {
-            // Collect unique vertices from faces
+            // Collect unique vertices from faces (now returns &[usize] for n-gons)
             let mesh = state.mesh();
             let mut verts: Vec<usize> = face_indices.iter()
                 .filter_map(|&fi| mesh.face_vertices(fi))
-                .flat_map(|[v0, v1, v2]| vec![v0, v1, v2])
+                .flat_map(|verts| verts.to_vec())
                 .collect();
             verts.sort();
             verts.dedup();
@@ -4169,7 +4497,7 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     // Handle clicks
     if let Some(prim) = clicked_primitive {
         state.push_undo(&format!("Add {}", prim.label()));
-        let size = state.snap_settings.grid_size * 2.0; // 2 grid units
+        let size = 512.0; // Reasonable size for new primitives (half of default cube)
         let new_mesh = prim.create(size);
         if let Some(mesh) = state.mesh_mut() {
             mesh.merge(&new_mesh, menu.world_pos);

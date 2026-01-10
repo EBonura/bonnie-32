@@ -57,8 +57,8 @@ async fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     crashlog::setup!(crashlog::cargo_metadata!().capitalized(), false);
 
-    #[cfg(target_arch = "wasm32")]
-    console_error_panic_hook::set_once();
+    // Note: console_error_panic_hook was removed because it requires wasm-bindgen
+    // which conflicts with macroquad's JS bundle. Panics still show in browser console.
 
     // Initialize framebuffer (used by 3D viewport in editor)
     let mut fb = Framebuffer::new(WIDTH, HEIGHT);
@@ -569,7 +569,7 @@ async fn main() {
                                                 }
                                                 // Swap v1 and v2 to flip winding order
                                                 for face in &mut mesh.faces {
-                                                    std::mem::swap(&mut face.v1, &mut face.v2);
+                                                    face.vertices.reverse();
                                                 }
                                             }
 
@@ -636,7 +636,7 @@ async fn main() {
                                                     vertex.normal = vertex.normal * -1.0;
                                                 }
                                                 for face in &mut mesh.faces {
-                                                    std::mem::swap(&mut face.v1, &mut face.v2);
+                                                    face.vertices.reverse();
                                                 }
                                             }
 
@@ -692,7 +692,7 @@ async fn main() {
                                             }
                                             // Swap v1 and v2 to flip winding order
                                             for face in &mut result.mesh.faces {
-                                                std::mem::swap(&mut face.v1, &mut face.v2);
+                                                face.vertices.reverse();
                                             }
                                         }
 
@@ -907,7 +907,7 @@ async fn main() {
                             vertex.normal = vertex.normal * -1.0;
                         }
                         for face in &mut mesh.faces {
-                            std::mem::swap(&mut face.v1, &mut face.v2);
+                            face.vertices.reverse();
                         }
                     }
 

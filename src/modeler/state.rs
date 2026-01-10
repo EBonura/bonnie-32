@@ -399,7 +399,7 @@ impl ModelerSelection {
             ModelerSelection::Faces(faces) => {
                 let mut indices: Vec<usize> = faces.iter()
                     .filter_map(|&face_idx| mesh.faces.get(face_idx))
-                    .flat_map(|face| [face.v0, face.v1, face.v2])
+                    .flat_map(|face| face.vertices.clone())
                     .collect();
                 indices.sort();
                 indices.dedup();
@@ -686,8 +686,14 @@ pub struct ModelerState {
     // Pending drag start positions (for detecting drag vs click)
     // Actual drag state is in DragManager
     pub box_select_pending_start: Option<(f32, f32)>,
+    /// Which viewport started the box select (for unified viewport handling)
+    pub box_select_viewport: Option<ViewportId>,
     pub free_drag_pending_start: Option<(f32, f32)>,
     pub ortho_drag_pending_start: Option<(f32, f32)>,
+    /// Pending start for ortho box selection (clicked on empty space)
+    pub ortho_box_select_pending_start: Option<(f32, f32)>,
+    /// Which ortho viewport started box selection
+    pub ortho_box_select_viewport: Option<ViewportId>,
     /// Which ortho viewport initiated the current drag (if any)
     pub ortho_drag_viewport: Option<ViewportId>,
     /// Zoom level of the ortho viewport when drag started
@@ -888,8 +894,11 @@ impl ModelerState {
             ortho_last_mouse: (0.0, 0.0),
 
             box_select_pending_start: None,
+            box_select_viewport: None,
             free_drag_pending_start: None,
             ortho_drag_pending_start: None,
+            ortho_box_select_pending_start: None,
+            ortho_box_select_viewport: None,
             ortho_drag_viewport: None,
             ortho_drag_zoom: 1.0,
             ortho_drag_axis: None,

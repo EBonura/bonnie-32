@@ -465,7 +465,7 @@ fn draw_orbit_preview(
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         if !vertices.is_empty() {
             if use_rgb555 {
-                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings);
+                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
             } else {
                 render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
             }

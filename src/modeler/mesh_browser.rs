@@ -827,18 +827,19 @@ fn draw_orbit_preview(
             if settings.use_rgb555 {
                 let atlas_texture_15 = atlas.to_raster_texture_15();
                 let textures_15 = [atlas_texture_15];
-                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings);
+                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
             } else {
                 let atlas_texture = atlas.to_raster_texture();
                 let textures = [atlas_texture];
                 render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
             }
         } else {
-            // Render without texture
+            // Render without texture (triangulate n-gon faces)
+            let (vertices, faces) = mesh.to_render_data();
             if settings.use_rgb555 {
-                render_mesh_15(fb, &mesh.vertices, &mesh.faces, &[], None, &camera, &settings);
+                render_mesh_15(fb, &vertices, &faces, &[], None, &camera, &settings, None);
             } else {
-                render_mesh(fb, &mesh.vertices, &mesh.faces, &[], &camera, &settings);
+                render_mesh(fb, &vertices, &faces, &[], &camera, &settings);
             }
         }
     }
@@ -953,9 +954,9 @@ pub fn apply_mesh_flip_horizontal(mesh: &mut EditableMesh) {
     }
 
     // Reverse face winding to maintain correct normals after mirror
-    // Swap v1 and v2 to reverse winding order
+    // Reverse vertex order to flip winding (works for any n-gon)
     for face in &mut mesh.faces {
-        std::mem::swap(&mut face.v1, &mut face.v2);
+        face.vertices.reverse();
     }
 }
 
@@ -972,8 +973,8 @@ pub fn apply_mesh_flip_vertical(mesh: &mut EditableMesh) {
     }
 
     // Reverse face winding to maintain correct normals after mirror
-    // Swap v1 and v2 to reverse winding order
+    // Reverse vertex order to flip winding (works for any n-gon)
     for face in &mut mesh.faces {
-        std::mem::swap(&mut face.v1, &mut face.v2);
+        face.vertices.reverse();
     }
 }
