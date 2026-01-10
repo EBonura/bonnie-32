@@ -33,7 +33,8 @@ indicatif = "0.17"
 crashlog = "0.1"  # Panic logging with backtrace
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = "0.1"  # Panics to browser console
+# Note: console_error_panic_hook removed - it requires wasm-bindgen bindings
+# that aren't provided by macroquad's JS bundle. Panics still show in console.
 
 [profile.release]
 opt-level = 3

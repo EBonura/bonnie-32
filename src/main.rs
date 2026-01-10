@@ -57,8 +57,8 @@ async fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     crashlog::setup!(crashlog::cargo_metadata!().capitalized(), false);
 
-    #[cfg(target_arch = "wasm32")]
-    console_error_panic_hook::set_once();
+    // Note: console_error_panic_hook was removed because it requires wasm-bindgen
+    // which conflicts with macroquad's JS bundle. Panics still show in browser console.
 
     // Initialize framebuffer (used by 3D viewport in editor)
     let mut fb = Framebuffer::new(WIDTH, HEIGHT);
