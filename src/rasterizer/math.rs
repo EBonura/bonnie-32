@@ -734,6 +734,157 @@ pub fn mat4_from_position_rotation(position: Vec3, rotation: Vec3) -> Mat4 {
     mat4_mul(&trans_mat, &rot_mat)
 }
 
+// =============================================================================
+// Integer coordinate types for PS1-style quantization
+// =============================================================================
+
+/// Scale factor: 1 old float unit = 4 integers
+pub const INT_SCALE: i32 = 4;
+
+/// Integer sector size (1024 * 4 = 4096, matches PS1 GTE ONE)
+pub const SECTOR_SIZE_INT: i32 = 4096;
+
+/// 3D Integer Vector for PS1-style mesh editing
+/// All mesh vertex positions use this type for true integer quantization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IVec3 {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl IVec3 {
+    pub const ZERO: IVec3 = IVec3 { x: 0, y: 0, z: 0 };
+
+    #[inline]
+    pub fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+
+    /// Integer dot product
+    #[inline]
+    pub fn dot(self, other: IVec3) -> i64 {
+        self.x as i64 * other.x as i64
+            + self.y as i64 * other.y as i64
+            + self.z as i64 * other.z as i64
+    }
+
+    /// Integer cross product
+    #[inline]
+    pub fn cross(self, other: IVec3) -> IVec3 {
+        IVec3 {
+            x: self.y * other.z - self.z * other.y,
+            y: self.z * other.x - self.x * other.z,
+            z: self.x * other.y - self.y * other.x,
+        }
+    }
+
+    /// Scale by integer factor with divisor (for precise scaling)
+    /// Computes (v * factor) / divisor using i64 to avoid overflow
+    #[inline]
+    pub fn scale_by(self, factor: i32, divisor: i32) -> IVec3 {
+        if divisor == 0 {
+            return IVec3::ZERO;
+        }
+        IVec3 {
+            x: ((self.x as i64 * factor as i64) / divisor as i64) as i32,
+            y: ((self.y as i64 * factor as i64) / divisor as i64) as i32,
+            z: ((self.z as i64 * factor as i64) / divisor as i64) as i32,
+        }
+    }
+
+    /// Negate all components
+    #[inline]
+    pub fn neg(self) -> IVec3 {
+        IVec3 {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
+    }
+
+    /// Convert from legacy float Vec3 (for migration only)
+    /// Multiplies by INT_SCALE and rounds to nearest integer
+    #[inline]
+    pub fn from_legacy_f32(v: Vec3) -> Self {
+        Self {
+            x: (v.x * INT_SCALE as f32).round() as i32,
+            y: (v.y * INT_SCALE as f32).round() as i32,
+            z: (v.z * INT_SCALE as f32).round() as i32,
+        }
+    }
+
+    /// Convert to float Vec3 for rendering (render boundary only)
+    #[inline]
+    pub fn to_render_f32(self) -> Vec3 {
+        Vec3 {
+            x: self.x as f32 / INT_SCALE as f32,
+            y: self.y as f32 / INT_SCALE as f32,
+            z: self.z as f32 / INT_SCALE as f32,
+        }
+    }
+}
+
+impl Add for IVec3 {
+    type Output = IVec3;
+    #[inline]
+    fn add(self, other: IVec3) -> IVec3 {
+        IVec3 {
+            x: self.x + other.x,
+            y: self.y + other.y,
+            z: self.z + other.z,
+        }
+    }
+}
+
+impl Sub for IVec3 {
+    type Output = IVec3;
+    #[inline]
+    fn sub(self, other: IVec3) -> IVec3 {
+        IVec3 {
+            x: self.x - other.x,
+            y: self.y - other.y,
+            z: self.z - other.z,
+        }
+    }
+}
+
+/// Integer 2D vector for texture UV coordinates (0-255)
+/// PS1 used 8-bit UVs, so we use u8 for authenticity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IVec2 {
+    pub x: u8,
+    pub y: u8,
+}
+
+impl IVec2 {
+    pub const ZERO: IVec2 = IVec2 { x: 0, y: 0 };
+
+    #[inline]
+    pub fn new(x: u8, y: u8) -> Self {
+        Self { x, y }
+    }
+
+    /// Convert from legacy float UV (for migration only)
+    /// Assumes input is 0.0-1.0, converts to 0-255
+    #[inline]
+    pub fn from_legacy_uv(v: Vec2) -> Self {
+        Self {
+            x: (v.x.clamp(0.0, 1.0) * 255.0).round() as u8,
+            y: (v.y.clamp(0.0, 1.0) * 255.0).round() as u8,
+        }
+    }
+
+    /// Convert to float UV for rendering (render boundary only)
+    #[inline]
+    pub fn to_render_uv(self) -> Vec2 {
+        Vec2 {
+            x: self.x as f32 / 255.0,
+            y: self.y as f32 / 255.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +912,50 @@ mod tests {
         let p = Vec3::new(5.0, 3.0, 0.0);
         let bc = barycentric(p, v1, v2, v3);
         assert!(bc.x >= 0.0 && bc.y >= 0.0 && bc.z >= 0.0);
+    }
+
+    #[test]
+    fn test_ivec3_add_sub() {
+        let a = IVec3::new(100, 200, 300);
+        let b = IVec3::new(10, 20, 30);
+        let sum = a + b;
+        assert_eq!(sum, IVec3::new(110, 220, 330));
+        let diff = a - b;
+        assert_eq!(diff, IVec3::new(90, 180, 270));
+    }
+
+    #[test]
+    fn test_ivec3_scale_by() {
+        let v = IVec3::new(100, 200, 300);
+        // Scale by 3/2 = 1.5x
+        let scaled = v.scale_by(3, 2);
+        assert_eq!(scaled, IVec3::new(150, 300, 450));
+        // Scale by 1/4 = 0.25x
+        let scaled = v.scale_by(1, 4);
+        assert_eq!(scaled, IVec3::new(25, 50, 75));
+    }
+
+    #[test]
+    fn test_ivec3_legacy_conversion() {
+        let f = Vec3::new(100.0, 200.0, 300.0);
+        let i = IVec3::from_legacy_f32(f);
+        // 100.0 * 4 = 400, etc.
+        assert_eq!(i, IVec3::new(400, 800, 1200));
+        // Round-trip should be close
+        let f2 = i.to_render_f32();
+        assert!((f2.x - f.x).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_ivec2_uv_conversion() {
+        let f = Vec2::new(0.5, 0.25);
+        let i = IVec2::from_legacy_uv(f);
+        // 0.5 * 255 = 127.5 -> 128
+        // 0.25 * 255 = 63.75 -> 64
+        assert_eq!(i, IVec2::new(128, 64));
+        // Round-trip
+        let f2 = i.to_render_uv();
+        assert!((f2.x - 0.502).abs() < 0.01); // 128/255
+        assert!((f2.y - 0.251).abs() < 0.01); // 64/255
     }
 }

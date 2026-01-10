@@ -551,13 +551,8 @@ async fn main() {
 
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
-                                    match ObjImporter::load_from_file(&path) {
+                                    match ObjImporter::load_from_file_with_scale(&path, scale) {
                                         Ok(mut mesh) => {
-                                            // Apply scale to preview
-                                            for vertex in &mut mesh.vertices {
-                                                vertex.pos = vertex.pos * scale;
-                                            }
-
                                             // Compute normals for shading in preview
                                             ObjImporter::compute_face_normals(&mut mesh);
 
@@ -565,7 +560,7 @@ async fn main() {
                                             if flip {
                                                 // Flip vertex normals
                                                 for vertex in &mut mesh.vertices {
-                                                    vertex.normal = vertex.normal * -1.0;
+                                                    vertex.normal = vertex.normal.neg();
                                                 }
                                                 // Swap v1 and v2 to flip winding order
                                                 for face in &mut mesh.faces {
@@ -621,19 +616,14 @@ async fn main() {
                                         let flip_h = ms.mesh_browser.flip_horizontal;
                                         let flip_v = ms.mesh_browser.flip_vertical;
 
-                                        if let Ok(mut mesh) = ObjImporter::load_from_file(&path) {
-                                            // Apply scale to preview
-                                            for vertex in &mut mesh.vertices {
-                                                vertex.pos = vertex.pos * scale;
-                                            }
-
+                                        if let Ok(mut mesh) = ObjImporter::load_from_file_with_scale(&path, scale) {
                                             // Compute normals for shading in preview
                                             ObjImporter::compute_face_normals(&mut mesh);
 
                                             // Flip normals if requested
                                             if flip_normals {
                                                 for vertex in &mut mesh.vertices {
-                                                    vertex.normal = vertex.normal * -1.0;
+                                                    vertex.normal = vertex.normal.neg();
                                                 }
                                                 for face in &mut mesh.faces {
                                                     face.vertices.reverse();
@@ -688,7 +678,7 @@ async fn main() {
                                         if flip_normals {
                                             // Flip vertex normals
                                             for vertex in &mut result.mesh.vertices {
-                                                vertex.normal = vertex.normal * -1.0;
+                                                vertex.normal = vertex.normal.neg();
                                             }
                                             // Swap v1 and v2 to flip winding order
                                             for face in &mut result.mesh.faces {

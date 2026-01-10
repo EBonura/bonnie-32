@@ -283,34 +283,39 @@ impl MeshBrowser {
 
     /// Update camera center and distance based on mesh bounds
     fn update_preview_camera(&mut self, mesh: &EditableMesh) {
-        // Calculate bounding box to center camera
-        let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
-        let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+        // Calculate bounding box to center camera (integer positions)
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut min_z = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        let mut max_z = i32::MIN;
 
         for vertex in &mesh.vertices {
-            min.x = min.x.min(vertex.pos.x);
-            min.y = min.y.min(vertex.pos.y);
-            min.z = min.z.min(vertex.pos.z);
-            max.x = max.x.max(vertex.pos.x);
-            max.y = max.y.max(vertex.pos.y);
-            max.z = max.z.max(vertex.pos.z);
+            min_x = min_x.min(vertex.pos.x);
+            min_y = min_y.min(vertex.pos.y);
+            min_z = min_z.min(vertex.pos.z);
+            max_x = max_x.max(vertex.pos.x);
+            max_y = max_y.max(vertex.pos.y);
+            max_z = max_z.max(vertex.pos.z);
         }
 
-        // Calculate center
-        if min.x != f32::MAX {
+        // Calculate center (convert to float for camera)
+        if min_x != i32::MAX {
+            let scale = crate::rasterizer::INT_SCALE as f32;
             self.orbit_center = Vec3::new(
-                (min.x + max.x) / 2.0,
-                (min.y + max.y) / 2.0,
-                (min.z + max.z) / 2.0,
+                (min_x + max_x) as f32 / 2.0 / scale,
+                (min_y + max_y) as f32 / 2.0 / scale,
+                (min_z + max_z) as f32 / 2.0 / scale,
             );
 
-            // Set distance based on mesh size
-            let size_x = max.x - min.x;
-            let size_y = max.y - min.y;
-            let size_z = max.z - min.z;
+            // Set distance based on mesh size (convert to float)
+            let size_x = (max_x - min_x) as f32 / scale;
+            let size_y = (max_y - min_y) as f32 / scale;
+            let size_z = (max_z - min_z) as f32 / scale;
             let diagonal = (size_x * size_x + size_y * size_y + size_z * size_z).sqrt();
-            // Min distance 2 meters (2048 units), scale by 2x model size
-            self.orbit_distance = diagonal.max(2048.0) * 2.0;
+            // Min distance 512 (128 float units), scale by 2x model size
+            self.orbit_distance = diagonal.max(512.0) * 2.0;
         } else {
             // Fallback: 1024 units = 1 meter
             self.orbit_center = Vec3::new(0.0, 1024.0, 0.0);
@@ -863,27 +868,35 @@ fn draw_orbit_preview(
     );
 }
 
-/// Compute the bounding box of a mesh, returning (min, max) corners
+/// Compute the bounding box of a mesh, returning (min, max) corners in float coords
 fn compute_mesh_bounds(mesh: &EditableMesh) -> (Vec3, Vec3) {
-    let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
-    let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+    // Use integer min/max since positions are IVec3
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut min_z = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    let mut max_z = i32::MIN;
 
     for vertex in &mesh.vertices {
-        min.x = min.x.min(vertex.pos.x);
-        min.y = min.y.min(vertex.pos.y);
-        min.z = min.z.min(vertex.pos.z);
-        max.x = max.x.max(vertex.pos.x);
-        max.y = max.y.max(vertex.pos.y);
-        max.z = max.z.max(vertex.pos.z);
+        min_x = min_x.min(vertex.pos.x);
+        min_y = min_y.min(vertex.pos.y);
+        min_z = min_z.min(vertex.pos.z);
+        max_x = max_x.max(vertex.pos.x);
+        max_y = max_y.max(vertex.pos.y);
+        max_z = max_z.max(vertex.pos.z);
     }
 
-    // Handle empty mesh case
-    if min.x == f32::MAX {
-        min = Vec3::new(0.0, 0.0, 0.0);
-        max = Vec3::new(0.0, 0.0, 0.0);
+    // Handle empty mesh case and convert to float
+    let scale = crate::rasterizer::INT_SCALE as f32;
+    if min_x == i32::MAX {
+        (Vec3::ZERO, Vec3::ZERO)
+    } else {
+        (
+            Vec3::new(min_x as f32 / scale, min_y as f32 / scale, min_z as f32 / scale),
+            Vec3::new(max_x as f32 / scale, max_y as f32 / scale, max_z as f32 / scale),
+        )
     }
-
-    (min, max)
 }
 
 /// Draw a floor grid matching the world editor
@@ -944,17 +957,18 @@ fn draw_text_button_enabled(ctx: &mut UiContext, rect: Rect, text: &str, bg_colo
 /// Flip mesh horizontally (mirror all vertices along X axis)
 /// Public so it can be called from main.rs during import
 pub fn apply_mesh_flip_horizontal(mesh: &mut EditableMesh) {
-    // Find the center X to mirror around
-    let (min, max) = compute_mesh_bounds(mesh);
-    let center_x = (min.x + max.x) / 2.0;
+    // Find the center X to mirror around (integer math)
+    let (min_x, max_x) = mesh.vertices.iter()
+        .fold((i32::MAX, i32::MIN), |(mi, ma), v| (mi.min(v.pos.x), ma.max(v.pos.x)));
+    if min_x == i32::MAX { return; } // Empty mesh
 
-    // Mirror each vertex X position around center
+    // Mirror around integer center: new_x = 2*center - x = (min + max) - x
+    let sum_x = min_x as i64 + max_x as i64;
     for vertex in &mut mesh.vertices {
-        vertex.pos.x = center_x - (vertex.pos.x - center_x);
+        vertex.pos.x = (sum_x - vertex.pos.x as i64) as i32;
     }
 
     // Reverse face winding to maintain correct normals after mirror
-    // Reverse vertex order to flip winding (works for any n-gon)
     for face in &mut mesh.faces {
         face.vertices.reverse();
     }
@@ -963,17 +977,18 @@ pub fn apply_mesh_flip_horizontal(mesh: &mut EditableMesh) {
 /// Flip mesh vertically (mirror all vertices along Y axis)
 /// Public so it can be called from main.rs during import
 pub fn apply_mesh_flip_vertical(mesh: &mut EditableMesh) {
-    // Find the center Y to mirror around
-    let (min, max) = compute_mesh_bounds(mesh);
-    let center_y = (min.y + max.y) / 2.0;
+    // Find the center Y to mirror around (integer math)
+    let (min_y, max_y) = mesh.vertices.iter()
+        .fold((i32::MAX, i32::MIN), |(mi, ma), v| (mi.min(v.pos.y), ma.max(v.pos.y)));
+    if min_y == i32::MAX { return; } // Empty mesh
 
-    // Mirror each vertex Y position around center
+    // Mirror around integer center: new_y = 2*center - y = (min + max) - y
+    let sum_y = min_y as i64 + max_y as i64;
     for vertex in &mut mesh.vertices {
-        vertex.pos.y = center_y - (vertex.pos.y - center_y);
+        vertex.pos.y = (sum_y - vertex.pos.y as i64) as i32;
     }
 
     // Reverse face winding to maintain correct normals after mirror
-    // Reverse vertex order to flip winding (works for any n-gon)
     for face in &mut mesh.faces {
         face.vertices.reverse();
     }

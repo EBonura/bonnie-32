@@ -32,8 +32,8 @@ fn from_ui_axis(axis: UiAxis) -> Axis {
     }
 }
 
-/// Get all selected element positions for modal transforms
-fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
+/// Get all selected element positions for modal transforms (integer coordinates)
+fn get_selected_positions(state: &ModelerState) -> Vec<crate::rasterizer::IVec3> {
     let mut positions = Vec::new();
     let mesh = state.mesh();
 
@@ -72,14 +72,15 @@ fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
     positions
 }
 
-/// Apply positions back to selected elements
+/// Apply positions back to selected elements (integer coordinates)
 /// If vertex_linking is enabled, also moves coincident vertices
-fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
-    const LINK_EPSILON: f32 = 0.001;
+fn apply_selected_positions(state: &mut ModelerState, positions: &[crate::rasterizer::IVec3]) {
+    use crate::rasterizer::IVec3;
+    const LINK_TOLERANCE: i32 = 1; // Integer distance for coincident detection
     let linking = state.vertex_linking;
 
     // Collect vertex movements: (idx, old_pos, new_pos)
-    let mut movements: Vec<(usize, Vec3, Vec3)> = Vec::new();
+    let mut movements: Vec<(usize, IVec3, IVec3)> = Vec::new();
     let mut pos_idx = 0;
     let selection = state.selection.clone();
 
@@ -139,7 +140,7 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
 
             if linking {
                 // Find all coincident vertices and move them by the same delta
-                let coincident = mesh.find_coincident_vertices(*idx, LINK_EPSILON);
+                let coincident = mesh.find_coincident_vertices_int(*idx, (LINK_TOLERANCE as i64) * (LINK_TOLERANCE as i64));
                 for ci in coincident {
                     if !already_moved.contains(&ci) {
                         if let Some(vert) = mesh.vertices.get_mut(ci) {
@@ -292,43 +293,45 @@ fn handle_drag_move(
         if ctx.mouse.left_down {
             if is_ortho && owns_ortho_drag {
                 // Ortho mode: use screen-to-world delta conversion
+                use crate::rasterizer::IVec3;
                 let drag_zoom = state.ortho_drag_zoom;
 
                 if let Some(drag_state) = &state.drag_manager.state {
                     let dx = mouse_pos.0 - drag_state.initial_mouse.0;
                     let dy = mouse_pos.1 - drag_state.initial_mouse.1;
 
-                    // Convert screen delta to world delta based on viewport
-                    let world_dx = dx / drag_zoom;
-                    let world_dy = -dy / drag_zoom; // Y inverted
+                    // Convert screen delta to world delta (integer units)
+                    // Scale by INT_SCALE (4) to convert float pixels to integer world units
+                    let world_dx = ((dx / drag_zoom) * crate::rasterizer::INT_SCALE as f32).round() as i32;
+                    let world_dy = ((-dy / drag_zoom) * crate::rasterizer::INT_SCALE as f32).round() as i32; // Y inverted
 
                     // Free move: movement on viewport plane (no axis constraint)
                     let delta = match viewport_id {
-                        ViewportId::Top => Vec3::new(world_dx, 0.0, world_dy),    // XZ plane
-                        ViewportId::Front => Vec3::new(world_dx, world_dy, 0.0),  // XY plane
-                        ViewportId::Side => Vec3::new(0.0, world_dy, world_dx),   // ZY plane
-                        ViewportId::Perspective => Vec3::ZERO,
+                        ViewportId::Top => IVec3::new(world_dx, 0, world_dy),    // XZ plane
+                        ViewportId::Front => IVec3::new(world_dx, world_dy, 0),  // XY plane
+                        ViewportId::Side => IVec3::new(0, world_dy, world_dx),   // ZY plane
+                        ViewportId::Perspective => IVec3::ZERO,
                     };
 
                     // Apply delta to initial positions
                     if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
                         let snap_disabled = is_key_down(KeyCode::Z);
                         let snap_enabled = state.snap_settings.enabled && !snap_disabled;
-                        let snap_size = state.snap_settings.grid_size;
+                        let snap_settings = state.snap_settings.clone();
 
                         let updates: Vec<_> = tracker.initial_positions.iter()
                             .map(|(idx, start_pos)| (*idx, *start_pos + delta))
                             .collect();
 
                         if let Some(mesh) = state.mesh_mut() {
-                            for (idx, mut new_pos) in updates {
-                                if snap_enabled {
-                                    new_pos.x = (new_pos.x / snap_size).round() * snap_size;
-                                    new_pos.y = (new_pos.y / snap_size).round() * snap_size;
-                                    new_pos.z = (new_pos.z / snap_size).round() * snap_size;
-                                }
+                            for (idx, new_pos) in updates {
+                                let final_pos = if snap_enabled {
+                                    snap_settings.snap_ivec3(new_pos)
+                                } else {
+                                    new_pos
+                                };
                                 if let Some(vert) = mesh.vertices.get_mut(idx) {
-                                    vert.pos = new_pos;
+                                    vert.pos = final_pos;
                                 }
                             }
                         }
@@ -353,7 +356,7 @@ fn handle_drag_move(
                         for (vert_idx, new_pos) in positions {
                             if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
                                 vert.pos = if snap_enabled {
-                                    snap_settings.snap_vec3(new_pos)
+                                    snap_settings.snap_ivec3(new_pos)
                                 } else {
                                     new_pos
                                 };
@@ -402,21 +405,30 @@ fn handle_drag_move(
                 let dy = (mouse_pos.1 - start_pos.1).abs();
                 // Only become free move if moved at least 3 pixels (distinguish from click)
                 if dx > 3.0 || dy > 3.0 {
+                    use crate::rasterizer::IVec3;
+
                     // Get vertex indices and initial positions
                     let mesh = state.mesh();
                     let mut indices = state.selection.get_affected_vertex_indices(mesh);
                     if state.vertex_linking {
-                        indices = mesh.expand_to_coincident(&indices, 0.001);
+                        indices = mesh.expand_to_coincident_int(&indices, 1);
                     }
 
-                    let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+                    let initial_positions: Vec<(usize, IVec3)> = indices.iter()
                         .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
                         .collect();
 
                     if !initial_positions.is_empty() {
-                        // Calculate center
-                        let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
-                        let center = sum * (1.0 / initial_positions.len() as f32);
+                        // Calculate center using i64 to avoid overflow
+                        let (sum_x, sum_y, sum_z): (i64, i64, i64) = initial_positions.iter()
+                            .map(|(_, p)| (p.x as i64, p.y as i64, p.z as i64))
+                            .fold((0, 0, 0), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+                        let count = initial_positions.len() as i64;
+                        let center = IVec3::new(
+                            (sum_x / count) as i32,
+                            (sum_y / count) as i32,
+                            (sum_z / count) as i32,
+                        );
 
                         // Save undo state before starting
                         state.push_undo("Drag move");
@@ -433,8 +445,9 @@ fn handle_drag_move(
                         }
 
                         // Start free move drag (axis = None for screen-space movement)
+                        // Convert integer center to float for screen-space calculations
                         state.drag_manager.start_move(
-                            center,
+                            center.to_render_f32(),
                             drag_start_mouse,
                             None,      // No axis = free movement
                             indices,
@@ -797,17 +810,25 @@ pub fn draw_modeler_viewport_ext(
         let mesh = state.mesh();
         let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident_int(&indices, 1);
         }
 
-        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+        let initial_positions: Vec<(usize, crate::rasterizer::IVec3)> = indices.iter()
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
         if !initial_positions.is_empty() {
-            // Calculate center
-            let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
-            let center = sum * (1.0 / initial_positions.len() as f32);
+            // Calculate center using i64 to avoid overflow
+            let (sum_x, sum_y, sum_z): (i64, i64, i64) = initial_positions.iter()
+                .map(|(_, p)| (p.x as i64, p.y as i64, p.z as i64))
+                .fold((0, 0, 0), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+            let count = initial_positions.len() as i64;
+            let center_int = crate::rasterizer::IVec3::new(
+                (sum_x / count) as i32,
+                (sum_y / count) as i32,
+                (sum_z / count) as i32,
+            );
+            let center = center_int.to_render_f32();
 
             // Save undo state before starting transform
             state.push_undo(mode.label());
@@ -830,6 +851,7 @@ pub fn draw_modeler_viewport_ext(
                     state.tool_box.tools.scale.start_drag(None);
                     state.drag_manager.start_scale(
                         center,
+                        center_int,
                         mouse_pos,
                         None, // No axis constraint initially
                         indices,
@@ -840,11 +862,12 @@ pub fn draw_modeler_viewport_ext(
                     state.tool_box.tools.rotate.start_drag(Some(UiAxis::Y), 0.0);
                     // For rotation, initial angle is 0
                     state.drag_manager.start_rotate(
-                        center,
-                        0.0, // initial angle
-                        mouse_pos,
-                        mouse_pos, // Use mouse_pos as center for screen-space rotation
-                        UiAxis::Y, // Default to Y axis rotation
+                        center,        // center in float for rendering
+                        center_int,    // center in integer for calculations
+                        0.0,           // initial angle
+                        mouse_pos,     // initial mouse position
+                        mouse_pos,     // center_screen for screen-space rotation
+                        UiAxis::Y,     // Default to Y axis rotation (uses ui::Axis)
                         indices,
                         initial_positions,
                         state.snap_settings.enabled,
@@ -928,9 +951,9 @@ pub fn draw_modeler_viewport_ext(
 
         let vertices: Vec<RasterVertex> = mesh.vertices.iter().map(|v| {
             RasterVertex {
-                pos: v.pos,
-                normal: v.normal,
-                uv: v.uv,
+                pos: v.pos.to_render_f32(),
+                normal: v.normal.to_render_f32(),
+                uv: v.uv.to_render_uv(),
                 color: RasterColor::new(base_color, base_color, base_color),
                 bone_index: None,
             }
@@ -1210,7 +1233,7 @@ fn apply_box_selection(
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    vert.pos.to_render_f32(),
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1248,7 +1271,17 @@ fn apply_box_selection(
                     .filter_map(|&vi| mesh.vertices.get(vi))
                     .collect();
                 if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                    // Calculate center using i64 to avoid overflow
+                    let (sum_x, sum_y, sum_z): (i64, i64, i64) = verts.iter()
+                        .map(|v| (v.pos.x as i64, v.pos.y as i64, v.pos.z as i64))
+                        .fold((0, 0, 0), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+                    let count = verts.len() as i64;
+                    let center_int = crate::rasterizer::IVec3::new(
+                        (sum_x / count) as i32,
+                        (sum_y / count) as i32,
+                        (sum_z / count) as i32,
+                    );
+                    let center = center_int.to_render_f32();
                     if let Some((sx, sy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
@@ -1295,7 +1328,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let Some(hovered_idx) = state.hovered_vertex {
         if let Some(vert) = mesh.vertices.get(hovered_idx) {
             if let Some((sx, sy)) = world_to_screen_with_ortho(
-                vert.pos,
+                vert.pos.to_render_f32(),
                 camera.position,
                 camera.basis_x,
                 camera.basis_y,
@@ -1315,8 +1348,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let Some((v0_idx, v1_idx)) = state.hovered_edge {
         if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
             if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
             ) {
                 fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, hover_color);
                 // Draw thicker by drawing adjacent lines
@@ -1334,7 +1367,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
             // Draw face edges (all edges of n-gon)
             let screen_positions: Vec<_> = face.vertices.iter()
                 .filter_map(|&vi| mesh.vertices.get(vi))
-                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                .filter_map(|v| world_to_screen_with_ortho(v.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                 .collect();
 
             let n = screen_positions.len();
@@ -1361,7 +1394,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
         for &idx in selected_verts {
             if let Some(vert) = mesh.vertices.get(idx) {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    vert.pos.to_render_f32(),
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1383,8 +1416,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
         for (v0_idx, v1_idx) in selected_edges {
             if let (Some(v0), Some(v1)) = (mesh.vertices.get(*v0_idx), mesh.vertices.get(*v1_idx)) {
                 if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                 ) {
                     fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, select_color);
                     fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
@@ -1402,12 +1435,13 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let ModelerSelection::Faces(selected_faces) = &state.selection {
         for &face_idx in selected_faces {
             if let Some(face) = mesh.faces.get(face_idx) {
-                // Collect world positions and screen positions
-                let world_positions: Vec<_> = face.vertices.iter()
+                // Collect integer positions for center calculation
+                let int_positions: Vec<_> = face.vertices.iter()
                     .filter_map(|&vi| mesh.vertices.get(vi).map(|v| v.pos))
                     .collect();
-                let screen_positions: Vec<_> = world_positions.iter()
-                    .filter_map(|&p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                // Convert to float for screen projection
+                let screen_positions: Vec<_> = int_positions.iter()
+                    .filter_map(|&p| world_to_screen_with_ortho(p.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                     .collect();
 
                 let n = screen_positions.len();
@@ -1419,8 +1453,17 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
                         // Thicker line
                         fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
                     }
-                    // Draw center dot
-                    let center = world_positions.iter().copied().fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / n as f32);
+                    // Draw center dot - use i64 intermediate to avoid overflow
+                    let (sum_x, sum_y, sum_z): (i64, i64, i64) = int_positions.iter()
+                        .map(|p| (p.x as i64, p.y as i64, p.z as i64))
+                        .fold((0, 0, 0), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+                    let count = n as i64;
+                    let center_int = crate::rasterizer::IVec3::new(
+                        (sum_x / count) as i32,
+                        (sum_y / count) as i32,
+                        (sum_z / count) as i32,
+                    );
+                    let center = center_int.to_render_f32();
                     if let Some((cx, cy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
@@ -1484,7 +1527,7 @@ fn draw_box_selection_preview(
             // Highlight vertices inside the box
             for vert in &mesh.vertices {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    vert.pos.to_render_f32(),
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1512,8 +1555,8 @@ fn draw_box_selection_preview(
 
                     if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                         if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                            world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                            world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                         ) {
                             // Check if midpoint is inside box
                             let mid_x = (sx0 + sx1) / 2.0;
@@ -1535,7 +1578,17 @@ fn draw_box_selection_preview(
                     .filter_map(|&vi| mesh.vertices.get(vi))
                     .collect();
                 if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                    // Calculate center using i64 to avoid overflow
+                    let (sum_x, sum_y, sum_z): (i64, i64, i64) = verts.iter()
+                        .map(|v| (v.pos.x as i64, v.pos.y as i64, v.pos.z as i64))
+                        .fold((0, 0, 0), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+                    let count = verts.len() as i64;
+                    let center_int = crate::rasterizer::IVec3::new(
+                        (sum_x / count) as i32,
+                        (sum_y / count) as i32,
+                        (sum_z / count) as i32,
+                    );
+                    let center = center_int.to_render_f32();
                     if let Some((cx, cy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
@@ -1549,7 +1602,7 @@ fn draw_box_selection_preview(
                         if cx >= fb_x0 && cx <= fb_x1 && cy >= fb_y0 && cy <= fb_y1 {
                             // Draw face outline in preview color
                             let screen_positions: Vec<_> = verts.iter()
-                                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                                .filter_map(|v| world_to_screen_with_ortho(v.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                                 .collect();
                             let n = screen_positions.len();
                             if n >= 3 {
@@ -1593,7 +1646,7 @@ fn handle_mesh_selection_click(
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    vert.pos.to_render_f32(),
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1645,7 +1698,17 @@ fn handle_mesh_selection_click(
                     .filter_map(|&vi| mesh.vertices.get(vi))
                     .collect();
                 if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                    // Calculate center using i64 to avoid overflow
+                    let (sum_x, sum_y, sum_z): (i64, i64, i64) = verts.iter()
+                        .map(|v| (v.pos.x as i64, v.pos.y as i64, v.pos.z as i64))
+                        .fold((0, 0, 0), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+                    let count = verts.len() as i64;
+                    let center_int = crate::rasterizer::IVec3::new(
+                        (sum_x / count) as i32,
+                        (sum_y / count) as i32,
+                        (sum_z / count) as i32,
+                    );
+                    let center = center_int.to_render_f32();
                     if let Some((sx, sy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
@@ -1731,9 +1794,9 @@ fn find_hovered_element(
             ) {
                 // Use screen-space signed area for backface culling (same as rasterizer)
                 if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v2.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                 ) {
                     // 2D screen-space signed area (PS1-style) - positive = front-facing
                     let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -1763,7 +1826,7 @@ fn find_hovered_element(
             continue; // Skip vertices only on backfaces
         }
         if let Some((sx, sy)) = world_to_screen_with_ortho(
-            vert.pos,
+            vert.pos.to_render_f32(),
             camera.position,
             camera.basis_x,
             camera.basis_y,
@@ -1796,8 +1859,8 @@ fn find_hovered_element(
 
                 if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         let dist = point_to_line_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
                         if dist < EDGE_THRESHOLD {
@@ -1821,11 +1884,15 @@ fn find_hovered_element(
                     mesh.vertices.get(i1),
                     mesh.vertices.get(i2),
                 ) {
+                    // Convert to float positions for screen projection
+                    let v0_pos = v0.pos.to_render_f32();
+                    let v1_pos = v1.pos.to_render_f32();
+                    let v2_pos = v2.pos.to_render_f32();
                     // Use screen-space signed area for backface culling (same as rasterizer)
                     if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v0_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v1_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v2_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -1838,9 +1905,9 @@ fn find_hovered_element(
                             // Calculate depth at mouse position for Z-ordering
                             let depth = interpolate_depth_in_triangle(
                                 mouse_fb_x, mouse_fb_y,
-                                sx0, sy0, (v0.pos - camera.position).dot(camera.basis_z),
-                                sx1, sy1, (v1.pos - camera.position).dot(camera.basis_z),
-                                sx2, sy2, (v2.pos - camera.position).dot(camera.basis_z),
+                                sx0, sy0, (v0_pos - camera.position).dot(camera.basis_z),
+                                sx1, sy1, (v1_pos - camera.position).dot(camera.basis_z),
+                                sx2, sy2, (v2_pos - camera.position).dot(camera.basis_z),
                             );
                             // Pick the closest (smallest depth) face
                             if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {
@@ -2073,7 +2140,8 @@ fn setup_gizmo(
     fb_width: usize,
     fb_height: usize,
 ) -> Option<GizmoSetup> {
-    let center = state.selection.compute_center(state.mesh())?;
+    let center_int = state.selection.compute_center(state.mesh())?;
+    let center = center_int.to_render_f32();
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
@@ -2208,24 +2276,32 @@ fn handle_move_gizmo(
                             }
                         }
 
-                        // Apply delta to initial positions
+                        // Convert float delta to integer delta (multiply by INT_SCALE)
+                        use crate::rasterizer::INT_SCALE;
+                        let delta_int = crate::rasterizer::IVec3::new(
+                            (delta.x * INT_SCALE as f32) as i32,
+                            (delta.y * INT_SCALE as f32) as i32,
+                            (delta.z * INT_SCALE as f32) as i32,
+                        );
+
+                        // Apply delta to initial positions (now IVec3)
                         let snap_disabled = is_key_down(KeyCode::Z);
                         let snap_enabled = state.snap_settings.enabled && !snap_disabled;
-                        let snap_size = state.snap_settings.grid_size;
+                        let snap_settings = state.snap_settings.clone();
 
                         let updates: Vec<_> = tracker.initial_positions.iter()
-                            .map(|(idx, start_pos)| (*idx, *start_pos + delta))
+                            .map(|(idx, start_pos)| (*idx, *start_pos + delta_int))
                             .collect();
 
                         if let Some(mesh) = state.mesh_mut() {
-                            for (idx, mut new_pos) in updates {
-                                if snap_enabled {
-                                    new_pos.x = (new_pos.x / snap_size).round() * snap_size;
-                                    new_pos.y = (new_pos.y / snap_size).round() * snap_size;
-                                    new_pos.z = (new_pos.z / snap_size).round() * snap_size;
-                                }
+                            for (idx, new_pos) in updates {
+                                let final_pos = if snap_enabled {
+                                    snap_settings.snap_ivec3(new_pos)
+                                } else {
+                                    new_pos
+                                };
                                 if let Some(vert) = mesh.vertices.get_mut(idx) {
-                                    vert.pos = new_pos;
+                                    vert.pos = final_pos;
                                 }
                             }
                         }
@@ -2254,7 +2330,7 @@ fn handle_move_gizmo(
                         for (vert_idx, new_pos) in positions {
                             if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
                                 vert.pos = if snap_enabled {
-                                    snap_settings.snap_vec3(new_pos)
+                                    snap_settings.snap_ivec3(new_pos)
                                 } else {
                                     new_pos
                                 };
@@ -2298,10 +2374,10 @@ fn handle_move_gizmo(
         let mesh = state.mesh();
         let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident_int(&indices, 1);
         }
 
-        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+        let initial_positions: Vec<(usize, crate::rasterizer::IVec3)> = indices.iter()
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
@@ -2439,7 +2515,7 @@ fn handle_scale_gizmo(
                     for (vert_idx, new_pos) in positions {
                         if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
                             vert.pos = if snap_enabled {
-                                snap_settings.snap_vec3(new_pos)
+                                snap_settings.snap_ivec3(new_pos)
                             } else {
                                 new_pos
                             };
@@ -2479,10 +2555,10 @@ fn handle_scale_gizmo(
         let mesh = state.mesh();
         let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident_int(&indices, 1);
         }
 
-        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+        let initial_positions: Vec<(usize, crate::rasterizer::IVec3)> = indices.iter()
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
@@ -2490,6 +2566,9 @@ fn handle_scale_gizmo(
             (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
             (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
         );
+
+        // Calculate center_int from selection
+        let center_int = state.selection.compute_center(state.mesh()).unwrap_or(crate::rasterizer::IVec3::ZERO);
 
         // Save undo state BEFORE starting the gizmo drag
         state.push_undo("Gizmo Scale");
@@ -2499,6 +2578,7 @@ fn handle_scale_gizmo(
         state.tool_box.tools.scale.start_drag(Some(ui_axis));
         state.drag_manager.start_scale(
             setup.center,
+            center_int,
             fb_mouse,
             Some(ui_axis),
             indices,
@@ -2587,7 +2667,7 @@ fn handle_rotate_gizmo(
                     for (vert_idx, new_pos) in positions {
                         if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
                             vert.pos = if snap_enabled {
-                                snap_settings.snap_vec3(new_pos)
+                                snap_settings.snap_ivec3(new_pos)
                             } else {
                                 new_pos
                             };
@@ -2657,10 +2737,10 @@ fn handle_rotate_gizmo(
         let mesh = state.mesh();
         let mut indices = state.selection.get_affected_vertex_indices(mesh);
         if state.vertex_linking {
-            indices = mesh.expand_to_coincident(&indices, 0.001);
+            indices = mesh.expand_to_coincident_int(&indices, 1);
         }
 
-        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
+        let initial_positions: Vec<(usize, crate::rasterizer::IVec3)> = indices.iter()
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
@@ -2671,6 +2751,9 @@ fn handle_rotate_gizmo(
         );
         let initial_angle = start_vec.1.atan2(start_vec.0);
 
+        // Calculate center_int from selection
+        let center_int = state.selection.compute_center(state.mesh()).unwrap_or(crate::rasterizer::IVec3::ZERO);
+
         // Save undo state BEFORE starting the gizmo drag
         state.push_undo("Gizmo Rotate");
 
@@ -2679,6 +2762,7 @@ fn handle_rotate_gizmo(
         state.tool_box.tools.rotate.start_drag(Some(ui_axis), initial_angle);
         state.drag_manager.start_rotate(
             setup.center,
+            center_int,
             initial_angle,
             mouse_pos,           // screen-space mouse
             setup.center_screen, // screen-space center for angle calculation

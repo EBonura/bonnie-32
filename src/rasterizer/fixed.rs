@@ -400,6 +400,111 @@ impl FixedVec2 {
 }
 
 // =============================================================================
+// PS1-style Sin/Cos Lookup Tables for Integer Rotation
+// =============================================================================
+
+/// Number of entries in sin/cos tables (full rotation = 4096 entries)
+pub const TRIG_TABLE_SIZE: usize = 4096;
+
+/// Fixed-point scale for trig values (4096 = 1.0)
+pub const TRIG_SCALE: i32 = 4096;
+
+/// Pre-computed sin table (4096 entries, scaled by 4096)
+/// Index 0 = 0°, Index 1024 = 90°, Index 2048 = 180°, Index 3072 = 270°
+pub static SIN_TABLE: [i32; TRIG_TABLE_SIZE] = generate_sin_table();
+
+/// Pre-computed cos table (4096 entries, scaled by 4096)
+pub static COS_TABLE: [i32; TRIG_TABLE_SIZE] = generate_cos_table();
+
+/// Generate sin lookup table at compile time
+const fn generate_sin_table() -> [i32; TRIG_TABLE_SIZE] {
+    let mut table = [0i32; TRIG_TABLE_SIZE];
+    let mut i = 0;
+    while i < TRIG_TABLE_SIZE {
+        // angle in radians = i * 2π / 4096
+        // We use a Taylor series approximation since std::f64::sin isn't const
+        let angle = (i as f64) * 2.0 * 3.14159265358979323846 / (TRIG_TABLE_SIZE as f64);
+        // sin(x) ≈ x - x³/6 + x⁵/120 - x⁷/5040 + x⁹/362880
+        // Normalize angle to [-π, π] for better convergence
+        let x = normalize_angle(angle);
+        let sin_val = taylor_sin(x);
+        table[i] = (sin_val * TRIG_SCALE as f64) as i32;
+        i += 1;
+    }
+    table
+}
+
+/// Generate cos lookup table at compile time
+const fn generate_cos_table() -> [i32; TRIG_TABLE_SIZE] {
+    let mut table = [0i32; TRIG_TABLE_SIZE];
+    let mut i = 0;
+    while i < TRIG_TABLE_SIZE {
+        let angle = (i as f64) * 2.0 * 3.14159265358979323846 / (TRIG_TABLE_SIZE as f64);
+        let x = normalize_angle(angle);
+        let cos_val = taylor_cos(x);
+        table[i] = (cos_val * TRIG_SCALE as f64) as i32;
+        i += 1;
+    }
+    table
+}
+
+/// Normalize angle to [-π, π] for Taylor series convergence
+const fn normalize_angle(angle: f64) -> f64 {
+    const PI: f64 = 3.14159265358979323846;
+    const TWO_PI: f64 = 2.0 * PI;
+    let mut a = angle;
+    while a > PI {
+        a -= TWO_PI;
+    }
+    while a < -PI {
+        a += TWO_PI;
+    }
+    a
+}
+
+/// Taylor series approximation for sin (const fn compatible)
+const fn taylor_sin(x: f64) -> f64 {
+    let x2 = x * x;
+    let x3 = x2 * x;
+    let x5 = x3 * x2;
+    let x7 = x5 * x2;
+    let x9 = x7 * x2;
+    let x11 = x9 * x2;
+    x - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0 - x11 / 39916800.0
+}
+
+/// Taylor series approximation for cos (const fn compatible)
+const fn taylor_cos(x: f64) -> f64 {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    let x6 = x4 * x2;
+    let x8 = x6 * x2;
+    let x10 = x8 * x2;
+    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0 + x8 / 40320.0 - x10 / 3628800.0
+}
+
+/// Get fixed-point sin value for angle (0-4095 = 0°-360°)
+/// Returns value scaled by 4096 (so 4096 = 1.0, -4096 = -1.0)
+#[inline]
+pub fn fixed_sin(angle: u16) -> i32 {
+    SIN_TABLE[(angle as usize) & 0xFFF]
+}
+
+/// Get fixed-point cos value for angle (0-4095 = 0°-360°)
+/// Returns value scaled by 4096 (so 4096 = 1.0, -4096 = -1.0)
+#[inline]
+pub fn fixed_cos(angle: u16) -> i32 {
+    COS_TABLE[(angle as usize) & 0xFFF]
+}
+
+/// Convert degrees to table index (0-4095)
+#[inline]
+pub fn degrees_to_angle(degrees: f32) -> u16 {
+    let normalized = degrees.rem_euclid(360.0);
+    ((normalized / 360.0) * TRIG_TABLE_SIZE as f32) as u16
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -459,5 +564,37 @@ mod tests {
         // Result should be reasonable screen coordinates
         assert!(x > -1000 && x < 1000);
         assert!(y > -1000 && y < 1000);
+    }
+
+    #[test]
+    fn test_fixed_sin_cos_key_angles() {
+        // sin(0°) = 0
+        assert_eq!(fixed_sin(0), 0);
+        // sin(90°) = 4096 (index 1024)
+        assert!((fixed_sin(1024) - 4096).abs() <= 1);
+        // sin(180°) = 0 (index 2048)
+        assert!(fixed_sin(2048).abs() <= 1);
+        // sin(270°) = -4096 (index 3072)
+        assert!((fixed_sin(3072) + 4096).abs() <= 1);
+
+        // cos(0°) = 4096
+        assert!((fixed_cos(0) - 4096).abs() <= 1);
+        // cos(90°) = 0 (index 1024)
+        assert!(fixed_cos(1024).abs() <= 1);
+        // cos(180°) = -4096 (index 2048)
+        assert!((fixed_cos(2048) + 4096).abs() <= 1);
+        // cos(270°) = 0 (index 3072)
+        assert!(fixed_cos(3072).abs() <= 1);
+    }
+
+    #[test]
+    fn test_degrees_to_angle() {
+        assert_eq!(degrees_to_angle(0.0), 0);
+        assert_eq!(degrees_to_angle(90.0), 1024);
+        assert_eq!(degrees_to_angle(180.0), 2048);
+        assert_eq!(degrees_to_angle(270.0), 3072);
+        // Wrap around
+        assert_eq!(degrees_to_angle(360.0), 0);
+        assert_eq!(degrees_to_angle(450.0), 1024); // 450 = 90
     }
 }

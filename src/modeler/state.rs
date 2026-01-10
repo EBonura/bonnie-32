@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15};
+use crate::rasterizer::{Camera, Vec2, Vec3, IVec3, Color, RasterSettings, BlendMode, Color15};
 use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
 use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, TextureAtlas};
 use super::model::Animation;
@@ -409,15 +409,23 @@ impl ModelerSelection {
     }
 
     /// Compute the center point of the selection (average of all affected vertex positions)
-    pub fn compute_center(&self, mesh: &EditableMesh) -> Option<Vec3> {
+    pub fn compute_center(&self, mesh: &EditableMesh) -> Option<IVec3> {
         let indices = self.get_affected_vertex_indices(mesh);
         if indices.is_empty() {
             return None;
         }
-        let sum: Vec3 = indices.iter()
+        // Sum positions using i64 to avoid overflow
+        let (sum_x, sum_y, sum_z): (i64, i64, i64) = indices.iter()
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| v.pos))
-            .fold(Vec3::ZERO, |acc, pos| acc + pos);
-        Some(sum * (1.0 / indices.len() as f32))
+            .fold((0i64, 0i64, 0i64), |(sx, sy, sz), pos| {
+                (sx + pos.x as i64, sy + pos.y as i64, sz + pos.z as i64)
+            });
+        let count = indices.len() as i64;
+        Some(IVec3::new(
+            (sum_x / count) as i32,
+            (sum_y / count) as i32,
+            (sum_z / count) as i32,
+        ))
     }
 }
 
@@ -542,32 +550,34 @@ impl GizmoHandle {
 #[derive(Debug, Clone, Copy)]
 pub struct SnapSettings {
     pub enabled: bool,
-    pub grid_size: f32,  // World units to snap to
+    pub grid_size: i32,  // Integer grid size (default: 20 = 5.0 old units * 4)
 }
 
 impl Default for SnapSettings {
     fn default() -> Self {
         Self {
             enabled: true,  // Enabled by default
-            grid_size: 5.0,  // 5 unit grid by default
+            grid_size: 20,  // 20 integer units = 5.0 old float units (since INT_SCALE = 4)
         }
     }
 }
 
 impl SnapSettings {
-    /// Snap a value to the grid
-    pub fn snap(&self, value: f32) -> f32 {
-        if self.enabled {
-            (value / self.grid_size).round() * self.grid_size
+    /// Snap an integer value to the grid
+    pub fn snap(&self, value: i32) -> i32 {
+        if self.enabled && self.grid_size > 0 {
+            // Round to nearest grid: (v + half) / grid * grid
+            let half = self.grid_size / 2;
+            ((value + half) / self.grid_size) * self.grid_size
         } else {
             value
         }
     }
 
-    /// Snap a Vec3 to the grid
-    pub fn snap_vec3(&self, v: Vec3) -> Vec3 {
-        if self.enabled {
-            Vec3::new(
+    /// Snap an IVec3 to the grid
+    pub fn snap_ivec3(&self, v: IVec3) -> IVec3 {
+        if self.enabled && self.grid_size > 0 {
+            IVec3::new(
                 self.snap(v.x),
                 self.snap(v.y),
                 self.snap(v.z),
@@ -753,14 +763,14 @@ pub struct ContextMenu {
     /// Screen position of menu
     pub x: f32,
     pub y: f32,
-    /// World position where clicked (for placing primitives)
-    pub world_pos: Vec3,
+    /// World position where clicked (integer coords for placing primitives)
+    pub world_pos: IVec3,
     /// Which viewport the menu was opened in
     pub viewport: ViewportId,
 }
 
 impl ContextMenu {
-    pub fn new(x: f32, y: f32, world_pos: Vec3, viewport: ViewportId) -> Self {
+    pub fn new(x: f32, y: f32, world_pos: IVec3, viewport: ViewportId) -> Self {
         Self { x, y, world_pos, viewport }
     }
 }

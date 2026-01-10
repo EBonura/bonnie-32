@@ -2,7 +2,7 @@
 //! Supports basic OBJ format: vertices (v), texture coords (vt), normals (vn), faces (f)
 //! Also includes MTL parsing and PNG texture loading with quantization.
 
-use crate::rasterizer::{Vec2, Vec3, Vertex, ClutDepth, Clut};
+use crate::rasterizer::{Vec2, Vec3, Vertex, IntVertex, IVec3, IVec2, INT_SCALE, ClutDepth, Clut, Color as RasterColor};
 use super::mesh_editor::{EditableMesh, IndexedAtlas, TextureAtlas, EditFace};
 use std::path::Path;
 
@@ -10,21 +10,33 @@ use std::path::Path;
 pub struct ObjImporter;
 
 impl ObjImporter {
-    /// Load an OBJ file and convert to EditableMesh
+    /// Load an OBJ file and convert to EditableMesh with integer coordinates
+    /// Scale is applied during conversion: final_int = (float * scale * INT_SCALE).round()
     pub fn load_from_file(path: &Path) -> Result<EditableMesh, ObjError> {
+        Self::load_from_file_with_scale(path, 1.0)
+    }
+
+    /// Load an OBJ file with custom scale
+    pub fn load_from_file_with_scale(path: &Path, scale: f32) -> Result<EditableMesh, ObjError> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| ObjError::Io(format!("Failed to read file: {}", e)))?;
 
-        Self::parse(&contents)
+        Self::parse_with_scale(&contents, scale)
     }
 
-    /// Parse OBJ file contents
+    /// Parse OBJ file contents with default scale (1.0)
     pub fn parse(contents: &str) -> Result<EditableMesh, ObjError> {
+        Self::parse_with_scale(contents, 1.0)
+    }
+
+    /// Parse OBJ file contents with custom scale
+    /// Scale converts OBJ units to world units before integer conversion
+    pub fn parse_with_scale(contents: &str, scale: f32) -> Result<EditableMesh, ObjError> {
         let mut positions: Vec<Vec3> = Vec::new();
         let mut tex_coords: Vec<Vec2> = Vec::new();
         let mut normals: Vec<Vec3> = Vec::new();
 
-        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut vertices: Vec<IntVertex> = Vec::new();
         let mut faces: Vec<EditFace> = Vec::new();
 
         // Track unique vertex combinations (pos_idx, tc_idx, norm_idx) -> vertex_idx
@@ -98,12 +110,13 @@ impl ObjImporter {
                     // Parse face vertices
                     let mut face_verts = Vec::new();
                     for i in 1..parts.len() {
-                        let vertex_idx = Self::parse_face_vertex(
+                        let vertex_idx = Self::parse_face_vertex_int(
                             parts[i],
                             line_num,
                             &positions,
                             &tex_coords,
                             &normals,
+                            scale,
                             &mut vertices,
                             &mut vertex_cache,
                         )?;
@@ -139,14 +152,15 @@ impl ObjImporter {
         Ok(EditableMesh::from_parts(vertices, faces))
     }
 
-    /// Parse a face vertex string like "1/2/3" or "1//3" or "1"
-    fn parse_face_vertex(
+    /// Parse a face vertex string and create IntVertex with integer coordinates
+    fn parse_face_vertex_int(
         spec: &str,
         line_num: usize,
         positions: &[Vec3],
         tex_coords: &[Vec2],
         normals: &[Vec3],
-        vertices: &mut Vec<Vertex>,
+        scale: f32,
+        vertices: &mut Vec<IntVertex>,
         vertex_cache: &mut std::collections::HashMap<(usize, usize, usize), usize>,
     ) -> Result<usize, ObjError> {
         let parts: Vec<&str> = spec.split('/').collect();
@@ -181,20 +195,34 @@ impl ObjImporter {
             return Ok(vertex_idx);
         }
 
-        // Create new vertex
-        let pos = positions[pos_idx];
+        // Create new integer vertex
+        let float_pos = positions[pos_idx];
+        let pos = IVec3::new(
+            ((float_pos.x * scale) * INT_SCALE as f32).round() as i32,
+            ((float_pos.y * scale) * INT_SCALE as f32).round() as i32,
+            ((float_pos.z * scale) * INT_SCALE as f32).round() as i32,
+        );
+
         let uv = if tc_idx != usize::MAX {
-            tex_coords[tc_idx]
+            let float_uv = tex_coords[tc_idx];
+            IVec2::from_legacy_uv(float_uv)
         } else {
-            Vec2::new(0.0, 0.0) // Default UV
-        };
-        let normal = if norm_idx != usize::MAX {
-            normals[norm_idx]
-        } else {
-            Vec3::ZERO // Default normal (will be computed if needed)
+            IVec2::ZERO
         };
 
-        let vertex = Vertex::new(pos, uv, normal);
+        let normal = if norm_idx != usize::MAX {
+            let float_normal = normals[norm_idx];
+            // Scale normal to integer range (normals are unit vectors, scale by 127)
+            IVec3::new(
+                (float_normal.x * 127.0).round() as i32,
+                (float_normal.y * 127.0).round() as i32,
+                (float_normal.z * 127.0).round() as i32,
+            )
+        } else {
+            IVec3::ZERO // Will be computed if needed
+        };
+
+        let vertex = IntVertex::new(pos, uv, normal);
         let vertex_idx = vertices.len();
         vertices.push(vertex);
         vertex_cache.insert(cache_key, vertex_idx);
@@ -460,9 +488,13 @@ impl ObjImporter {
         // Load mesh
         let mut mesh = Self::load_from_file(obj_path)?;
 
-        // Apply scale
+        // Apply scale (convert to float, scale, convert back to int)
         for vertex in &mut mesh.vertices {
-            vertex.pos = vertex.pos * scale;
+            vertex.pos = IVec3::new(
+                (vertex.pos.x as f32 * scale).round() as i32,
+                (vertex.pos.y as f32 * scale).round() as i32,
+                (vertex.pos.z as f32 * scale).round() as i32,
+            );
         }
 
         // Compute normals if missing
@@ -512,9 +544,13 @@ impl ObjImporter {
         // Load mesh
         let mut mesh = Self::load_from_file(obj_path)?;
 
-        // Apply scale
+        // Apply scale (convert to float, scale, convert back to int)
         for vertex in &mut mesh.vertices {
-            vertex.pos = vertex.pos * scale;
+            vertex.pos = IVec3::new(
+                (vertex.pos.x as f32 * scale).round() as i32,
+                (vertex.pos.y as f32 * scale).round() as i32,
+                (vertex.pos.z as f32 * scale).round() as i32,
+            );
         }
 
         // Compute normals if missing
@@ -545,28 +581,34 @@ impl ObjImporter {
 
     /// Compute face normals for meshes that don't have them
     pub fn compute_face_normals(mesh: &mut EditableMesh) {
-        // First pass: collect normals for each face
-        let face_normals: Vec<(Vec<usize>, Vec3)> = mesh.faces.iter()
+        // First pass: collect normals for each face (as integer direction hints)
+        let face_normals: Vec<(Vec<usize>, IVec3)> = mesh.faces.iter()
             .filter(|face| face.vertices.len() >= 3)
             .map(|face| {
                 let v0 = &mesh.vertices[face.vertices[0]];
                 let v1 = &mesh.vertices[face.vertices[1]];
                 let v2 = &mesh.vertices[face.vertices[2]];
 
-                // Compute face normal via cross product
+                // Compute face normal via cross product (use float for normalization)
                 let edge1 = Vec3::new(
-                    v1.pos.x - v0.pos.x,
-                    v1.pos.y - v0.pos.y,
-                    v1.pos.z - v0.pos.z,
+                    (v1.pos.x - v0.pos.x) as f32,
+                    (v1.pos.y - v0.pos.y) as f32,
+                    (v1.pos.z - v0.pos.z) as f32,
                 );
                 let edge2 = Vec3::new(
-                    v2.pos.x - v0.pos.x,
-                    v2.pos.y - v0.pos.y,
-                    v2.pos.z - v0.pos.z,
+                    (v2.pos.x - v0.pos.x) as f32,
+                    (v2.pos.y - v0.pos.y) as f32,
+                    (v2.pos.z - v0.pos.z) as f32,
                 );
 
-                let normal = edge1.cross(edge2).normalize();
-                (face.vertices.clone(), normal)
+                let normal_f32 = edge1.cross(edge2).normalize();
+                // Convert to integer direction hint (scale by INT_SCALE)
+                let normal_int = IVec3::new(
+                    (normal_f32.x * INT_SCALE as f32).round() as i32,
+                    (normal_f32.y * INT_SCALE as f32).round() as i32,
+                    (normal_f32.z * INT_SCALE as f32).round() as i32,
+                );
+                (face.vertices.clone(), normal_int)
             })
             .collect();
 
@@ -574,7 +616,8 @@ impl ObjImporter {
         for (vertices, normal) in face_normals {
             for v_idx in vertices {
                 let vertex = &mut mesh.vertices[v_idx];
-                if vertex.normal.x == 0.0 && vertex.normal.y == 0.0 && vertex.normal.z == 0.0 {
+                // Check if normal is zero (integers)
+                if vertex.normal.x == 0 && vertex.normal.y == 0 && vertex.normal.z == 0 {
                     vertex.normal = normal;
                 }
             }

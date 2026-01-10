@@ -7,7 +7,7 @@
 //! - Reading: Auto-detects format by checking for valid RON start
 //! - Writing: Always uses brotli compression
 
-use crate::rasterizer::{Vec3, Vec2, Face as RasterFace, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
+use crate::rasterizer::{Vec3, IntVertex, IVec3, IVec2, INT_SCALE, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1019,7 +1019,8 @@ impl EditorBone {
 /// Triangulation happens in `to_render_data()` for the rasterizer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EditableMesh {
-    pub vertices: Vec<Vertex>,
+    /// Vertices with integer coordinates (PS1-style quantization)
+    pub vertices: Vec<IntVertex>,
     pub faces: Vec<EditFace>,
 }
 
@@ -1031,46 +1032,46 @@ impl EditableMesh {
         }
     }
 
-    pub fn from_parts(vertices: Vec<Vertex>, faces: Vec<EditFace>) -> Self {
+    pub fn from_parts(vertices: Vec<IntVertex>, faces: Vec<EditFace>) -> Self {
         Self { vertices, faces }
     }
 
     /// Create a cube primitive centered at origin
     pub fn cube(size: f32) -> Self {
-        use crate::rasterizer::Vec2;
+        let half_int = (size / 2.0 * INT_SCALE as f32).round() as i32;
+        let scale = INT_SCALE as i32;
 
-        let half = size / 2.0;
         let vertices = vec![
-            // Front face
-            Vertex::new(Vec3::new(-half, -half,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)),
-            Vertex::new(Vec3::new( half, -half,  half), Vec2::new(1.0, 1.0), Vec3::new(0.0, 0.0, 1.0)),
-            Vertex::new(Vec3::new( half,  half,  half), Vec2::new(1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
-            Vertex::new(Vec3::new(-half,  half,  half), Vec2::new(0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
-            // Back face
-            Vertex::new(Vec3::new( half, -half, -half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 0.0, -1.0)),
-            Vertex::new(Vec3::new(-half, -half, -half), Vec2::new(1.0, 1.0), Vec3::new(0.0, 0.0, -1.0)),
-            Vertex::new(Vec3::new(-half,  half, -half), Vec2::new(1.0, 0.0), Vec3::new(0.0, 0.0, -1.0)),
-            Vertex::new(Vec3::new( half,  half, -half), Vec2::new(0.0, 0.0), Vec3::new(0.0, 0.0, -1.0)),
-            // Top face
-            Vertex::new(Vec3::new(-half,  half,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new( half,  half,  half), Vec2::new(1.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new( half,  half, -half), Vec2::new(1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new(-half,  half, -half), Vec2::new(0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            // Bottom face
-            Vertex::new(Vec3::new(-half, -half, -half), Vec2::new(0.0, 1.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new( half, -half, -half), Vec2::new(1.0, 1.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new( half, -half,  half), Vec2::new(1.0, 0.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new(-half, -half,  half), Vec2::new(0.0, 0.0), Vec3::new(0.0, -1.0, 0.0)),
-            // Right face
-            Vertex::new(Vec3::new( half, -half,  half), Vec2::new(0.0, 1.0), Vec3::new(1.0, 0.0, 0.0)),
-            Vertex::new(Vec3::new( half, -half, -half), Vec2::new(1.0, 1.0), Vec3::new(1.0, 0.0, 0.0)),
-            Vertex::new(Vec3::new( half,  half, -half), Vec2::new(1.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
-            Vertex::new(Vec3::new( half,  half,  half), Vec2::new(0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
-            // Left face
-            Vertex::new(Vec3::new(-half, -half, -half), Vec2::new(0.0, 1.0), Vec3::new(-1.0, 0.0, 0.0)),
-            Vertex::new(Vec3::new(-half, -half,  half), Vec2::new(1.0, 1.0), Vec3::new(-1.0, 0.0, 0.0)),
-            Vertex::new(Vec3::new(-half,  half,  half), Vec2::new(1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)),
-            Vertex::new(Vec3::new(-half,  half, -half), Vec2::new(0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)),
+            // Front face (normal +Z)
+            IntVertex { pos: IVec3::new(-half_int, -half_int,  half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, 0, scale), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, -half_int,  half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, 0, scale), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int,  half_int,  half_int), uv: IVec2::new(255, 0), normal: IVec3::new(0, 0, scale), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int,  half_int,  half_int), uv: IVec2::new(0, 0), normal: IVec3::new(0, 0, scale), color: RasterColor::WHITE, bone_index: None },
+            // Back face (normal -Z)
+            IntVertex { pos: IVec3::new( half_int, -half_int, -half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, 0, -scale), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int, -half_int, -half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, 0, -scale), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int,  half_int, -half_int), uv: IVec2::new(255, 0), normal: IVec3::new(0, 0, -scale), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int,  half_int, -half_int), uv: IVec2::new(0, 0), normal: IVec3::new(0, 0, -scale), color: RasterColor::WHITE, bone_index: None },
+            // Top face (normal +Y)
+            IntVertex { pos: IVec3::new(-half_int,  half_int,  half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int,  half_int,  half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int,  half_int, -half_int), uv: IVec2::new(255, 0), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int,  half_int, -half_int), uv: IVec2::new(0, 0), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            // Bottom face (normal -Y)
+            IntVertex { pos: IVec3::new(-half_int, -half_int, -half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, -half_int, -half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, -half_int,  half_int), uv: IVec2::new(255, 0), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int, -half_int,  half_int), uv: IVec2::new(0, 0), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            // Right face (normal +X)
+            IntVertex { pos: IVec3::new( half_int, -half_int,  half_int), uv: IVec2::new(0, 255), normal: IVec3::new(scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, -half_int, -half_int), uv: IVec2::new(255, 255), normal: IVec3::new(scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int,  half_int, -half_int), uv: IVec2::new(255, 0), normal: IVec3::new(scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int,  half_int,  half_int), uv: IVec2::new(0, 0), normal: IVec3::new(scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
+            // Left face (normal -X)
+            IntVertex { pos: IVec3::new(-half_int, -half_int, -half_int), uv: IVec2::new(0, 255), normal: IVec3::new(-scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int, -half_int,  half_int), uv: IVec2::new(255, 255), normal: IVec3::new(-scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int,  half_int,  half_int), uv: IVec2::new(255, 0), normal: IVec3::new(-scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int,  half_int, -half_int), uv: IVec2::new(0, 0), normal: IVec3::new(-scale, 0, 0), color: RasterColor::WHITE, bone_index: None },
         ];
 
         // Quad faces (CW winding for rasterizer - triangulated in to_render_data)
@@ -1088,14 +1089,14 @@ impl EditableMesh {
 
     /// Create a plane primitive on the XZ plane, centered at origin
     pub fn plane(size: f32) -> Self {
-        use crate::rasterizer::Vec2;
+        let half_int = (size / 2.0 * INT_SCALE as f32).round() as i32;
+        let scale = INT_SCALE as i32;
 
-        let half = size / 2.0;
         let vertices = vec![
-            Vertex::new(Vec3::new(-half, 0.0, -half), Vec2::new(0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new( half, 0.0, -half), Vec2::new(1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new( half, 0.0,  half), Vec2::new(1.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new(-half, 0.0,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
+            IntVertex { pos: IVec3::new(-half_int, 0, -half_int), uv: IVec2::new(0, 0), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, 0, -half_int), uv: IVec2::new(255, 0), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, 0,  half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int, 0,  half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
         ];
 
         // Single quad face (CCW winding when viewed from above)
@@ -1106,21 +1107,20 @@ impl EditableMesh {
 
     /// Create a triangular prism (wedge) primitive
     pub fn prism(size: f32, height: f32) -> Self {
-        use crate::rasterizer::Vec2;
-
-        let half = size / 2.0;
-        let h = height;
+        let half_int = (size / 2.0 * INT_SCALE as f32).round() as i32;
+        let h_int = (height * INT_SCALE as f32).round() as i32;
+        let scale = INT_SCALE as i32;
 
         // 6 vertices: 3 on bottom, 3 on top
         let vertices = vec![
             // Bottom triangle (Y=0)
-            Vertex::new(Vec3::new(-half, 0.0, -half), Vec2::new(0.0, 1.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new( half, 0.0, -half), Vec2::new(1.0, 1.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new( 0.0,  0.0,  half), Vec2::new(0.5, 0.0), Vec3::new(0.0, -1.0, 0.0)),
+            IntVertex { pos: IVec3::new(-half_int, 0, -half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, 0, -half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( 0,        0,  half_int), uv: IVec2::new(127, 0), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
             // Top triangle (Y=height)
-            Vertex::new(Vec3::new(-half, h, -half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new( half, h, -half), Vec2::new(1.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
-            Vertex::new(Vec3::new( 0.0,  h,  half), Vec2::new(0.5, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            IntVertex { pos: IVec3::new(-half_int, h_int, -half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, h_int, -half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( 0,        h_int,  half_int), uv: IVec2::new(127, 0), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
         ];
 
         // Faces (CCW winding when viewed from outside)
@@ -1139,59 +1139,62 @@ impl EditableMesh {
 
     /// Create a cylinder primitive with given segments
     pub fn cylinder(radius: f32, height: f32, segments: usize) -> Self {
-        use crate::rasterizer::Vec2;
         use std::f32::consts::PI;
 
         let segments = segments.max(3);
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
+        let scale = INT_SCALE as i32;
+        let h_int = (height * INT_SCALE as f32).round() as i32;
 
         // Ring vertices for caps
         let bottom_ring_start = vertices.len();
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius;
-            let u = 0.5 + angle.cos() * 0.5;
-            let v = 0.5 + angle.sin() * 0.5;
+            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
+            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
+            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
 
             // Bottom ring (for cap)
-            vertices.push(Vertex::new(Vec3::new(x, 0.0, z), Vec2::new(u, v), Vec3::new(0.0, -1.0, 0.0)));
+            vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
         let top_ring_start = vertices.len();
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius;
-            let u = 0.5 + angle.cos() * 0.5;
-            let v = 0.5 + angle.sin() * 0.5;
+            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
+            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
+            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
 
             // Top ring (for cap)
-            vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(u, v), Vec3::new(0.0, 1.0, 0.0)));
+            vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
         // Side vertices (need separate for proper normals)
         let side_bottom_start = vertices.len();
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius;
-            let normal = Vec3::new(angle.cos(), 0.0, angle.sin());
-            let u = i as f32 / segments as f32;
+            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
+            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
+            let normal_x = (angle.cos() * INT_SCALE as f32).round() as i32;
+            let normal_z = (angle.sin() * INT_SCALE as f32).round() as i32;
+            let u = ((i as f32 / segments as f32) * 255.0).clamp(0.0, 255.0) as u8;
 
-            vertices.push(Vertex::new(Vec3::new(x, 0.0, z), Vec2::new(u, 1.0), normal));
+            vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, 255), normal: IVec3::new(normal_x, 0, normal_z), color: RasterColor::WHITE, bone_index: None });
         }
 
         let side_top_start = vertices.len();
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius;
-            let normal = Vec3::new(angle.cos(), 0.0, angle.sin());
-            let u = i as f32 / segments as f32;
+            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
+            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
+            let normal_x = (angle.cos() * INT_SCALE as f32).round() as i32;
+            let normal_z = (angle.sin() * INT_SCALE as f32).round() as i32;
+            let u = ((i as f32 / segments as f32) * 255.0).clamp(0.0, 255.0) as u8;
 
-            vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(u, 0.0), normal));
+            vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, 0), normal: IVec3::new(normal_x, 0, normal_z), color: RasterColor::WHITE, bone_index: None });
         }
 
         // Bottom cap face (single n-gon, CCW from below)
@@ -1220,19 +1223,19 @@ impl EditableMesh {
 
     /// Create a pyramid primitive
     pub fn pyramid(base_size: f32, height: f32) -> Self {
-        use crate::rasterizer::Vec2;
-
-        let half = base_size / 2.0;
+        let half_int = (base_size / 2.0 * INT_SCALE as f32).round() as i32;
+        let h_int = (height * INT_SCALE as f32).round() as i32;
+        let scale = INT_SCALE as i32;
 
         // 5 vertices: 4 base corners + 1 apex
         let vertices = vec![
             // Base corners (Y=0)
-            Vertex::new(Vec3::new(-half, 0.0, -half), Vec2::new(0.0, 0.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new( half, 0.0, -half), Vec2::new(1.0, 0.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new( half, 0.0,  half), Vec2::new(1.0, 1.0), Vec3::new(0.0, -1.0, 0.0)),
-            Vertex::new(Vec3::new(-half, 0.0,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, -1.0, 0.0)),
+            IntVertex { pos: IVec3::new(-half_int, 0, -half_int), uv: IVec2::new(0, 0), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, 0, -half_int), uv: IVec2::new(255, 0), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new( half_int, 0,  half_int), uv: IVec2::new(255, 255), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
+            IntVertex { pos: IVec3::new(-half_int, 0,  half_int), uv: IVec2::new(0, 255), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None },
             // Apex
-            Vertex::new(Vec3::new(0.0, height, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, 1.0, 0.0)),
+            IntVertex { pos: IVec3::new(0, h_int, 0), uv: IVec2::new(127, 127), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None },
         ];
 
         // Faces (CCW winding when viewed from outside)
@@ -1261,29 +1264,34 @@ impl EditableMesh {
 
     /// Create an N-sided prism (generalized)
     pub fn ngon_prism(sides: usize, radius: f32, height: f32) -> Self {
-        use crate::rasterizer::Vec2;
         use std::f32::consts::PI;
 
         let sides = sides.max(3);
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
+        let scale = INT_SCALE as i32;
+        let h_int = (height * INT_SCALE as f32).round() as i32;
 
         // Bottom ring
         let bottom_start = vertices.len();
         for i in 0..sides {
             let angle = (i as f32 / sides as f32) * 2.0 * PI;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius;
-            vertices.push(Vertex::new(Vec3::new(x, 0.0, z), Vec2::new(0.5 + angle.cos() * 0.5, 0.5 + angle.sin() * 0.5), Vec3::new(0.0, -1.0, 0.0)));
+            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
+            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
+            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
         // Top ring
         let top_start = vertices.len();
         for i in 0..sides {
             let angle = (i as f32 / sides as f32) * 2.0 * PI;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius;
-            vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(0.5 + angle.cos() * 0.5, 0.5 + angle.sin() * 0.5), Vec3::new(0.0, 1.0, 0.0)));
+            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
+            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
+            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
         // Bottom cap face (single n-gon, CCW from below)
@@ -1309,10 +1317,10 @@ impl EditableMesh {
     }
 
     /// Merge another mesh into this one (for adding primitives)
-    pub fn merge(&mut self, other: &EditableMesh, offset: Vec3) {
+    pub fn merge(&mut self, other: &EditableMesh, offset: IVec3) {
         let vertex_offset = self.vertices.len();
 
-        // Add vertices with position offset
+        // Add vertices with position offset (pure integer addition)
         for v in &other.vertices {
             let mut new_v = v.clone();
             new_v.pos.x += offset.x;
@@ -1353,19 +1361,27 @@ impl EditableMesh {
             return None;
         }
 
-        let mut sum = Vec3::ZERO;
+        let mut sum_x: i64 = 0;
+        let mut sum_y: i64 = 0;
+        let mut sum_z: i64 = 0;
         let mut count = 0;
         for &vi in &face.vertices {
             if let Some(v) = self.vertices.get(vi) {
-                sum.x += v.pos.x;
-                sum.y += v.pos.y;
-                sum.z += v.pos.z;
+                sum_x += v.pos.x as i64;
+                sum_y += v.pos.y as i64;
+                sum_z += v.pos.z as i64;
                 count += 1;
             }
         }
 
         if count > 0 {
-            Some(Vec3::new(sum.x / count as f32, sum.y / count as f32, sum.z / count as f32))
+            // Convert from integer coordinates back to float for the result
+            let avg_pos = IVec3::new(
+                (sum_x / count as i64) as i32,
+                (sum_y / count as i64) as i32,
+                (sum_z / count as i64) as i32,
+            );
+            Some(avg_pos.to_render_f32())
         } else {
             None
         }
@@ -1379,15 +1395,16 @@ impl EditableMesh {
             return Some(Vec3::new(0.0, 1.0, 0.0)); // Default up for degenerate
         }
 
-        let v0 = self.vertices.get(face.vertices[0])?.pos;
-        let v1 = self.vertices.get(face.vertices[1])?.pos;
-        let v2 = self.vertices.get(face.vertices[2])?.pos;
+        // Convert integer positions to float for normal calculation
+        let v0 = self.vertices.get(face.vertices[0])?.pos.to_render_f32();
+        let v1 = self.vertices.get(face.vertices[1])?.pos.to_render_f32();
+        let v2 = self.vertices.get(face.vertices[2])?.pos.to_render_f32();
 
         // Edge vectors
         let e1 = v1 - v0;
         let e2 = v2 - v0;
 
-        // Cross product: e2 × e1 for CW winding (reversed from CCW convention)
+        // Cross product: e2 x e1 for CW winding (reversed from CCW convention)
         // This gives outward-facing normal for CW-wound faces
         let normal = e2.cross(e1);
 
@@ -1402,37 +1419,42 @@ impl EditableMesh {
 
     /// Find all vertices at approximately the same position as the given vertex
     /// Returns indices of coincident vertices (including the input vertex)
-    pub fn find_coincident_vertices(&self, idx: usize, epsilon: f32) -> Vec<usize> {
+    /// tolerance: maximum integer distance squared (e.g., 1 = exact match only)
+    pub fn find_coincident_vertices_int(&self, idx: usize, tolerance_sq: i64) -> Vec<usize> {
         let Some(pos) = self.vertices.get(idx).map(|v| v.pos) else {
             return vec![];
         };
 
         self.vertices.iter().enumerate()
             .filter(|(_, v)| {
-                let d = v.pos - pos;
-                (d.x * d.x + d.y * d.y + d.z * d.z).sqrt() < epsilon
+                let dx = (v.pos.x - pos.x) as i64;
+                let dy = (v.pos.y - pos.y) as i64;
+                let dz = (v.pos.z - pos.z) as i64;
+                dx * dx + dy * dy + dz * dz <= tolerance_sq
             })
             .map(|(i, _)| i)
             .collect()
     }
 
-    /// Expand a set of vertex indices to include all coincident vertices
-    pub fn expand_to_coincident(&self, indices: &[usize], epsilon: f32) -> Vec<usize> {
+    /// Expand a set of vertex indices to include all coincident vertices (integer version)
+    /// tolerance: maximum integer distance (1 = exact match only)
+    pub fn expand_to_coincident_int(&self, indices: &[usize], tolerance: i32) -> Vec<usize> {
+        let tolerance_sq = (tolerance as i64) * (tolerance as i64);
         let mut result = std::collections::HashSet::new();
         for &idx in indices {
-            for coincident in self.find_coincident_vertices(idx, epsilon) {
+            for coincident in self.find_coincident_vertices_int(idx, tolerance_sq) {
                 result.insert(coincident);
             }
         }
         result.into_iter().collect()
     }
 
-    /// Extrude selected faces by a given amount along their normals
+    /// Extrude selected faces by a given amount (integer units) along their normals
     /// Returns the indices of the new top faces (for selection update)
-    pub fn extrude_faces(&mut self, face_indices: &[usize], amount: f32) -> Vec<usize> {
+    pub fn extrude_faces(&mut self, face_indices: &[usize], amount: i32) -> Vec<usize> {
         use std::collections::{HashMap, HashSet};
 
-        if face_indices.is_empty() || amount.abs() < 0.001 {
+        if face_indices.is_empty() || amount == 0 {
             return face_indices.to_vec();
         }
 
@@ -1444,7 +1466,7 @@ impl EditableMesh {
         vertex_set.sort();
         vertex_set.dedup();
 
-        // Compute average normal for extrusion direction
+        // Compute average normal for extrusion direction (use float for normalization)
         let mut avg_normal = Vec3::ZERO;
         for &fi in face_indices {
             if let Some(n) = self.face_normal(fi) {
@@ -1462,19 +1484,28 @@ impl EditableMesh {
             avg_normal = Vec3::new(0.0, 1.0, 0.0);
         }
 
+        // Convert normal * amount to integer offset
+        let offset = IVec3::new(
+            (avg_normal.x * amount as f32).round() as i32,
+            (avg_normal.y * amount as f32).round() as i32,
+            (avg_normal.z * amount as f32).round() as i32,
+        );
+
         // Create new vertices (copies of originals, offset by extrusion)
         let mut old_to_new: HashMap<usize, usize> = HashMap::new();
         for &vi in &vertex_set {
             if let Some(old_vert) = self.vertices.get(vi) {
-                let new_vert = Vertex::new(
-                    Vec3::new(
-                        old_vert.pos.x + avg_normal.x * amount,
-                        old_vert.pos.y + avg_normal.y * amount,
-                        old_vert.pos.z + avg_normal.z * amount,
+                let new_vert = IntVertex {
+                    pos: IVec3::new(
+                        old_vert.pos.x + offset.x,
+                        old_vert.pos.y + offset.y,
+                        old_vert.pos.z + offset.z,
                     ),
-                    old_vert.uv,
-                    old_vert.normal,
-                );
+                    uv: old_vert.uv,
+                    normal: old_vert.normal,
+                    color: old_vert.color,
+                    bone_index: old_vert.bone_index,
+                };
                 let new_idx = self.vertices.len();
                 self.vertices.push(new_vert);
                 old_to_new.insert(vi, new_idx);
@@ -1505,29 +1536,35 @@ impl EditableMesh {
         // The edge (v0, v1) is in the winding order of the original face
         for (v0_old, v1_old) in boundary_edges {
             if let (Some(&v0_new), Some(&v1_new)) = (old_to_new.get(&v0_old), old_to_new.get(&v1_old)) {
-                // Get positions
+                // Get positions (as IVec3)
                 let p0_old = self.vertices[v0_old].pos;
                 let p1_old = self.vertices[v1_old].pos;
                 let p0_new = self.vertices[v0_new].pos;
                 let p1_new = self.vertices[v1_new].pos;
 
-                // Compute the face normal from the actual quad geometry
-                let e1 = p1_new - p1_old;
-                let e2 = p0_new - p1_old;
-                let side_normal = e2.cross(e1).normalize();
+                // Compute the face normal from the actual quad geometry (use float for normalize)
+                let e1 = (p1_new - p1_old).to_render_f32();
+                let e2 = (p0_new - p1_old).to_render_f32();
+                let side_normal_f32 = e2.cross(e1).normalize();
+                // Convert back to integer normal hint (just store direction, normalized at render)
+                let side_normal = IVec3::new(
+                    (side_normal_f32.x * INT_SCALE as f32).round() as i32,
+                    (side_normal_f32.y * INT_SCALE as f32).round() as i32,
+                    (side_normal_f32.z * INT_SCALE as f32).round() as i32,
+                );
 
-                // Get UVs for side face
-                let uv00 = Vec2::new(0.0, 0.0);
-                let uv01 = Vec2::new(0.0, 1.0);
-                let uv11 = Vec2::new(1.0, 1.0);
-                let uv10 = Vec2::new(1.0, 0.0);
+                // Get UVs for side face (corners of UV space)
+                let uv00 = IVec2::new(0, 0);
+                let uv01 = IVec2::new(0, 255);
+                let uv11 = IVec2::new(255, 255);
+                let uv10 = IVec2::new(255, 0);
 
                 // Create 4 vertices for the quad with the computed normal
                 // Quad: v1_old -> v1_new -> v0_new -> v0_old (CW when viewed from outside)
-                let sv0 = Vertex::new(p1_old, uv00, side_normal);
-                let sv1 = Vertex::new(p1_new, uv01, side_normal);
-                let sv2 = Vertex::new(p0_new, uv11, side_normal);
-                let sv3 = Vertex::new(p0_old, uv10, side_normal);
+                let sv0 = IntVertex { pos: p1_old, uv: uv00, normal: side_normal, color: crate::rasterizer::Color::WHITE, bone_index: None };
+                let sv1 = IntVertex { pos: p1_new, uv: uv01, normal: side_normal, color: crate::rasterizer::Color::WHITE, bone_index: None };
+                let sv2 = IntVertex { pos: p0_new, uv: uv11, normal: side_normal, color: crate::rasterizer::Color::WHITE, bone_index: None };
+                let sv3 = IntVertex { pos: p0_old, uv: uv10, normal: side_normal, color: crate::rasterizer::Color::WHITE, bone_index: None };
 
                 let si0 = self.vertices.len();
                 self.vertices.push(sv0);
@@ -1623,15 +1660,10 @@ impl EditableMesh {
     pub fn to_render_data(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
         use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
 
-        let raster_vertices: Vec<RasterVertex> = self.vertices.iter().map(|v| {
-            RasterVertex {
-                pos: v.pos,
-                uv: v.uv,
-                normal: v.normal,
-                color: v.color,
-                bone_index: None,
-            }
-        }).collect();
+        // Convert IntVertex to float Vertex for rendering
+        let raster_vertices: Vec<RasterVertex> = self.vertices.iter()
+            .map(|v| v.to_render_vertex())
+            .collect();
 
         // Triangulate n-gon faces
         let mut raster_faces: Vec<RasterFace> = Vec::new();
@@ -1657,15 +1689,10 @@ impl EditableMesh {
     pub fn to_render_data_textured(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
         use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
 
-        let raster_vertices: Vec<RasterVertex> = self.vertices.iter().map(|v| {
-            RasterVertex {
-                pos: v.pos,
-                uv: v.uv,
-                normal: v.normal,
-                color: v.color,
-                bone_index: None,
-            }
-        }).collect();
+        // Convert IntVertex to float Vertex for rendering
+        let raster_vertices: Vec<RasterVertex> = self.vertices.iter()
+            .map(|v| v.to_render_vertex())
+            .collect();
 
         // Triangulate n-gon faces
         let mut raster_faces: Vec<RasterFace> = Vec::new();

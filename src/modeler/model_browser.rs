@@ -184,12 +184,13 @@ impl ModelBrowser {
     /// Set the preview project
     pub fn set_preview(&mut self, project: MeshProject) {
         // Calculate bounding box to center camera (across all objects)
-        let mut min_y = f32::MAX;
-        let mut max_y = f32::MIN;
-        let mut min_x = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut min_z = f32::MAX;
-        let mut max_z = f32::MIN;
+        // Use integer min/max since positions are now IVec3
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
 
         for obj in &project.objects {
             for vertex in &obj.mesh.vertices {
@@ -202,20 +203,20 @@ impl ModelBrowser {
             }
         }
 
-        // Calculate center
-        if min_y != f32::MAX {
-            let center_x = (min_x + max_x) / 2.0;
-            let center_y = (min_y + max_y) / 2.0;
-            let center_z = (min_z + max_z) / 2.0;
+        // Calculate center (convert to float for camera)
+        if min_y != i32::MAX {
+            let center_x = (min_x + max_x) as f32 / 2.0 / crate::rasterizer::INT_SCALE as f32;
+            let center_y = (min_y + max_y) as f32 / 2.0 / crate::rasterizer::INT_SCALE as f32;
+            let center_z = (min_z + max_z) as f32 / 2.0 / crate::rasterizer::INT_SCALE as f32;
             self.orbit_center = Vec3::new(center_x, center_y, center_z);
 
-            // Set distance based on model size
-            let size_x = max_x - min_x;
-            let size_y = max_y - min_y;
-            let size_z = max_z - min_z;
+            // Set distance based on model size (convert to float)
+            let size_x = (max_x - min_x) as f32 / crate::rasterizer::INT_SCALE as f32;
+            let size_y = (max_y - min_y) as f32 / crate::rasterizer::INT_SCALE as f32;
+            let size_z = (max_z - min_z) as f32 / crate::rasterizer::INT_SCALE as f32;
             let diagonal = (size_x * size_x + size_y * size_y + size_z * size_z).sqrt();
-            // Min distance 2 meters (2048 units), scale by 1.5x model size
-            self.orbit_distance = diagonal.max(2048.0) * 1.5;
+            // Min distance 2 units (512 int = 128 float), scale by 1.5x model size
+            self.orbit_distance = diagonal.max(512.0) * 1.5;
         } else {
             // Fallback: 1024 units = 1 meter
             self.orbit_center = Vec3::new(0.0, 1024.0, 0.0);

@@ -969,6 +969,64 @@ impl Vertex {
     }
 }
 
+// =============================================================================
+// Integer Vertex for PS1-style mesh editing
+// =============================================================================
+
+use super::math::{IVec3, IVec2};
+
+/// Integer vertex for PS1-authentic mesh editing
+/// All positions are stored as i32 (1 old unit = 4 integers)
+/// UVs are stored as u8 (0-255, PS1 8-bit UV precision)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IntVertex {
+    pub pos: IVec3,
+    pub uv: IVec2,
+    pub normal: IVec3,
+    pub color: Color,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bone_index: Option<usize>,
+}
+
+impl IntVertex {
+    pub fn new(pos: IVec3, uv: IVec2, normal: IVec3) -> Self {
+        Self { pos, uv, normal, color: Color::NEUTRAL, bone_index: None }
+    }
+
+    /// Create from integer position only (default UV/normal)
+    pub fn from_pos(x: i32, y: i32, z: i32) -> Self {
+        Self {
+            pos: IVec3::new(x, y, z),
+            uv: IVec2::ZERO,
+            normal: IVec3::ZERO,
+            color: Color::NEUTRAL,
+            bone_index: None,
+        }
+    }
+
+    /// Convert to float Vertex for rendering (render boundary only)
+    pub fn to_render_vertex(&self) -> Vertex {
+        Vertex {
+            pos: self.pos.to_render_f32(),
+            uv: self.uv.to_render_uv(),
+            normal: self.normal.to_render_f32().normalize(),
+            color: self.color,
+            bone_index: self.bone_index,
+        }
+    }
+
+    /// Convert from legacy float Vertex (for migration only)
+    pub fn from_legacy(v: &Vertex) -> Self {
+        Self {
+            pos: IVec3::from_legacy_f32(v.pos),
+            uv: IVec2::from_legacy_uv(v.uv),
+            normal: IVec3::from_legacy_f32(v.normal * 127.0), // Scale normal to fit i32
+            color: v.color,
+            bone_index: v.bone_index,
+        }
+    }
+}
+
 /// A triangle face (indices into vertex array)
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Face {

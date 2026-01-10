@@ -1405,9 +1405,10 @@ fn draw_atlas_preview(
             for &fi in selected_faces {
                 if let Some(face) = obj.mesh.faces.get(fi) {
                     // Collect screen UVs for all vertices of n-gon
+                    // Convert u8 UV (0-255) to f32 (0.0-1.0) for screen calculation
                     let screen_uvs: Vec<_> = face.vertices.iter()
                         .filter_map(|&vi| obj.mesh.vertices.get(vi))
-                        .map(|v| uv_to_screen(v.uv.x, v.uv.y))
+                        .map(|v| uv_to_screen(v.uv.x as f32 / 255.0, v.uv.y as f32 / 255.0))
                         .collect();
 
                     // Draw edges (all edges of n-gon)
@@ -2068,9 +2069,12 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
         let selected_color = Color::from_rgba(255, 200, 100, 255);
 
         // Convert UVs to screen coordinates (snapped to pixel centers)
-        let uv_to_screen = |uv: crate::rasterizer::Vec2| {
-            let px = (uv.x * atlas_w).floor();
-            let py = ((1.0 - uv.y) * atlas_h).floor();
+        // UV is now IVec2 with u8 values (0-255), convert to 0.0-1.0
+        let uv_to_screen = |uv: crate::rasterizer::IVec2| {
+            let u = uv.x as f32 / 255.0;
+            let v = uv.y as f32 / 255.0;
+            let px = (u * atlas_w).floor();
+            let py = ((1.0 - v) * atlas_h).floor();
             let sx = atlas_x + (px + 0.5) * scale;
             let sy = atlas_y + (py + 0.5) * scale;
             (sx, sy)
@@ -2290,11 +2294,13 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     }
 
     // Helper: project 3D vertex to ortho screen coords
-    let project_vertex = |v: &crate::rasterizer::Vertex| -> (f32, f32) {
+    // IntVertex uses integer positions, convert to f32 for screen projection
+    let project_vertex = |v: &crate::rasterizer::IntVertex| -> (f32, f32) {
+        let pos = v.pos.to_render_f32(); // Convert IVec3 -> Vec3
         match viewport_id {
-            ViewportId::Top => world_to_ortho(v.pos.x, v.pos.z),    // XZ plane, looking down Y
-            ViewportId::Front => world_to_ortho(v.pos.x, v.pos.y),  // XY plane, looking down Z
-            ViewportId::Side => world_to_ortho(v.pos.z, v.pos.y),   // ZY plane, looking down X
+            ViewportId::Top => world_to_ortho(pos.x, pos.z),    // XZ plane, looking down Y
+            ViewportId::Front => world_to_ortho(pos.x, pos.y),  // XY plane, looking down Z
+            ViewportId::Side => world_to_ortho(pos.z, pos.y),   // ZY plane, looking down X
             ViewportId::Perspective => (0.0, 0.0), // Shouldn't happen
         }
     };
@@ -2453,13 +2459,9 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             };
 
             let vertices: Vec<RasterVertex> = obj_mesh.vertices.iter().map(|v| {
-                RasterVertex {
-                    pos: v.pos,
-                    normal: v.normal,
-                    uv: v.uv,
-                    color: RasterColor::new(base_color, base_color, base_color),
-                    bone_index: None,
-                }
+                let mut rv = v.to_render_vertex();
+                rv.color = RasterColor::new(base_color, base_color, base_color);
+                rv
             }).collect();
 
             // Triangulate n-gon faces for rendering
@@ -2608,7 +2610,9 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // Draw transform gizmo in ortho views (2-axis version)
     // =========================================================================
     if !state.selection.is_empty() && state.tool_box.active_transform_tool().is_some() {
-        if let Some(center) = state.selection.compute_center(state.mesh()) {
+        if let Some(center_int) = state.selection.compute_center(state.mesh()) {
+            // Convert integer center to float for screen projection
+            let center = center_int.to_render_f32();
             // Project center to screen using world_to_ortho directly
             let (cx, cy) = match viewport_id {
                 ViewportId::Top => world_to_ortho(center.x, center.z),
@@ -2878,18 +2882,23 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                     let mesh = state.mesh();
                     let mut indices = state.selection.get_affected_vertex_indices(mesh);
                     if state.vertex_linking {
-                        indices = mesh.expand_to_coincident(&indices, 0.001);
+                        indices = mesh.expand_to_coincident_int(&indices, 1);
                     }
-                    let initial_positions: Vec<(usize, crate::rasterizer::Vec3)> = indices.iter()
+                    let initial_positions: Vec<(usize, crate::rasterizer::IVec3)> = indices.iter()
                         .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
                         .collect();
 
                     if !initial_positions.is_empty() {
-                        // Calculate center
-                        let sum: crate::rasterizer::Vec3 = initial_positions.iter()
-                            .map(|(_, p)| *p)
-                            .fold(crate::rasterizer::Vec3::ZERO, |acc, p| acc + p);
-                        let center = sum * (1.0 / initial_positions.len() as f32);
+                        // Calculate center using i64 to avoid overflow
+                        let (sum_x, sum_y, sum_z): (i64, i64, i64) = initial_positions.iter()
+                            .map(|(_, p)| (p.x as i64, p.y as i64, p.z as i64))
+                            .fold((0i64, 0i64, 0i64), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+                        let count = initial_positions.len() as i64;
+                        let center = crate::rasterizer::IVec3::new(
+                            (sum_x / count) as i32,
+                            (sum_y / count) as i32,
+                            (sum_z / count) as i32,
+                        );
 
                         // Save undo state before starting
                         state.push_undo("Ortho Move");
@@ -2903,8 +2912,9 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         let drag_start_mouse = (ctx.mouse.x, ctx.mouse.y);
 
                         // Start move drag (constrained if gizmo axis was clicked)
+                        // Convert integer center to float for screen-space calculations
                         state.drag_manager.start_move(
-                            center,
+                            center.to_render_f32(),
                             drag_start_mouse,
                             state.ortho_drag_axis, // Use captured axis constraint
                             indices,
@@ -2964,9 +2974,23 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         }
                     }
 
+                    // Convert float delta to integer delta (scale by INT_SCALE)
+                    let int_delta = crate::rasterizer::IVec3::new(
+                        (delta.x * crate::rasterizer::INT_SCALE as f32).round() as i32,
+                        (delta.y * crate::rasterizer::INT_SCALE as f32).round() as i32,
+                        (delta.z * crate::rasterizer::INT_SCALE as f32).round() as i32,
+                    );
+
                     // Collect updates first, then apply (borrow checker)
                     let updates: Vec<_> = tracker.initial_positions.iter()
-                        .map(|(idx, start_pos)| (*idx, *start_pos + delta))
+                        .map(|(idx, start_pos)| {
+                            let new_pos = crate::rasterizer::IVec3::new(
+                                start_pos.x + int_delta.x,
+                                start_pos.y + int_delta.y,
+                                start_pos.z + int_delta.z,
+                            );
+                            (*idx, new_pos)
+                        })
                         .collect();
                     // Capture snap settings before borrowing mesh
                     let snap_enabled = state.snap_settings.enabled && !is_key_down(KeyCode::Z);
@@ -2976,11 +3000,13 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                             if let Some(vert) = mesh.vertices.get_mut(idx) {
                                 vert.pos = new_pos;
 
-                                // Apply grid snapping if enabled
-                                if snap_enabled {
-                                    vert.pos.x = (vert.pos.x / snap_size).round() * snap_size;
-                                    vert.pos.y = (vert.pos.y / snap_size).round() * snap_size;
-                                    vert.pos.z = (vert.pos.z / snap_size).round() * snap_size;
+                                // Apply grid snapping if enabled (integer division)
+                                if snap_enabled && snap_size > 0 {
+                                    // Round to nearest grid: (x + snap/2) / snap * snap
+                                    let half = snap_size / 2;
+                                    vert.pos.x = ((vert.pos.x + half) / snap_size) * snap_size;
+                                    vert.pos.y = ((vert.pos.y + half) / snap_size) * snap_size;
+                                    vert.pos.z = ((vert.pos.z + half) / snap_size) * snap_size;
                                 }
                             }
                         }
@@ -3093,8 +3119,9 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
-                let (sx, sy) = world_to_screen(vert.pos);
-                let in_box = is_in_box(vert.pos);
+                let pos_f32 = vert.pos.to_render_f32();
+                let (sx, sy) = world_to_screen(pos_f32);
+                let in_box = is_in_box(pos_f32);
                 if idx < 3 {
                     eprintln!("[DEBUG] vertex {} pos={:?} -> screen=({}, {}) in_box={}", idx, vert.pos, sx, sy, in_box);
                 }
@@ -3128,7 +3155,12 @@ fn apply_ortho_box_selection(
                     if edges_checked.insert(edge) {
                         // Check if edge center is in box
                         if let (Some(p0), Some(p1)) = (mesh.vertices.get(v0), mesh.vertices.get(v1)) {
-                            let center = (p0.pos + p1.pos) * 0.5;
+                            // Calculate edge center using integer math, then convert to float
+                            let center = crate::rasterizer::IVec3::new(
+                                (p0.pos.x + p1.pos.x) / 2,
+                                (p0.pos.y + p1.pos.y) / 2,
+                                (p0.pos.z + p1.pos.z) / 2,
+                            ).to_render_f32();
                             if is_in_box(center) {
                                 let e = (v0, v1);
                                 if !selected.iter().any(|&(a, b)| (a, b) == e || (b, a) == e) {
@@ -3156,13 +3188,21 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, face) in mesh.faces.iter().enumerate() {
-                // Calculate face center
+                // Calculate face center using integer math
                 let verts: Vec<_> = face.vertices.iter()
                     .filter_map(|&vi| mesh.vertices.get(vi))
                     .collect();
                 if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(crate::rasterizer::Vec3::ZERO, |acc, p| acc + p)
-                        * (1.0 / verts.len() as f32);
+                    // Sum positions using i64 to avoid overflow, then divide by count
+                    let (sum_x, sum_y, sum_z): (i64, i64, i64) = verts.iter()
+                        .map(|v| (v.pos.x as i64, v.pos.y as i64, v.pos.z as i64))
+                        .fold((0i64, 0i64, 0i64), |(ax, ay, az), (px, py, pz)| (ax + px, ay + py, az + pz));
+                    let count = verts.len() as i64;
+                    let center = crate::rasterizer::IVec3::new(
+                        (sum_x / count) as i32,
+                        (sum_y / count) as i32,
+                        (sum_z / count) as i32,
+                    ).to_render_f32();
                     if is_in_box(center) && !selected.contains(&idx) {
                         selected.push(idx);
                     }
@@ -3525,32 +3565,32 @@ fn get_uv_vertices_from_selection(state: &ModelerState) -> Vec<usize> {
 }
 
 /// Compute center of UV coordinates for given vertices
-fn compute_uv_center(state: &ModelerState, verts: &[usize]) -> Option<crate::rasterizer::Vec2> {
+/// UVs are u8 (0-255), returns center as u8 values
+fn compute_uv_center(state: &ModelerState, verts: &[usize]) -> Option<(u8, u8)> {
     if verts.is_empty() {
         return None;
     }
     let obj = state.project.selected()?;
-    let mut sum_u = 0.0f32;
-    let mut sum_v = 0.0f32;
-    let mut count = 0;
+    let mut sum_u = 0u32;
+    let mut sum_v = 0u32;
+    let mut count = 0u32;
     for &vi in verts {
         if let Some(v) = obj.mesh.vertices.get(vi) {
-            sum_u += v.uv.x;
-            sum_v += v.uv.y;
+            sum_u += v.uv.x as u32;
+            sum_v += v.uv.y as u32;
             count += 1;
         }
     }
     if count == 0 {
         return None;
     }
-    Some(crate::rasterizer::Vec2::new(sum_u / count as f32, sum_v / count as f32))
+    Some(((sum_u / count) as u8, (sum_v / count) as u8))
 }
 
-/// Snap UV to pixel boundary
-fn snap_uv(u: f32, v: f32, atlas_size: f32) -> (f32, f32) {
-    let px = (u * atlas_size).round() / atlas_size;
-    let py = (v * atlas_size).round() / atlas_size;
-    (px.clamp(0.0, 1.0), py.clamp(0.0, 1.0))
+/// Snap UV (u8, 0-255) to pixel boundary given atlas size
+fn snap_uv_int(u: u8, v: u8, _atlas_size: u32) -> (u8, u8) {
+    // UVs are already integer (0-255), snapping is inherent
+    (u, v)
 }
 
 /// Flip selected UVs horizontally and/or vertically around their center
@@ -3566,21 +3606,25 @@ fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
         None => return,
     };
 
-    let atlas_size = state.project.atlas.width as f32;
+    let atlas_size = state.project.atlas.width;
 
     state.push_undo(if flip_h { "Flip UV Horizontal" } else { "Flip UV Vertical" });
 
     if let Some(obj) = state.project.selected_mut() {
         for &vi in &verts {
             if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                // Flip around center using integer math
+                // new = center - (old - center) = 2*center - old
                 if flip_h {
-                    v.uv.x = center.x - (v.uv.x - center.x);
+                    let new_x = (2 * center.0 as i16 - v.uv.x as i16).clamp(0, 255) as u8;
+                    v.uv.x = new_x;
                 }
                 if flip_v {
-                    v.uv.y = center.y - (v.uv.y - center.y);
+                    let new_y = (2 * center.1 as i16 - v.uv.y as i16).clamp(0, 255) as u8;
+                    v.uv.y = new_y;
                 }
-                // Snap to pixel boundary
-                let (su, sv) = snap_uv(v.uv.x, v.uv.y, atlas_size);
+                // Snap to pixel boundary (already integer)
+                let (su, sv) = snap_uv_int(v.uv.x, v.uv.y, atlas_size as u32);
                 v.uv.x = su;
                 v.uv.y = sv;
             }
@@ -3605,27 +3649,27 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
         None => return,
     };
 
-    let atlas_size = state.project.atlas.width as f32;
+    let atlas_size = state.project.atlas.width as u32;
 
     state.push_undo("Rotate UV 90°");
 
     if let Some(obj) = state.project.selected_mut() {
         for &vi in &verts {
             if let Some(v) = obj.mesh.vertices.get_mut(vi) {
-                // Translate to origin
-                let du = v.uv.x - center.x;
-                let dv = v.uv.y - center.y;
+                // Translate to origin using signed integers
+                let du = v.uv.x as i16 - center.0 as i16;
+                let dv = v.uv.y as i16 - center.1 as i16;
                 // Rotate 90 degrees
                 let (new_du, new_dv) = if clockwise {
                     (dv, -du)  // CW: (x,y) -> (y,-x)
                 } else {
                     (-dv, du)  // CCW: (x,y) -> (-y,x)
                 };
-                // Translate back
-                v.uv.x = center.x + new_du;
-                v.uv.y = center.y + new_dv;
-                // Snap to pixel boundary
-                let (su, sv) = snap_uv(v.uv.x, v.uv.y, atlas_size);
+                // Translate back and clamp to valid range
+                v.uv.x = (center.0 as i16 + new_du).clamp(0, 255) as u8;
+                v.uv.y = (center.1 as i16 + new_dv).clamp(0, 255) as u8;
+                // Snap to pixel boundary (already integer)
+                let (su, sv) = snap_uv_int(v.uv.x, v.uv.y, atlas_size);
                 v.uv.x = su;
                 v.uv.y = sv;
             }
@@ -3656,10 +3700,10 @@ fn reset_selected_uvs(state: &mut ModelerState) {
                         continue;
                     }
 
-                    // Get first 3 vertex positions for normal calculation
-                    let p0 = obj.mesh.vertices[face.vertices[0]].pos;
-                    let p1 = obj.mesh.vertices[face.vertices[1]].pos;
-                    let p2 = obj.mesh.vertices[face.vertices[2]].pos;
+                    // Get first 3 vertex positions for normal calculation (convert to float)
+                    let p0 = obj.mesh.vertices[face.vertices[0]].pos.to_render_f32();
+                    let p1 = obj.mesh.vertices[face.vertices[1]].pos.to_render_f32();
+                    let p2 = obj.mesh.vertices[face.vertices[2]].pos.to_render_f32();
 
                     // Compute face normal from first 3 vertices
                     let edge1 = p1 - p0;
@@ -3670,34 +3714,40 @@ fn reset_selected_uvs(state: &mut ModelerState) {
                     // This gives axis-aligned projections similar to TrenchBroom's paraxial
                     let abs_normal = crate::rasterizer::Vec3::new(normal.x.abs(), normal.y.abs(), normal.z.abs());
 
-                    let (u_axis, v_axis) = if abs_normal.y >= abs_normal.x && abs_normal.y >= abs_normal.z {
+                    // Axis indices: 0=X, 1=Y, 2=Z
+                    let (u_axis_idx, v_axis_idx) = if abs_normal.y >= abs_normal.x && abs_normal.y >= abs_normal.z {
                         // Top/bottom face - project onto XZ
-                        (crate::rasterizer::Vec3::new(1.0, 0.0, 0.0), crate::rasterizer::Vec3::new(0.0, 0.0, 1.0))
+                        (0, 2)
                     } else if abs_normal.x >= abs_normal.z {
                         // Side face (X dominant) - project onto YZ
-                        (crate::rasterizer::Vec3::new(0.0, 0.0, 1.0), crate::rasterizer::Vec3::new(0.0, 1.0, 0.0))
+                        (2, 1)
                     } else {
                         // Front/back face (Z dominant) - project onto XY
-                        (crate::rasterizer::Vec3::new(1.0, 0.0, 0.0), crate::rasterizer::Vec3::new(0.0, 1.0, 0.0))
+                        (0, 1)
                     };
 
-                    // Project all vertices of n-gon onto UV plane
-                    // Scale factor: 1 world unit = 1/64 of texture (adjustable)
-                    let uv_scale = 1.0 / 64.0;
+                    // Helper to get axis component from IVec3
+                    fn get_axis(pos: crate::rasterizer::IVec3, axis: usize) -> i32 {
+                        match axis {
+                            0 => pos.x,
+                            1 => pos.y,
+                            _ => pos.z,
+                        }
+                    }
 
-                    // Normalize to 0-1 range by taking fractional part
-                    let norm_uv = |u: f32, v: f32| {
-                        let u = u.rem_euclid(1.0);
-                        let v = v.rem_euclid(1.0);
-                        snap_uv(u, v, atlas_size)
-                    };
-
+                    // Project all vertices of n-gon onto UV plane using integer math
+                    // Scale: 4 integer units = 1 old float unit, and 16 float units = 255 UV
+                    // So 64 integer units = 255 UV, or roughly 1 UV per 4 integer units
                     for &vi in &face.vertices {
                         let pos = obj.mesh.vertices[vi].pos;
-                        let u = pos.dot(u_axis) * uv_scale;
-                        let v = pos.dot(v_axis) * uv_scale;
-                        let (su, sv) = norm_uv(u, v);
-                        obj.mesh.vertices[vi].uv = crate::rasterizer::Vec2::new(su, sv);
+                        // Take fractional part by modulo, scale to 0-255
+                        // Use 64 integer units per UV wrap (adjustable)
+                        let u_raw = get_axis(pos, u_axis_idx);
+                        let v_raw = get_axis(pos, v_axis_idx);
+                        // Map position to UV: modulo 64 integer units -> 0-255
+                        let u = ((u_raw.rem_euclid(64) * 255) / 64).clamp(0, 255) as u8;
+                        let v = ((v_raw.rem_euclid(64) * 255) / 64).clamp(0, 255) as u8;
+                        obj.mesh.vertices[vi].uv = crate::rasterizer::IVec2::new(u, v);
                     }
                 }
             }
@@ -3978,7 +4028,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         // Tab key opens context menu at mouse position
         let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
         let world_pos = screen_to_world_position(state, mx, my);
-        let snapped = state.snap_settings.snap_vec3(world_pos);
+        // Convert to integer and snap
+        let world_ivec = crate::rasterizer::IVec3::from_legacy_f32(world_pos);
+        let snapped = state.snap_settings.snap_ivec3(world_ivec);
         state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));
     }
     if actions.triggered("context.close", &ctx) {
@@ -4057,7 +4109,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
 /// Handle arrow key movement for selected vertices/faces
 /// PicoCAD-style: arrow keys move by grid units, shift for smaller increments
 fn handle_arrow_key_movement(state: &mut ModelerState, shift: bool, snap_disabled: bool) {
-    use crate::rasterizer::Vec3;
+    use crate::rasterizer::IVec3;
 
     // Check for arrow key presses
     let left = is_key_pressed(KeyCode::Left);
@@ -4069,12 +4121,12 @@ fn handle_arrow_key_movement(state: &mut ModelerState, shift: bool, snap_disable
         return;
     }
 
-    // Determine move amount
+    // Determine move amount (integer units)
     let grid = state.snap_settings.grid_size;
-    let move_amount = if snap_disabled {
-        1.0  // 1 unit when snap disabled (Z held)
+    let move_amount: i32 = if snap_disabled {
+        1  // 1 integer unit when snap disabled (Z held)
     } else if shift {
-        grid * 0.5  // Half grid when shift held
+        (grid / 2).max(1)  // Half grid when shift held, minimum 1
     } else {
         grid  // Full grid step
     };
@@ -4084,26 +4136,26 @@ fn handle_arrow_key_movement(state: &mut ModelerState, shift: bool, snap_disable
     let delta = match state.active_viewport {
         ViewportId::Perspective | ViewportId::Front => {
             // Front view (XY plane): Left/Right = X, Up/Down = Y
-            Vec3::new(
-                if right { move_amount } else if left { -move_amount } else { 0.0 },
-                if up { move_amount } else if down { -move_amount } else { 0.0 },
-                0.0,
+            IVec3::new(
+                if right { move_amount } else if left { -move_amount } else { 0 },
+                if up { move_amount } else if down { -move_amount } else { 0 },
+                0,
             )
         }
         ViewportId::Top => {
             // Top view (XZ plane): Left/Right = X, Up/Down = Z
-            Vec3::new(
-                if right { move_amount } else if left { -move_amount } else { 0.0 },
-                0.0,
-                if up { -move_amount } else if down { move_amount } else { 0.0 },
+            IVec3::new(
+                if right { move_amount } else if left { -move_amount } else { 0 },
+                0,
+                if up { -move_amount } else if down { move_amount } else { 0 },
             )
         }
         ViewportId::Side => {
             // Side view (ZY plane): Left/Right = Z, Up/Down = Y
-            Vec3::new(
-                0.0,
-                if up { move_amount } else if down { -move_amount } else { 0.0 },
-                if right { move_amount } else if left { -move_amount } else { 0.0 },
+            IVec3::new(
+                0,
+                if up { move_amount } else if down { -move_amount } else { 0 },
+                if right { move_amount } else if left { -move_amount } else { 0 },
             )
         }
     };
@@ -4117,13 +4169,13 @@ fn handle_arrow_key_movement(state: &mut ModelerState, shift: bool, snap_disable
 
     // If vertex linking is enabled, expand to include coincident vertices
     if state.vertex_linking {
-        vertex_indices = state.mesh().expand_to_coincident(&vertex_indices, 0.001);
+        vertex_indices = state.mesh().expand_to_coincident_int(&vertex_indices, 1);
     }
 
     // Save undo state before moving
     state.push_undo("Move");
 
-    // Move selected vertices
+    // Move selected vertices (pure integer addition)
     if let Some(mesh) = state.mesh_mut() {
         for &vi in &vertex_indices {
             if let Some(vert) = mesh.vertices.get_mut(vi) {
@@ -4509,11 +4561,11 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
 
     if clone_clicked {
         state.push_undo("Clone mesh");
-        // Clone entire mesh at offset
-        let offset = Vec3::new(
-            state.snap_settings.grid_size * 2.0,
-            0.0,
-            state.snap_settings.grid_size * 2.0,
+        // Clone entire mesh at offset (integer coordinates)
+        let offset = crate::rasterizer::IVec3::new(
+            state.snap_settings.grid_size * 2,
+            0,
+            state.snap_settings.grid_size * 2,
         );
         let clone = state.mesh().clone();
         if let Some(mesh) = state.mesh_mut() {
