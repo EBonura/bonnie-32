@@ -2343,8 +2343,8 @@ pub fn draw_palette_panel(
         let gen_bg = if gen_hover { Color::new(0.35, 0.50, 0.35, 1.0) } else { Color::new(0.25, 0.40, 0.25, 1.0) };
         draw_rectangle(btn_gen.x, btn_gen.y, btn_gen.w, btn_gen.h, gen_bg);
         let gen_text = "Gen";
-        let tw = gen_text.len() as f32 * 4.5;
-        draw_text(gen_text, btn_gen.x + (btn_gen.w - tw) / 2.0, btn_gen.y + 12.0, 11.0, WHITE);
+        let tw = gen_text.len() as f32 * 5.0;
+        draw_text(gen_text, btn_gen.x + (btn_gen.w - tw) / 2.0, btn_gen.y + 12.0, 12.0, WHITE);
 
         if ctx.mouse.clicked(&btn_gen) {
             // Generate palette from key colors
@@ -2543,7 +2543,7 @@ pub fn draw_palette_panel(
 
     // Color editor for editing_index - only show if there's enough space
     let remaining_height = rect.bottom() - y;
-    let slider_section_height = 14.0 + 3.0 * (10.0 + 4.0); // label + 3 sliders
+    let slider_section_height = 16.0 + 3.0 * (10.0 + 4.0); // label + 3 sliders
 
     if state.editing_index < texture.palette.len() && remaining_height >= slider_section_height {
         let color = texture.palette[state.editing_index];
@@ -2552,11 +2552,11 @@ pub fn draw_palette_panel(
         draw_text(
             &format!("Color {}", state.editing_index),
             rect.x + padding,
-            y + 10.0,
-            10.0,
+            y + 11.0,
+            12.0,
             TEXT_DIM,
         );
-        y += 14.0;
+        y += 16.0;
 
         // RGB sliders - constrained to available space
         let slider_w = (rect.w - padding * 2.0 - 40.0).max(40.0);
@@ -2577,7 +2577,7 @@ pub fn draw_palette_panel(
             let slider_x = rect.x + padding + 14.0;
             let track_rect = Rect::new(slider_x, y, slider_w, slider_h);
 
-            draw_text(label, rect.x + padding, y + 8.0, 10.0, tint);
+            draw_text(label, rect.x + padding, y + 9.0, 12.0, tint);
             draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::new(0.12, 0.12, 0.14, 1.0));
 
             let fill_ratio = value as f32 / 31.0;
@@ -2586,7 +2586,7 @@ pub fn draw_palette_panel(
             let handle_x = track_rect.x + track_rect.w * fill_ratio - 2.0;
             draw_rectangle(handle_x.max(track_rect.x), track_rect.y, 4.0, slider_h, WHITE);
 
-            draw_text(&format!("{}", value), track_rect.x + track_rect.w + 4.0, y + 8.0, 10.0, TEXT_DIM);
+            draw_text(&format!("{}", value), track_rect.x + track_rect.w + 4.0, y + 9.0, 11.0, TEXT_DIM);
 
             // Slider interaction
             if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && state.color_slider.is_none() {
@@ -2634,10 +2634,10 @@ pub fn draw_palette_panel(
             }
 
             // Label "Effect:"
-            draw_text("Effect:", checkbox_rect.right() + 4.0, y + 9.0, 10.0, TEXT_COLOR);
+            draw_text("Effect:", checkbox_rect.right() + 4.0, y + 10.0, 12.0, TEXT_COLOR);
 
             // Blend mode dropdown (right next to checkbox)
-            let dropdown_x = checkbox_rect.right() + 42.0;
+            let dropdown_x = checkbox_rect.right() + 48.0;
             let dropdown_w = rect.right() - dropdown_x - padding;
             let dropdown_h = 14.0;
             let dropdown_rect = Rect::new(dropdown_x, y - 1.0, dropdown_w.max(50.0), dropdown_h);
@@ -2660,10 +2660,10 @@ pub fn draw_palette_panel(
                 Color::new(0.22, 0.22, 0.24, 1.0)
             };
             draw_rectangle(dropdown_rect.x, dropdown_rect.y, dropdown_rect.w, dropdown_rect.h, dropdown_bg);
-            draw_text(current_name, dropdown_rect.x + 4.0, dropdown_rect.y + 10.0, 10.0, TEXT_COLOR);
+            draw_text(current_name, dropdown_rect.x + 4.0, dropdown_rect.y + 11.0, 11.0, TEXT_COLOR);
 
             // Dropdown arrow
-            draw_text("\u{25BC}", dropdown_rect.right() - 10.0, dropdown_rect.y + 9.0, 7.0, TEXT_DIM);
+            draw_text("\u{25BC}", dropdown_rect.right() - 10.0, dropdown_rect.y + 10.0, 9.0, TEXT_DIM);
 
             // Click handlers
             let checkbox_click_area = Rect::new(checkbox_rect.x, y, 54.0, 14.0);
@@ -2691,7 +2691,7 @@ pub fn draw_palette_panel(
                         draw_rectangle(opt_rect.x, opt_rect.y, opt_rect.w, opt_rect.h, ACCENT_COLOR);
                     }
                     let text_color = if i == current_idx { WHITE } else { TEXT_COLOR };
-                    draw_text(name, opt_rect.x + 4.0, opt_rect.y + 12.0, 10.0, text_color);
+                    draw_text(name, opt_rect.x + 4.0, opt_rect.y + 13.0, 11.0, text_color);
 
                     if ctx.mouse.clicked(&opt_rect) {
                         texture.blend_mode = match i {

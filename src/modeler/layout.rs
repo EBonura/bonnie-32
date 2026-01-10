@@ -1248,10 +1248,13 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     // This matches the World Editor's texture_palette.rs layout exactly
     let tool_panel_w = 36.0;  // Vertical toolbar (32px buttons + padding)
     let canvas_w = content_rect.w - tool_panel_w;
-    // Canvas should be square and capped at a reasonable size (leave room for palette)
-    let max_canvas_h = (content_rect.h * 0.5).min(canvas_w).max(100.0);  // 50% of height or square, whichever is smaller
+    // Tool panel needs ~280px height (6 tools + undo/redo/zoom/grid + size/shape options)
+    // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190
+    let min_canvas_h = 280.0;  // Minimum for tool panel to fit all buttons
+    let min_palette_h = 190.0;
+    let max_canvas_h = (content_rect.h - min_palette_h).min(canvas_w).max(min_canvas_h);
     let canvas_h = max_canvas_h;
-    let palette_panel_h = content_rect.h - canvas_h;  // Remaining space goes to palette
+    let palette_panel_h = (content_rect.h - canvas_h).max(min_palette_h);  // Remaining space goes to palette
 
     let canvas_rect = Rect::new(content_rect.x, content_rect.y, canvas_w, canvas_h);
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
