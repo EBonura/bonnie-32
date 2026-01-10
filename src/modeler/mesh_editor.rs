@@ -7,11 +7,125 @@
 //! - Reading: Auto-detects format by checking for valid RON start
 //! - Writing: Always uses brotli compression
 
-use crate::rasterizer::{Vec3, Face, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
+use crate::rasterizer::{Vec3, Vec2, Face as RasterFace, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;
+
+// ============================================================================
+// N-Gon Face Support (Blender-style)
+// ============================================================================
+
+/// N-gon face for editing (supports 3+ vertices)
+///
+/// Unlike the rasterizer's `Face` which is triangle-only, EditFace supports
+/// arbitrary polygon sizes. Triangulation happens in `to_render_data()`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EditFace {
+    /// Vertex indices (3 for triangle, 4 for quad, n for n-gon)
+    pub vertices: Vec<usize>,
+    /// Optional texture ID
+    pub texture_id: Option<usize>,
+    /// If true, pure black pixels are treated as transparent
+    #[serde(default = "default_black_transparent")]
+    pub black_transparent: bool,
+    /// PS1 blend mode for this face
+    #[serde(default)]
+    pub blend_mode: BlendMode,
+}
+
+fn default_black_transparent() -> bool {
+    true
+}
+
+impl EditFace {
+    /// Create a triangle face
+    pub fn tri(v0: usize, v1: usize, v2: usize) -> Self {
+        Self {
+            vertices: vec![v0, v1, v2],
+            texture_id: None,
+            black_transparent: true,
+            blend_mode: BlendMode::Opaque,
+        }
+    }
+
+    /// Create a quad face
+    pub fn quad(v0: usize, v1: usize, v2: usize, v3: usize) -> Self {
+        Self {
+            vertices: vec![v0, v1, v2, v3],
+            texture_id: None,
+            black_transparent: true,
+            blend_mode: BlendMode::Opaque,
+        }
+    }
+
+    /// Create an n-gon face from a slice of vertex indices
+    pub fn ngon(vertices: &[usize]) -> Self {
+        Self {
+            vertices: vertices.to_vec(),
+            texture_id: None,
+            black_transparent: true,
+            blend_mode: BlendMode::Opaque,
+        }
+    }
+
+    /// Number of vertices in this face
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Check if this is a triangle
+    pub fn is_tri(&self) -> bool {
+        self.vertices.len() == 3
+    }
+
+    /// Check if this is a quad
+    pub fn is_quad(&self) -> bool {
+        self.vertices.len() == 4
+    }
+
+    /// Get edges as pairs of vertex indices (in winding order)
+    pub fn edges(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let n = self.vertices.len();
+        (0..n).map(move |i| (self.vertices[i], self.vertices[(i + 1) % n]))
+    }
+
+    /// Fan triangulation: split n-gon into triangles from first vertex
+    /// Returns vertex index triplets for each triangle
+    pub fn triangulate(&self) -> Vec<[usize; 3]> {
+        let n = self.vertices.len();
+        if n < 3 {
+            return vec![];
+        }
+        if n == 3 {
+            return vec![[self.vertices[0], self.vertices[1], self.vertices[2]]];
+        }
+
+        // Fan from vertex 0: creates (n-2) triangles
+        (1..n - 1)
+            .map(|i| [self.vertices[0], self.vertices[i], self.vertices[i + 1]])
+            .collect()
+    }
+
+    /// Set texture ID (builder pattern)
+    pub fn with_texture(mut self, texture_id: usize) -> Self {
+        self.texture_id = Some(texture_id);
+        self
+    }
+
+    /// Set black_transparent flag (builder pattern)
+    pub fn with_black_transparent(mut self, black_transparent: bool) -> Self {
+        self.black_transparent = black_transparent;
+        self
+    }
+
+    /// Set blend mode (builder pattern)
+    pub fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
+        self
+    }
+}
 
 // ============================================================================
 // PicoCAD-style Mesh Organization
@@ -899,11 +1013,14 @@ impl EditorBone {
     }
 }
 
-/// Editable mesh (vertices and faces from OBJ import)
+/// Editable mesh with n-gon face support
+///
+/// Faces can be triangles, quads, or arbitrary n-gons.
+/// Triangulation happens in `to_render_data()` for the rasterizer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EditableMesh {
     pub vertices: Vec<Vertex>,
-    pub faces: Vec<Face>,
+    pub faces: Vec<EditFace>,
 }
 
 impl EditableMesh {
@@ -914,7 +1031,7 @@ impl EditableMesh {
         }
     }
 
-    pub fn from_parts(vertices: Vec<Vertex>, faces: Vec<Face>) -> Self {
+    pub fn from_parts(vertices: Vec<Vertex>, faces: Vec<EditFace>) -> Self {
         Self { vertices, faces }
     }
 
@@ -956,26 +1073,14 @@ impl EditableMesh {
             Vertex::new(Vec3::new(-half,  half, -half), Vec2::new(0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)),
         ];
 
-        // Note: Rasterizer expects CW winding (swap v1/v2 from CCW to CW)
+        // Quad faces (CW winding for rasterizer - triangulated in to_render_data)
         let faces = vec![
-            // Front
-            Face::new(0, 2, 1),
-            Face::new(0, 3, 2),
-            // Back
-            Face::new(4, 6, 5),
-            Face::new(4, 7, 6),
-            // Top
-            Face::new(8, 10, 9),
-            Face::new(8, 11, 10),
-            // Bottom
-            Face::new(12, 14, 13),
-            Face::new(12, 15, 14),
-            // Right
-            Face::new(16, 18, 17),
-            Face::new(16, 19, 18),
-            // Left
-            Face::new(20, 22, 21),
-            Face::new(20, 23, 22),
+            EditFace::quad(0, 3, 2, 1),    // Front
+            EditFace::quad(4, 7, 6, 5),    // Back
+            EditFace::quad(8, 11, 10, 9),  // Top
+            EditFace::quad(12, 15, 14, 13), // Bottom
+            EditFace::quad(16, 19, 18, 17), // Right
+            EditFace::quad(20, 23, 22, 21), // Left
         ];
 
         Self { vertices, faces }
@@ -993,11 +1098,8 @@ impl EditableMesh {
             Vertex::new(Vec3::new(-half, 0.0,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Note: Rasterizer expects CW winding (swap v1/v2 from CCW to CW)
-        let faces = vec![
-            Face::new(0, 2, 1),
-            Face::new(0, 3, 2),
-        ];
+        // Single quad face (CCW winding when viewed from above)
+        let faces = vec![EditFace::quad(0, 1, 2, 3)];
 
         Self { vertices, faces }
     }
@@ -1021,21 +1123,15 @@ impl EditableMesh {
             Vertex::new(Vec3::new( 0.0,  h,  half), Vec2::new(0.5, 0.0), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Faces (CW winding)
+        // Faces (CCW winding when viewed from outside)
         let faces = vec![
-            // Bottom (reversed for correct facing)
-            Face::new(0, 1, 2),
-            // Top
-            Face::new(3, 5, 4),
-            // Side 1 (back)
-            Face::new(0, 4, 1),
-            Face::new(0, 3, 4),
-            // Side 2 (right)
-            Face::new(1, 5, 2),
-            Face::new(1, 4, 5),
-            // Side 3 (left)
-            Face::new(2, 3, 0),
-            Face::new(2, 5, 3),
+            // Bottom and top triangles
+            EditFace::tri(0, 2, 1),   // Bottom (CCW from below)
+            EditFace::tri(3, 5, 4),   // Top (CCW from above)
+            // Side faces are quads (CCW from outside)
+            EditFace::quad(0, 1, 4, 3), // Back face
+            EditFace::quad(1, 2, 5, 4), // Right face
+            EditFace::quad(2, 0, 3, 5), // Left face
         ];
 
         Self { vertices, faces }
@@ -1050,15 +1146,7 @@ impl EditableMesh {
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
 
-        // Bottom center vertex
-        let bottom_center = vertices.len();
-        vertices.push(Vertex::new(Vec3::new(0.0, 0.0, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, -1.0, 0.0)));
-
-        // Top center vertex
-        let top_center = vertices.len();
-        vertices.push(Vertex::new(Vec3::new(0.0, height, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, 1.0, 0.0)));
-
-        // Ring vertices
+        // Ring vertices for caps
         let bottom_ring_start = vertices.len();
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * 2.0 * PI;
@@ -1106,39 +1194,24 @@ impl EditableMesh {
             vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(u, 0.0), normal));
         }
 
-        // Bottom cap faces
-        for i in 0..segments {
-            let next = (i + 1) % segments;
-            faces.push(Face::new(
-                bottom_center,
-                bottom_ring_start + next,
-                bottom_ring_start + i,
-            ));
-        }
+        // Bottom cap face (single n-gon, CCW from below)
+        // Vertices go clockwise when viewed from above, so CCW from below
+        let bottom_cap_verts: Vec<usize> = (0..segments).map(|i| bottom_ring_start + i).collect();
+        faces.push(EditFace::ngon(&bottom_cap_verts));
 
-        // Top cap faces
-        for i in 0..segments {
-            let next = (i + 1) % segments;
-            faces.push(Face::new(
-                top_center,
-                top_ring_start + i,
-                top_ring_start + next,
-            ));
-        }
+        // Top cap face (single n-gon, CCW from above)
+        // Vertices go counter-clockwise when viewed from above
+        let top_cap_verts: Vec<usize> = (0..segments).rev().map(|i| top_ring_start + i).collect();
+        faces.push(EditFace::ngon(&top_cap_verts));
 
-        // Side faces
+        // Side faces (quads, CCW from outside)
         for i in 0..segments {
             let next = (i + 1) % segments;
-            // Two triangles per quad
-            faces.push(Face::new(
+            faces.push(EditFace::quad(
                 side_bottom_start + i,
-                side_top_start + next,
                 side_bottom_start + next,
-            ));
-            faces.push(Face::new(
-                side_bottom_start + i,
-                side_top_start + i,
                 side_top_start + next,
+                side_top_start + i,
             ));
         }
 
@@ -1162,19 +1235,15 @@ impl EditableMesh {
             Vertex::new(Vec3::new(0.0, height, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Faces (CW winding)
+        // Faces (CCW winding when viewed from outside)
         let faces = vec![
-            // Base (two triangles)
-            Face::new(0, 2, 1),
-            Face::new(0, 3, 2),
-            // Front side
-            Face::new(0, 1, 4),
-            // Right side
-            Face::new(1, 2, 4),
-            // Back side
-            Face::new(2, 3, 4),
-            // Left side
-            Face::new(3, 0, 4),
+            // Base (quad, CCW from below)
+            EditFace::quad(0, 1, 2, 3),
+            // Side faces (triangles connecting to apex, CCW from outside)
+            EditFace::tri(0, 4, 1), // Front (-Z side)
+            EditFace::tri(1, 4, 2), // Right (+X side)
+            EditFace::tri(2, 4, 3), // Back (+Z side)
+            EditFace::tri(3, 4, 0), // Left (-X side)
         ];
 
         Self { vertices, faces }
@@ -1199,14 +1268,6 @@ impl EditableMesh {
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
 
-        // Bottom center
-        let bottom_center = vertices.len();
-        vertices.push(Vertex::new(Vec3::new(0.0, 0.0, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, -1.0, 0.0)));
-
-        // Top center
-        let top_center = vertices.len();
-        vertices.push(Vertex::new(Vec3::new(0.0, height, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, 1.0, 0.0)));
-
         // Bottom ring
         let bottom_start = vertices.len();
         for i in 0..sides {
@@ -1225,24 +1286,23 @@ impl EditableMesh {
             vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(0.5 + angle.cos() * 0.5, 0.5 + angle.sin() * 0.5), Vec3::new(0.0, 1.0, 0.0)));
         }
 
-        // Bottom cap
-        for i in 0..sides {
-            let next = (i + 1) % sides;
-            faces.push(Face::new(bottom_center, bottom_start + next, bottom_start + i));
-        }
+        // Bottom cap face (single n-gon, CCW from below)
+        let bottom_cap_verts: Vec<usize> = (0..sides).map(|i| bottom_start + i).collect();
+        faces.push(EditFace::ngon(&bottom_cap_verts));
 
-        // Top cap
-        for i in 0..sides {
-            let next = (i + 1) % sides;
-            faces.push(Face::new(top_center, top_start + i, top_start + next));
-        }
+        // Top cap face (single n-gon, CCW from above)
+        let top_cap_verts: Vec<usize> = (0..sides).rev().map(|i| top_start + i).collect();
+        faces.push(EditFace::ngon(&top_cap_verts));
 
-        // Sides (need separate vertices for proper normals in real impl, but this works for low-poly)
+        // Side faces (quads, CCW from outside)
         for i in 0..sides {
             let next = (i + 1) % sides;
-            // Two triangles per side quad
-            faces.push(Face::new(bottom_start + i, top_start + next, bottom_start + next));
-            faces.push(Face::new(bottom_start + i, top_start + i, top_start + next));
+            faces.push(EditFace::quad(
+                bottom_start + i,
+                bottom_start + next,
+                top_start + next,
+                top_start + i,
+            ));
         }
 
         Self { vertices, faces }
@@ -1263,11 +1323,13 @@ impl EditableMesh {
 
         // Add faces with index offset
         for f in &other.faces {
-            self.faces.push(Face::new(
-                f.v0 + vertex_offset,
-                f.v1 + vertex_offset,
-                f.v2 + vertex_offset,
-            ));
+            let new_verts: Vec<usize> = f.vertices.iter().map(|&v| v + vertex_offset).collect();
+            self.faces.push(EditFace {
+                vertices: new_verts,
+                texture_id: f.texture_id,
+                black_transparent: f.black_transparent,
+                blend_mode: f.blend_mode,
+            });
         }
     }
 
@@ -1279,37 +1341,54 @@ impl EditableMesh {
         self.faces.len()
     }
 
-    /// Get all vertex indices used by a face
-    pub fn face_vertices(&self, face_idx: usize) -> Option<[usize; 3]> {
-        self.faces.get(face_idx).map(|f| [f.v0, f.v1, f.v2])
+    /// Get all vertex indices used by a face (as a slice)
+    pub fn face_vertices(&self, face_idx: usize) -> Option<&[usize]> {
+        self.faces.get(face_idx).map(|f| f.vertices.as_slice())
     }
 
-    /// Compute centroid of a face
+    /// Compute centroid of a face (works for any n-gon)
     pub fn face_centroid(&self, face_idx: usize) -> Option<Vec3> {
         let face = self.faces.get(face_idx)?;
-        let v0 = self.vertices.get(face.v0)?.pos;
-        let v1 = self.vertices.get(face.v1)?.pos;
-        let v2 = self.vertices.get(face.v2)?.pos;
-        Some(Vec3::new(
-            (v0.x + v1.x + v2.x) / 3.0,
-            (v0.y + v1.y + v2.y) / 3.0,
-            (v0.z + v1.z + v2.z) / 3.0,
-        ))
+        if face.vertices.is_empty() {
+            return None;
+        }
+
+        let mut sum = Vec3::ZERO;
+        let mut count = 0;
+        for &vi in &face.vertices {
+            if let Some(v) = self.vertices.get(vi) {
+                sum.x += v.pos.x;
+                sum.y += v.pos.y;
+                sum.z += v.pos.z;
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            Some(Vec3::new(sum.x / count as f32, sum.y / count as f32, sum.z / count as f32))
+        } else {
+            None
+        }
     }
 
     /// Compute face normal for CW-wound faces (pointing outward)
+    /// Uses first 3 vertices for normal calculation (works for n-gons)
     pub fn face_normal(&self, face_idx: usize) -> Option<Vec3> {
         let face = self.faces.get(face_idx)?;
-        let v0 = self.vertices.get(face.v0)?.pos;
-        let v1 = self.vertices.get(face.v1)?.pos;
-        let v2 = self.vertices.get(face.v2)?.pos;
+        if face.vertices.len() < 3 {
+            return Some(Vec3::new(0.0, 1.0, 0.0)); // Default up for degenerate
+        }
+
+        let v0 = self.vertices.get(face.vertices[0])?.pos;
+        let v1 = self.vertices.get(face.vertices[1])?.pos;
+        let v2 = self.vertices.get(face.vertices[2])?.pos;
 
         // Edge vectors
         let e1 = v1 - v0;
         let e2 = v2 - v0;
 
         // Cross product: e2 × e1 for CW winding (reversed from CCW convention)
-        // This gives outward-facing normal for CW-wound triangles
+        // This gives outward-facing normal for CW-wound faces
         let normal = e2.cross(e1);
 
         // Normalize
@@ -1351,7 +1430,6 @@ impl EditableMesh {
     /// Extrude selected faces by a given amount along their normals
     /// Returns the indices of the new top faces (for selection update)
     pub fn extrude_faces(&mut self, face_indices: &[usize], amount: f32) -> Vec<usize> {
-        use crate::rasterizer::Vec2;
         use std::collections::{HashMap, HashSet};
 
         if face_indices.is_empty() || amount.abs() < 0.001 {
@@ -1360,8 +1438,8 @@ impl EditableMesh {
 
         // Collect all unique vertices from selected faces
         let mut vertex_set: Vec<usize> = face_indices.iter()
-            .filter_map(|&fi| self.face_vertices(fi))
-            .flat_map(|[v0, v1, v2]| vec![v0, v1, v2])
+            .filter_map(|&fi| self.faces.get(fi))
+            .flat_map(|f| f.vertices.iter().cloned())
             .collect();
         vertex_set.sort();
         vertex_set.dedup();
@@ -1407,11 +1485,11 @@ impl EditableMesh {
         // Each edge stored as (v_from, v_to) in face winding order
         let mut directed_edges: Vec<(usize, usize)> = Vec::new();
         for &fi in face_indices {
-            if let Some([v0, v1, v2]) = self.face_vertices(fi) {
-                // Edges in winding order: v0->v1, v1->v2, v2->v0
-                directed_edges.push((v0, v1));
-                directed_edges.push((v1, v2));
-                directed_edges.push((v2, v0));
+            if let Some(face) = self.faces.get(fi) {
+                // Collect edges from n-gon face
+                for edge in face.edges() {
+                    directed_edges.push(edge);
+                }
             }
         }
 
@@ -1423,7 +1501,7 @@ impl EditableMesh {
             .cloned()
             .collect();
 
-        // Create side faces for each boundary edge
+        // Create side faces (quads) for each boundary edge
         // The edge (v0, v1) is in the winding order of the original face
         for (v0_old, v1_old) in boundary_edges {
             if let (Some(&v0_new), Some(&v1_new)) = (old_to_new.get(&v0_old), old_to_new.get(&v1_old)) {
@@ -1433,18 +1511,7 @@ impl EditableMesh {
                 let p0_new = self.vertices[v0_new].pos;
                 let p1_new = self.vertices[v1_new].pos;
 
-                // Build quad: v1_old -> v1_new -> v0_new -> v0_old (CW when viewed from outside)
-                // This creates a quad where:
-                // - Bottom edge: v1_old to v0_old (reverse of boundary edge direction)
-                // - Top edge: v1_new to v0_new
-                // - Left edge: v0_old to v0_new (extrusion direction)
-                // - Right edge: v1_old to v1_new (extrusion direction)
-
                 // Compute the face normal from the actual quad geometry
-                // First triangle is: sv0(p1_old), sv1(p1_new), sv2(p0_new)
-                // For CW winding, normal = e2.cross(e1) where:
-                // e1 = sv1 - sv0 = p1_new - p1_old
-                // e2 = sv2 - sv0 = p0_new - p1_old
                 let e1 = p1_new - p1_old;
                 let e2 = p0_new - p1_old;
                 let side_normal = e2.cross(e1).normalize();
@@ -1456,6 +1523,7 @@ impl EditableMesh {
                 let uv10 = Vec2::new(1.0, 0.0);
 
                 // Create 4 vertices for the quad with the computed normal
+                // Quad: v1_old -> v1_new -> v0_new -> v0_old (CW when viewed from outside)
                 let sv0 = Vertex::new(p1_old, uv00, side_normal);
                 let sv1 = Vertex::new(p1_new, uv01, side_normal);
                 let sv2 = Vertex::new(p0_new, uv11, side_normal);
@@ -1467,12 +1535,8 @@ impl EditableMesh {
                 self.vertices.push(sv2);
                 self.vertices.push(sv3);
 
-                // Two triangles for the quad (CW winding for our rasterizer)
-                // Quad is: sv0(v1_old), sv1(v1_new), sv2(v0_new), sv3(v0_old)
-                // Triangle 1: sv0, sv1, sv2
-                // Triangle 2: sv0, sv2, sv3
-                self.faces.push(Face::new(si0, si0 + 1, si0 + 2));
-                self.faces.push(Face::new(si0, si0 + 2, si0 + 3));
+                // Single quad face (triangulated at render time)
+                self.faces.push(EditFace::quad(si0, si0 + 1, si0 + 2, si0 + 3));
             }
         }
 
@@ -1480,14 +1544,20 @@ impl EditableMesh {
         let mut new_top_faces = Vec::new();
         for &fi in face_indices {
             if let Some(face) = self.faces.get_mut(fi) {
-                if let (Some(&nv0), Some(&nv1), Some(&nv2)) = (
-                    old_to_new.get(&face.v0),
-                    old_to_new.get(&face.v1),
-                    old_to_new.get(&face.v2),
-                ) {
-                    face.v0 = nv0;
-                    face.v1 = nv1;
-                    face.v2 = nv2;
+                let mut all_mapped = true;
+                let new_verts: Vec<usize> = face.vertices.iter()
+                    .map(|&v| {
+                        if let Some(&nv) = old_to_new.get(&v) {
+                            nv
+                        } else {
+                            all_mapped = false;
+                            v
+                        }
+                    })
+                    .collect();
+
+                if all_mapped {
+                    face.vertices = new_verts;
                     new_top_faces.push(fi);
                 }
             }
@@ -1548,6 +1618,8 @@ impl EditableMesh {
     }
 
     /// Convert to render data (vertices and faces for the rasterizer) - no texture
+    ///
+    /// N-gon faces are triangulated here using fan triangulation.
     pub fn to_render_data(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
         use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
 
@@ -1561,21 +1633,27 @@ impl EditableMesh {
             }
         }).collect();
 
-        let raster_faces: Vec<RasterFace> = self.faces.iter().map(|f| {
-            RasterFace {
-                v0: f.v0,
-                v1: f.v1,
-                v2: f.v2,
-                texture_id: None,
-                black_transparent: f.black_transparent,
-                blend_mode: f.blend_mode,
+        // Triangulate n-gon faces
+        let mut raster_faces: Vec<RasterFace> = Vec::new();
+        for edit_face in &self.faces {
+            for [v0, v1, v2] in edit_face.triangulate() {
+                raster_faces.push(RasterFace {
+                    v0,
+                    v1,
+                    v2,
+                    texture_id: None,
+                    black_transparent: edit_face.black_transparent,
+                    blend_mode: edit_face.blend_mode,
+                });
             }
-        }).collect();
+        }
 
         (raster_vertices, raster_faces)
     }
 
     /// Convert to render data with texture atlas (texture_id = 0 for all faces)
+    ///
+    /// N-gon faces are triangulated here using fan triangulation.
     pub fn to_render_data_textured(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
         use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
 
@@ -1589,16 +1667,20 @@ impl EditableMesh {
             }
         }).collect();
 
-        let raster_faces: Vec<RasterFace> = self.faces.iter().map(|f| {
-            RasterFace {
-                v0: f.v0,
-                v1: f.v1,
-                v2: f.v2,
-                texture_id: Some(0), // Use texture atlas (index 0)
-                black_transparent: f.black_transparent,
-                blend_mode: f.blend_mode,
+        // Triangulate n-gon faces
+        let mut raster_faces: Vec<RasterFace> = Vec::new();
+        for edit_face in &self.faces {
+            for [v0, v1, v2] in edit_face.triangulate() {
+                raster_faces.push(RasterFace {
+                    v0,
+                    v1,
+                    v2,
+                    texture_id: edit_face.texture_id.or(Some(0)), // Use face texture or atlas
+                    black_transparent: edit_face.black_transparent,
+                    blend_mode: edit_face.blend_mode,
+                });
             }
-        }).collect();
+        }
 
         (raster_vertices, raster_faces)
     }

@@ -660,6 +660,7 @@ impl Framebuffer {
 }
 
 /// Camera state
+#[derive(Clone)]
 pub struct Camera {
     pub position: Vec3,
     pub rotation_x: f32, // Pitch

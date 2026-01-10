@@ -569,7 +569,7 @@ async fn main() {
                                                 }
                                                 // Swap v1 and v2 to flip winding order
                                                 for face in &mut mesh.faces {
-                                                    std::mem::swap(&mut face.v1, &mut face.v2);
+                                                    face.vertices.reverse();
                                                 }
                                             }
 
@@ -636,7 +636,7 @@ async fn main() {
                                                     vertex.normal = vertex.normal * -1.0;
                                                 }
                                                 for face in &mut mesh.faces {
-                                                    std::mem::swap(&mut face.v1, &mut face.v2);
+                                                    face.vertices.reverse();
                                                 }
                                             }
 
@@ -692,7 +692,7 @@ async fn main() {
                                             }
                                             // Swap v1 and v2 to flip winding order
                                             for face in &mut result.mesh.faces {
-                                                std::mem::swap(&mut face.v1, &mut face.v2);
+                                                face.vertices.reverse();
                                             }
                                         }
 
@@ -907,7 +907,7 @@ async fn main() {
                             vertex.normal = vertex.normal * -1.0;
                         }
                         for face in &mut mesh.faces {
-                            std::mem::swap(&mut face.v1, &mut face.v2);
+                            face.vertices.reverse();
                         }
                     }
 
