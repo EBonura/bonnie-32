@@ -1098,7 +1098,7 @@ impl EditableMesh {
             Vertex::new(Vec3::new(-half, 0.0,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Single quad face (CCW winding when viewed from above)
+        // Single quad face (CW winding for rasterizer)
         let faces = vec![EditFace::quad(0, 1, 2, 3)];
 
         Self { vertices, faces }
@@ -1123,12 +1123,12 @@ impl EditableMesh {
             Vertex::new(Vec3::new( 0.0,  h,  half), Vec2::new(0.5, 0.0), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Faces (CCW winding when viewed from outside)
+        // Faces (CW winding for rasterizer, matches cube)
         let faces = vec![
             // Bottom and top triangles
-            EditFace::tri(0, 2, 1),   // Bottom (CCW from below)
-            EditFace::tri(3, 5, 4),   // Top (CCW from above)
-            // Side faces are quads (CCW from outside)
+            EditFace::tri(0, 1, 2),   // Bottom (CW from below)
+            EditFace::tri(3, 4, 5),   // Top (CW from above)
+            // Side faces are quads (CW from outside)
             EditFace::quad(0, 1, 4, 3), // Back face
             EditFace::quad(1, 2, 5, 4), // Right face
             EditFace::quad(2, 0, 3, 5), // Left face
@@ -1194,17 +1194,17 @@ impl EditableMesh {
             vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(u, 0.0), normal));
         }
 
-        // Bottom cap face (single n-gon, CCW from below)
-        // Vertices go clockwise when viewed from above, so CCW from below
-        let bottom_cap_verts: Vec<usize> = (0..segments).map(|i| bottom_ring_start + i).collect();
+        // Bottom cap face (single n-gon, CW winding for rasterizer)
+        // Reversed order so normal points down (-Y)
+        let bottom_cap_verts: Vec<usize> = (0..segments).rev().map(|i| bottom_ring_start + i).collect();
         faces.push(EditFace::ngon(&bottom_cap_verts));
 
-        // Top cap face (single n-gon, CCW from above)
-        // Vertices go counter-clockwise when viewed from above
-        let top_cap_verts: Vec<usize> = (0..segments).rev().map(|i| top_ring_start + i).collect();
+        // Top cap face (single n-gon, CW winding for rasterizer)
+        // Normal order so normal points up (+Y)
+        let top_cap_verts: Vec<usize> = (0..segments).map(|i| top_ring_start + i).collect();
         faces.push(EditFace::ngon(&top_cap_verts));
 
-        // Side faces (quads, CCW from outside)
+        // Side faces (quads, CW winding for rasterizer)
         for i in 0..segments {
             let next = (i + 1) % segments;
             faces.push(EditFace::quad(
@@ -1235,15 +1235,15 @@ impl EditableMesh {
             Vertex::new(Vec3::new(0.0, height, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Faces (CCW winding when viewed from outside)
+        // Faces (CW winding for rasterizer, matches cube)
         let faces = vec![
-            // Base (quad, CCW from below)
-            EditFace::quad(0, 1, 2, 3),
-            // Side faces (triangles connecting to apex, CCW from outside)
-            EditFace::tri(0, 4, 1), // Front (-Z side)
-            EditFace::tri(1, 4, 2), // Right (+X side)
-            EditFace::tri(2, 4, 3), // Back (+Z side)
-            EditFace::tri(3, 4, 0), // Left (-X side)
+            // Base (quad, CW from below)
+            EditFace::quad(0, 3, 2, 1),
+            // Side faces (triangles connecting to apex, CW from outside)
+            EditFace::tri(0, 1, 4), // Front (-Z side)
+            EditFace::tri(1, 2, 4), // Right (+X side)
+            EditFace::tri(2, 3, 4), // Back (+Z side)
+            EditFace::tri(3, 0, 4), // Left (-X side)
         ];
 
         Self { vertices, faces }
@@ -1286,15 +1286,15 @@ impl EditableMesh {
             vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(0.5 + angle.cos() * 0.5, 0.5 + angle.sin() * 0.5), Vec3::new(0.0, 1.0, 0.0)));
         }
 
-        // Bottom cap face (single n-gon, CCW from below)
-        let bottom_cap_verts: Vec<usize> = (0..sides).map(|i| bottom_start + i).collect();
+        // Bottom cap face (single n-gon, CW winding for rasterizer)
+        let bottom_cap_verts: Vec<usize> = (0..sides).rev().map(|i| bottom_start + i).collect();
         faces.push(EditFace::ngon(&bottom_cap_verts));
 
-        // Top cap face (single n-gon, CCW from above)
-        let top_cap_verts: Vec<usize> = (0..sides).rev().map(|i| top_start + i).collect();
+        // Top cap face (single n-gon, CW winding for rasterizer)
+        let top_cap_verts: Vec<usize> = (0..sides).map(|i| top_start + i).collect();
         faces.push(EditFace::ngon(&top_cap_verts));
 
-        // Side faces (quads, CCW from outside)
+        // Side faces (quads, CW winding for rasterizer)
         for i in 0..sides {
             let next = (i + 1) % sides;
             faces.push(EditFace::quad(

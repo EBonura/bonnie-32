@@ -549,7 +549,7 @@ impl Default for SnapSettings {
     fn default() -> Self {
         Self {
             enabled: true,  // Enabled by default
-            grid_size: 5.0,  // 5 unit grid by default
+            grid_size: 128.0,  // 128 units = 1/8 of SECTOR_SIZE (1024)
         }
     }
 }
