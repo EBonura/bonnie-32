@@ -365,7 +365,12 @@ fn draw_orbit_preview(
 
     // Create camera
     let mut camera = Camera::new();
-    camera.position = Vec3::new(cam_x, cam_y, cam_z);
+    // Convert position to IVec3 (INT_SCALE = 4)
+    camera.position = crate::rasterizer::IVec3::new(
+        (cam_x * crate::world::INT_SCALE as f32) as i32,
+        (cam_y * crate::world::INT_SCALE as f32) as i32,
+        (cam_z * crate::world::INT_SCALE as f32) as i32,
+    );
 
     // Direction FROM camera TO center (what we want to look at)
     let dir_x = cx - cam_x;  // = -offset_x
@@ -386,13 +391,14 @@ fn draw_orbit_preview(
 
     // rotation_x (pitch): from y = -sin(rotation_x), so rotation_x = -asin(y)
     // Note: we negate because the camera convention has -sin for y
-    camera.rotation_x = (-ny).asin();
+    // Convert radians to BAM
+    camera.rotation_x = crate::rasterizer::radians_to_bam((-ny).asin());
 
     // rotation_y (yaw): from x/z = sin(rotation_y)/cos(rotation_y) = tan(rotation_y)
     // So rotation_y = atan2(x, z) but we need to account for cos(rotation_x)
     // At rotation_x=0: x = sin(rotation_y), z = cos(rotation_y)
     // So rotation_y = atan2(x, z)
-    camera.rotation_y = nx.atan2(nz);
+    camera.rotation_y = crate::rasterizer::radians_to_bam(nx.atan2(nz));
 
     camera.update_basis();
 

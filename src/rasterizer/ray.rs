@@ -91,7 +91,7 @@ pub fn screen_to_ray(
         cam_space_dir.x * camera.basis_x.z + cam_space_dir.y * camera.basis_y.z + cam_space_dir.z * camera.basis_z.z,
     );
 
-    Ray::new(camera.position, world_dir)
+    Ray::new(camera.position_f32(), world_dir)
 }
 
 /// Find the closest point on an infinite line to a ray.

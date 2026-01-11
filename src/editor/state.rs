@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
-use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode, Color15};
+use crate::rasterizer::{Camera, Vec3, Vec2, IVec3, Texture, Texture15, RasterSettings, Color, BlendMode, Color15};
 use crate::texture::{TextureLibrary, TextureEditorState};
 use super::texture_pack::TexturePack;
 
@@ -659,10 +659,12 @@ impl EditorState {
         let mut camera_3d = Camera::new();
         // Position camera far away from origin to get good view of sector
         // Single 1024×1024 sector is at origin (0,0,0) to (1024,0,1024)
-        camera_3d.position = Vec3::new(4096.0, 4096.0, 4096.0);
-        // Set initial rotation for good viewing angle
-        camera_3d.rotation_x = 0.46;
-        camera_3d.rotation_y = 4.02;
+        // Position is in integer units (scaled by INT_SCALE=4), so 4096.0 * 4 = 16384
+        camera_3d.position = IVec3::new(16384, 16384, 16384);
+        // Set initial rotation for good viewing angle (0.46 rad, 4.02 rad)
+        // Convert to BAM: rad * 4096 / (2*PI)
+        camera_3d.rotation_x = 300;  // ~17 degrees pitch
+        camera_3d.rotation_y = 2620; // ~230 degrees yaw
         camera_3d.update_basis();
 
         // Discover all texture packs
@@ -1066,9 +1068,12 @@ impl EditorState {
         );
 
         // Camera sits behind the target along the forward direction
-        self.camera_3d.position = self.orbit_target - forward * self.orbit_distance;
-        self.camera_3d.rotation_x = pitch;
-        self.camera_3d.rotation_y = yaw;
+        let cam_pos = self.orbit_target - forward * self.orbit_distance;
+        self.camera_3d.set_position_f32(cam_pos);
+        // Convert radians to BAM (0-4095)
+        use crate::rasterizer::radians_to_bam;
+        self.camera_3d.rotation_x = radians_to_bam(pitch);
+        self.camera_3d.rotation_y = radians_to_bam(yaw);
         self.camera_3d.update_basis();
     }
 
@@ -1165,7 +1170,8 @@ impl EditorState {
             }
             CameraMode::Free => {
                 // Calculate direction from selection to current camera
-                let to_camera = self.camera_3d.position - center;
+                let cam_pos_f32 = self.camera_3d.position_f32();
+                let to_camera = cam_pos_f32 - center;
                 let distance = to_camera.len();
 
                 // Use current distance, or a reasonable default if camera is at the center
@@ -1174,7 +1180,7 @@ impl EditorState {
                 // Keep camera at same distance but centered on selection
                 // The camera's forward direction (-basis_z) points at selection
                 let new_position = center - self.camera_3d.basis_z * actual_distance;
-                self.camera_3d.position = new_position;
+                self.camera_3d.set_position_f32(new_position);
             }
         }
     }
@@ -1305,20 +1311,22 @@ impl EditorState {
 
             // Position camera above and behind the room center, looking at it
             let distance = room_size * 1.5;
-            self.camera_3d.position = Vec3::new(
+            let cam_pos = Vec3::new(
                 center_x,
                 center_y + distance * 0.5,
                 center_z - distance,
             );
+            self.camera_3d.set_position_f32(cam_pos);
 
             // Look at room center (calculate rotation angles)
-            let dx = center_x - self.camera_3d.position.x;
-            let dy = center_y - self.camera_3d.position.y;
-            let dz = center_z - self.camera_3d.position.z;
+            let dx = center_x - cam_pos.x;
+            let dy = center_y - cam_pos.y;
+            let dz = center_z - cam_pos.z;
             let horizontal_dist = (dx * dx + dz * dz).sqrt();
 
-            self.camera_3d.rotation_y = dx.atan2(dz);
-            self.camera_3d.rotation_x = (-dy).atan2(horizontal_dist);
+            use crate::rasterizer::radians_to_bam;
+            self.camera_3d.rotation_y = radians_to_bam(dx.atan2(dz));
+            self.camera_3d.rotation_x = radians_to_bam((-dy).atan2(horizontal_dist));
 
             // Update orbit parameters if in orbit mode
             self.orbit_target = Vec3::new(center_x, center_y, center_z);

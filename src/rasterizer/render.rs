@@ -86,7 +86,8 @@ impl Framebuffer {
         use super::math::{perspective_transform, project};
 
         // 1. Render base skybox sphere (gradient + sun glow + clouds baked in vertex colors)
-        let cam_pos = (camera.position.x, camera.position.y, camera.position.z);
+        let cam_pos_f32 = camera.position_f32();
+        let cam_pos = (cam_pos_f32.x, cam_pos_f32.y, cam_pos_f32.z);
         let (vertices, faces) = skybox.generate_mesh(cam_pos, time);
 
         // Transform and project all vertices
@@ -94,7 +95,7 @@ impl Framebuffer {
 
         for v in &vertices {
             let world_pos = super::math::Vec3::new(v.pos.0, v.pos.1, v.pos.2);
-            let rel_pos = world_pos - camera.position;
+            let rel_pos = world_pos - cam_pos_f32;
             let cam_space = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
 
             // Skip vertices behind camera
@@ -661,23 +662,30 @@ impl Framebuffer {
 
 /// Camera state
 #[derive(Clone)]
+/// Camera with integer position and BAM rotation (PS1-authentic)
+/// Position uses IVec3 (scaled by INT_SCALE=4)
+/// Rotation uses BAM: 0-4095 = 0-360 degrees (4096 steps per revolution)
 pub struct Camera {
-    pub position: Vec3,
-    pub rotation_x: f32, // Pitch
-    pub rotation_y: f32, // Yaw
+    pub position: super::math::IVec3,
+    pub rotation_x: u16, // Pitch in BAM (0-4095)
+    pub rotation_y: u16, // Yaw in BAM (0-4095)
 
-    // Computed basis vectors
+    // Computed basis vectors (normalized, used for transforms)
     pub basis_x: Vec3,
     pub basis_y: Vec3,
     pub basis_z: Vec3,
 }
 
+/// Pitch clamp in BAM: ±90° = ±1024 BAM, with small margin
+const PITCH_MIN_BAM: u16 = 4096 - 1020; // -89° (wraps to 3076)
+const PITCH_MAX_BAM: u16 = 1020;        // +89°
+
 impl Camera {
     pub fn new() -> Self {
         let mut cam = Self {
-            position: Vec3::ZERO,
-            rotation_x: 0.0,
-            rotation_y: 0.0,
+            position: super::math::IVec3::ZERO,
+            rotation_x: 0,
+            rotation_y: 0,
             basis_x: Vec3::new(1.0, 0.0, 0.0),
             basis_y: Vec3::new(0.0, 1.0, 0.0),
             basis_z: Vec3::new(0.0, 0.0, 1.0),
@@ -689,9 +697,9 @@ impl Camera {
     /// Create a camera looking down the Y axis (top-down view, XZ plane)
     pub fn ortho_top() -> Self {
         Self {
-            position: Vec3::ZERO,
-            rotation_x: 0.0,
-            rotation_y: 0.0,
+            position: super::math::IVec3::ZERO,
+            rotation_x: 0,
+            rotation_y: 0,
             // Looking down -Y, so: right=+X, up=+Z, forward=-Y
             basis_x: Vec3::new(1.0, 0.0, 0.0),   // Right
             basis_y: Vec3::new(0.0, 0.0, 1.0),   // Up (Z goes up on screen)
@@ -702,11 +710,10 @@ impl Camera {
     /// Create a camera looking down the Z axis (front view, XY plane)
     pub fn ortho_front() -> Self {
         Self {
-            position: Vec3::ZERO,
-            rotation_x: 0.0,
-            rotation_y: 0.0,
+            position: super::math::IVec3::ZERO,
+            rotation_x: 0,
+            rotation_y: 0,
             // Looking down -Z, so: right=+X, up=+Y, forward=-Z
-            // Don't negate Y here - project_ortho handles the screen Y flip
             basis_x: Vec3::new(1.0, 0.0, 0.0),   // Right: world +X -> camera +X
             basis_y: Vec3::new(0.0, 1.0, 0.0),   // Up: world +Y -> camera +Y
             basis_z: Vec3::new(0.0, 0.0, -1.0),  // Forward (into the scene)
@@ -716,43 +723,139 @@ impl Camera {
     /// Create a camera looking down the X axis (side view, ZY plane)
     pub fn ortho_side() -> Self {
         Self {
-            position: Vec3::ZERO,
-            rotation_x: 0.0,
-            rotation_y: 0.0,
+            position: super::math::IVec3::ZERO,
+            rotation_x: 0,
+            rotation_y: 0,
             // Looking down -X, so: right=+Z, up=+Y, forward=-X
-            // Wireframe uses (v.pos.z, v.pos.y), so:
-            // cam_pos.x should be v.pos.z, cam_pos.y should be v.pos.y
             basis_x: Vec3::new(0.0, 0.0, 1.0),   // Right: world +Z -> camera +X
             basis_y: Vec3::new(0.0, 1.0, 0.0),   // Up: world +Y -> camera +Y
             basis_z: Vec3::new(-1.0, 0.0, 0.0),  // Forward (into the scene)
         }
     }
 
+    /// Update basis vectors using fixed-point sin/cos lookup tables (PS1-authentic)
     pub fn update_basis(&mut self) {
-        let upward = Vec3::new(0.0, -1.0, 0.0);  // Use -Y as up to match screen coordinates
+        use super::fixed::{fixed_sin, fixed_cos, TRIG_SCALE};
 
-        // Forward vector based on rotation
+        // Get fixed-point sin/cos values (scaled by 4096)
+        let cos_pitch = fixed_cos(self.rotation_x);
+        let sin_pitch = fixed_sin(self.rotation_x);
+        let cos_yaw = fixed_cos(self.rotation_y);
+        let sin_yaw = fixed_sin(self.rotation_y);
+
+        // Forward vector: (cos(pitch)*sin(yaw), -sin(pitch), cos(pitch)*cos(yaw))
+        // Divide by TRIG_SCALE to get normalized values
+        let scale = TRIG_SCALE as f32;
         self.basis_z = Vec3 {
-            x: self.rotation_x.cos() * self.rotation_y.sin(),
-            y: -self.rotation_x.sin(),  // Back to original with negation
-            z: self.rotation_x.cos() * self.rotation_y.cos(),
+            x: (cos_pitch as i64 * sin_yaw as i64 / TRIG_SCALE as i64) as f32 / scale,
+            y: -sin_pitch as f32 / scale,
+            z: (cos_pitch as i64 * cos_yaw as i64 / TRIG_SCALE as i64) as f32 / scale,
         };
 
-        // Right vector
+        // Right and up vectors
+        let upward = Vec3::new(0.0, -1.0, 0.0);
         self.basis_x = upward.cross(self.basis_z).normalize();
-
-        // Up vector
         self.basis_y = self.basis_z.cross(self.basis_x);
     }
 
+    /// Rotate camera by delta (in radians for compatibility with input systems)
+    /// Internally converts to BAM and clamps pitch
     pub fn rotate(&mut self, dx: f32, dy: f32) {
-        self.rotation_y += dy;
-        self.rotation_x = (self.rotation_x + dx).clamp(
-            -std::f32::consts::FRAC_PI_2 + 0.01,
-            std::f32::consts::FRAC_PI_2 - 0.01,
-        );
+        // Convert delta to BAM
+        let dx_bam = (dx * 4096.0 / (2.0 * std::f32::consts::PI)) as i32;
+        let dy_bam = (dy * 4096.0 / (2.0 * std::f32::consts::PI)) as i32;
+
+        // Yaw wraps naturally (0-4095)
+        self.rotation_y = ((self.rotation_y as i32 + dy_bam) & 0xFFF) as u16;
+
+        // Pitch needs clamping to avoid gimbal lock
+        // Convert current pitch to signed for clamping
+        let mut pitch = self.rotation_x as i32;
+        if pitch > 2048 { pitch -= 4096; } // Convert to signed (-2048 to 2047)
+        pitch = (pitch + dx_bam).clamp(-1020, 1020);
+        if pitch < 0 { pitch += 4096; } // Convert back to unsigned
+        self.rotation_x = (pitch & 0xFFF) as u16;
+
         self.update_basis();
     }
+
+    /// Rotate by BAM units directly (for integer-only input)
+    pub fn rotate_bam(&mut self, dx: i16, dy: i16) {
+        // Yaw wraps naturally
+        self.rotation_y = ((self.rotation_y as i32 + dy as i32) & 0xFFF) as u16;
+
+        // Pitch with clamping
+        let mut pitch = self.rotation_x as i32;
+        if pitch > 2048 { pitch -= 4096; }
+        pitch = (pitch + dx as i32).clamp(-1020, 1020);
+        if pitch < 0 { pitch += 4096; }
+        self.rotation_x = (pitch & 0xFFF) as u16;
+
+        self.update_basis();
+    }
+
+    /// Get position as float Vec3 (for compatibility with float render path)
+    #[inline]
+    pub fn position_f32(&self) -> Vec3 {
+        self.position.to_render_f32()
+    }
+
+    /// Set position from float Vec3 (for compatibility)
+    #[inline]
+    pub fn set_position_f32(&mut self, pos: Vec3) {
+        self.position = super::math::IVec3::from_vec3(pos);
+    }
+
+    /// Get pitch as radians (for compatibility)
+    #[inline]
+    pub fn rotation_x_radians(&self) -> f32 {
+        bam_to_radians(self.rotation_x)
+    }
+
+    /// Get yaw as radians (for compatibility)
+    #[inline]
+    pub fn rotation_y_radians(&self) -> f32 {
+        bam_to_radians(self.rotation_y)
+    }
+
+    /// Move camera along basis vectors by integer amount
+    #[inline]
+    pub fn move_by(&mut self, forward: i32, right: i32, up: i32) {
+        // Scale basis vectors by movement amount and add to position
+        // Basis vectors are normalized (length 1.0), so multiply by movement in integer units
+        self.position.x += (self.basis_z.x * forward as f32 + self.basis_x.x * right as f32 + self.basis_y.x * up as f32) as i32;
+        self.position.y += (self.basis_z.y * forward as f32 + self.basis_x.y * right as f32 + self.basis_y.y * up as f32) as i32;
+        self.position.z += (self.basis_z.z * forward as f32 + self.basis_x.z * right as f32 + self.basis_y.z * up as f32) as i32;
+    }
+
+    /// Translate camera position by a float delta (converts to integer internally)
+    /// Useful for mouse/keyboard movement where delta is calculated in float space
+    #[inline]
+    pub fn translate_f32(&mut self, delta: Vec3) {
+        // Convert delta to integer units (scale by INT_SCALE=4)
+        self.position.x += (delta.x * super::math::INT_SCALE as f32) as i32;
+        self.position.y += (delta.y * super::math::INT_SCALE as f32) as i32;
+        self.position.z += (delta.z * super::math::INT_SCALE as f32) as i32;
+    }
+}
+
+/// Convert radians to BAM (Binary Angular Measurement)
+/// 2π radians = 4096 BAM units
+#[inline]
+pub fn radians_to_bam(radians: f32) -> u16 {
+    const BAM_PER_RADIAN: f32 = 4096.0 / (2.0 * std::f32::consts::PI);
+    let bam = (radians * BAM_PER_RADIAN).round() as i32;
+    // Wrap to 0-4095 range
+    (bam.rem_euclid(4096)) as u16
+}
+
+/// Convert BAM (Binary Angular Measurement) to radians
+/// 4096 BAM units = 2π radians
+#[inline]
+pub fn bam_to_radians(bam: u16) -> f32 {
+    let signed = if bam > 2048 { bam as i32 - 4096 } else { bam as i32 };
+    const RADIANS_PER_BAM: f32 = (2.0 * std::f32::consts::PI) / 4096.0;
+    (signed as f32) * RADIANS_PER_BAM
 }
 
 impl Default for Camera {
@@ -1666,6 +1769,7 @@ pub fn render_mesh(
 
     // === TRANSFORM PHASE ===
     let transform_start = get_time();
+    let camera_pos_f32 = camera.position_f32();
 
     // Transform all vertices to camera space
     let mut cam_space_positions: Vec<Vec3> = Vec::with_capacity(vertices.len());
@@ -1676,7 +1780,7 @@ pub fn render_mesh(
         // Project to screen - use ortho, fixed-point, or float projection
         let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
             // Ortho: use float path
-            let rel_pos = v.pos - camera.position;
+            let rel_pos = v.pos - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
             (screen, cam_pos)
@@ -1684,7 +1788,7 @@ pub fn render_mesh(
             // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
             let (sx, sy, depth) = super::fixed::project_fixed(
                 v.pos,
-                camera.position,
+                camera_pos_f32,
                 camera.basis_x,
                 camera.basis_y,
                 camera.basis_z,
@@ -1692,12 +1796,12 @@ pub fn render_mesh(
                 fb.height,
             );
             // Still need cam_pos for culling/shading (use float for this)
-            let rel_pos = v.pos - camera.position;
+            let rel_pos = v.pos - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
         } else {
             // Standard float path
-            let rel_pos = v.pos - camera.position;
+            let rel_pos = v.pos - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             let screen = project(cam_pos, fb.width, fb.height);
             (screen, cam_pos)
@@ -1988,6 +2092,7 @@ pub fn render_mesh_15(
 
     // === TRANSFORM PHASE ===
     let transform_start = get_time();
+    let camera_pos_f32 = camera.position_f32();
 
     // Transform all vertices to camera space
     let mut cam_space_positions: Vec<Vec3> = Vec::with_capacity(vertices.len());
@@ -1998,7 +2103,7 @@ pub fn render_mesh_15(
         // Project to screen - use ortho, fixed-point, or float projection
         let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
             // Ortho: use float path
-            let rel_pos = v.pos - camera.position;
+            let rel_pos = v.pos - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
             (screen, cam_pos)
@@ -2006,7 +2111,7 @@ pub fn render_mesh_15(
             // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
             let (sx, sy, depth) = super::fixed::project_fixed(
                 v.pos,
-                camera.position,
+                camera_pos_f32,
                 camera.basis_x,
                 camera.basis_y,
                 camera.basis_z,
@@ -2014,12 +2119,12 @@ pub fn render_mesh_15(
                 fb.height,
             );
             // Still need cam_pos for culling/shading (use float for this)
-            let rel_pos = v.pos - camera.position;
+            let rel_pos = v.pos - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
         } else {
             // Standard float path
-            let rel_pos = v.pos - camera.position;
+            let rel_pos = v.pos - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             let screen = project(cam_pos, fb.width, fb.height);
             (screen, cam_pos)
@@ -2337,20 +2442,22 @@ pub fn render_mesh_15_int(
     let mut cam_space_normals: Vec<Vec3> = Vec::with_capacity(vertices.len());
     let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
 
+    let camera_pos_f32 = camera.position_f32();
     for v in vertices {
         // Project using integer path (IVec3 → Fixed32 → screen integers)
         let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
             // Ortho: convert to float for ortho projection (rare path)
             let world_f32 = v.pos.to_render_f32();
-            let rel_pos = world_f32 - camera.position;
+            let rel_pos = world_f32 - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
             (screen, cam_pos)
         } else {
-            // PS1-style: use integer projection path (no float conversion for position!)
-            let (sx, sy, depth) = super::fixed::project_fixed_int(
+            // PS1-style: use fully integer projection path (no float conversion!)
+            // Both world position AND camera position are integers
+            let (sx, sy, depth) = super::fixed::project_fixed_full_int(
                 v.pos,
-                camera.position,
+                camera.position,  // Already IVec3!
                 camera.basis_x,
                 camera.basis_y,
                 camera.basis_z,
@@ -2359,7 +2466,7 @@ pub fn render_mesh_15_int(
             );
             // Still need cam_pos for culling/shading (convert here, minimal)
             let world_f32 = v.pos.to_render_f32();
-            let rel_pos = world_f32 - camera.position;
+            let rel_pos = world_f32 - camera_pos_f32;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
             (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
         };
@@ -2656,18 +2763,24 @@ pub fn create_test_cube() -> (Vec<Vertex>, Vec<Face>) {
 
 /// Draw a 3D line with proper near-plane clipping.
 /// Used by both world editor and modeler for grid/wireframe rendering.
+/// Takes IVec3 for endpoints (full integer approach).
 pub fn draw_3d_line_clipped(
     fb: &mut Framebuffer,
     camera: &Camera,
-    p0: Vec3,
-    p1: Vec3,
+    p0: super::math::IVec3,
+    p1: super::math::IVec3,
     color: Color,
 ) {
-    use super::math::{world_to_screen, NEAR_PLANE};
+    use super::math::{world_to_screen, IVec3, NEAR_PLANE};
+
+    // Convert to float for clipping math
+    let p0_f32 = p0.to_render_f32();
+    let p1_f32 = p1.to_render_f32();
+    let camera_pos_f32 = camera.position_f32();
 
     // Transform to camera space
-    let rel0 = p0 - camera.position;
-    let rel1 = p1 - camera.position;
+    let rel0 = p0_f32 - camera_pos_f32;
+    let rel1 = p1_f32 - camera_pos_f32;
 
     let z0 = rel0.dot(camera.basis_z);
     let z1 = rel1.dot(camera.basis_z);
@@ -2677,15 +2790,15 @@ pub fn draw_3d_line_clipped(
         return;
     }
 
-    // Clip line to near plane if needed
+    // Clip line to near plane if needed, convert back to IVec3
     let (clipped_p0, clipped_p1) = if z0 <= NEAR_PLANE {
         let t = (NEAR_PLANE - z0) / (z1 - z0);
-        let new_p0 = p0 + (p1 - p0) * t;
-        (new_p0, p1)
+        let new_p0 = p0_f32 + (p1_f32 - p0_f32) * t;
+        (IVec3::from_vec3(new_p0), p1)
     } else if z1 <= NEAR_PLANE {
         let t = (NEAR_PLANE - z0) / (z1 - z0);
-        let new_p1 = p0 + (p1 - p0) * t;
-        (p0, new_p1)
+        let new_p1 = p0_f32 + (p1_f32 - p0_f32) * t;
+        (p0, IVec3::from_vec3(new_p1))
     } else {
         (p0, p1)
     };
@@ -2717,33 +2830,36 @@ pub fn draw_3d_line_clipped(
 
 /// Draw a floor grid on a horizontal plane.
 /// Uses short segments for better near-plane clipping behavior.
+/// Takes integer world coordinates (full integer approach).
 ///
 /// # Arguments
 /// * `fb` - Framebuffer to draw to
 /// * `camera` - Camera for projection
-/// * `y` - Y height of the grid plane
-/// * `spacing` - Distance between grid lines
-/// * `extent` - Half-size of the grid (grid goes from -extent to +extent)
+/// * `y` - Y height of the grid plane (integer)
+/// * `spacing` - Distance between grid lines (integer)
+/// * `extent` - Half-size of the grid (integer, grid goes from -extent to +extent)
 /// * `grid_color` - Color for regular grid lines
 /// * `x_axis_color` - Color for the X axis (line at Z=0)
 /// * `z_axis_color` - Color for the Z axis (line at X=0)
 pub fn draw_floor_grid(
     fb: &mut Framebuffer,
     camera: &Camera,
-    y: f32,
-    spacing: f32,
-    extent: f32,
+    y: i32,
+    spacing: i32,
+    extent: i32,
     grid_color: Color,
     x_axis_color: Color,
     z_axis_color: Color,
 ) {
+    use super::math::IVec3;
+
     // Use shorter segments for better clipping behavior
     let segment_length = spacing;
 
     // X-parallel lines (varying X, fixed Z)
     let mut z = -extent;
     while z <= extent {
-        let is_z_axis = z.abs() < 0.001;
+        let is_z_axis = z == 0;
         let color = if is_z_axis { z_axis_color } else { grid_color };
 
         let mut x = -extent;
@@ -2752,8 +2868,8 @@ pub fn draw_floor_grid(
             draw_3d_line_clipped(
                 fb,
                 camera,
-                Vec3::new(x, y, z),
-                Vec3::new(x_end, y, z),
+                IVec3::new(x, y, z),
+                IVec3::new(x_end, y, z),
                 color,
             );
             x += segment_length;
@@ -2764,7 +2880,7 @@ pub fn draw_floor_grid(
     // Z-parallel lines (fixed X, varying Z)
     let mut x = -extent;
     while x <= extent {
-        let is_x_axis = x.abs() < 0.001;
+        let is_x_axis = x == 0;
         let color = if is_x_axis { x_axis_color } else { grid_color };
 
         let mut z = -extent;
@@ -2773,8 +2889,8 @@ pub fn draw_floor_grid(
             draw_3d_line_clipped(
                 fb,
                 camera,
-                Vec3::new(x, y, z),
-                Vec3::new(x, y, z_end),
+                IVec3::new(x, y, z),
+                IVec3::new(x, y, z_end),
                 color,
             );
             z += segment_length;

@@ -513,12 +513,17 @@ fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputStat
         move_delta.y -= fly_speed * delta;
     }
 
-    // Apply movement
-    game.camera.position = game.camera.position + move_delta;
+    // Apply movement (convert Vec3 delta to IVec3)
+    let move_delta_int = crate::rasterizer::IVec3::new(
+        (move_delta.x * crate::world::INT_SCALE as f32) as i32,
+        (move_delta.y * crate::world::INT_SCALE as f32) as i32,
+        (move_delta.z * crate::world::INT_SCALE as f32) as i32,
+    );
+    game.camera.position = game.camera.position + move_delta_int;
 
-    // Update camera orientation
-    game.camera.rotation_y = game.freefly_yaw;
-    game.camera.rotation_x = game.freefly_pitch;
+    // Update camera orientation (convert radians to BAM)
+    game.camera.rotation_y = crate::rasterizer::radians_to_bam(game.freefly_yaw);
+    game.camera.rotation_x = crate::rasterizer::radians_to_bam(game.freefly_pitch);
     game.camera.update_basis();
 
     game.viewport_last_mouse = mouse_pos;
@@ -1040,8 +1045,10 @@ fn draw_wireframe_cylinder(
     }
 
     // Project all points to screen space
+    // Convert camera position to Vec3 for float calculations
+    let cam_pos_f = camera.position.to_render_f32();
     let project_point = |p: Vec3| -> Option<(i32, i32, f32)> {
-        let rel = p - camera.position;
+        let rel = p - cam_pos_f;
         let cam = perspective_transform(rel, camera.basis_x, camera.basis_y, camera.basis_z);
 
         // Behind camera check

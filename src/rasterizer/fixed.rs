@@ -434,6 +434,52 @@ pub fn project_fixed_int(
     (sx, sy, depth.to_f32())
 }
 
+/// Transform IVec3 to camera space with IVec3 camera position (fully integer input!)
+/// Both world position and camera position are integers - no float conversion!
+pub fn transform_to_camera_space_full_int(
+    world_pos: super::IVec3,
+    camera_pos: super::IVec3,
+    basis_x: super::Vec3,
+    basis_y: super::Vec3,
+    basis_z: super::Vec3,
+) -> FixedVec3 {
+    // Convert both positions directly from integer to fixed-point (no float!)
+    let world_fixed = FixedVec3::from_ivec3(world_pos);
+    let cam_fixed = FixedVec3::from_ivec3(camera_pos);
+    let rel = world_fixed - cam_fixed;
+
+    let bx = FixedVec3::from_vec3(basis_x);
+    let by = FixedVec3::from_vec3(basis_y);
+    let bz = FixedVec3::from_vec3(basis_z);
+
+    FixedVec3::new(
+        rel.dot(bx),
+        rel.dot(by),
+        rel.dot(bz),
+    )
+}
+
+/// Complete PS1-style vertex transformation from fully integer coordinates
+/// Takes IVec3 world position AND IVec3 camera position - pure integer pipeline!
+pub fn project_fixed_full_int(
+    world_pos: super::IVec3,
+    camera_pos: super::IVec3,
+    basis_x: super::Vec3,
+    basis_y: super::Vec3,
+    basis_z: super::Vec3,
+    width: usize,
+    height: usize,
+) -> (i32, i32, f32) {
+    // Transform to camera space (integer → fixed-point, no float conversion!)
+    let cam_pos = transform_to_camera_space_full_int(world_pos, camera_pos, basis_x, basis_y, basis_z);
+
+    // Project to screen (in fixed-point, returns integers)
+    let (sx, sy, depth) = project_to_screen(cam_pos, width, height);
+
+    // Return screen integers + depth as float (for z-buffer compatibility)
+    (sx, sy, depth.to_f32())
+}
+
 // =============================================================================
 // 2D vector for UV coordinates
 // =============================================================================

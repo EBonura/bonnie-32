@@ -296,9 +296,15 @@ impl GameToolState {
         );
 
         // Camera sits behind the target along the forward direction
-        camera.position = target - forward * distance;
-        camera.rotation_x = pitch;
-        camera.rotation_y = yaw;
+        // Calculate in float space, then convert to IVec3
+        let pos_float = target - forward * distance;
+        camera.position = crate::rasterizer::IVec3::new(
+            (pos_float.x * crate::world::INT_SCALE as f32) as i32,
+            (pos_float.y * crate::world::INT_SCALE as f32) as i32,
+            (pos_float.z * crate::world::INT_SCALE as f32) as i32,
+        );
+        camera.rotation_x = crate::rasterizer::radians_to_bam(pitch);
+        camera.rotation_y = crate::rasterizer::radians_to_bam(yaw);
         camera.update_basis();
     }
 
@@ -344,12 +350,20 @@ impl GameToolState {
             -yaw.cos() * horizontal_dist,
         );
 
-        self.camera.position = look_at + cam_offset;
+        // Calculate camera position in float space
+        let cam_pos_float = look_at + cam_offset;
 
-        // Point camera at target
-        let to_target = (look_at - self.camera.position).normalize();
-        self.camera.rotation_y = to_target.x.atan2(to_target.z);
-        self.camera.rotation_x = (-to_target.y).asin();
+        // Convert to IVec3 for storage
+        self.camera.position = crate::rasterizer::IVec3::new(
+            (cam_pos_float.x * crate::world::INT_SCALE as f32) as i32,
+            (cam_pos_float.y * crate::world::INT_SCALE as f32) as i32,
+            (cam_pos_float.z * crate::world::INT_SCALE as f32) as i32,
+        );
+
+        // Point camera at target (use float position for accurate direction)
+        let to_target = (look_at - cam_pos_float).normalize();
+        self.camera.rotation_y = crate::rasterizer::radians_to_bam(to_target.x.atan2(to_target.z));
+        self.camera.rotation_x = crate::rasterizer::radians_to_bam((-to_target.y).asin());
         self.camera.update_basis();
 
         Some(player_pos)

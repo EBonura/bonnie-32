@@ -6078,7 +6078,7 @@ fn draw_player_camera_preview(
 
     // Set up camera looking from cam_pos toward look_at
     let mut camera = Camera::new();
-    camera.position = cam_pos;
+    camera.set_position_f32(cam_pos);
 
     // Calculate direction from camera to look_at point
     let dir = Vec3::new(
@@ -6093,9 +6093,10 @@ fn draw_player_camera_preview(
         let nz = dir.z / len;
 
         // rotation_x (pitch): from y = -sin(rotation_x)
-        camera.rotation_x = (-ny).asin();
         // rotation_y (yaw): from x/z = sin(rotation_y)/cos(rotation_y)
-        camera.rotation_y = nx.atan2(nz);
+        use crate::rasterizer::radians_to_bam;
+        camera.rotation_x = radians_to_bam((-ny).asin());
+        camera.rotation_y = radians_to_bam(nx.atan2(nz));
     }
     camera.update_basis();
 
@@ -6241,10 +6242,11 @@ fn draw_preview_3d_line(
     color: RasterColor,
 ) {
     const NEAR_PLANE: f32 = 0.1;
+    let camera_pos_f32 = camera.position_f32();
 
     // Transform to camera space
-    let rel0 = p0 - camera.position;
-    let rel1 = p1 - camera.position;
+    let rel0 = p0 - camera_pos_f32;
+    let rel1 = p1 - camera_pos_f32;
 
     let z0 = rel0.dot(camera.basis_z);
     let z1 = rel1.dot(camera.basis_z);
@@ -6313,7 +6315,7 @@ fn draw_preview_3d_line(
 
 /// Project world position to screen for camera preview
 fn preview_world_to_screen(pos: Vec3, camera: &Camera, width: usize, height: usize) -> Option<(f32, f32)> {
-    let rel = pos - camera.position;
+    let rel = pos - camera.position_f32();
 
     // Transform to camera space
     let cam_x = rel.dot(camera.basis_x);

@@ -15,11 +15,11 @@ use crate::ui::{Rect, UiContext, drag_tracker::pick_plane};
 use crate::rasterizer::{
     Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, render_mesh_15_int, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
-    world_to_screen, world_to_screen_with_depth,
+    world_to_screen, world_to_screen_with_depth, IVec3,
     point_to_segment_distance, point_in_triangle_2d,
     Light, RasterSettings,
 };
-use crate::world::{SECTOR_SIZE, SplitDirection};
+use crate::world::{SECTOR_SIZE, SECTOR_SIZE_INT, SplitDirection};
 use crate::input::{InputState, Action};
 use super::{EditorState, EditorTool, Selection, SectorFace, CameraMode, CEILING_HEIGHT, CopiedFaceData};
 
@@ -539,13 +539,13 @@ pub fn draw_viewport_3d(
 
     // Find hovered elements using 2D screen-space projection
     // Priority: vertex > edge > face
-    let mut preview_sector: Option<(f32, f32, f32, bool)> = None; // (x, z, target_y, is_occupied)
-    // Wall preview: (x, z, direction, corner_heights [bl, br, tr, tl], state, mouse_y_room_relative)
+    let mut preview_sector: Option<(i32, i32, i32, bool)> = None; // (x_int, z_int, target_y_int, is_occupied)
+    // Wall preview: (grid_x_int, grid_z_int, direction, corner_heights [bl, br, tr, tl], state, mouse_y_room_relative)
     // state: 0 = new wall, 1 = filling gap, 2 = fully covered
-    // preview_wall: (grid_x_f32, grid_z_f32, direction, heights_int[4], wall_state, mouse_y_int)
-    let mut preview_wall: Option<(f32, f32, crate::world::Direction, [i32; 4], u8, Option<i32>)> = None;
-    // Diagonal wall preview: (x, z, is_nwse, corner_heights_int [corner1_bot, corner2_bot, corner2_top, corner1_top])
-    let mut preview_diagonal_wall: Option<(f32, f32, bool, [i32; 4])> = None;
+    // preview_wall: (grid_x_int, grid_z_int, direction, heights_int[4], wall_state, mouse_y_int)
+    let mut preview_wall: Option<(i32, i32, crate::world::Direction, [i32; 4], u8, Option<i32>)> = None;
+    // Diagonal wall preview: (grid_x_int, grid_z_int, is_nwse, corner_heights_int [corner1_bot, corner2_bot, corner2_top, corner1_top])
+    let mut preview_diagonal_wall: Option<(i32, i32, bool, [i32; 4])> = None;
 
     let hover = if inside_viewport && !ctx.mouse.right_down &&
         (state.tool == EditorTool::Select || state.tool == EditorTool::PlaceObject) {
@@ -698,13 +698,10 @@ pub fn draw_viewport_3d(
                     preview_y_int
                 };
 
-                // Convert grid coords to world coords for rendering
+                // Get world coords in integer units for preview
                 if let Some(room) = state.level.rooms.get(state.current_room) {
                     let world_pos = room.grid_to_world_i(gx, gz);
-                    let world_x = world_pos.x as f32 / crate::world::INT_SCALE as f32;
-                    let world_z = world_pos.z as f32 / crate::world::INT_SCALE as f32;
-                    let world_y = final_y_int as f32 / crate::world::INT_SCALE as f32;
-                    preview_sector = Some((world_x, world_z, world_y, occupied));
+                    preview_sector = Some((world_pos.x, world_pos.z, final_y_int, occupied));
                 }
             }
         }
@@ -741,33 +738,31 @@ pub fn draw_viewport_3d(
             );
 
             if let Some(world_pos) = sector_pos {
-                let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-                let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
+                // Convert float world position to integer grid coordinates
+                let grid_x_int = (world_pos.x * crate::world::INT_SCALE as f32) as i32 / SECTOR_SIZE_INT * SECTOR_SIZE_INT;
+                let grid_z_int = (world_pos.z * crate::world::INT_SCALE as f32) as i32 / SECTOR_SIZE_INT * SECTOR_SIZE_INT;
 
                 // Estimate mouse world Y for gap selection
                 // Note: diagonal directions filtered out in if condition above
                 let edge_x = match dir {
-                    crate::world::Direction::North | crate::world::Direction::South => grid_x + SECTOR_SIZE / 2.0,
-                    crate::world::Direction::East => grid_x + SECTOR_SIZE,
-                    crate::world::Direction::West => grid_x,
+                    crate::world::Direction::North | crate::world::Direction::South => grid_x_int + SECTOR_SIZE_INT / 2,
+                    crate::world::Direction::East => grid_x_int + SECTOR_SIZE_INT,
+                    crate::world::Direction::West => grid_x_int,
                     crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
                 };
                 let edge_z = match dir {
-                    crate::world::Direction::North => grid_z,
-                    crate::world::Direction::South => grid_z + SECTOR_SIZE,
-                    crate::world::Direction::East | crate::world::Direction::West => grid_z + SECTOR_SIZE / 2.0,
+                    crate::world::Direction::North => grid_z_int,
+                    crate::world::Direction::South => grid_z_int + SECTOR_SIZE_INT,
+                    crate::world::Direction::East | crate::world::Direction::West => grid_z_int + SECTOR_SIZE_INT / 2,
                     crate::world::Direction::NwSe | crate::world::Direction::NeSw => unreachable!(),
                 };
 
                 let room_y = state.level.rooms.get(state.current_room)
-                    .map(|r| r.position.to_render_f32().y)
-                    .unwrap_or(0.0);
-                // Convert integer heights to float for screen coordinate calculations
-                let scale = crate::world::INT_SCALE as f32;
-                let default_y_bottom_f32 = default_y_bottom_int as f32 / scale;
-                let default_y_top_f32 = default_y_top_int as f32 / scale;
-                let floor_world = Vec3::new(edge_x, room_y + default_y_bottom_f32, edge_z);
-                let ceiling_world = Vec3::new(edge_x, room_y + default_y_top_f32, edge_z);
+                    .map(|r| r.position.y)
+                    .unwrap_or(0);
+                // Floor and ceiling world positions in integers
+                let floor_world = IVec3::new(edge_x, room_y + default_y_bottom_int, edge_z);
+                let ceiling_world = IVec3::new(edge_x, room_y + default_y_top_int, edge_z);
 
                 let mouse_y_room_relative: Option<i32> = if let (Some((_, floor_sy)), Some((_, ceiling_sy))) = (
                     world_to_screen(floor_world, state.camera_3d.position,
@@ -798,8 +793,9 @@ pub fn draw_viewport_3d(
                     Some(default_y_bottom_int + 1024)  // Near floor
                 };
                 let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    let wx_int = ((grid_x + SECTOR_SIZE * 0.5) * crate::world::INT_SCALE as f32) as i32;
-                    let wz_int = ((grid_z + SECTOR_SIZE * 0.5) * crate::world::INT_SCALE as f32) as i32;
+                    // Use integer grid coordinates + half sector offset
+                    let wx_int = grid_x_int + SECTOR_SIZE_INT / 2;
+                    let wz_int = grid_z_int + SECTOR_SIZE_INT / 2;
                     if let Some((gx, gz)) = room.world_to_grid(wx_int, wz_int) {
                         if let Some(sector) = room.get_sector(gx, gz) {
                             // Debug logging for wall gap detection (only when sector changes)
@@ -850,7 +846,7 @@ pub fn draw_viewport_3d(
                 };
 
                 if let Some((corner_heights, wall_state)) = wall_info {
-                    preview_wall = Some((grid_x, grid_z, dir, corner_heights, wall_state, mouse_y_room_relative));
+                    preview_wall = Some((grid_x_int, grid_z_int, dir, corner_heights, wall_state, mouse_y_room_relative));
                 }
             }
         }
@@ -884,10 +880,9 @@ pub fn draw_viewport_3d(
             );
 
             if let Some(world_pos) = sector_pos {
-                let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-                let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
-                let center_x = grid_x + SECTOR_SIZE / 2.0;
-                let center_z = grid_z + SECTOR_SIZE / 2.0;
+                // Convert float world position to integer grid coordinates
+                let grid_x_int = (world_pos.x * crate::world::INT_SCALE as f32) as i32 / SECTOR_SIZE_INT * SECTOR_SIZE_INT;
+                let grid_z_int = (world_pos.z * crate::world::INT_SCALE as f32) as i32 / SECTOR_SIZE_INT * SECTOR_SIZE_INT;
 
                 // Use wall_direction to determine diagonal type (NwSe or NeSw)
                 let is_nwse = state.wall_direction == crate::world::Direction::NwSe;
@@ -902,8 +897,8 @@ pub fn draw_viewport_3d(
 
                 // Use gap detection for diagonal walls
                 let wall_info = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    let wx_int = (center_x * crate::world::INT_SCALE as f32) as i32;
-                    let wz_int = (center_z * crate::world::INT_SCALE as f32) as i32;
+                    let wx_int = grid_x_int + SECTOR_SIZE_INT / 2;
+                    let wz_int = grid_z_int + SECTOR_SIZE_INT / 2;
                     if let Some((gx, gz)) = room.world_to_grid(wx_int, wz_int) {
                         if let Some(sector) = room.get_sector(gx, gz) {
                             // Debug logging for diagonal wall gap detection (only when sector changes)
@@ -954,7 +949,7 @@ pub fn draw_viewport_3d(
 
                 if let Some((corner_heights, wall_state)) = wall_info {
                     if wall_state < 2 { // Not fully covered
-                        preview_diagonal_wall = Some((grid_x, grid_z, is_nwse, corner_heights));
+                        preview_diagonal_wall = Some((grid_x_int, grid_z_int, is_nwse, corner_heights));
                     }
                 }
             }
@@ -1128,10 +1123,9 @@ pub fn draw_viewport_3d(
                     // If linking mode is on, find coincident vertices across ALL rooms
                     if state.link_coincident_vertices {
                         let all_room_vertices = collect_all_room_vertices(state);
-                        const EPSILON: f32 = 0.1;
 
-                        // Collect world positions of all currently dragged vertices
-                        let dragged_positions: Vec<Vec3> = state.dragging_sector_vertices.iter()
+                        // Collect world positions of all currently dragged vertices (IVec3)
+                        let dragged_positions: Vec<IVec3> = state.dragging_sector_vertices.iter()
                             .filter_map(|(ri, vgx, vgz, vface, ci)| {
                                 all_room_vertices.iter()
                                     .find(|(_, r, x, z, c, f)| *r == *ri && *x == *vgx && *z == *vgz && *c == *ci && f == vface)
@@ -1139,17 +1133,18 @@ pub fn draw_viewport_3d(
                             })
                             .collect();
 
-                        // Find all coincident vertices
+                        // Find all coincident vertices (exact integer comparison)
                         for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
                             for dragged_pos in &dragged_positions {
-                                if (pos.x - dragged_pos.x).abs() < EPSILON &&
-                                   (pos.y - dragged_pos.y).abs() < EPSILON &&
-                                   (pos.z - dragged_pos.z).abs() < EPSILON {
+                                // Exact match for integer coordinates
+                                if pos.x == dragged_pos.x &&
+                                   pos.y == dragged_pos.y &&
+                                   pos.z == dragged_pos.z {
                                     let key = (*ri, *vgx, *vgz, *vface, *ci);
                                     if !state.dragging_sector_vertices.contains(&key) {
                                         state.dragging_sector_vertices.push(key);
-                                        let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.to_render_f32().y).unwrap_or(0.0);
-                                        state.drag_initial_heights.push(((pos.y - linked_room_y) * crate::world::INT_SCALE as f32).round() as i32);
+                                        let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.y).unwrap_or(0);
+                                        state.drag_initial_heights.push(pos.y - linked_room_y);
                                     }
                                     break;
                                 }
@@ -1349,40 +1344,37 @@ pub fn draw_viewport_3d(
 
                                         // If linking, find coincident vertices for the edge across ALL rooms
                                         if state.link_coincident_vertices {
-                                            let base_x = room.position.to_render_f32().x + (*gx as f32) * SECTOR_SIZE;
-                                            let base_z = room.position.to_render_f32().z + (*gz as f32) * SECTOR_SIZE;
-                                            let room_y = room.position.to_render_f32().y; // Y offset for world-space
+                                            let base_x = room.position.x + (*gx as i32) * SECTOR_SIZE_INT;
+                                            let base_z = room.position.z + (*gz as i32) * SECTOR_SIZE_INT;
 
-                                            let edge_positions = [
+                                            let edge_positions: [IVec3; 2] = [
                                                 match corner0 {
-                                                    0 => Vec3::new(base_x, room_y + h[0] as f32 / crate::world::INT_SCALE as f32, base_z),
-                                                    1 => Vec3::new(base_x + SECTOR_SIZE, room_y + h[1] as f32 / crate::world::INT_SCALE as f32, base_z),
-                                                    2 => Vec3::new(base_x + SECTOR_SIZE, room_y + h[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
-                                                    3 => Vec3::new(base_x, room_y + h[3] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
+                                                    0 => IVec3::new(base_x, room.position.y + h[0], base_z),
+                                                    1 => IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + h[1], base_z),
+                                                    2 => IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + h[2], base_z + SECTOR_SIZE_INT),
+                                                    3 => IVec3::new(base_x, room.position.y + h[3], base_z + SECTOR_SIZE_INT),
                                                     _ => unreachable!(),
                                                 },
                                                 match corner1 {
-                                                    0 => Vec3::new(base_x, room_y + h[0] as f32 / crate::world::INT_SCALE as f32, base_z),
-                                                    1 => Vec3::new(base_x + SECTOR_SIZE, room_y + h[1] as f32 / crate::world::INT_SCALE as f32, base_z),
-                                                    2 => Vec3::new(base_x + SECTOR_SIZE, room_y + h[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
-                                                    3 => Vec3::new(base_x, room_y + h[3] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
+                                                    0 => IVec3::new(base_x, room.position.y + h[0], base_z),
+                                                    1 => IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + h[1], base_z),
+                                                    2 => IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + h[2], base_z + SECTOR_SIZE_INT),
+                                                    3 => IVec3::new(base_x, room.position.y + h[3], base_z + SECTOR_SIZE_INT),
                                                     _ => unreachable!(),
                                                 },
                                             ];
 
-                                            const EPSILON: f32 = 0.1;
                                             let all_room_vertices = collect_all_room_vertices(state);
                                             for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
                                                 for ep in &edge_positions {
-                                                    if (pos.x - ep.x).abs() < EPSILON &&
-                                                       (pos.y - ep.y).abs() < EPSILON &&
-                                                       (pos.z - ep.z).abs() < EPSILON {
+                                                    // Exact match for integer coordinates
+                                                    if pos.x == ep.x && pos.y == ep.y && pos.z == ep.z {
                                                         let key = (*ri, *vgx, *vgz, *vface, *ci);
                                                         if !state.dragging_sector_vertices.contains(&key) {
                                                             state.dragging_sector_vertices.push(key);
                                                             // Store room-relative height (pos.y is world-space)
-                                                            let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.to_render_f32().y).unwrap_or(0.0);
-                                                            state.drag_initial_heights.push(((pos.y - linked_room_y) * crate::world::INT_SCALE as f32).round() as i32);
+                                                            let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.y).unwrap_or(0);
+                                                            state.drag_initial_heights.push(pos.y - linked_room_y);
                                                         }
                                                     }
                                                 }
@@ -1422,51 +1414,48 @@ pub fn draw_viewport_3d(
 
                                             // If linking, find coincident vertices for wall edges across ALL rooms
                                             if state.link_coincident_vertices {
-                                                let base_x = room.position.to_render_f32().x + (*gx as f32) * SECTOR_SIZE;
-                                                let base_z = room.position.to_render_f32().z + (*gz as f32) * SECTOR_SIZE;
-                                                let room_y = room.position.to_render_f32().y;
+                                                let base_x = room.position.x + (*gx as i32) * SECTOR_SIZE_INT;
+                                                let base_z = room.position.z + (*gz as i32) * SECTOR_SIZE_INT;
 
-                                                // Wall corner positions depend on wall direction
+                                                // Wall corner positions depend on wall direction (integer)
                                                 // Walls: [0]=bottom-left, [1]=bottom-right, [2]=top-right, [3]=top-left
                                                 let (x0, z0, x1, z1) = match wall_face {
-                                                    SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
-                                                    SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
-                                                    SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE),
-                                                    SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE, base_x, base_z),
-                                                    SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
-                                                    SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
+                                                    SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE_INT, base_z),
+                                                    SectorFace::WallEast(_) => (base_x + SECTOR_SIZE_INT, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT),
+                                                    SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT, base_x, base_z + SECTOR_SIZE_INT),
+                                                    SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE_INT, base_x, base_z),
+                                                    SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT),
+                                                    SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE_INT, base_z, base_x, base_z + SECTOR_SIZE_INT),
                                                     _ => (base_x, base_z, base_x, base_z),
                                                 };
 
-                                                let edge_positions = [
+                                                let edge_positions: [IVec3; 2] = [
                                                     match corner0 {
-                                                        0 => Vec3::new(x0, room_y + h[0] as f32 / crate::world::INT_SCALE as f32, z0), // bottom-left
-                                                        1 => Vec3::new(x1, room_y + h[1] as f32 / crate::world::INT_SCALE as f32, z1), // bottom-right
-                                                        2 => Vec3::new(x1, room_y + h[2] as f32 / crate::world::INT_SCALE as f32, z1), // top-right
-                                                        3 => Vec3::new(x0, room_y + h[3] as f32 / crate::world::INT_SCALE as f32, z0), // top-left
+                                                        0 => IVec3::new(x0, room.position.y + h[0], z0), // bottom-left
+                                                        1 => IVec3::new(x1, room.position.y + h[1], z1), // bottom-right
+                                                        2 => IVec3::new(x1, room.position.y + h[2], z1), // top-right
+                                                        3 => IVec3::new(x0, room.position.y + h[3], z0), // top-left
                                                         _ => unreachable!(),
                                                     },
                                                     match corner1 {
-                                                        0 => Vec3::new(x0, room_y + h[0] as f32 / crate::world::INT_SCALE as f32, z0),
-                                                        1 => Vec3::new(x1, room_y + h[1] as f32 / crate::world::INT_SCALE as f32, z1),
-                                                        2 => Vec3::new(x1, room_y + h[2] as f32 / crate::world::INT_SCALE as f32, z1),
-                                                        3 => Vec3::new(x0, room_y + h[3] as f32 / crate::world::INT_SCALE as f32, z0),
+                                                        0 => IVec3::new(x0, room.position.y + h[0], z0),
+                                                        1 => IVec3::new(x1, room.position.y + h[1], z1),
+                                                        2 => IVec3::new(x1, room.position.y + h[2], z1),
+                                                        3 => IVec3::new(x0, room.position.y + h[3], z0),
                                                         _ => unreachable!(),
                                                     },
                                                 ];
 
-                                                const EPSILON: f32 = 0.1;
                                                 let all_room_vertices = collect_all_room_vertices(state);
                                                 for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
                                                     for ep in &edge_positions {
-                                                        if (pos.x - ep.x).abs() < EPSILON &&
-                                                           (pos.y - ep.y).abs() < EPSILON &&
-                                                           (pos.z - ep.z).abs() < EPSILON {
+                                                        // Exact match for integer coordinates
+                                                        if pos.x == ep.x && pos.y == ep.y && pos.z == ep.z {
                                                             let key = (*ri, *vgx, *vgz, *vface, *ci);
                                                             if !state.dragging_sector_vertices.contains(&key) {
                                                                 state.dragging_sector_vertices.push(key);
-                                                                let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.to_render_f32().y).unwrap_or(0.0);
-                                                                state.drag_initial_heights.push(((pos.y - linked_room_y) * crate::world::INT_SCALE as f32).round() as i32);
+                                                                let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.y).unwrap_or(0);
+                                                                state.drag_initial_heights.push(pos.y - linked_room_y);
                                                             }
                                                         }
                                                     }
@@ -1787,29 +1776,25 @@ pub fn draw_viewport_3d(
 
                                     // If linking, find coincident vertices across ALL rooms
                                     if state.link_coincident_vertices {
-                                        let base_x = room.position.to_render_f32().x + (*gx as f32) * SECTOR_SIZE;
-                                        let base_z = room.position.to_render_f32().z + (*gz as f32) * SECTOR_SIZE;
-                                        let room_y = room.position.to_render_f32().y; // Y offset for world-space
-                                        let face_positions = [
-                                            Vec3::new(base_x, room_y + h[0] as f32 / crate::world::INT_SCALE as f32, base_z),
-                                            Vec3::new(base_x + SECTOR_SIZE, room_y + h[1] as f32 / crate::world::INT_SCALE as f32, base_z),
-                                            Vec3::new(base_x + SECTOR_SIZE, room_y + h[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
-                                            Vec3::new(base_x, room_y + h[3] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
+                                        let base_x = room.position.x + (*gx as i32) * SECTOR_SIZE_INT;
+                                        let base_z = room.position.z + (*gz as i32) * SECTOR_SIZE_INT;
+                                        let face_positions: [IVec3; 4] = [
+                                            IVec3::new(base_x, room.position.y + h[0], base_z),
+                                            IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + h[1], base_z),
+                                            IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + h[2], base_z + SECTOR_SIZE_INT),
+                                            IVec3::new(base_x, room.position.y + h[3], base_z + SECTOR_SIZE_INT),
                                         ];
 
-                                        const EPSILON: f32 = 0.1;
                                         let all_room_vertices = collect_all_room_vertices(state);
                                         for (pos, ri, vgx, vgz, ci, vface) in &all_room_vertices {
                                             for fp in &face_positions {
-                                                if (pos.x - fp.x).abs() < EPSILON &&
-                                                   (pos.y - fp.y).abs() < EPSILON &&
-                                                   (pos.z - fp.z).abs() < EPSILON {
+                                                if pos.x == fp.x && pos.y == fp.y && pos.z == fp.z {
                                                     let key = (*ri, *vgx, *vgz, *vface, *ci);
                                                     if !state.dragging_sector_vertices.contains(&key) {
                                                         state.dragging_sector_vertices.push(key);
                                                         // Store room-relative height (pos.y is world-space)
-                                                        let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.to_render_f32().y).unwrap_or(0.0);
-                                                        state.drag_initial_heights.push(((pos.y - linked_room_y) * crate::world::INT_SCALE as f32).round() as i32);
+                                                        let linked_room_y = state.level.rooms.get(*ri).map(|r| r.position.y).unwrap_or(0);
+                                                        state.drag_initial_heights.push(pos.y - linked_room_y);
                                                     }
                                                 }
                                             }
@@ -1898,12 +1883,12 @@ pub fn draw_viewport_3d(
             // Drawing modes - start drag for floor/ceiling placement
             else if state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling {
                 if let Some((snapped_x, snapped_z, _target_y, _occupied)) = preview_sector {
-                    // Convert world coords to grid coords for drag start
+                    // Convert integer world coords to grid coords for drag start
                     if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let local_x = snapped_x - room.position.to_render_f32().x;
-                        let local_z = snapped_z - room.position.to_render_f32().z;
-                        let gx = (local_x / SECTOR_SIZE).floor() as i32;
-                        let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                        let local_x = snapped_x - room.position.x;
+                        let local_z = snapped_z - room.position.z;
+                        let gx = local_x / SECTOR_SIZE_INT;
+                        let gz = local_z / SECTOR_SIZE_INT;
                         state.placement_drag_start = Some((gx, gz));
                         state.placement_drag_current = Some((gx, gz));
                     }
@@ -1914,19 +1899,19 @@ pub fn draw_viewport_3d(
                 if let Some((grid_x, grid_z, dir, _corner_heights, wall_state, _mouse_y)) = preview_wall {
                     // Only start drag if not fully covered
                     if wall_state != 2 {
-                        // Convert world coords to grid coords
+                        // Convert world coords to grid coords (integer math)
                         if let Some(room) = state.level.rooms.get(state.current_room) {
-                            let local_x = grid_x - room.position.to_render_f32().x;
-                            let local_z = grid_z - room.position.to_render_f32().z;
-                            let gx = (local_x / SECTOR_SIZE).floor() as i32;
-                            let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                            let local_x = grid_x - room.position.x;
+                            let local_z = grid_z - room.position.z;
+                            let gx = local_x / SECTOR_SIZE_INT;
+                            let gz = local_z / SECTOR_SIZE_INT;
                             state.wall_drag_start = Some((gx, gz, dir));
                             state.wall_drag_current = Some((gx, gz, dir));
-                            // Use wall_prefer_high to select gap (same as preview, integer world units)
+                            // Use wall_prefer_high to select gap (integer world units)
                             let gap_y = if state.wall_prefer_high {
-                                Some(((super::CEILING_HEIGHT - 1.0) * crate::world::INT_SCALE as f32) as i32)  // Near ceiling
+                                Some(super::CEILING_HEIGHT_INT - crate::world::INT_SCALE)  // Near ceiling
                             } else {
-                                Some((1.0 * crate::world::INT_SCALE as f32) as i32)  // Near floor
+                                Some(crate::world::INT_SCALE)  // Near floor
                             };
                             state.wall_drag_mouse_y = gap_y;
                         }
@@ -1938,20 +1923,20 @@ pub fn draw_viewport_3d(
             // DrawWall mode with diagonal direction - start drag for diagonal wall placement
             else if state.tool == EditorTool::DrawWall && state.wall_direction.is_diagonal() {
                 if let Some((grid_x, grid_z, _is_nwse, _corner_heights)) = preview_diagonal_wall {
-                    // Convert world coords to grid coords
+                    // Convert world coords to grid coords (integer math)
                     if let Some(room) = state.level.rooms.get(state.current_room) {
-                        let local_x = grid_x - room.position.to_render_f32().x;
-                        let local_z = grid_z - room.position.to_render_f32().z;
-                        let gx = (local_x / SECTOR_SIZE).floor() as i32;
-                        let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                        let local_x = grid_x - room.position.x;
+                        let local_z = grid_z - room.position.z;
+                        let gx = local_x / SECTOR_SIZE_INT;
+                        let gz = local_z / SECTOR_SIZE_INT;
                         // Use wall_direction which already has the diagonal type
                         state.wall_drag_start = Some((gx, gz, state.wall_direction));
                         state.wall_drag_current = Some((gx, gz, state.wall_direction));
-                        // Use wall_prefer_high to select gap (same as axis-aligned walls, integer world units)
+                        // Use wall_prefer_high to select gap (integer world units)
                         let gap_y = if state.wall_prefer_high {
-                            Some(((super::CEILING_HEIGHT - 1.0) * crate::world::INT_SCALE as f32) as i32)  // Near ceiling
+                            Some(super::CEILING_HEIGHT_INT - crate::world::INT_SCALE)  // Near ceiling
                         } else {
-                            Some((1.0 * crate::world::INT_SCALE as f32) as i32)  // Near floor
+                            Some(crate::world::INT_SCALE)  // Near floor
                         };
                         state.wall_drag_mouse_y = gap_y;
                     }
@@ -2124,10 +2109,10 @@ pub fn draw_viewport_3d(
         if ctx.mouse.left_down && state.placement_drag_start.is_some() {
             if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
                 if let Some(room) = state.level.rooms.get(state.current_room) {
-                    let local_x = snapped_x - room.position.to_render_f32().x;
-                    let local_z = snapped_z - room.position.to_render_f32().z;
-                    let gx = (local_x / SECTOR_SIZE).floor() as i32;
-                    let gz = (local_z / SECTOR_SIZE).floor() as i32;
+                    let local_x = snapped_x - room.position.x;
+                    let local_z = snapped_z - room.position.z;
+                    let gx = local_x / SECTOR_SIZE_INT;
+                    let gz = local_z / SECTOR_SIZE_INT;
                     state.placement_drag_current = Some((gx, gz));
                 }
             }
@@ -2138,18 +2123,18 @@ pub fn draw_viewport_3d(
         if ctx.mouse.left_down {
             if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
                 if !start_dir.is_diagonal() {
-                    // Get mouse grid position from preview_wall or preview_sector
+                    // Get mouse grid position from preview_wall or preview_sector (integer world coords)
                     let mouse_grid_pos = if let Some((grid_x, grid_z, _, _, _, _)) = preview_wall {
                         if let Some(room) = state.level.rooms.get(state.current_room) {
-                            let local_x = grid_x - room.position.to_render_f32().x;
-                            let local_z = grid_z - room.position.to_render_f32().z;
-                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                            let local_x = grid_x - room.position.x;
+                            let local_z = grid_z - room.position.z;
+                            Some((local_x / SECTOR_SIZE_INT, local_z / SECTOR_SIZE_INT))
                         } else { None }
                     } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
                         if let Some(room) = state.level.rooms.get(state.current_room) {
-                            let local_x = snapped_x - room.position.to_render_f32().x;
-                            let local_z = snapped_z - room.position.to_render_f32().z;
-                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                            let local_x = snapped_x - room.position.x;
+                            let local_z = snapped_z - room.position.z;
+                            Some((local_x / SECTOR_SIZE_INT, local_z / SECTOR_SIZE_INT))
                         } else { None }
                     } else { None };
 
@@ -2173,18 +2158,18 @@ pub fn draw_viewport_3d(
         if ctx.mouse.left_down {
             if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
                 if start_dir.is_diagonal() {
-                    // Get mouse grid position from preview_diagonal_wall or preview_sector
+                    // Get mouse grid position from preview_diagonal_wall or preview_sector (integer world coords)
                     let mouse_grid_pos = if let Some((grid_x, grid_z, _, _)) = preview_diagonal_wall {
                         if let Some(room) = state.level.rooms.get(state.current_room) {
-                            let local_x = grid_x - room.position.to_render_f32().x;
-                            let local_z = grid_z - room.position.to_render_f32().z;
-                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                            let local_x = grid_x - room.position.x;
+                            let local_z = grid_z - room.position.z;
+                            Some((local_x / SECTOR_SIZE_INT, local_z / SECTOR_SIZE_INT))
                         } else { None }
                     } else if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
                         if let Some(room) = state.level.rooms.get(state.current_room) {
-                            let local_x = snapped_x - room.position.to_render_f32().x;
-                            let local_z = snapped_z - room.position.to_render_f32().z;
-                            Some(((local_x / SECTOR_SIZE).floor() as i32, (local_z / SECTOR_SIZE).floor() as i32))
+                            let local_x = snapped_x - room.position.x;
+                            let local_z = snapped_z - room.position.z;
+                            Some((local_x / SECTOR_SIZE_INT, local_z / SECTOR_SIZE_INT))
                         } else { None }
                     } else { None };
 
@@ -2466,7 +2451,7 @@ pub fn draw_viewport_3d(
                                 };
 
                                 // Vector from wall to camera (XZ plane only)
-                                let cam_pos = state.camera_3d.position;
+                                let cam_pos = state.camera_3d.position_f32();
                                 let to_camera = macroquad::math::Vec3::new(
                                     cam_pos.x - wall_center.x,
                                     0.0,
@@ -2612,7 +2597,7 @@ pub fn draw_viewport_3d(
                                     };
 
                                     // Vector from wall to camera (XZ plane only)
-                                    let cam_pos = state.camera_3d.position;
+                                    let cam_pos = state.camera_3d.position_f32();
                                     let to_camera = macroquad::math::Vec3::new(
                                         cam_pos.x - wall_center.x,
                                         0.0,
@@ -3247,19 +3232,23 @@ pub fn draw_viewport_3d(
 
     // Draw hovering floor grid centered on hovered tile when in floor placement mode
     // (Drawn after mesh so it renders on top)
-    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+    if let Some((snapped_x_int, snapped_z_int, _, _)) = preview_sector {
         if state.tool == EditorTool::DrawFloor {
             let inner_color = RasterColor::new(80, 180, 160); // Teal (bright)
             let outer_color = RasterColor::new(40, 90, 80);   // Teal (dim)
 
+            // Convert integer world coords to float for rendering
+            let sector_x = snapped_x_int as f32 / crate::world::INT_SCALE as f32;
+            let sector_z = snapped_z_int as f32 / crate::world::INT_SCALE as f32;
+
             // Get room Y offset for correct world-space positioning
             let grid_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.to_render_f32().y)
+                .map(|r| r.position.y as f32 / crate::world::INT_SCALE as f32)
                 .unwrap_or(0.0);
 
-            // Center of the hovered sector (snap to grid)
-            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            // Center of the hovered sector
+            let center_x = sector_x + SECTOR_SIZE * 0.5;
+            let center_z = sector_z + SECTOR_SIZE * 0.5;
 
             let inner_half = SECTOR_SIZE * 1.5; // Inner 3x3
             let outer_half = SECTOR_SIZE * 2.5; // Outer 5x5
@@ -3295,8 +3284,6 @@ pub fn draw_viewport_3d(
             }
 
             // Draw vertex indicators at the 4 corners of the hovered sector
-            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
             let vertex_color = RasterColor::new(255, 255, 255); // White
             draw_3d_point(fb, Vec3::new(sector_x, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
             draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, grid_y, sector_z), &state.camera_3d, 3, vertex_color);
@@ -3307,21 +3294,26 @@ pub fn draw_viewport_3d(
 
     // Draw hovering ceiling grid centered on hovered tile when in ceiling placement mode
     // (Drawn after mesh so it renders on top)
-    if let Some((snapped_x, snapped_z, _, _)) = preview_sector {
+    if let Some((snapped_x_int, snapped_z_int, _, _)) = preview_sector {
         if state.tool == EditorTool::DrawCeiling {
             use super::CEILING_HEIGHT;
 
             let inner_color = RasterColor::new(140, 100, 180); // Purple (bright)
             let outer_color = RasterColor::new(70, 50, 90);    // Purple (dim)
 
+            // Convert integer world coords to float for rendering
+            let sector_x = snapped_x_int as f32 / crate::world::INT_SCALE as f32;
+            let sector_z = snapped_z_int as f32 / crate::world::INT_SCALE as f32;
+
             // Get room Y offset for correct world-space positioning
             let room_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.to_render_f32().y)
+                .map(|r| r.position.y as f32 / crate::world::INT_SCALE as f32)
                 .unwrap_or(0.0);
             let ceiling_y = room_y + CEILING_HEIGHT;
 
-            let center_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-            let center_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+            // Center of the hovered sector
+            let center_x = sector_x + SECTOR_SIZE * 0.5;
+            let center_z = sector_z + SECTOR_SIZE * 0.5;
 
             let inner_half = SECTOR_SIZE * 1.5;
             let outer_half = SECTOR_SIZE * 2.5;
@@ -3356,8 +3348,6 @@ pub fn draw_viewport_3d(
             }
 
             // Draw vertex indicators at the 4 corners of the hovered sector
-            let sector_x = (snapped_x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-            let sector_z = (snapped_z / SECTOR_SIZE).floor() * SECTOR_SIZE;
             let vertex_color = RasterColor::new(255, 255, 255); // White
             draw_3d_point(fb, Vec3::new(sector_x, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
             draw_3d_point(fb, Vec3::new(sector_x + SECTOR_SIZE, ceiling_y, sector_z), &state.camera_3d, 3, vertex_color);
@@ -3368,19 +3358,19 @@ pub fn draw_viewport_3d(
 
     // Draw subtle sector boundary highlight for wall placement
     // Only show if on the drag line (same check as wall preview)
-    if let Some((grid_x, grid_z, dir, _, _, _)) = preview_wall {
+    if let Some((grid_x_int, grid_z_int, dir, _, _, _)) = preview_wall {
         // Check if this sector is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;
             if start_dir.is_diagonal() {
                 false // Diagonal walls have separate boundary highlighting
             } else {
-                // Convert preview world coords to grid coords
+                // Convert preview integer world coords to grid coords
                 let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_x - room.position.to_render_f32().x) / SECTOR_SIZE).floor() as i32
+                    (grid_x_int - room.position.x) / SECTOR_SIZE_INT
                 } else { 0 };
                 let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_z - room.position.to_render_f32().z) / SECTOR_SIZE).floor() as i32
+                    (grid_z_int - room.position.z) / SECTOR_SIZE_INT
                 } else { 0 };
                 // Sector is on the line if direction matches AND the fixed axis matches
                 dir == start_dir && match start_dir {
@@ -3394,8 +3384,11 @@ pub fn draw_viewport_3d(
         };
 
         if on_drag_line {
+            // Convert integer world coords to float for rendering
+            let grid_x = grid_x_int as f32 / crate::world::INT_SCALE as f32;
+            let grid_z = grid_z_int as f32 / crate::world::INT_SCALE as f32;
             let room_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.to_render_f32().y)
+                .map(|r| r.position.y as f32 / crate::world::INT_SCALE as f32)
                 .unwrap_or(0.0);
 
             let floor_y = room_y;
@@ -3434,7 +3427,7 @@ pub fn draw_viewport_3d(
 
     // Draw subtle sector boundary highlight for diagonal wall placement
     // Only show if on the drag line (same check as diagonal preview)
-    if let Some((grid_x, grid_z, is_nwse, _)) = preview_diagonal_wall {
+    if let Some((grid_x_int, grid_z_int, is_nwse, _)) = preview_diagonal_wall {
         use crate::world::Direction;
         // Check if this sector is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
@@ -3442,12 +3435,12 @@ pub fn draw_viewport_3d(
                 true // Not diagonal drag, always show
             } else {
                 let start_is_nwse = start_dir == Direction::NwSe;
-                // Convert preview world coords to grid coords
+                // Convert preview integer world coords to grid coords
                 let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_x - room.position.to_render_f32().x) / SECTOR_SIZE).floor() as i32
+                    (grid_x_int - room.position.x) / SECTOR_SIZE_INT
                 } else { 0 };
                 let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_z - room.position.to_render_f32().z) / SECTOR_SIZE).floor() as i32
+                    (grid_z_int - room.position.z) / SECTOR_SIZE_INT
                 } else { 0 };
                 // Diagonal is on the line if type matches AND it's on the simple diagonal line
                 if let Some((end_gx, end_gz, _)) = state.wall_drag_current {
@@ -3478,8 +3471,11 @@ pub fn draw_viewport_3d(
         };
 
         if on_drag_line {
+            // Convert integer world coords to float for rendering
+            let grid_x = grid_x_int as f32 / crate::world::INT_SCALE as f32;
+            let grid_z = grid_z_int as f32 / crate::world::INT_SCALE as f32;
             let room_y = state.level.rooms.get(state.current_room)
-                .map(|r| r.position.to_render_f32().y)
+                .map(|r| r.position.y as f32 / crate::world::INT_SCALE as f32)
                 .unwrap_or(0.0);
 
             let floor_y = room_y;
@@ -3520,19 +3516,19 @@ pub fn draw_viewport_3d(
     // wall_state: 0 = new, 1 = filling gap, 2 = fully covered
     // corner_heights: [bottom-left, bottom-right, top-right, top-left] (room-relative)
     // Skip single wall preview if it's not on the drag line
-    if let Some((grid_x, grid_z, dir, corner_heights, wall_state, _mouse_y)) = preview_wall {
+    if let Some((grid_x_int, grid_z_int, dir, corner_heights, wall_state, _mouse_y)) = preview_wall {
         // Check if this preview is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
             use crate::world::Direction;
             if start_dir.is_diagonal() {
                 false // Diagonal walls have separate preview
             } else {
-                // Convert preview world coords to grid coords
+                // Convert preview integer world coords to grid coords
                 let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_x - room.position.to_render_f32().x) / SECTOR_SIZE).floor() as i32
+                    (grid_x_int - room.position.x) / SECTOR_SIZE_INT
                 } else { 0 };
                 let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_z - room.position.to_render_f32().z) / SECTOR_SIZE).floor() as i32
+                    (grid_z_int - room.position.z) / SECTOR_SIZE_INT
                 } else { 0 };
                 // Wall is on the line if direction matches AND the fixed axis matches
                 dir == start_dir && match start_dir {
@@ -3547,9 +3543,11 @@ pub fn draw_viewport_3d(
         if on_drag_line {
         use crate::world::Direction;
 
-        // Get room Y offset for world-space rendering
+        // Convert integer world coords to float for rendering
+        let grid_x = grid_x_int as f32 / crate::world::INT_SCALE as f32;
+        let grid_z = grid_z_int as f32 / crate::world::INT_SCALE as f32;
         let room_y = state.level.rooms.get(state.current_room)
-            .map(|r| r.position.to_render_f32().y)
+            .map(|r| r.position.y as f32 / crate::world::INT_SCALE as f32)
             .unwrap_or(0.0);
 
         // For fully covered edges, show an X at edge center (no rectangle)
@@ -3649,7 +3647,7 @@ pub fn draw_viewport_3d(
 
     // Draw diagonal wall preview when in DrawWall mode with diagonal direction
     // Skip single diagonal preview if it's not on the drag line
-    if let Some((grid_x, grid_z, is_nwse, corner_heights)) = preview_diagonal_wall {
+    if let Some((grid_x_int, grid_z_int, is_nwse, corner_heights)) = preview_diagonal_wall {
         use crate::world::Direction;
         // Check if this preview is on the drag line (if dragging)
         let on_drag_line = if let Some((start_gx, start_gz, start_dir)) = state.wall_drag_start {
@@ -3657,12 +3655,12 @@ pub fn draw_viewport_3d(
                 true // Not diagonal drag, always show
             } else {
                 let start_is_nwse = start_dir == Direction::NwSe;
-                // Convert preview world coords to grid coords
+                // Convert preview integer world coords to grid coords
                 let preview_gx = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_x - room.position.to_render_f32().x) / SECTOR_SIZE).floor() as i32
+                    (grid_x_int - room.position.x) / SECTOR_SIZE_INT
                 } else { 0 };
                 let preview_gz = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    ((grid_z - room.position.to_render_f32().z) / SECTOR_SIZE).floor() as i32
+                    (grid_z_int - room.position.z) / SECTOR_SIZE_INT
                 } else { 0 };
                 // Diagonal is on the line if type matches AND it's on the simple diagonal line
                 if let Some((end_gx, end_gz, _)) = state.wall_drag_current {
@@ -3693,9 +3691,11 @@ pub fn draw_viewport_3d(
             true // Not dragging, always show preview
         };
         if on_drag_line {
-        // Get room Y offset for world-space rendering
+        // Convert integer world coords to float for rendering
+        let grid_x = grid_x_int as f32 / crate::world::INT_SCALE as f32;
+        let grid_z = grid_z_int as f32 / crate::world::INT_SCALE as f32;
         let room_y = state.level.rooms.get(state.current_room)
-            .map(|r| r.position.to_render_f32().y)
+            .map(|r| r.position.y as f32 / crate::world::INT_SCALE as f32)
             .unwrap_or(0.0);
 
         // Diagonal wall corners
@@ -3761,34 +3761,32 @@ pub fn draw_viewport_3d(
                 RasterColor::new(60, 60, 80) // Dim gray for other rooms
             };
 
-            // Room grid extents in world space (convert to float for rendering)
-            let room_pos = room.position.to_render_f32();
-            let min_x = room_pos.x;
-            let min_z = room_pos.z;
-            let max_x = room_pos.x + (room.width as f32) * SECTOR_SIZE;
-            let max_z = room_pos.z + (room.depth as f32) * SECTOR_SIZE;
+            // Room grid extents in world space (integer coordinates)
+            let min_x = room.position.x;
+            let min_z = room.position.z;
+            let max_x = room.position.x + (room.width as i32) * SECTOR_SIZE_INT;
+            let max_z = room.position.z + (room.depth as i32) * SECTOR_SIZE_INT;
 
             // Use Y range from room's actual geometry bounds
             // bounds are room-relative, so add room.position.y
-            let bounds = room.bounds.to_aabb();
-            let min_y = room_pos.y + bounds.min.y;
-            let max_y = room_pos.y + bounds.max.y;
+            let min_y = room.position.y + room.bounds.min.y;
+            let max_y = room.position.y + room.bounds.max.y;
 
             // Skip rooms with no geometry (empty bounds)
             if min_y > max_y || min_x > max_x || min_z > max_z {
                 continue;
             }
 
-            // 8 corners of the room bounding box
+            // 8 corners of the room bounding box (IVec3)
             let corners = [
-                Vec3::new(min_x, min_y, min_z), // 0: front-bottom-left
-                Vec3::new(max_x, min_y, min_z), // 1: front-bottom-right
-                Vec3::new(max_x, min_y, max_z), // 2: back-bottom-right
-                Vec3::new(min_x, min_y, max_z), // 3: back-bottom-left
-                Vec3::new(min_x, max_y, min_z), // 4: front-top-left
-                Vec3::new(max_x, max_y, min_z), // 5: front-top-right
-                Vec3::new(max_x, max_y, max_z), // 6: back-top-right
-                Vec3::new(min_x, max_y, max_z), // 7: back-top-left
+                IVec3::new(min_x, min_y, min_z), // 0: front-bottom-left
+                IVec3::new(max_x, min_y, min_z), // 1: front-bottom-right
+                IVec3::new(max_x, min_y, max_z), // 2: back-bottom-right
+                IVec3::new(min_x, min_y, max_z), // 3: back-bottom-left
+                IVec3::new(min_x, max_y, min_z), // 4: front-top-left
+                IVec3::new(max_x, max_y, min_z), // 5: front-top-right
+                IVec3::new(max_x, max_y, max_z), // 6: back-top-right
+                IVec3::new(min_x, max_y, max_z), // 7: back-top-left
             ];
 
             // Project corners to screen with depth for z-tested line drawing
@@ -3829,13 +3827,12 @@ pub fn draw_viewport_3d(
                     RasterColor::new(100, 255, 255) // Cyan for wall portals
                 };
 
-                // Portal vertices are room-relative IVec3, convert to world space floats
-                let room_pos = room.position.to_render_f32();
-                let world_verts: [Vec3; 4] = [
-                    portal.vertices[0].to_render_f32() + room_pos,
-                    portal.vertices[1].to_render_f32() + room_pos,
-                    portal.vertices[2].to_render_f32() + room_pos,
-                    portal.vertices[3].to_render_f32() + room_pos,
+                // Portal vertices are room-relative IVec3, add room position for world space
+                let world_verts: [IVec3; 4] = [
+                    portal.vertices[0] + room.position,
+                    portal.vertices[1] + room.position,
+                    portal.vertices[2] + room.position,
+                    portal.vertices[3] + room.position,
                 ];
 
                 // Project to screen
@@ -3860,11 +3857,11 @@ pub fn draw_viewport_3d(
     // Draw LevelObject gizmos (spawns, object-based lights, triggers, etc.)
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         for (obj_idx, obj) in room.objects.iter().enumerate() {
-            let world_pos = obj.world_position(room).to_render_f32();
+            let world_pos_int = obj.world_position(room);
 
             // Project to screen
             if let Some((fb_x, fb_y)) = world_to_screen(
-                world_pos,
+                world_pos_int,
                 state.camera_3d.position,
                 state.camera_3d.basis_x,
                 state.camera_3d.basis_y,
@@ -3872,6 +3869,8 @@ pub fn draw_viewport_3d(
                 fb.width,
                 fb.height,
             ) {
+                // Convert to float for helper draw functions
+                let world_pos = world_pos_int.to_render_f32();
                 use crate::world::{ObjectType, SpawnPointType};
 
                 // Check if this object is selected
@@ -4007,38 +4006,36 @@ pub fn draw_viewport_3d(
     }
 
     // Draw selected edges (primary and multi-selection)
-    // Helper closure to draw an edge
+    // Helper closure to draw an edge (integer coordinates)
     let draw_edge_highlight = |fb: &mut Framebuffer, state: &EditorState, room_idx: usize, gx: usize, gz: usize, face_idx: usize, edge_idx: usize, wall_face_opt: &Option<SectorFace>, color: RasterColor| {
         if let Some(room) = state.level.rooms.get(room_idx) {
             if let Some(sector) = room.get_sector(gx, gz) {
-                let base_x = room.position.to_render_f32().x + (gx as f32) * SECTOR_SIZE;
-                let base_z = room.position.to_render_f32().z + (gz as f32) * SECTOR_SIZE;
-                let room_y = room.position.to_render_f32().y;
+                let base_x = room.position.x + (gx as i32) * SECTOR_SIZE_INT;
+                let base_z = room.position.z + (gz as i32) * SECTOR_SIZE_INT;
 
-                let scale = crate::world::INT_SCALE as f32;
-                let corners: Option<[Vec3; 4]> = match face_idx {
+                let corners: Option<[IVec3; 4]> = match face_idx {
                     0 => sector.floor.as_ref().map(|f| [
-                        Vec3::new(base_x, room_y + f.heights[0] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + f.heights[1] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + f.heights[2] as f32 / scale, base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + f.heights[3] as f32 / scale, base_z + SECTOR_SIZE),
+                        IVec3::new(base_x, room.position.y + f.heights[0], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + f.heights[1], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + f.heights[2], base_z + SECTOR_SIZE_INT),
+                        IVec3::new(base_x, room.position.y + f.heights[3], base_z + SECTOR_SIZE_INT),
                     ]),
                     1 => sector.ceiling.as_ref().map(|c| [
-                        Vec3::new(base_x, room_y + c.heights[0] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + c.heights[1] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + c.heights[2] as f32 / scale, base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + c.heights[3] as f32 / scale, base_z + SECTOR_SIZE),
+                        IVec3::new(base_x, room.position.y + c.heights[0], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + c.heights[1], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + c.heights[2], base_z + SECTOR_SIZE_INT),
+                        IVec3::new(base_x, room.position.y + c.heights[3], base_z + SECTOR_SIZE_INT),
                     ]),
                     2 => {
                         if let Some(wf) = wall_face_opt {
                             let (x0, z0, x1, z1) = match wf {
-                                SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
-                                SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
-                                SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE),
-                                SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE, base_x, base_z),
-                                SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
-                                SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
-                                _ => (0.0, 0.0, 0.0, 0.0),
+                                SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE_INT, base_z),
+                                SectorFace::WallEast(_) => (base_x + SECTOR_SIZE_INT, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT),
+                                SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT, base_x, base_z + SECTOR_SIZE_INT),
+                                SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE_INT, base_x, base_z),
+                                SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT),
+                                SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE_INT, base_z, base_x, base_z + SECTOR_SIZE_INT),
+                                _ => (0, 0, 0, 0),
                             };
                             let wall_heights = match wf {
                                 SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.heights),
@@ -4050,10 +4047,10 @@ pub fn draw_viewport_3d(
                                 _ => None,
                             };
                             wall_heights.map(|h| [
-                                Vec3::new(x0, room_y + h[0] as f32 / crate::world::INT_SCALE as f32, z0),
-                                Vec3::new(x1, room_y + h[1] as f32 / crate::world::INT_SCALE as f32, z1),
-                                Vec3::new(x1, room_y + h[2] as f32 / crate::world::INT_SCALE as f32, z1),
-                                Vec3::new(x0, room_y + h[3] as f32 / crate::world::INT_SCALE as f32, z0),
+                                IVec3::new(x0, room.position.y + h[0], z0),
+                                IVec3::new(x1, room.position.y + h[1], z1),
+                                IVec3::new(x1, room.position.y + h[2], z1),
+                                IVec3::new(x0, room.position.y + h[3], z0),
                             ])
                         } else {
                             None
@@ -4093,43 +4090,40 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Draw hovered edge highlight directly into framebuffer
+    // Draw hovered edge highlight directly into framebuffer (integer coordinates)
     if let Some((room_idx, gx, gz, face_idx, edge_idx, wall_face_opt, _)) = hovered_edge {
         if let Some(room) = state.level.rooms.get(room_idx) {
             if let Some(sector) = room.get_sector(gx, gz) {
-                let base_x = room.position.to_render_f32().x + (gx as f32) * SECTOR_SIZE;
-                let base_z = room.position.to_render_f32().z + (gz as f32) * SECTOR_SIZE;
+                let base_x = room.position.x + (gx as i32) * SECTOR_SIZE_INT;
+                let base_z = room.position.z + (gz as i32) * SECTOR_SIZE_INT;
 
                 let edge_color = RasterColor::new(255, 200, 100); // Orange for edge hover
 
-                let room_y = room.position.to_render_f32().y; // Y offset for world-space
-
-                // Get edge vertices based on face_idx
-                let scale = crate::world::INT_SCALE as f32;
-                let corners: Option<[Vec3; 4]> = match face_idx {
+                // Get edge vertices based on face_idx (integer coordinates)
+                let corners: Option<[IVec3; 4]> = match face_idx {
                     0 => sector.floor.as_ref().map(|f| [
-                        Vec3::new(base_x, room_y + f.heights[0] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + f.heights[1] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + f.heights[2] as f32 / scale, base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + f.heights[3] as f32 / scale, base_z + SECTOR_SIZE),
+                        IVec3::new(base_x, room.position.y + f.heights[0], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + f.heights[1], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + f.heights[2], base_z + SECTOR_SIZE_INT),
+                        IVec3::new(base_x, room.position.y + f.heights[3], base_z + SECTOR_SIZE_INT),
                     ]),
                     1 => sector.ceiling.as_ref().map(|c| [
-                        Vec3::new(base_x, room_y + c.heights[0] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + c.heights[1] as f32 / scale, base_z),
-                        Vec3::new(base_x + SECTOR_SIZE, room_y + c.heights[2] as f32 / scale, base_z + SECTOR_SIZE),
-                        Vec3::new(base_x, room_y + c.heights[3] as f32 / scale, base_z + SECTOR_SIZE),
+                        IVec3::new(base_x, room.position.y + c.heights[0], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + c.heights[1], base_z),
+                        IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + c.heights[2], base_z + SECTOR_SIZE_INT),
+                        IVec3::new(base_x, room.position.y + c.heights[3], base_z + SECTOR_SIZE_INT),
                     ]),
                     2 => {
                         // Wall edge - get corners from the specific wall
                         if let Some(wf) = &wall_face_opt {
                             let (x0, z0, x1, z1) = match wf {
-                                SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z),
-                                SectorFace::WallEast(_) => (base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
-                                SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE),
-                                SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE, base_x, base_z),
-                                SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE),
-                                SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE, base_z, base_x, base_z + SECTOR_SIZE),
-                                _ => (0.0, 0.0, 0.0, 0.0),
+                                SectorFace::WallNorth(_) => (base_x, base_z, base_x + SECTOR_SIZE_INT, base_z),
+                                SectorFace::WallEast(_) => (base_x + SECTOR_SIZE_INT, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT),
+                                SectorFace::WallSouth(_) => (base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT, base_x, base_z + SECTOR_SIZE_INT),
+                                SectorFace::WallWest(_) => (base_x, base_z + SECTOR_SIZE_INT, base_x, base_z),
+                                SectorFace::WallNwSe(_) => (base_x, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT),
+                                SectorFace::WallNeSw(_) => (base_x + SECTOR_SIZE_INT, base_z, base_x, base_z + SECTOR_SIZE_INT),
+                                _ => (0, 0, 0, 0),
                             };
                             let wall_heights = match wf {
                                 SectorFace::WallNorth(i) => sector.walls_north.get(*i).map(|w| w.heights),
@@ -4141,10 +4135,10 @@ pub fn draw_viewport_3d(
                                 _ => None,
                             };
                             wall_heights.map(|h| [
-                                Vec3::new(x0, room_y + h[0] as f32 / crate::world::INT_SCALE as f32, z0),
-                                Vec3::new(x1, room_y + h[1] as f32 / crate::world::INT_SCALE as f32, z1),
-                                Vec3::new(x1, room_y + h[2] as f32 / crate::world::INT_SCALE as f32, z1),
-                                Vec3::new(x0, room_y + h[3] as f32 / crate::world::INT_SCALE as f32, z0),
+                                IVec3::new(x0, room.position.y + h[0], z0),
+                                IVec3::new(x1, room.position.y + h[1], z1),
+                                IVec3::new(x1, room.position.y + h[2], z1),
+                                IVec3::new(x0, room.position.y + h[3], z0),
                             ])
                         } else {
                             None
@@ -5113,38 +5107,38 @@ pub fn draw_viewport_3d(
     }
 
     // Draw floor/ceiling placement preview wireframe with vertical sector boundaries
-    if let Some((snapped_x, snapped_z, target_y, occupied)) = preview_sector {
-        use super::CEILING_HEIGHT;
+    if let Some((snapped_x_int, snapped_z_int, target_y_int, occupied)) = preview_sector {
+        use super::CEILING_HEIGHT_INT;
 
-        // Get room Y offset for correct world-space positioning
-        let room_y = state.level.rooms.get(state.current_room)
-            .map(|r| r.position.to_render_f32().y)
-            .unwrap_or(0.0);
+        // Get room Y offset for correct world-space positioning (integer)
+        let room_y_int = state.level.rooms.get(state.current_room)
+            .map(|r| r.position.y)
+            .unwrap_or(0);
 
-        let floor_y = room_y;
-        let ceiling_y = room_y + CEILING_HEIGHT;
+        let floor_y_int = room_y_int;
+        let ceiling_y_int = room_y_int + CEILING_HEIGHT_INT;
 
         // target_y is room-relative, add room_y for world-space position
-        let world_target_y = room_y + target_y;
-        let corners = [
-            Vec3::new(snapped_x, world_target_y, snapped_z),
-            Vec3::new(snapped_x, world_target_y, snapped_z + SECTOR_SIZE),
-            Vec3::new(snapped_x + SECTOR_SIZE, world_target_y, snapped_z + SECTOR_SIZE),
-            Vec3::new(snapped_x + SECTOR_SIZE, world_target_y, snapped_z),
+        let world_target_y_int = room_y_int + target_y_int;
+        let corners: [IVec3; 4] = [
+            IVec3::new(snapped_x_int, world_target_y_int, snapped_z_int),
+            IVec3::new(snapped_x_int, world_target_y_int, snapped_z_int + SECTOR_SIZE_INT),
+            IVec3::new(snapped_x_int + SECTOR_SIZE_INT, world_target_y_int, snapped_z_int + SECTOR_SIZE_INT),
+            IVec3::new(snapped_x_int + SECTOR_SIZE_INT, world_target_y_int, snapped_z_int),
         ];
 
-        let floor_corners = [
-            Vec3::new(snapped_x, floor_y, snapped_z),
-            Vec3::new(snapped_x, floor_y, snapped_z + SECTOR_SIZE),
-            Vec3::new(snapped_x + SECTOR_SIZE, floor_y, snapped_z + SECTOR_SIZE),
-            Vec3::new(snapped_x + SECTOR_SIZE, floor_y, snapped_z),
+        let floor_corners: [IVec3; 4] = [
+            IVec3::new(snapped_x_int, floor_y_int, snapped_z_int),
+            IVec3::new(snapped_x_int, floor_y_int, snapped_z_int + SECTOR_SIZE_INT),
+            IVec3::new(snapped_x_int + SECTOR_SIZE_INT, floor_y_int, snapped_z_int + SECTOR_SIZE_INT),
+            IVec3::new(snapped_x_int + SECTOR_SIZE_INT, floor_y_int, snapped_z_int),
         ];
 
-        let ceiling_corners = [
-            Vec3::new(snapped_x, ceiling_y, snapped_z),
-            Vec3::new(snapped_x, ceiling_y, snapped_z + SECTOR_SIZE),
-            Vec3::new(snapped_x + SECTOR_SIZE, ceiling_y, snapped_z + SECTOR_SIZE),
-            Vec3::new(snapped_x + SECTOR_SIZE, ceiling_y, snapped_z),
+        let ceiling_corners: [IVec3; 4] = [
+            IVec3::new(snapped_x_int, ceiling_y_int, snapped_z_int),
+            IVec3::new(snapped_x_int, ceiling_y_int, snapped_z_int + SECTOR_SIZE_INT),
+            IVec3::new(snapped_x_int + SECTOR_SIZE_INT, ceiling_y_int, snapped_z_int + SECTOR_SIZE_INT),
+            IVec3::new(snapped_x_int + SECTOR_SIZE_INT, ceiling_y_int, snapped_z_int),
         ];
 
         let mut screen_corners = Vec::new();
@@ -5292,13 +5286,14 @@ pub fn draw_viewport_3d(
     }
 
     // Draw camera info (position and rotation) - top left
+    let cam_pos = state.camera_3d.position_f32();
     draw_text(
         &format!(
-            "Cam: ({:.0}, {:.0}, {:.0}) | Rot: ({:.2}, {:.2})",
-            state.camera_3d.position.x,
-            state.camera_3d.position.y,
-            state.camera_3d.position.z,
-            state.camera_3d.rotation_x,
+            "Cam: ({:.0}, {:.0}, {:.0}) | Rot: ({}, {})",
+            cam_pos.x,
+            cam_pos.y,
+            cam_pos.z,
+            state.camera_3d.rotation_x,  // Show BAM angle
             state.camera_3d.rotation_y
         ),
         rect.x + 5.0,
@@ -5375,6 +5370,16 @@ fn draw_3d_line_depth(
     draw_3d_line_impl(fb, p0, p1, camera, color, true);
 }
 
+/// Convert Vec3 float render coords to IVec3 integer world units
+#[inline]
+fn vec3_to_ivec3(v: Vec3) -> IVec3 {
+    IVec3::new(
+        (v.x * crate::world::INT_SCALE as f32).round() as i32,
+        (v.y * crate::world::INT_SCALE as f32).round() as i32,
+        (v.z * crate::world::INT_SCALE as f32).round() as i32,
+    )
+}
+
 /// Draw a thick 3D line with depth testing (for preview highlights)
 fn draw_3d_thick_line_depth(
     fb: &mut Framebuffer,
@@ -5390,10 +5395,11 @@ fn draw_3d_thick_line_depth(
     }
 
     const NEAR_PLANE: f32 = 0.1;
+    let camera_pos_f32 = camera.position_f32();
 
     // Transform to camera space
-    let rel0 = p0 - camera.position;
-    let rel1 = p1 - camera.position;
+    let rel0 = p0 - camera_pos_f32;
+    let rel1 = p1 - camera_pos_f32;
 
     let z0 = rel0.dot(camera.basis_z);
     let z1 = rel1.dot(camera.basis_z);
@@ -5416,9 +5422,9 @@ fn draw_3d_thick_line_depth(
         (p0, p1)
     };
 
-    // Project to screen
-    let s0 = world_to_screen_with_depth(clipped_p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-    let s1 = world_to_screen_with_depth(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    // Project to screen (convert float coords to IVec3 for projection)
+    let s0 = world_to_screen_with_depth(vec3_to_ivec3(clipped_p0), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+    let s1 = world_to_screen_with_depth(vec3_to_ivec3(clipped_p1), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
     let (Some((x0f, y0f, depth0)), Some((x1f, y1f, depth1))) = (s0, s1) else {
         return;
@@ -5459,10 +5465,11 @@ fn draw_3d_line_impl(
     use_depth: bool,
 ) {
     const NEAR_PLANE: f32 = 0.1;
+    let camera_pos_f32 = camera.position_f32();
 
     // Transform to camera space
-    let rel0 = p0 - camera.position;
-    let rel1 = p1 - camera.position;
+    let rel0 = p0 - camera_pos_f32;
+    let rel1 = p1 - camera_pos_f32;
 
     let z0 = rel0.dot(camera.basis_z);
     let z1 = rel1.dot(camera.basis_z);
@@ -5486,9 +5493,9 @@ fn draw_3d_line_impl(
     };
 
     if use_depth {
-        // Use depth-tested line drawing
-        let s0 = world_to_screen_with_depth(clipped_p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-        let s1 = world_to_screen_with_depth(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+        // Use depth-tested line drawing (convert float coords to IVec3 for projection)
+        let s0 = world_to_screen_with_depth(vec3_to_ivec3(clipped_p0), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+        let s1 = world_to_screen_with_depth(vec3_to_ivec3(clipped_p1), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
         let (Some((x0f, y0f, depth0)), Some((x1f, y1f, depth1))) = (s0, s1) else {
             return;
@@ -5496,9 +5503,9 @@ fn draw_3d_line_impl(
 
         fb.draw_line_3d_overlay(x0f as i32, y0f as i32, depth0, x1f as i32, y1f as i32, depth1, color);
     } else {
-        // No depth testing - draw on top of everything
-        let s0 = world_to_screen(clipped_p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
-        let s1 = world_to_screen(clipped_p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+        // No depth testing - draw on top of everything (convert float coords to IVec3 for projection)
+        let s0 = world_to_screen(vec3_to_ivec3(clipped_p0), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
+        let s1 = world_to_screen(vec3_to_ivec3(clipped_p1), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height);
 
         let (Some((x0f, y0f)), Some((x1f, y1f))) = (s0, s1) else {
             return;
@@ -5632,8 +5639,9 @@ fn draw_3d_point(
     radius: i32,
     color: RasterColor,
 ) {
+    // Convert float render coords to IVec3 for projection
     if let Some((sx, sy)) = world_to_screen(
-        pos,
+        vec3_to_ivec3(pos),
         camera.position,
         camera.basis_x,
         camera.basis_y,
@@ -5748,6 +5756,8 @@ fn draw_filled_octahedron(
     size: f32,
     color: RasterColor,
 ) {
+    let camera_pos_f32 = camera.position_f32();
+
     // Octahedron has 6 vertices: top, bottom, and 4 around the middle
     let top = Vec3::new(center.x, center.y + size, center.z);
     let bottom = Vec3::new(center.x, center.y - size, center.z);
@@ -5758,7 +5768,7 @@ fn draw_filled_octahedron(
 
     // Project all vertices to screen space
     let project_vertex = |p: Vec3| -> Option<(i32, i32, f32)> {
-        let rel = p - camera.position;
+        let rel = p - camera_pos_f32;
         let cam = crate::rasterizer::perspective_transform(rel, camera.basis_x, camera.basis_y, camera.basis_z);
         if cam.z < 0.1 { return None; }
         let proj = crate::rasterizer::project(cam, fb.width, fb.height);
@@ -5929,37 +5939,37 @@ fn handle_camera_input(
             let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
             if (inside_viewport || state.viewport_mouse_captured || has_gamepad_input) && state.dragging_sector_vertices.is_empty() {
                 if is_key_down(KeyCode::W) {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_z * move_speed);
                 }
                 if is_key_down(KeyCode::S) {
-                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_z * -move_speed);
                 }
                 if is_key_down(KeyCode::A) {
-                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_x * -move_speed);
                 }
                 if is_key_down(KeyCode::D) {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_x * move_speed);
                 }
                 if is_key_down(KeyCode::Q) {
-                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_y * -move_speed);
                 }
                 if is_key_down(KeyCode::E) {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_y * move_speed);
                 }
 
                 // Gamepad left stick: move forward/back, strafe left/right
                 let gamepad_speed = 1500.0 * delta; // Frame-rate independent
                 if left_stick.length() > 0.1 {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * left_stick.y * gamepad_speed;
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * left_stick.x * gamepad_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_z * left_stick.y * gamepad_speed);
+                    state.camera_3d.translate_f32(state.camera_3d.basis_x * left_stick.x * gamepad_speed);
                 }
 
                 // Gamepad vertical movement: LB up, LT down
                 if input.action_down(Action::FlyUp) {
-                    state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * gamepad_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_y * gamepad_speed);
                 }
                 if input.action_down(Action::FlyDown) {
-                    state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * gamepad_speed;
+                    state.camera_3d.translate_f32(state.camera_3d.basis_y * -gamepad_speed);
                 }
             }
 
@@ -5967,7 +5977,7 @@ fn handle_camera_input(
             if inside_viewport && ctx.mouse.scroll != 0.0 {
                 let scroll_speed = if shift_held { 400.0 } else { 100.0 };
                 let direction = if ctx.mouse.scroll > 0.0 { 1.0 } else { -1.0 };
-                state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * direction * scroll_speed;
+                state.camera_3d.translate_f32(state.camera_3d.basis_z * direction * scroll_speed);
             }
         }
 
@@ -6065,67 +6075,67 @@ impl Default for HoverResult {
 
 /// Collected vertex data for hover detection and rendering
 /// (world_pos, room_idx, gx, gz, corner_idx, face_type)
-pub type VertexData = Vec<(Vec3, usize, usize, usize, usize, SectorFace)>;
+/// Uses IVec3 for full integer coordinate system
+pub type VertexData = Vec<(IVec3, usize, usize, usize, usize, SectorFace)>;
 
-/// Collect vertices from a single room
+/// Collect vertices from a single room (integer coordinates)
 fn collect_single_room_vertices(room: &crate::world::Room, room_idx: usize) -> VertexData {
     let mut vertices = Vec::new();
-    let room_y = room.position.to_render_f32().y; // Y offset for world-space
 
     for (gx, gz, sector) in room.iter_sectors() {
-        let base_x = room.position.to_render_f32().x + (gx as f32) * SECTOR_SIZE;
-        let base_z = room.position.to_render_f32().z + (gz as f32) * SECTOR_SIZE;
+        let base_x = room.position.x + (gx as i32) * SECTOR_SIZE_INT;
+        let base_z = room.position.z + (gz as i32) * SECTOR_SIZE_INT;
 
         // Floor vertices
         if let Some(floor) = &sector.floor {
-            vertices.push((Vec3::new(base_x, room_y + floor.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 0, SectorFace::Floor));
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 1, SectorFace::Floor));
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 2, SectorFace::Floor));
-            vertices.push((Vec3::new(base_x, room_y + floor.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 3, SectorFace::Floor));
+            vertices.push((IVec3::new(base_x, room.position.y + floor.heights[0], base_z), room_idx, gx, gz, 0, SectorFace::Floor));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + floor.heights[1], base_z), room_idx, gx, gz, 1, SectorFace::Floor));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + floor.heights[2], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 2, SectorFace::Floor));
+            vertices.push((IVec3::new(base_x, room.position.y + floor.heights[3], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 3, SectorFace::Floor));
         }
 
         // Ceiling vertices
         if let Some(ceiling) = &sector.ceiling {
-            vertices.push((Vec3::new(base_x, room_y + ceiling.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 0, SectorFace::Ceiling));
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 1, SectorFace::Ceiling));
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 2, SectorFace::Ceiling));
-            vertices.push((Vec3::new(base_x, room_y + ceiling.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 3, SectorFace::Ceiling));
+            vertices.push((IVec3::new(base_x, room.position.y + ceiling.heights[0], base_z), room_idx, gx, gz, 0, SectorFace::Ceiling));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + ceiling.heights[1], base_z), room_idx, gx, gz, 1, SectorFace::Ceiling));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + ceiling.heights[2], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 2, SectorFace::Ceiling));
+            vertices.push((IVec3::new(base_x, room.position.y + ceiling.heights[3], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 3, SectorFace::Ceiling));
         }
 
         // Wall vertices
-        let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-            (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-            (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-            (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-            (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+        let wall_configs: [(&Vec<crate::world::VerticalFace>, i32, i32, i32, i32, fn(usize) -> SectorFace); 4] = [
+            (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE_INT, base_z, |i| SectorFace::WallNorth(i)),
+            (&sector.walls_east, base_x + SECTOR_SIZE_INT, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT, |i| SectorFace::WallEast(i)),
+            (&sector.walls_south, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT, base_x, base_z + SECTOR_SIZE_INT, |i| SectorFace::WallSouth(i)),
+            (&sector.walls_west, base_x, base_z + SECTOR_SIZE_INT, base_x, base_z, |i| SectorFace::WallWest(i)),
         ];
 
         for (walls, x0, z0, x1, z1, make_face) in wall_configs {
             for (i, wall) in walls.iter().enumerate() {
                 // 4 corners of wall: bottom-left, bottom-right, top-right, top-left
-                vertices.push((Vec3::new(x0, room_y + wall.heights[0] as f32 / crate::world::INT_SCALE as f32, z0), room_idx, gx, gz, 0, make_face(i)));
-                vertices.push((Vec3::new(x1, room_y + wall.heights[1] as f32 / crate::world::INT_SCALE as f32, z1), room_idx, gx, gz, 1, make_face(i)));
-                vertices.push((Vec3::new(x1, room_y + wall.heights[2] as f32 / crate::world::INT_SCALE as f32, z1), room_idx, gx, gz, 2, make_face(i)));
-                vertices.push((Vec3::new(x0, room_y + wall.heights[3] as f32 / crate::world::INT_SCALE as f32, z0), room_idx, gx, gz, 3, make_face(i)));
+                vertices.push((IVec3::new(x0, room.position.y + wall.heights[0], z0), room_idx, gx, gz, 0, make_face(i)));
+                vertices.push((IVec3::new(x1, room.position.y + wall.heights[1], z1), room_idx, gx, gz, 1, make_face(i)));
+                vertices.push((IVec3::new(x1, room.position.y + wall.heights[2], z1), room_idx, gx, gz, 2, make_face(i)));
+                vertices.push((IVec3::new(x0, room.position.y + wall.heights[3], z0), room_idx, gx, gz, 3, make_face(i)));
             }
         }
 
         // Diagonal wall vertices (NW-SE)
         for (i, wall) in sector.walls_nwse.iter().enumerate() {
             // NW-SE wall: from NW corner (base_x, base_z) to SE corner (base_x+SIZE, base_z+SIZE)
-            vertices.push((Vec3::new(base_x, room_y + wall.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 0, SectorFace::WallNwSe(i)));
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 1, SectorFace::WallNwSe(i)));
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 2, SectorFace::WallNwSe(i)));
-            vertices.push((Vec3::new(base_x, room_y + wall.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 3, SectorFace::WallNwSe(i)));
+            vertices.push((IVec3::new(base_x, room.position.y + wall.heights[0], base_z), room_idx, gx, gz, 0, SectorFace::WallNwSe(i)));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + wall.heights[1], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 1, SectorFace::WallNwSe(i)));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + wall.heights[2], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 2, SectorFace::WallNwSe(i)));
+            vertices.push((IVec3::new(base_x, room.position.y + wall.heights[3], base_z), room_idx, gx, gz, 3, SectorFace::WallNwSe(i)));
         }
 
         // Diagonal wall vertices (NE-SW)
         for (i, wall) in sector.walls_nesw.iter().enumerate() {
             // NE-SW wall: from NE corner (base_x+SIZE, base_z) to SW corner (base_x, base_z+SIZE)
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 0, SectorFace::WallNeSw(i)));
-            vertices.push((Vec3::new(base_x, room_y + wall.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 1, SectorFace::WallNeSw(i)));
-            vertices.push((Vec3::new(base_x, room_y + wall.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE), room_idx, gx, gz, 2, SectorFace::WallNeSw(i)));
-            vertices.push((Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z), room_idx, gx, gz, 3, SectorFace::WallNeSw(i)));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + wall.heights[0], base_z), room_idx, gx, gz, 0, SectorFace::WallNeSw(i)));
+            vertices.push((IVec3::new(base_x, room.position.y + wall.heights[1], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 1, SectorFace::WallNeSw(i)));
+            vertices.push((IVec3::new(base_x, room.position.y + wall.heights[2], base_z + SECTOR_SIZE_INT), room_idx, gx, gz, 2, SectorFace::WallNeSw(i)));
+            vertices.push((IVec3::new(base_x + SECTOR_SIZE_INT, room.position.y + wall.heights[3], base_z), room_idx, gx, gz, 3, SectorFace::WallNeSw(i)));
         }
     }
 
@@ -6527,7 +6537,7 @@ fn find_hovered_elements(
     let mut best_edge: Option<(usize, usize, usize, usize, usize, Option<SectorFace>, f32, f32)> = None; // + depth
     let mut best_face: Option<(usize, usize, usize, SectorFace, f32)> = None;
 
-    // Check vertices with depth
+    // Check vertices with depth (world_pos is IVec3)
     for (world_pos, room_idx, gx, gz, corner_idx, face) in all_vertices {
         if let Some((sx, sy, depth)) = world_to_screen_with_depth(
             *world_pos,
@@ -6550,13 +6560,13 @@ fn find_hovered_elements(
 
     // Check edges with depth
     if let Some(room) = state.level.rooms.get(state.current_room) {
-        let room_y = room.position.to_render_f32().y;
+        let room_y = room.position.y;
         for (gx, gz, sector) in room.iter_sectors() {
-            let base_x = room.position.to_render_f32().x + (gx as f32) * SECTOR_SIZE;
-            let base_z = room.position.to_render_f32().z + (gz as f32) * SECTOR_SIZE;
+            let base_x = room.position.x + (gx as i32) * SECTOR_SIZE_INT;
+            let base_z = room.position.z + (gz as i32) * SECTOR_SIZE_INT;
 
-            // Helper to check an edge and update best_edge if closer
-            let mut check_edge = |v0: Vec3, v1: Vec3, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace>| {
+            // Helper to check an edge and update best_edge if closer (takes IVec3)
+            let mut check_edge = |v0: IVec3, v1: IVec3, face_idx: usize, edge_idx: usize, wall_face: Option<SectorFace>| {
                 if let (Some((sx0, sy0, d0)), Some((sx1, sy1, d1))) = (
                     world_to_screen_with_depth(v0, state.camera_3d.position, state.camera_3d.basis_x,
                         state.camera_3d.basis_y, state.camera_3d.basis_z, fb_width, fb_height),
@@ -6576,47 +6586,47 @@ fn find_hovered_elements(
                 }
             };
 
-            // Check floor edges
+            // Check floor edges (using IVec3 with integer world units)
             if let Some(floor) = &sector.floor {
-                let corners = [
-                    Vec3::new(base_x, room_y + floor.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z),
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z),
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + floor.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, room_y + floor.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
+                let corners: [IVec3; 4] = [
+                    IVec3::new(base_x, room_y + floor.heights[0], base_z),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + floor.heights[1], base_z),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + floor.heights[2], base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x, room_y + floor.heights[3], base_z + SECTOR_SIZE_INT),
                 ];
                 for edge_idx in 0..4 {
                     check_edge(corners[edge_idx], corners[(edge_idx + 1) % 4], 0, edge_idx, None);
                 }
             }
 
-            // Check ceiling edges
+            // Check ceiling edges (using IVec3)
             if let Some(ceiling) = &sector.ceiling {
-                let corners = [
-                    Vec3::new(base_x, room_y + ceiling.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z),
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z),
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + ceiling.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, room_y + ceiling.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),
+                let corners: [IVec3; 4] = [
+                    IVec3::new(base_x, room_y + ceiling.heights[0], base_z),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + ceiling.heights[1], base_z),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + ceiling.heights[2], base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x, room_y + ceiling.heights[3], base_z + SECTOR_SIZE_INT),
                 ];
                 for edge_idx in 0..4 {
                     check_edge(corners[edge_idx], corners[(edge_idx + 1) % 4], 1, edge_idx, None);
                 }
             }
 
-            // Check wall edges
-            let wall_configs: [(&Vec<crate::world::VerticalFace>, f32, f32, f32, f32, fn(usize) -> SectorFace); 4] = [
-                (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE, base_z, |i| SectorFace::WallNorth(i)),
-                (&sector.walls_east, base_x + SECTOR_SIZE, base_z, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, |i| SectorFace::WallEast(i)),
-                (&sector.walls_south, base_x + SECTOR_SIZE, base_z + SECTOR_SIZE, base_x, base_z + SECTOR_SIZE, |i| SectorFace::WallSouth(i)),
-                (&sector.walls_west, base_x, base_z + SECTOR_SIZE, base_x, base_z, |i| SectorFace::WallWest(i)),
+            // Check wall edges (using IVec3)
+            let wall_configs: [(&Vec<crate::world::VerticalFace>, i32, i32, i32, i32, fn(usize) -> SectorFace); 4] = [
+                (&sector.walls_north, base_x, base_z, base_x + SECTOR_SIZE_INT, base_z, |i| SectorFace::WallNorth(i)),
+                (&sector.walls_east, base_x + SECTOR_SIZE_INT, base_z, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT, |i| SectorFace::WallEast(i)),
+                (&sector.walls_south, base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT, base_x, base_z + SECTOR_SIZE_INT, |i| SectorFace::WallSouth(i)),
+                (&sector.walls_west, base_x, base_z + SECTOR_SIZE_INT, base_x, base_z, |i| SectorFace::WallWest(i)),
             ];
 
             for (walls, x0, z0, x1, z1, make_face) in wall_configs {
                 for (i, wall) in walls.iter().enumerate() {
-                    let wall_corners = [
-                        Vec3::new(x0, room_y + wall.heights[0] as f32 / crate::world::INT_SCALE as f32, z0),
-                        Vec3::new(x1, room_y + wall.heights[1] as f32 / crate::world::INT_SCALE as f32, z1),
-                        Vec3::new(x1, room_y + wall.heights[2] as f32 / crate::world::INT_SCALE as f32, z1),
-                        Vec3::new(x0, room_y + wall.heights[3] as f32 / crate::world::INT_SCALE as f32, z0),
+                    let wall_corners: [IVec3; 4] = [
+                        IVec3::new(x0, room_y + wall.heights[0], z0),
+                        IVec3::new(x1, room_y + wall.heights[1], z1),
+                        IVec3::new(x1, room_y + wall.heights[2], z1),
+                        IVec3::new(x0, room_y + wall.heights[3], z0),
                     ];
                     for edge_idx in 0..4 {
                         check_edge(wall_corners[edge_idx], wall_corners[(edge_idx + 1) % 4], 2, edge_idx, Some(make_face(i)));
@@ -6624,14 +6634,14 @@ fn find_hovered_elements(
                 }
             }
 
-            // Check diagonal wall edges
+            // Check diagonal wall edges (using IVec3)
             // NW-SE walls: from NW corner (base_x, base_z) to SE corner (base_x+SIZE, base_z+SIZE)
             for (i, wall) in sector.walls_nwse.iter().enumerate() {
-                let wall_corners = [
-                    Vec3::new(base_x, room_y + wall.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z),                               // NW bottom
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),   // SE bottom
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),   // SE top
-                    Vec3::new(base_x, room_y + wall.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z),                               // NW top
+                let wall_corners: [IVec3; 4] = [
+                    IVec3::new(base_x, room_y + wall.heights[0], base_z),                               // NW bottom
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + wall.heights[1], base_z + SECTOR_SIZE_INT),   // SE bottom
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + wall.heights[2], base_z + SECTOR_SIZE_INT),   // SE top
+                    IVec3::new(base_x, room_y + wall.heights[3], base_z),                               // NW top
                 ];
                 for edge_idx in 0..4 {
                     check_edge(wall_corners[edge_idx], wall_corners[(edge_idx + 1) % 4], 2, edge_idx, Some(SectorFace::WallNwSe(i)));
@@ -6640,11 +6650,11 @@ fn find_hovered_elements(
 
             // NE-SW walls: from NE corner (base_x+SIZE, base_z) to SW corner (base_x, base_z+SIZE)
             for (i, wall) in sector.walls_nesw.iter().enumerate() {
-                let wall_corners = [
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[0] as f32 / crate::world::INT_SCALE as f32, base_z),                 // NE bottom
-                    Vec3::new(base_x, room_y + wall.heights[1] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),                 // SW bottom
-                    Vec3::new(base_x, room_y + wall.heights[2] as f32 / crate::world::INT_SCALE as f32, base_z + SECTOR_SIZE),                 // SW top
-                    Vec3::new(base_x + SECTOR_SIZE, room_y + wall.heights[3] as f32 / crate::world::INT_SCALE as f32, base_z),                 // NE top
+                let wall_corners: [IVec3; 4] = [
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + wall.heights[0], base_z),                 // NE bottom
+                    IVec3::new(base_x, room_y + wall.heights[1], base_z + SECTOR_SIZE_INT),                 // SW bottom
+                    IVec3::new(base_x, room_y + wall.heights[2], base_z + SECTOR_SIZE_INT),                 // SW top
+                    IVec3::new(base_x + SECTOR_SIZE_INT, room_y + wall.heights[3], base_z),                 // NE top
                 ];
                 for edge_idx in 0..4 {
                     check_edge(wall_corners[edge_idx], wall_corners[(edge_idx + 1) % 4], 2, edge_idx, Some(SectorFace::WallNeSw(i)));
@@ -6821,7 +6831,7 @@ fn find_hovered_elements(
     const OBJECT_THRESHOLD: f32 = 12.0;
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         for (obj_idx, obj) in room.objects.iter().enumerate() {
-            let world_pos = obj.world_position(room).to_render_f32();
+            let world_pos = obj.world_position(room);  // IVec3
             if let Some((sx, sy)) = world_to_screen(
                 world_pos,
                 state.camera_3d.position,
@@ -6880,9 +6890,9 @@ fn check_quad_hit_with_depth(
 ) -> Option<f32> {
     use crate::rasterizer::world_to_screen_with_depth;
 
-    // Get screen coords + depth for all 4 corners
+    // Get screen coords + depth for all 4 corners (convert Vec3 to IVec3)
     let projected: Vec<Option<(f32, f32, f32)>> = corners.iter().map(|&c| {
-        world_to_screen_with_depth(c, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height)
+        world_to_screen_with_depth(vec3_to_ivec3(c), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height)
     }).collect();
 
     // Need all 4 corners visible
@@ -7021,7 +7031,7 @@ fn find_selections_in_rect(
 
     // Check objects
     for (i, obj) in room.objects.iter().enumerate() {
-        let world_pos = obj.world_position(room).to_render_f32();
+        let world_pos = obj.world_position(room);  // IVec3
         if let Some((sx, sy)) = world_to_screen(world_pos, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
             if sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y {
                 collected.push(Selection::Object { room: room_idx, index: i });
@@ -7050,7 +7060,8 @@ fn face_center_in_rect(
         base_z + SECTOR_SIZE / 2.0,
     );
 
-    if let Some((sx, sy)) = world_to_screen(center, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+    // Convert Vec3 to IVec3 for world_to_screen
+    if let Some((sx, sy)) = world_to_screen(vec3_to_ivec3(center), cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
         sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y
     } else {
         false
@@ -7088,7 +7099,8 @@ fn wall_center_in_rect(
         (z0 + z1) / 2.0,
     );
 
-    if let Some((sx, sy)) = world_to_screen(center, cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
+    // Convert Vec3 to IVec3 for world_to_screen
+    if let Some((sx, sy)) = world_to_screen(vec3_to_ivec3(center), cam.position, cam.basis_x, cam.basis_y, cam.basis_z, fb.width, fb.height) {
         sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y
     } else {
         false

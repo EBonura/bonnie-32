@@ -806,9 +806,11 @@ impl ModelerState {
 
         let mut camera = Camera::new();
         // Initialize camera position for free mode (similar starting view)
-        camera.position = Vec3::new(-2048.0, 2048.0, -2048.0);
-        camera.rotation_x = 0.3;  // Looking slightly down
-        camera.rotation_y = 0.8;  // Looking toward origin
+        // Position in integer units (scaled by INT_SCALE=4)
+        camera.position = crate::rasterizer::IVec3::new(-8192, 8192, -8192);
+        // Rotation in BAM (Binary Angular Measurement)
+        camera.rotation_x = crate::rasterizer::radians_to_bam(0.3);  // Looking slightly down
+        camera.rotation_y = crate::rasterizer::radians_to_bam(0.8);  // Looking toward origin
         camera.update_basis();
 
         // Project is the single source of truth for mesh data
@@ -965,9 +967,15 @@ impl ModelerState {
         );
 
         // Camera sits behind the target along the forward direction
-        camera.position = target - forward * distance;
-        camera.rotation_x = pitch;
-        camera.rotation_y = yaw;
+        // Calculate in float space, then convert to IVec3
+        let pos_float = target - forward * distance;
+        camera.position = crate::rasterizer::IVec3::new(
+            (pos_float.x * crate::world::INT_SCALE as f32) as i32,
+            (pos_float.y * crate::world::INT_SCALE as f32) as i32,
+            (pos_float.z * crate::world::INT_SCALE as f32) as i32,
+        );
+        camera.rotation_x = crate::rasterizer::radians_to_bam(pitch);
+        camera.rotation_y = crate::rasterizer::radians_to_bam(yaw);
         camera.update_basis();
     }
 

@@ -613,19 +613,20 @@ pub fn draw_modeler_viewport_ext(
 
         // Position camera at a fixed distance along its view axis, looking toward origin
         // The camera looks along +basis_z, so position it behind the origin
-        let view_distance = 50000.0; // Far enough to not clip anything
+        // view_distance in integer world units (scaled by INT_SCALE)
+        let view_distance_int = 50000 * crate::world::INT_SCALE;
         match viewport_id {
             ViewportId::Top => {
                 // Looking down -Y at XZ plane, camera above origin
-                cam.position = Vec3::new(0.0, view_distance, 0.0);
+                cam.position = crate::rasterizer::IVec3::new(0, view_distance_int, 0);
             }
             ViewportId::Front => {
                 // Looking down -Z at XY plane, camera in front of origin
-                cam.position = Vec3::new(0.0, 0.0, view_distance);
+                cam.position = crate::rasterizer::IVec3::new(0, 0, view_distance_int);
             }
             ViewportId::Side => {
                 // Looking down -X at ZY plane, camera to the right of origin
-                cam.position = Vec3::new(view_distance, 0.0, 0.0);
+                cam.position = crate::rasterizer::IVec3::new(view_distance_int, 0, 0);
             }
             ViewportId::Perspective => unreachable!(),
         }
@@ -708,10 +709,11 @@ pub fn draw_modeler_viewport_ext(
             if ctx.mouse.right_down && inside_viewport && !state.drag_manager.is_dragging() {
                 if state.viewport_mouse_captured {
                     // Inverted to match Y-down coordinate system (same as world editor)
-                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 0.005;
-                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 0.005;
-                    state.camera.rotation_x += dx;
-                    state.camera.rotation_y += dy;
+                    // Convert mouse delta to BAM rotation (u16)
+                    let dx = (mouse_pos.1 - state.viewport_last_mouse.1) * 5.0; // Scale for BAM
+                    let dy = -(mouse_pos.0 - state.viewport_last_mouse.0) * 5.0;
+                    state.camera.rotation_x = state.camera.rotation_x.wrapping_add(dx as i16 as u16);
+                    state.camera.rotation_y = state.camera.rotation_y.wrapping_add(dy as i16 as u16);
                     state.camera.update_basis();
                 }
                 state.viewport_mouse_captured = true;
@@ -721,26 +723,35 @@ pub fn draw_modeler_viewport_ext(
 
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
-            let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
-            let move_speed = if shift_held { 100.0 } else { base_speed };
+            // move_speed is in integer units (scaled by INT_SCALE)
+            let base_speed = 200; // ~50 float units * 4 INT_SCALE
+            let move_speed = if shift_held { 400 } else { base_speed };
             if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() {
+                // Helper to convert Vec3 direction to IVec3 movement
+                let vec3_to_ivec3_delta = |v: crate::rasterizer::Vec3, speed: i32| -> crate::rasterizer::IVec3 {
+                    crate::rasterizer::IVec3::new(
+                        (v.x * speed as f32) as i32,
+                        (v.y * speed as f32) as i32,
+                        (v.z * speed as f32) as i32,
+                    )
+                };
                 if is_key_down(KeyCode::W) {
-                    state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
+                    state.camera.position = state.camera.position + vec3_to_ivec3_delta(state.camera.basis_z, move_speed);
                 }
                 if is_key_down(KeyCode::S) {
-                    state.camera.position = state.camera.position - state.camera.basis_z * move_speed;
+                    state.camera.position = state.camera.position - vec3_to_ivec3_delta(state.camera.basis_z, move_speed);
                 }
                 if is_key_down(KeyCode::A) {
-                    state.camera.position = state.camera.position - state.camera.basis_x * move_speed;
+                    state.camera.position = state.camera.position - vec3_to_ivec3_delta(state.camera.basis_x, move_speed);
                 }
                 if is_key_down(KeyCode::D) {
-                    state.camera.position = state.camera.position + state.camera.basis_x * move_speed;
+                    state.camera.position = state.camera.position + vec3_to_ivec3_delta(state.camera.basis_x, move_speed);
                 }
                 if is_key_down(KeyCode::Q) {
-                    state.camera.position = state.camera.position - state.camera.basis_y * move_speed;
+                    state.camera.position = state.camera.position - vec3_to_ivec3_delta(state.camera.basis_y, move_speed);
                 }
                 if is_key_down(KeyCode::E) {
-                    state.camera.position = state.camera.position + state.camera.basis_y * move_speed;
+                    state.camera.position = state.camera.position + vec3_to_ivec3_delta(state.camera.basis_y, move_speed);
                 }
             }
         }
@@ -902,7 +913,7 @@ pub fn draw_modeler_viewport_ext(
         draw_ortho_grid(fb, state, viewport_id, grid_color, x_axis_color, z_axis_color);
     } else {
         // For perspective, use the 3D floor grid
-        draw_floor_grid(fb, &state.camera, 0.0, crate::world::SECTOR_SIZE, crate::world::SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
+        draw_floor_grid(fb, &state.camera, 0, crate::world::SECTOR_SIZE_INT, crate::world::SECTOR_SIZE_INT * 10, grid_color, x_axis_color, z_axis_color);
     }
 
     // Render all visible objects
@@ -1233,7 +1244,7 @@ fn apply_box_selection(
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos.to_render_f32(),
+                    vert.pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1281,9 +1292,8 @@ fn apply_box_selection(
                         (sum_y / count) as i32,
                         (sum_z / count) as i32,
                     );
-                    let center = center_int.to_render_f32();
                     if let Some((sx, sy)) = world_to_screen_with_ortho(
-                        center,
+                        center_int,
                         camera.position,
                         camera.basis_x,
                         camera.basis_y,
@@ -1328,7 +1338,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let Some(hovered_idx) = state.hovered_vertex {
         if let Some(vert) = mesh.vertices.get(hovered_idx) {
             if let Some((sx, sy)) = world_to_screen_with_ortho(
-                vert.pos.to_render_f32(),
+                vert.pos,
                 camera.position,
                 camera.basis_x,
                 camera.basis_y,
@@ -1348,8 +1358,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if let Some((v0_idx, v1_idx)) = state.hovered_edge {
         if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
             if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
             ) {
                 fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, hover_color);
                 // Draw thicker by drawing adjacent lines
@@ -1367,7 +1377,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
             // Draw face edges (all edges of n-gon)
             let screen_positions: Vec<_> = face.vertices.iter()
                 .filter_map(|&vi| mesh.vertices.get(vi))
-                .filter_map(|v| world_to_screen_with_ortho(v.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                 .collect();
 
             let n = screen_positions.len();
@@ -1394,7 +1404,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
         for &idx in selected_verts {
             if let Some(vert) = mesh.vertices.get(idx) {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos.to_render_f32(),
+                    vert.pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1416,8 +1426,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
         for (v0_idx, v1_idx) in selected_edges {
             if let (Some(v0), Some(v1)) = (mesh.vertices.get(*v0_idx), mesh.vertices.get(*v1_idx)) {
                 if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                    world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                    world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                 ) {
                     fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, select_color);
                     fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
@@ -1439,9 +1449,9 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
                 let int_positions: Vec<_> = face.vertices.iter()
                     .filter_map(|&vi| mesh.vertices.get(vi).map(|v| v.pos))
                     .collect();
-                // Convert to float for screen projection
+                // Project positions to screen
                 let screen_positions: Vec<_> = int_positions.iter()
-                    .filter_map(|&p| world_to_screen_with_ortho(p.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                    .filter_map(|&p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                     .collect();
 
                 let n = screen_positions.len();
@@ -1463,9 +1473,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
                         (sum_y / count) as i32,
                         (sum_z / count) as i32,
                     );
-                    let center = center_int.to_render_f32();
                     if let Some((cx, cy)) = world_to_screen_with_ortho(
-                        center,
+                        center_int,
                         camera.position,
                         camera.basis_x,
                         camera.basis_y,
@@ -1527,7 +1536,7 @@ fn draw_box_selection_preview(
             // Highlight vertices inside the box
             for vert in &mesh.vertices {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos.to_render_f32(),
+                    vert.pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1555,8 +1564,8 @@ fn draw_box_selection_preview(
 
                     if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                         if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                            world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                            world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                         ) {
                             // Check if midpoint is inside box
                             let mid_x = (sx0 + sx1) / 2.0;
@@ -1588,9 +1597,8 @@ fn draw_box_selection_preview(
                         (sum_y / count) as i32,
                         (sum_z / count) as i32,
                     );
-                    let center = center_int.to_render_f32();
                     if let Some((cx, cy)) = world_to_screen_with_ortho(
-                        center,
+                        center_int,
                         camera.position,
                         camera.basis_x,
                         camera.basis_y,
@@ -1602,7 +1610,7 @@ fn draw_box_selection_preview(
                         if cx >= fb_x0 && cx <= fb_x1 && cy >= fb_y0 && cy <= fb_y1 {
                             // Draw face outline in preview color
                             let screen_positions: Vec<_> = verts.iter()
-                                .filter_map(|v| world_to_screen_with_ortho(v.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                                 .collect();
                             let n = screen_positions.len();
                             if n >= 3 {
@@ -1646,7 +1654,7 @@ fn handle_mesh_selection_click(
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos.to_render_f32(),
+                    vert.pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1708,9 +1716,8 @@ fn handle_mesh_selection_click(
                         (sum_y / count) as i32,
                         (sum_z / count) as i32,
                     );
-                    let center = center_int.to_render_f32();
                     if let Some((sx, sy)) = world_to_screen_with_ortho(
-                        center,
+                        center_int,
                         camera.position,
                         camera.basis_x,
                         camera.basis_y,
@@ -1794,9 +1801,9 @@ fn find_hovered_element(
             ) {
                 // Use screen-space signed area for backface culling (same as rasterizer)
                 if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                    world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v2.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                 ) {
                     // 2D screen-space signed area (PS1-style) - positive = front-facing
                     let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -1826,7 +1833,7 @@ fn find_hovered_element(
             continue; // Skip vertices only on backfaces
         }
         if let Some((sx, sy)) = world_to_screen_with_ortho(
-            vert.pos.to_render_f32(),
+            vert.pos,
             camera.position,
             camera.basis_x,
             camera.basis_y,
@@ -1859,8 +1866,8 @@ fn find_hovered_element(
 
                 if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                        world_to_screen_with_ortho(v0.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1.pos.to_render_f32(), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         let dist = point_to_line_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
                         if dist < EDGE_THRESHOLD {
@@ -1884,15 +1891,11 @@ fn find_hovered_element(
                     mesh.vertices.get(i1),
                     mesh.vertices.get(i2),
                 ) {
-                    // Convert to float positions for screen projection
-                    let v0_pos = v0.pos.to_render_f32();
-                    let v1_pos = v1.pos.to_render_f32();
-                    let v2_pos = v2.pos.to_render_f32();
                     // Use screen-space signed area for backface culling (same as rasterizer)
                     if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                        world_to_screen_with_ortho(v0_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v2_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -1903,11 +1906,13 @@ fn find_hovered_element(
                         // Check if mouse is inside the triangle
                         if point_in_triangle_2d(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1, sx2, sy2) {
                             // Calculate depth at mouse position for Z-ordering
+                            // Convert to floats for depth calculation at render boundary
+                            let cam_pos_f = camera.position.to_render_f32();
                             let depth = interpolate_depth_in_triangle(
                                 mouse_fb_x, mouse_fb_y,
-                                sx0, sy0, (v0_pos - camera.position).dot(camera.basis_z),
-                                sx1, sy1, (v1_pos - camera.position).dot(camera.basis_z),
-                                sx2, sy2, (v2_pos - camera.position).dot(camera.basis_z),
+                                sx0, sy0, (v0.pos.to_render_f32() - cam_pos_f).dot(camera.basis_z),
+                                sx1, sy1, (v1.pos.to_render_f32() - cam_pos_f).dot(camera.basis_z),
+                                sx2, sy2, (v2.pos.to_render_f32() - cam_pos_f).dot(camera.basis_z),
                             );
                             // Pick the closest (smallest depth) face
                             if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {
@@ -2145,7 +2150,16 @@ fn setup_gizmo(
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
-    let center_screen = match world_to_screen_with_ortho(center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho) {
+    // Helper to convert Vec3 to IVec3 for world_to_screen
+    let vec3_to_ivec3 = |v: Vec3| -> crate::rasterizer::IVec3 {
+        crate::rasterizer::IVec3::new(
+            (v.x * crate::world::INT_SCALE as f32) as i32,
+            (v.y * crate::world::INT_SCALE as f32) as i32,
+            (v.z * crate::world::INT_SCALE as f32) as i32,
+        )
+    };
+
+    let center_screen = match world_to_screen_with_ortho(center_int, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho) {
         Some((sx, sy)) => (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h),
         None => return None,
     };
@@ -2158,11 +2172,12 @@ fn setup_gizmo(
 
     // In ortho mode, use a fixed world-space size scaled by zoom
     // In perspective mode, scale by distance to camera
+    let cam_pos_f = camera.position.to_render_f32();
     let world_length = if let Some(ortho) = ortho {
         // Fixed size in screen pixels, converted to world units
         50.0 / ortho.zoom
     } else {
-        let dist_to_camera = (center - camera.position).len();
+        let dist_to_camera = (center - cam_pos_f).len();
         dist_to_camera * 0.1
     };
 
@@ -2174,7 +2189,7 @@ fn setup_gizmo(
 
     for (i, (axis, dir, color)) in axis_dirs.iter().enumerate() {
         let end_world = center + *dir * world_length;
-        if let Some((sx, sy)) = world_to_screen_with_ortho(end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho) {
+        if let Some((sx, sy)) = world_to_screen_with_ortho(vec3_to_ivec3(end_world), camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho) {
             let screen_end = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
             axis_screen_ends[i] = (*axis, screen_end, *color);
         }
@@ -2644,6 +2659,15 @@ fn handle_rotate_gizmo(
     let camera_basis_z = state.camera.basis_z;
     let ortho = state.raster_settings.ortho_projection.clone();
 
+    // Helper to convert Vec3 to IVec3 for world_to_screen
+    let vec3_to_ivec3 = |v: Vec3| -> crate::rasterizer::IVec3 {
+        crate::rasterizer::IVec3::new(
+            (v.x * crate::world::INT_SCALE as f32) as i32,
+            (v.y * crate::world::INT_SCALE as f32) as i32,
+            (v.z * crate::world::INT_SCALE as f32) as i32,
+        )
+    };
+
     // Check if DragManager has an active rotate drag
     let is_dragging = state.drag_manager.is_dragging() && state.drag_manager.active.is_rotate();
 
@@ -2711,7 +2735,7 @@ fn handle_rotate_gizmo(
                 let t = i as f32 / segments as f32 * std::f32::consts::TAU;
                 let world_point = setup.center + *perp1 * (t.cos() * setup.world_length) + *perp2 * (t.sin() * setup.world_length);
 
-                if let Some((sx, sy)) = world_to_screen_with_ortho(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height, ortho.as_ref()) {
+                if let Some((sx, sy)) = world_to_screen_with_ortho(vec3_to_ivec3(world_point), camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height, ortho.as_ref()) {
                     let screen_pos = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
                     let dist = ((mouse_pos.0 - screen_pos.0).powi(2) + (mouse_pos.1 - screen_pos.1).powi(2)).sqrt();
                     if dist < best_dist {
@@ -2809,7 +2833,7 @@ fn handle_rotate_gizmo(
                 let t = i as f32 / segments as f32 * std::f32::consts::TAU;
                 let world_point = setup.center + perp1 * (t.cos() * setup.world_length) + perp2 * (t.sin() * setup.world_length);
 
-                if let Some((sx, sy)) = world_to_screen_with_ortho(world_point, camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height, ortho.as_ref()) {
+                if let Some((sx, sy)) = world_to_screen_with_ortho(vec3_to_ivec3(world_point), camera_position, camera_basis_x, camera_basis_y, camera_basis_z, fb_width, fb_height, ortho.as_ref()) {
                     let screen_pos = (draw_x + sx / fb_width as f32 * draw_w, draw_y + sy / fb_height as f32 * draw_h);
 
                     if let Some(prev) = prev_screen {

@@ -500,16 +500,18 @@ pub fn screen_to_ray(
 
 /// Project a world-space point to framebuffer coordinates.
 /// Used by both editor and modeler viewports for UI overlay rendering.
+/// Takes IVec3 for both world and camera positions (full integer approach).
 pub fn world_to_screen(
-    world_pos: Vec3,
-    camera_pos: Vec3,
+    world_pos: IVec3,
+    camera_pos: IVec3,
     basis_x: Vec3,
     basis_y: Vec3,
     basis_z: Vec3,
     fb_width: usize,
     fb_height: usize,
 ) -> Option<(f32, f32)> {
-    let rel = world_pos - camera_pos;
+    // Convert to float for dot product with basis vectors
+    let rel = (world_pos - camera_pos).to_render_f32();
     let cam_z = rel.dot(basis_z);
 
     // Behind camera
@@ -535,9 +537,10 @@ pub fn world_to_screen(
 
 /// Project a world-space point to framebuffer coordinates with optional ortho projection.
 /// Used for UI overlays (gizmos, etc.) that need to match the rasterizer's projection.
+/// Takes IVec3 for both world and camera positions (full integer approach).
 pub fn world_to_screen_with_ortho(
-    world_pos: Vec3,
-    camera_pos: Vec3,
+    world_pos: IVec3,
+    camera_pos: IVec3,
     basis_x: Vec3,
     basis_y: Vec3,
     basis_z: Vec3,
@@ -545,7 +548,8 @@ pub fn world_to_screen_with_ortho(
     fb_height: usize,
     ortho: Option<&super::OrthoProjection>,
 ) -> Option<(f32, f32)> {
-    let rel = world_pos - camera_pos;
+    // Convert to float for dot product with basis vectors
+    let rel = (world_pos - camera_pos).to_render_f32();
     let cam_x = rel.dot(basis_x);
     let cam_y = rel.dot(basis_y);
     let cam_z = rel.dot(basis_z);
@@ -575,11 +579,11 @@ pub fn world_to_screen_with_ortho(
 }
 
 /// Project an integer world-space point to framebuffer coordinates.
-/// Takes IVec3 directly - avoids IVec3 → Vec3 conversion for mesh editor UI.
-/// Camera position/basis are still floats (editor camera uses floats).
+/// Takes IVec3 for both world and camera positions (full integer approach).
+/// Wrapper for world_to_screen_with_ortho with ortho support.
 pub fn world_to_screen_int(
     world_pos: IVec3,
-    camera_pos: Vec3,
+    camera_pos: IVec3,
     basis_x: Vec3,
     basis_y: Vec3,
     basis_z: Vec3,
@@ -587,24 +591,23 @@ pub fn world_to_screen_int(
     fb_height: usize,
     ortho: Option<&super::OrthoProjection>,
 ) -> Option<(f32, f32)> {
-    // Convert IVec3 to float only once, at the boundary
-    // This is more efficient than converting in the caller and passing Vec3
-    let world_f32 = world_pos.to_render_f32();
-    world_to_screen_with_ortho(world_f32, camera_pos, basis_x, basis_y, basis_z, fb_width, fb_height, ortho)
+    world_to_screen_with_ortho(world_pos, camera_pos, basis_x, basis_y, basis_z, fb_width, fb_height, ortho)
 }
 
 /// Project a world-space point to framebuffer coordinates with depth.
 /// Returns (screen_x, screen_y, depth) where depth is camera-space Z.
+/// Takes IVec3 for both world and camera positions (full integer approach).
 pub fn world_to_screen_with_depth(
-    world_pos: Vec3,
-    camera_pos: Vec3,
+    world_pos: IVec3,
+    camera_pos: IVec3,
     basis_x: Vec3,
     basis_y: Vec3,
     basis_z: Vec3,
     fb_width: usize,
     fb_height: usize,
 ) -> Option<(f32, f32, f32)> {
-    let rel = world_pos - camera_pos;
+    // Convert to float for dot product with basis vectors
+    let rel = (world_pos - camera_pos).to_render_f32();
     let cam_z = rel.dot(basis_z);
 
     // Behind camera
@@ -858,6 +861,17 @@ impl IVec3 {
             x: self.x as f32 / INT_SCALE as f32,
             y: self.y as f32 / INT_SCALE as f32,
             z: self.z as f32 / INT_SCALE as f32,
+        }
+    }
+
+    /// Convert from float coordinates to integer (scaled by INT_SCALE=4)
+    /// Inverse of to_render_f32()
+    #[inline]
+    pub fn from_vec3(v: Vec3) -> Self {
+        Self {
+            x: (v.x * INT_SCALE as f32).round() as i32,
+            y: (v.y * INT_SCALE as f32).round() as i32,
+            z: (v.z * INT_SCALE as f32).round() as i32,
         }
     }
 

@@ -428,14 +428,19 @@ fn draw_orbit_preview(
 
     // Create camera
     let mut camera = Camera::new();
-    camera.position = cam_pos;
+    // Convert position to IVec3 (INT_SCALE = 4)
+    camera.position = crate::rasterizer::IVec3::new(
+        (cam_pos.x * crate::world::INT_SCALE as f32) as i32,
+        (cam_pos.y * crate::world::INT_SCALE as f32) as i32,
+        (cam_pos.z * crate::world::INT_SCALE as f32) as i32,
+    );
 
     // Calculate rotation from direction
     let dir = browser.orbit_center - cam_pos;
     let len = dir.len();
     let n = dir * (1.0 / len);
-    camera.rotation_x = (-n.y).asin();
-    camera.rotation_y = n.x.atan2(n.z);
+    camera.rotation_x = crate::rasterizer::radians_to_bam((-n.y).asin());
+    camera.rotation_y = crate::rasterizer::radians_to_bam(n.x.atan2(n.z));
     camera.update_basis();
 
     // Resize framebuffer
@@ -499,8 +504,8 @@ fn draw_preview_grid(fb: &mut Framebuffer, camera: &Camera) {
     let x_axis_color = RasterColor::new(100, 60, 60); // Red-ish for X axis
     let z_axis_color = RasterColor::new(60, 60, 100); // Blue-ish for Z axis
 
-    // 1024 units per grid cell, 10 cells in each direction (10240 unit extent)
-    draw_floor_grid(fb, camera, 0.0, SECTOR_SIZE, SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
+    // 4096 integer units per grid cell, 10 cells in each direction
+    draw_floor_grid(fb, camera, 0, crate::world::SECTOR_SIZE_INT, crate::world::SECTOR_SIZE_INT * 10, grid_color, x_axis_color, z_axis_color);
 }
 
 /// Draw a close button (X)
