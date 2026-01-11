@@ -5825,6 +5825,8 @@ fn handle_camera_input(
     input: &InputState,
 ) -> bool {
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
     let delta = get_frame_time();
 
     // Gamepad input
@@ -5859,9 +5861,10 @@ fn handle_camera_input(
 
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
+            // Skip when Ctrl is held to avoid conflict with Ctrl+A select all
             let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
             let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured || has_gamepad_input) && state.dragging_sector_vertices.is_empty() {
+            if (inside_viewport || state.viewport_mouse_captured || has_gamepad_input) && state.dragging_sector_vertices.is_empty() && !ctrl_held {
                 if is_key_down(KeyCode::W) {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
                 }

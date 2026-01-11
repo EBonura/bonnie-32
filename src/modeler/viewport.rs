@@ -687,6 +687,8 @@ pub fn draw_modeler_viewport_ext(
 
     // Perspective camera controls (free or orbit mode) - skip for ortho views
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
 
     if !is_ortho {
     match state.camera_mode {
@@ -708,9 +710,10 @@ pub fn draw_modeler_viewport_ext(
 
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
+            // Skip when Ctrl is held to avoid conflict with Ctrl+A select all
             let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
             let move_speed = if shift_held { 100.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() {
+            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !ctrl_held {
                 if is_key_down(KeyCode::W) {
                     state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
                 }
