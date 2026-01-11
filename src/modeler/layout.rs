@@ -1236,12 +1236,8 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     // Get texture name for save and display (clone before we use tex mutably)
     let tex_name = tex.name.clone();
 
-    if ctx.mouse.clicked(&save_rect) {
-        // Save to user textures library
-        if let Err(e) = state.user_textures.save_texture(&tex_name) {
-            eprintln!("Failed to save texture: {}", e);
-        }
-    }
+    // Check save button now (will handle later after editing is done)
+    let save_clicked = ctx.mouse.clicked(&save_rect);
 
     // Texture name (vertically centered in header)
     let name_text = format!("Editing: {}", tex_name);
@@ -1296,6 +1292,40 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     if state.texture_editor.redo_requested {
         state.texture_editor.redo_requested = false;
         state.redo();
+    }
+
+    // Sync editing_texture back to project.atlas (so mesh updates in real-time)
+    // Get fresh reference to editing texture after all draws
+    if let Some(ref editing_tex) = state.editing_texture {
+        // Sync to project atlas for mesh preview
+        state.project.atlas.width = editing_tex.width;
+        state.project.atlas.height = editing_tex.height;
+        state.project.atlas.depth = editing_tex.depth;
+        state.project.atlas.indices = editing_tex.indices.clone();
+        // Update the default CLUT with the texture's palette
+        if let Some(clut) = state.project.clut_pool.get_mut(state.project.atlas.default_clut) {
+            clut.colors = editing_tex.palette.clone();
+            clut.depth = editing_tex.depth;
+        }
+    }
+
+    // Handle save button click
+    if save_clicked {
+        // Sync editing_texture to user_textures library before saving
+        if let Some(ref editing_tex) = state.editing_texture {
+            if let Some(lib_tex) = state.user_textures.get_mut(&tex_name) {
+                lib_tex.indices = editing_tex.indices.clone();
+                lib_tex.palette = editing_tex.palette.clone();
+                lib_tex.depth = editing_tex.depth;
+                lib_tex.width = editing_tex.width;
+                lib_tex.height = editing_tex.height;
+            }
+        }
+        // Now save to disk
+        if let Err(e) = state.user_textures.save_texture(&tex_name) {
+            eprintln!("Failed to save texture: {}", e);
+        }
+        state.dirty = true;
     }
 }
 
