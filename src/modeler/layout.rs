@@ -15,7 +15,7 @@ use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
 use super::mesh_editor::EditableMesh;
 use super::actions::{create_modeler_actions, build_context};
-use crate::rasterizer::Vec3;
+use crate::rasterizer::{Vec3, Vec2 as RastVec2};
 
 // Colors (matching tracker/editor style)
 const BG_COLOR: Color = Color::new(0.11, 0.11, 0.13, 1.0);
@@ -1405,16 +1405,25 @@ fn apply_uv_modal_transform(
             state.dirty = true;
         }
         UvModalTransform::Scale => {
-            // Scale around center with pixel snapping
-            let center = state.texture_editor.uv_modal_center;
+            // Scale around center - snap center to pixel boundary for consistent results
+            let raw_center = state.texture_editor.uv_modal_center;
+            let center = RastVec2::new(
+                (raw_center.x * tex_width).round() / tex_width,
+                (raw_center.y * tex_height).round() / tex_height,
+            );
             // Scale factor based on horizontal mouse movement
             let scale = 1.0 + delta_screen_x * 0.01;
             let scale = scale.max(0.01); // Prevent negative/zero scale
 
             for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
                 if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
-                    let offset_x = original_uv.x - center.x;
-                    let offset_y = original_uv.y - center.y;
+                    // Snap original UV to pixel boundary for consistent scaling
+                    let snapped_orig = RastVec2::new(
+                        (original_uv.x * tex_width).round() / tex_width,
+                        (original_uv.y * tex_height).round() / tex_height,
+                    );
+                    let offset_x = snapped_orig.x - center.x;
+                    let offset_y = snapped_orig.y - center.y;
                     let new_u = center.x + offset_x * scale;
                     let new_v = center.y + offset_y * scale;
                     // Snap to pixel boundaries

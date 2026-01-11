@@ -1626,16 +1626,25 @@ fn apply_uv_modal_transform_to_face(
                 }
             }
             UvModalTransform::Scale => {
-                // Scale around center with pixel snapping
-                let center = state.texture_editor.uv_modal_center;
+                // Scale around center - snap center to pixel boundary for consistent results
+                let raw_center = state.texture_editor.uv_modal_center;
+                let center = RastVec2::new(
+                    (raw_center.x * tex_width).round() / tex_width,
+                    (raw_center.y * tex_height).round() / tex_height,
+                );
                 // Scale factor based on horizontal mouse movement
                 let scale = 1.0 + delta_screen_x * 0.01;
                 let scale = scale.max(0.01); // Prevent negative/zero scale
 
                 for (corner, original_uv) in changes {
                     if corner < 4 {
-                        let offset_x = original_uv.x - center.x;
-                        let offset_y = original_uv.y - center.y;
+                        // Snap original UV to pixel boundary for consistent scaling
+                        let snapped_orig = RastVec2::new(
+                            (original_uv.x * tex_width).round() / tex_width,
+                            (original_uv.y * tex_height).round() / tex_height,
+                        );
+                        let offset_x = snapped_orig.x - center.x;
+                        let offset_y = snapped_orig.y - center.y;
                         let scaled_u = center.x + offset_x * scale - offset_u;
                         let scaled_v = center.y + offset_y * scale - offset_v;
                         new_uvs[corner].x = (scaled_u * tex_width).round() / tex_width;
