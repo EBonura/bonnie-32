@@ -448,10 +448,11 @@ fn draw_orbit_preview(
     let settings = RasterSettings::default();
     let use_rgb555 = settings.use_rgb555;
 
-    // Convert atlas to appropriate texture format
-    let atlas_texture = project.atlas.to_raster_texture();
+    // Convert atlas to appropriate texture format using CLUT
+    let clut = project.effective_clut();
+    let atlas_texture = clut.map(|c| project.atlas.to_raster_texture(c, "atlas"));
     let atlas_texture_15 = if use_rgb555 {
-        Some(project.atlas.to_raster_texture_15())
+        clut.map(|c| project.atlas.to_texture15(c, "atlas"))
     } else {
         None
     };
@@ -462,11 +463,15 @@ fn draw_orbit_preview(
             let (vertices, faces) = obj.mesh.to_render_data_textured();
             if !vertices.is_empty() {
                 if use_rgb555 {
-                    let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
-                    render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
+                    if let Some(ref tex15) = atlas_texture_15 {
+                        let textures_15 = [tex15.clone()];
+                        render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
+                    }
                 } else {
-                    let textures = [atlas_texture.clone()];
-                    render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+                    if let Some(ref tex) = atlas_texture {
+                        let textures = [tex.clone()];
+                        render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+                    }
                 }
             }
         }

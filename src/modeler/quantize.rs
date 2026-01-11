@@ -267,32 +267,6 @@ pub fn count_unique_colors(rgba_pixels: &[u8]) -> usize {
     unique_colors.len()
 }
 
-/// Count unique colors in a TextureAtlas (convenience wrapper)
-/// Colors are counted in RGB555 space since that's what PS1 uses
-pub fn count_atlas_colors(atlas: &super::mesh_editor::TextureAtlas) -> usize {
-    use std::collections::HashSet;
-
-    let mut unique_colors: HashSet<u16> = HashSet::new();
-
-    for y in 0..atlas.height {
-        for x in 0..atlas.width {
-            let color = atlas.get_pixel(x, y);
-            // Skip transparent pixels
-            if color.blend == crate::rasterizer::BlendMode::Erase {
-                continue;
-            }
-            // Convert to RGB555 and pack (matches Color15::from_rgb888)
-            let r5 = color.r >> 3;
-            let g5 = color.g >> 3;
-            let b5 = color.b >> 3;
-            let packed = ((r5 as u16) << 10) | ((g5 as u16) << 5) | (b5 as u16);
-            unique_colors.insert(packed);
-        }
-    }
-
-    unique_colors.len()
-}
-
 /// Determine optimal CLUT depth based on unique color count
 /// Returns Bpp4 (16 colors) if <= 15 unique colors (index 0 reserved for transparent)
 /// Returns Bpp8 (256 colors) otherwise
@@ -303,57 +277,6 @@ pub fn optimal_clut_depth(unique_colors: usize) -> ClutDepth {
     } else {
         ClutDepth::Bpp8
     }
-}
-
-/// Auto-quantize a TextureAtlas, automatically choosing optimal CLUT depth
-/// Returns (IndexedAtlas, Clut, detected_color_count)
-pub fn quantize_atlas_auto(
-    atlas: &super::mesh_editor::TextureAtlas,
-    name: &str,
-) -> (super::mesh_editor::IndexedAtlas, Clut, usize) {
-    let color_count = count_atlas_colors(atlas);
-    let depth = optimal_clut_depth(color_count);
-    let (indexed, clut) = quantize_atlas(atlas, depth, name);
-    (indexed, clut, color_count)
-}
-
-/// Quantize a TextureAtlas to an IndexedAtlas + Clut
-///
-/// Convenience function for converting existing RGBA atlases to indexed format.
-pub fn quantize_atlas(
-    atlas: &super::mesh_editor::TextureAtlas,
-    depth: ClutDepth,
-    name: &str,
-) -> (super::mesh_editor::IndexedAtlas, Clut) {
-    // Extract RGBA pixels from atlas
-    let mut rgba_pixels = Vec::with_capacity(atlas.width * atlas.height * 4);
-    for y in 0..atlas.height {
-        for x in 0..atlas.width {
-            let color = atlas.get_pixel(x, y);
-            rgba_pixels.push(color.r);
-            rgba_pixels.push(color.g);
-            rgba_pixels.push(color.b);
-            // Map BlendMode::Erase to transparent, otherwise opaque
-            let alpha = if color.blend == crate::rasterizer::BlendMode::Erase {
-                0
-            } else {
-                255
-            };
-            rgba_pixels.push(alpha);
-        }
-    }
-
-    let result = quantize_image(&rgba_pixels, atlas.width, atlas.height, depth, name);
-
-    let indexed_atlas = super::mesh_editor::IndexedAtlas {
-        width: atlas.width,
-        height: atlas.height,
-        depth,
-        indices: result.texture.indices,
-        default_clut: ClutId::NONE,
-    };
-
-    (indexed_atlas, result.clut)
 }
 
 #[cfg(test)]

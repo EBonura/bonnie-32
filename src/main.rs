@@ -576,25 +576,25 @@ async fn main() {
                                             ms.mesh_browser.set_preview(mesh);
 
                                             // Load all textures (primary + additional)
-                                            let mut atlases = Vec::new();
+                                            let mut textures = Vec::new();
 
-                                            // Load primary texture first
+                                            // Load primary texture first (auto-quantize to indexed)
                                             if let Some(tex_path) = texture_path {
-                                                match ObjImporter::load_png_to_atlas(&tex_path) {
-                                                    Ok(atlas) => atlases.push(atlas),
+                                                match ObjImporter::load_png_to_indexed(&tex_path, "preview") {
+                                                    Ok((indexed, clut, color_count)) => textures.push(TextureImportResult { indexed, clut, color_count }),
                                                     Err(e) => eprintln!("Failed to load primary texture: {}", e),
                                                 }
                                             }
 
                                             // Load additional textures (_tex0.png, _tex1.png, etc.)
                                             for tex_path in additional_textures {
-                                                match ObjImporter::load_png_to_atlas(&tex_path) {
-                                                    Ok(atlas) => atlases.push(atlas),
+                                                match ObjImporter::load_png_to_indexed(&tex_path, "preview") {
+                                                    Ok((indexed, clut, color_count)) => textures.push(TextureImportResult { indexed, clut, color_count }),
                                                     Err(e) => eprintln!("Failed to load texture {:?}: {}", tex_path, e),
                                                 }
                                             }
 
-                                            ms.mesh_browser.set_preview_atlases(atlases);
+                                            ms.mesh_browser.set_preview_textures(textures);
                                         }
                                         Err(e) => {
                                             eprintln!("Failed to load mesh: {}", e);
@@ -719,25 +719,18 @@ async fn main() {
                                         // Handle texture import
                                         let mut texture_status = String::new();
                                         if let Some(tex_result) = result.texture {
-                                            match tex_result {
-                                                TextureImportResult::Atlas(atlas) => {
-                                                    ms.modeler_state.project.atlas = atlas;
-                                                    texture_status = " + texture".to_string();
-                                                }
-                                                TextureImportResult::Quantized { atlas, mut indexed, clut, color_count } => {
-                                                    ms.modeler_state.project.atlas = atlas;
-                                                    // Clear existing CLUTs and add only the imported one
-                                                    ms.modeler_state.project.clut_pool.clear();
-                                                    let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
-                                                    indexed.default_clut = clut_id;
-                                                    let depth_label = indexed.depth.short_label();
-                                                    ms.modeler_state.project.indexed_atlas = Some(indexed);
-                                                    ms.modeler_state.selected_clut = Some(clut_id);
-                                                    // Show "(forced)" if user manually selected the depth
-                                                    let forced = if clut_depth_override.is_some() { " forced" } else { "" };
-                                                    texture_status = format!(" + CLUT {}{} ({} colors)", depth_label, forced, color_count);
-                                                }
-                                            }
+                                            let TextureImportResult { mut indexed, clut, color_count } = tex_result;
+                                            // Clear existing CLUTs and add only the imported one
+                                            ms.modeler_state.project.clut_pool.clear();
+                                            let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
+                                            indexed.default_clut = clut_id;
+                                            let depth_label = indexed.depth.short_label();
+                                            // Set the indexed atlas as the project atlas
+                                            ms.modeler_state.project.atlas = indexed;
+                                            ms.modeler_state.selected_clut = Some(clut_id);
+                                            // Show "(forced)" if user manually selected the depth
+                                            let forced = if clut_depth_override.is_some() { " forced" } else { "" };
+                                            texture_status = format!(" + CLUT {}{} ({} colors)", depth_label, forced, color_count);
                                         }
 
                                         // Reset camera to fit the scaled mesh

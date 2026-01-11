@@ -5,7 +5,7 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Too
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
-use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, CameraMode};
+use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode};
 use crate::texture::{UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel};
 use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
@@ -840,30 +840,23 @@ fn draw_collapsible_header(
     }
 }
 
-/// Create a UserTexture for editing from the project's IndexedAtlas or create a new one
+/// Create a UserTexture for editing from the project's IndexedAtlas
 fn create_editing_texture(state: &ModelerState) -> UserTexture {
-    if let Some(indexed) = &state.project.indexed_atlas {
-        // Convert IndexedAtlas to UserTexture
-        let clut = state.project.clut_pool.get(indexed.default_clut)
-            .or_else(|| state.project.clut_pool.iter().next())
-            .cloned()
-            .unwrap_or_else(|| Clut::new_4bit("default".to_string()));
+    let indexed = &state.project.atlas;
+    // Get CLUT for palette colors
+    let clut = state.project.clut_pool.get(indexed.default_clut)
+        .or_else(|| state.project.clut_pool.iter().next())
+        .cloned()
+        .unwrap_or_else(|| Clut::new_4bit("default".to_string()));
 
-        UserTexture {
-            name: "atlas".to_string(),
-            width: indexed.width,
-            height: indexed.height,
-            depth: indexed.depth,
-            indices: indexed.indices.clone(),
-            palette: clut.colors.clone(),
-            blend_mode: crate::rasterizer::BlendMode::Opaque,
-        }
-    } else {
-        // Create new indexed texture from atlas dimensions
-        let atlas = &state.project.atlas;
-        let size = TextureSize::from_dimensions(atlas.width, atlas.height)
-            .unwrap_or(TextureSize::Size64x64); // Default to 64x64 if atlas size doesn't match standard sizes
-        UserTexture::new("atlas", size, ClutDepth::Bpp4)
+    UserTexture {
+        name: "atlas".to_string(),
+        width: indexed.width,
+        height: indexed.height,
+        depth: indexed.depth,
+        indices: indexed.indices.clone(),
+        palette: clut.colors.clone(),
+        blend_mode: crate::rasterizer::BlendMode::Opaque,
     }
 }
 
@@ -1336,6 +1329,9 @@ fn draw_atlas_preview(
     let atlas_width = atlas.width;
     let atlas_height = atlas.height;
 
+    // Get CLUT for rendering atlas preview
+    let clut = state.project.effective_clut();
+
     // Draw checkerboard background
     let checker_size = 8.0;
     let check_cols = (atlas_screen_w / checker_size).ceil() as usize;
@@ -1357,28 +1353,28 @@ fn draw_atlas_preview(
         }
     }
 
-    // Draw texture pixels
+    // Draw texture pixels (indexed - use CLUT to get colors)
     let pixels_per_block = (1.0 / scale).max(1.0) as usize;
-    for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
-        for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
-            let pixel = state.project.atlas.get_pixel(bx, by);
-            if pixel.is_transparent() {
-                continue;
-            }
-            let px = atlas_x + bx as f32 * scale;
-            let py = atlas_y + by as f32 * scale;
-            let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
-            let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
-            if pw > 0.0 && ph > 0.0 {
-                let alpha = match pixel.blend {
-                    crate::rasterizer::BlendMode::Opaque => 255,
-                    crate::rasterizer::BlendMode::Average => 128,
-                    crate::rasterizer::BlendMode::Add => 200,
-                    crate::rasterizer::BlendMode::Subtract => 200,
-                    crate::rasterizer::BlendMode::AddQuarter => 64,
-                    crate::rasterizer::BlendMode::Erase => 0,
-                };
-                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, alpha));
+    if let Some(clut) = clut {
+        for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
+            for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
+                let index = atlas.get_index(bx, by);
+                // Index 0 = transparent (PS1 convention)
+                if index == 0 {
+                    continue;
+                }
+                let c15 = clut.lookup(index);
+                let px = atlas_x + bx as f32 * scale;
+                let py = atlas_y + by as f32 * scale;
+                let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
+                let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
+                if pw > 0.0 && ph > 0.0 {
+                    // Convert Color15 (5-bit per channel) to 8-bit
+                    let r = (c15.r5() << 3) | (c15.r5() >> 2);
+                    let g = (c15.g5() << 3) | (c15.g5() >> 2);
+                    let b = (c15.b5() << 3) | (c15.b5() >> 2);
+                    draw_rectangle(px, py, pw, ph, Color::from_rgba(r, g, b, 255));
+                }
             }
         }
     }
@@ -2003,6 +1999,7 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
     let atlas = &state.project.atlas;
     let atlas_w = atlas.width as f32;
     let atlas_h = atlas.height as f32;
+    let clut = state.project.effective_clut();
 
     // Calculate scale to fit atlas in panel
     let padding = 10.0;
@@ -2036,25 +2033,29 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
         }
     }
 
-    // Draw the actual texture atlas pixels (skip transparent to show checkerboard)
-    // For performance, we draw in blocks instead of pixel-by-pixel
-    let block_size = (scale * 4.0).max(1.0); // Larger blocks for zoomed-out view
+    // Draw the actual texture atlas pixels (indexed - use CLUT)
+    let block_size = (scale * 4.0).max(1.0);
     let pixels_per_block = (block_size / scale).max(1.0) as usize;
 
-    for by in (0..atlas.height).step_by(pixels_per_block) {
-        for bx in (0..atlas.width).step_by(pixels_per_block) {
-            // Sample the pixel (or average a block for downsampled view)
-            let pixel = atlas.get_pixel(bx, by);
-            // Skip transparent pixels so checkerboard shows through
-            if pixel.is_transparent() {
-                continue;
-            }
-            let px = atlas_x + bx as f32 * scale;
-            let py = atlas_y + by as f32 * scale;
-            let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px);
-            let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py);
-            if pw > 0.0 && ph > 0.0 {
-                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, 255));
+    if let Some(clut) = clut {
+        for by in (0..atlas.height).step_by(pixels_per_block) {
+            for bx in (0..atlas.width).step_by(pixels_per_block) {
+                let index = atlas.get_index(bx, by);
+                // Index 0 = transparent
+                if index == 0 {
+                    continue;
+                }
+                let c15 = clut.lookup(index);
+                let px = atlas_x + bx as f32 * scale;
+                let py = atlas_y + by as f32 * scale;
+                let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px);
+                let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py);
+                if pw > 0.0 && ph > 0.0 {
+                    let r = (c15.r5() << 3) | (c15.r5() >> 2);
+                    let g = (c15.g5() << 3) | (c15.g5() >> 2);
+                    let b = (c15.b5() << 3) | (c15.b5() >> 2);
+                    draw_rectangle(px, py, pw, ph, Color::from_rgba(r, g, b, 255));
+                }
             }
         }
     }
@@ -2114,11 +2115,6 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
         12.0,
         TEXT_DIM,
     );
-
-    // Mode indicator
-    let mode_text = if state.view_mode == ViewMode::Texture { "EDIT MODE" } else { "VIEW ONLY" };
-    let mode_color = if state.view_mode == ViewMode::Texture { ACCENT_COLOR } else { TEXT_DIM };
-    draw_text(mode_text, rect.x + rect.w - 70.0, rect.y + 12.0, 13.0, mode_color);
 }
 
 /// Draw PicoCAD-style 4-panel viewport layout with resizable splits
@@ -2212,14 +2208,6 @@ fn draw_single_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
     let label_bg = Rect::new(rect.x + 2.0, rect.y + 2.0, label.len() as f32 * 7.0 + 8.0, 16.0);
     draw_rectangle(label_bg.x, label_bg.y, label_bg.w, label_bg.h, Color::from_rgba(0, 0, 0, 180));
     draw_text(label, label_bg.x + 4.0, label_bg.y + 12.0, 12.0, TEXT_COLOR);
-
-    // Show view mode indicator if in texture mode
-    if state.view_mode == ViewMode::Texture {
-        let mode_label = "UV";
-        let mode_bg = Rect::new(rect.right() - 28.0, rect.y + 2.0, 24.0, 16.0);
-        draw_rectangle(mode_bg.x, mode_bg.y, mode_bg.w, mode_bg.h, Color::from_rgba(100, 50, 150, 200));
-        draw_text(mode_label, mode_bg.x + 4.0, mode_bg.y + 12.0, 12.0, TEXT_COLOR);
-    }
 }
 
 /// Calculate distance from point to line segment (for edge hover detection)
@@ -2427,10 +2415,15 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         ortho_settings.backface_wireframe = false;
 
         // Convert atlas to texture (shared by all objects)
+        // Get effective CLUT for rendering
+        let clut = state.project.effective_clut();
+        let default_clut = Clut::new_4bit("default");
+        let clut_ref = clut.unwrap_or(&default_clut);
+
         let use_rgb555 = state.raster_settings.use_rgb555;
-        let atlas_texture = state.project.atlas.to_raster_texture();
+        let atlas_texture = state.project.atlas.to_raster_texture(clut_ref, "atlas");
         let atlas_texture_15 = if use_rgb555 {
-            Some(state.project.atlas.to_raster_texture_15())
+            Some(state.project.atlas.to_texture15(clut_ref, "atlas"))
         } else {
             None
         };
@@ -3211,15 +3204,20 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
 
     // Draw the actual texture atlas
     let pixels_per_block = (1.0 / scale).max(1.0) as usize;
-    for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
-        for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
-            let pixel = state.project.atlas.get_pixel(bx, by);
-            let px = atlas_x + bx as f32 * scale;
-            let py = atlas_y + by as f32 * scale;
-            let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
-            let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
-            if pw > 0.0 && ph > 0.0 {
-                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, 255));
+    if let Some(clut) = state.project.effective_clut() {
+        for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
+            for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
+                let pixel = state.project.atlas.get_color(bx, by, clut);
+                let px = atlas_x + bx as f32 * scale;
+                let py = atlas_y + by as f32 * scale;
+                let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
+                let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
+                if pw > 0.0 && ph > 0.0 {
+                    let r = (pixel.r5() << 3) | (pixel.r5() >> 2);
+                    let g = (pixel.g5() << 3) | (pixel.g5() >> 2);
+                    let b = (pixel.b5() << 3) | (pixel.b5() >> 2);
+                    draw_rectangle(px, py, pw, ph, Color::from_rgba(r, g, b, 255));
+                }
             }
         }
     }
@@ -3227,11 +3225,11 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     // Draw atlas border
     draw_rectangle_lines(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, 1.0, Color::from_rgba(100, 100, 105, 255));
 
-    // Handle painting in texture mode
+    // Handle painting when paint section is expanded
     let (mx, my) = (ctx.mouse.x, ctx.mouse.y);
     let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
 
-    if state.view_mode == super::state::ViewMode::Texture && atlas_rect.contains(mx, my) {
+    if state.paint_section_expanded && atlas_rect.contains(mx, my) {
         // Convert mouse position to atlas pixel coordinates
         let px = ((mx - atlas_x) / scale) as usize;
         let py = ((my - atlas_y) / scale) as usize;
@@ -3243,18 +3241,18 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
         let cursor_w = brush_size * scale;
         draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
 
-        // Paint on click/drag
+        // Paint on click/drag (indexed painting with palette index)
         if ctx.mouse.left_down {
             // Save undo at stroke start
             if !state.paint_stroke_active {
                 state.push_undo_with_atlas("Paint");
                 state.paint_stroke_active = true;
             }
-            let color = state.paint_color;
+            let index = state.active_palette_index;
             let brush = brush_size as usize;
             for dy in 0..brush {
                 for dx in 0..brush {
-                    state.project.atlas.set_pixel(px + dx, py + dy, color);
+                    state.project.atlas.set_index(px + dx, py + dy, index);
                 }
             }
             state.dirty = true;
@@ -3302,18 +3300,15 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
         let swatch_color = Color::from_rgba(*r, *g, *b, 255);
         draw_rectangle(sx, sy, swatch_size - 2.0, swatch_size - 2.0, swatch_color);
 
-        // Highlight current color
-        let is_current = state.paint_color.r == *r
-            && state.paint_color.g == *g
-            && state.paint_color.b == *b;
-        if is_current {
+        // Highlight current palette index
+        if i as u8 == state.active_palette_index {
             draw_rectangle_lines(sx - 1.0, sy - 1.0, swatch_size, swatch_size, 2.0, WHITE);
         }
 
-        // Handle click to select color
+        // Handle click to select palette index
         let swatch_rect = Rect::new(sx, sy, swatch_size - 2.0, swatch_size - 2.0);
         if ctx.mouse.left_pressed && swatch_rect.contains(mx, my) {
-            state.paint_color = crate::rasterizer::Color::new(*r, *g, *b);
+            state.active_palette_index = i as u8;
         }
     }
 
@@ -3726,9 +3721,8 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         SelectMode::Edge => "edge",
         SelectMode::Face => "face",
     };
-    let is_texture_mode = state.view_mode == ViewMode::Texture;
     let is_dragging = state.drag_manager.is_dragging() || state.modal_transform != ModalTransform::None;
-    let is_paint_mode = is_texture_mode && state.paint_section_expanded;
+    let is_paint_mode = state.paint_section_expanded;
 
     let ctx = build_context(
         state.can_undo(),
@@ -3736,7 +3730,6 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         has_selection,
         has_face_selection,
         has_vertex_selection,
-        is_texture_mode,
         select_mode_str,
         false, // text_editing - would need to track this
         state.dirty,
@@ -3881,9 +3874,6 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     // ========================================================================
     // View Actions
     // ========================================================================
-    if actions.triggered("view.toggle_mode", &ctx) {
-        state.toggle_view_mode();
-    }
     if actions.triggered("view.toggle_fullscreen", &ctx) {
         state.toggle_fullscreen_viewport();
     }

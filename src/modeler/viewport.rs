@@ -7,7 +7,7 @@ use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
-    world_to_screen, world_to_screen_with_ortho, draw_floor_grid, point_in_triangle_2d,
+    world_to_screen_with_ortho, draw_floor_grid, point_in_triangle_2d,
     OrthoProjection, Camera,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
@@ -887,25 +887,11 @@ pub fn draw_modeler_viewport_ext(
     // Use RGB555 or RGB888 based on settings
     let use_rgb555 = state.raster_settings.use_rgb555;
 
-    // Pre-convert atlas to appropriate format
-    // If we have an indexed atlas with a CLUT, use that for authentic PS1 rendering
-    let atlas_texture = state.project.atlas.to_raster_texture();
+    // Pre-convert atlas to appropriate format using CLUT
+    let clut = state.project.effective_clut();
+    let atlas_texture = clut.map(|c| state.project.atlas.to_raster_texture(c, "atlas"));
     let atlas_texture_15 = if use_rgb555 {
-        // Check if we have indexed atlas + CLUT for authentic rendering
-        if let Some(ref indexed_atlas) = state.project.indexed_atlas {
-            // Determine which CLUT to use: preview override or default
-            let clut_id = state.project.preview_clut.unwrap_or(indexed_atlas.default_clut);
-            if let Some(clut) = state.project.clut_pool.get(clut_id) {
-                // Convert indexed atlas -> Texture15 using CLUT lookup
-                Some(indexed_atlas.to_texture15(clut, "indexed_atlas"))
-            } else {
-                // Fallback to regular atlas if CLUT not found
-                Some(state.project.atlas.to_raster_texture_15())
-            }
-        } else {
-            // No indexed atlas, use regular atlas
-            Some(state.project.atlas.to_raster_texture_15())
-        }
+        clut.map(|c| state.project.atlas.to_texture15(c, "atlas"))
     } else {
         None
     };
@@ -960,28 +946,32 @@ pub fn draw_modeler_viewport_ext(
             if use_rgb555 {
                 // RGB555 rendering path
                 // Per-face blend modes + per-pixel STP bit (PS1-authentic)
-                let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
-                render_mesh_15(
-                    fb,
-                    &vertices,
-                    &faces,
-                    &textures_15,
-                    Some(&blend_modes),
-                    &state.camera,
-                    &state.raster_settings,
-                    None,
-                );
+                if let Some(ref tex15) = atlas_texture_15 {
+                    let textures_15 = [tex15.clone()];
+                    render_mesh_15(
+                        fb,
+                        &vertices,
+                        &faces,
+                        &textures_15,
+                        Some(&blend_modes),
+                        &state.camera,
+                        &state.raster_settings,
+                        None,
+                    );
+                }
             } else {
                 // RGB888 rendering path (original)
-                let textures = [atlas_texture.clone()];
-                render_mesh(
-                    fb,
-                    &vertices,
-                    &faces,
-                    &textures,
-                    &state.camera,
-                    &state.raster_settings,
-                );
+                if let Some(ref tex) = atlas_texture {
+                    let textures = [tex.clone()];
+                    render_mesh(
+                        fb,
+                        &vertices,
+                        &faces,
+                        &textures,
+                        &state.camera,
+                        &state.raster_settings,
+                    );
+                }
             }
         }
     }

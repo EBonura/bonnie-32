@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15};
-use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
-use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, TextureAtlas};
+use crate::texture::{TextureLibrary, TextureEditorState};
+use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, IndexedAtlas};
 use super::model::Animation;
 use super::drag::DragManager;
 use super::tools::ModelerToolBox;
@@ -81,32 +81,6 @@ impl Default for OrthoCamera {
             // Scale: 1024 units = 1 meter
             zoom: 0.1, // Zoomed out more for larger scale
             center: Vec2::new(0.0, 1024.0), // Centered at 1 meter height
-        }
-    }
-}
-
-/// Build mode vs Texture mode (V key to toggle, like PicoCAD)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ViewMode {
-    /// Edit geometry (vertices, faces, extrude)
-    #[default]
-    Build,
-    /// Edit UVs and textures
-    Texture,
-}
-
-impl ViewMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ViewMode::Build => "Build",
-            ViewMode::Texture => "Texture",
-        }
-    }
-
-    pub fn toggle(&self) -> Self {
-        match self {
-            ViewMode::Build => ViewMode::Texture,
-            ViewMode::Texture => ViewMode::Build,
         }
     }
 }
@@ -604,7 +578,6 @@ pub struct ModelerState {
     pub orbit_elevation: f32,    // Vertical angle in radians (orbit mode)
 
     // PicoCAD-style 4-panel viewport system
-    pub view_mode: ViewMode,           // Build vs Texture (V to toggle)
     pub active_viewport: ViewportId,   // Which viewport has focus
     pub fullscreen_viewport: Option<ViewportId>,  // Space to toggle fullscreen
     pub ortho_top: OrthoCamera,        // Top view camera (XZ plane)
@@ -772,7 +745,7 @@ pub enum UndoEvent {
     Mesh {
         object_index: Option<usize>,
         mesh: EditableMesh,
-        atlas: Option<TextureAtlas>,
+        atlas: Option<IndexedAtlas>,
         description: String,
     },
     /// Selection change only
@@ -824,7 +797,6 @@ impl ModelerState {
             orbit_elevation,
 
             // PicoCAD-style viewports
-            view_mode: ViewMode::Build,
             active_viewport: ViewportId::Perspective,
             fullscreen_viewport: None,
             ortho_top: OrthoCamera::default(),
@@ -976,12 +948,6 @@ impl ModelerState {
     // PicoCAD-style viewport helpers
     // ========================================================================
 
-    /// Toggle between Build and Texture view mode (V key)
-    pub fn toggle_view_mode(&mut self) {
-        self.view_mode = self.view_mode.toggle();
-        self.set_status(&format!("{} Mode", self.view_mode.label()), 1.0);
-    }
-
     /// Toggle fullscreen for the active viewport (Space key)
     pub fn toggle_fullscreen_viewport(&mut self) {
         if self.fullscreen_viewport.is_some() {
@@ -1094,13 +1060,13 @@ impl ModelerState {
     // PicoCAD-style Project Helpers
     // ========================================================================
 
-    /// Get the texture atlas
-    pub fn atlas(&self) -> &TextureAtlas {
+    /// Get the indexed texture atlas
+    pub fn atlas(&self) -> &IndexedAtlas {
         &self.project.atlas
     }
 
-    /// Get mutable texture atlas
-    pub fn atlas_mut(&mut self) -> &mut TextureAtlas {
+    /// Get mutable indexed texture atlas
+    pub fn atlas_mut(&mut self) -> &mut IndexedAtlas {
         &mut self.project.atlas
     }
 

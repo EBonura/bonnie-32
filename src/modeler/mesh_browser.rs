@@ -6,7 +6,8 @@ use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, icon, icon_button, icon_button_active, ACCENT_COLOR, TEXT_COLOR};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid, ClutDepth};
 use crate::world::SECTOR_SIZE;
-use super::mesh_editor::{EditableMesh, TextureAtlas};
+use super::mesh_editor::EditableMesh;
+use super::obj_import::TextureImportResult;
 use super::obj_import::ObjImporter;
 use std::path::PathBuf;
 
@@ -205,8 +206,8 @@ pub struct MeshBrowser {
     pub pending_load_path: Option<PathBuf>,
     /// Whether we need to async load the mesh list (WASM)
     pub pending_load_list: bool,
-    /// Preview texture atlases (primary + additional _texN.png files)
-    pub preview_atlases: Vec<TextureAtlas>,
+    /// Preview textures (atlas + clut pairs)
+    pub preview_textures: Vec<TextureImportResult>,
     /// Whether to show texture in preview (if available)
     pub show_texture: bool,
     /// Scroll offset for texture preview panel
@@ -238,7 +239,7 @@ impl Default for MeshBrowser {
             flip_vertical: false,
             pending_load_path: None,
             pending_load_list: false,
-            preview_atlases: Vec::new(),
+            preview_textures: Vec::new(),
             show_texture: true, // Show textures by default
             texture_scroll_offset: 0.0,
             clut_depth_override: None, // Auto-detect by default
@@ -253,7 +254,7 @@ impl MeshBrowser {
         self.meshes = meshes;
         self.selected_index = None;
         self.preview_mesh = None;
-        self.preview_atlases.clear();
+        self.preview_textures.clear();
         self.scroll_offset = 0.0;
         self.texture_scroll_offset = 0.0;
     }
@@ -262,7 +263,7 @@ impl MeshBrowser {
     pub fn close(&mut self) {
         self.open = false;
         self.preview_mesh = None;
-        self.preview_atlases.clear();
+        self.preview_textures.clear();
     }
 
     /// Set the preview mesh (resets camera view)
@@ -323,15 +324,15 @@ impl MeshBrowser {
         self.selected_index.and_then(|i| self.meshes.get(i))
     }
 
-    /// Set the preview texture atlases (primary first, then additional)
-    pub fn set_preview_atlases(&mut self, atlases: Vec<TextureAtlas>) {
-        self.preview_atlases = atlases;
+    /// Set the preview textures (primary first, then additional)
+    pub fn set_preview_textures(&mut self, textures: Vec<TextureImportResult>) {
+        self.preview_textures = textures;
         self.texture_scroll_offset = 0.0;
     }
 
-    /// Get the primary preview atlas (for 3D rendering)
-    pub fn preview_atlas(&self) -> Option<&TextureAtlas> {
-        self.preview_atlases.first()
+    /// Get the primary preview texture (for 3D rendering)
+    pub fn preview_texture(&self) -> Option<&TextureImportResult> {
+        self.preview_textures.first()
     }
 }
 
@@ -482,7 +483,7 @@ pub fn draw_mesh_browser(
     draw_rectangle_lines(tex_panel_rect.x, tex_panel_rect.y, tex_panel_rect.w, tex_panel_rect.h, 1.0, Color::from_rgba(50, 50, 55, 255));
 
     // Draw texture label with count
-    let tex_count = browser.preview_atlases.len();
+    let tex_count = browser.preview_textures.len();
     let tex_label = if tex_count > 1 {
         format!("Textures ({})", tex_count)
     } else {
@@ -491,7 +492,7 @@ pub fn draw_mesh_browser(
     draw_text(&tex_label, tex_panel_rect.x + 8.0, tex_panel_rect.y + 16.0, 12.0, Color::from_rgba(120, 120, 120, 255));
 
     // Draw textures or "No texture" message
-    if !browser.preview_atlases.is_empty() {
+    if !browser.preview_textures.is_empty() {
         // Content area for textures (below label)
         let tex_content_y = tex_panel_rect.y + 24.0;
         let tex_content_h = content_h - 32.0;
@@ -526,7 +527,7 @@ pub fn draw_mesh_browser(
         }
 
         // Draw each texture
-        for (i, atlas) in browser.preview_atlases.iter().enumerate() {
+        for (i, tex_result) in browser.preview_textures.iter().enumerate() {
             let item_y = tex_content_y + i as f32 * item_h - browser.texture_scroll_offset;
 
             // Skip if completely off-screen (optimization only, scissor handles actual clipping)
@@ -534,17 +535,19 @@ pub fn draw_mesh_browser(
                 continue;
             }
 
-            // Convert atlas to RGBA for display
+            // Convert indexed atlas to RGBA using CLUT for display
+            let atlas = &tex_result.indexed;
+            let clut = &tex_result.clut;
             let atlas_w = atlas.width;
             let atlas_h = atlas.height;
             let mut rgba = vec![0u8; atlas_w * atlas_h * 4];
             for y in 0..atlas_h {
                 for x in 0..atlas_w {
-                    let pixel = atlas.get_pixel(x, y);
+                    let pixel = atlas.get_color(x, y, clut);
                     let idx = (y * atlas_w + x) * 4;
-                    rgba[idx] = pixel.r;
-                    rgba[idx + 1] = pixel.g;
-                    rgba[idx + 2] = pixel.b;
+                    rgba[idx] = (pixel.r5() << 3) | (pixel.r5() >> 2);
+                    rgba[idx + 1] = (pixel.g5() << 3) | (pixel.g5() >> 2);
+                    rgba[idx + 2] = (pixel.b5() << 3) | (pixel.b5() >> 2);
                     rgba[idx + 3] = 255;
                 }
             }
@@ -642,7 +645,7 @@ pub fn draw_mesh_browser(
 
     // Texture toggle (only enabled if texture is available)
     let tex_rect = Rect::new(dialog_x + 230.0, footer_y + 8.0, 28.0, 28.0);
-    let has_texture = !browser.preview_atlases.is_empty();
+    let has_texture = !browser.preview_textures.is_empty();
     let tex_icon = if browser.show_texture { icon::EYE } else { icon::EYE_OFF };
     let tex_tooltip = if has_texture {
         if browser.show_texture { "Hide Texture" } else { "Show Texture" }
@@ -820,16 +823,16 @@ fn draw_orbit_preview(
 
     if !mesh.vertices.is_empty() {
         // Check if we should render with texture (use primary atlas for preview)
-        if browser.show_texture && browser.preview_atlas().is_some() {
-            let atlas = browser.preview_atlas().unwrap();
+        if browser.show_texture && browser.preview_texture().is_some() {
+            let tex_result = browser.preview_texture().unwrap();
             let (vertices, faces) = mesh.to_render_data_textured();
 
             if settings.use_rgb555 {
-                let atlas_texture_15 = atlas.to_raster_texture_15();
+                let atlas_texture_15 = tex_result.indexed.to_texture15(&tex_result.clut, "preview");
                 let textures_15 = [atlas_texture_15];
                 render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
             } else {
-                let atlas_texture = atlas.to_raster_texture();
+                let atlas_texture = tex_result.indexed.to_raster_texture(&tex_result.clut, "preview");
                 let textures = [atlas_texture];
                 render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
             }

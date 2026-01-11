@@ -7,7 +7,7 @@
 //! - Reading: Auto-detects format by checking for valid RON start
 //! - Writing: Always uses brotli compression
 
-use crate::rasterizer::{Vec3, Vec2, Face as RasterFace, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
+use crate::rasterizer::{Vec3, Vec2, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
@@ -172,22 +172,15 @@ impl MeshObject {
     }
 }
 
-/// A complete PicoCAD-style project with multiple objects and texture atlas
+/// A complete PicoCAD-style project with multiple objects and indexed texture atlas
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeshProject {
     /// Project name
     pub name: String,
     /// All mesh objects in the project
     pub objects: Vec<MeshObject>,
-    /// The texture atlas (serialized as raw RGBA) - kept for backwards compat
-    pub atlas: TextureAtlas,
-
-    // ---- PS1 CLUT System ----
-
-    /// Optional indexed atlas (stores palette indices instead of colors)
-    /// When present, this is the authoritative texture data
-    #[serde(default)]
-    pub indexed_atlas: Option<IndexedAtlas>,
+    /// The indexed texture atlas (stores palette indices)
+    pub atlas: IndexedAtlas,
 
     /// Global CLUT pool (shared across all textures)
     #[serde(default)]
@@ -208,8 +201,7 @@ impl MeshProject {
             name: name.into(),
             // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
             objects: vec![MeshObject::cube("object", 1024.0)],
-            atlas: TextureAtlas::new(128, 128),
-            indexed_atlas: None,
+            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
             clut_pool: ClutPool::default(),
             preview_clut: None,
             selected_object: Some(0),
@@ -241,6 +233,24 @@ impl MeshProject {
     /// Get total face count across all objects
     pub fn total_faces(&self) -> usize {
         self.objects.iter().map(|o| o.mesh.face_count()).sum()
+    }
+
+    /// Get the effective CLUT for the atlas (preview_clut > default_clut > first in pool)
+    pub fn effective_clut(&self) -> Option<&Clut> {
+        // Try preview override first
+        if let Some(preview_id) = self.preview_clut {
+            if let Some(clut) = self.clut_pool.get(preview_id) {
+                return Some(clut);
+            }
+        }
+        // Try atlas default
+        if self.atlas.default_clut.is_valid() {
+            if let Some(clut) = self.clut_pool.get(self.atlas.default_clut) {
+                return Some(clut);
+            }
+        }
+        // Fall back to first CLUT in pool
+        self.clut_pool.first_id().and_then(|id| self.clut_pool.get(id))
     }
 
     /// Save project to file (compressed RON format with brotli)
@@ -305,310 +315,6 @@ impl MeshProject {
 impl Default for MeshProject {
     fn default() -> Self {
         Self::new("Untitled")
-    }
-}
-
-// ============================================================================
-// Texture Atlas (PicoCAD-style 128x128 pixel texture)
-// ============================================================================
-
-/// A small texture atlas for low-poly models (like picoCAD's 128x120)
-#[derive(Clone, Debug)]
-pub struct TextureAtlas {
-    pub width: usize,
-    pub height: usize,
-    /// RGB pixel data + blend mode (stored as 4 bytes: R, G, B, blend_mode_u8)
-    pub pixels: Vec<u8>,
-}
-
-impl TextureAtlas {
-    pub fn new(width: usize, height: usize) -> Self {
-        // Initialize with grey (like Blender's default material)
-        let mut pixels = vec![0u8; width * height * 4];
-        for i in 0..(width * height) {
-            pixels[i * 4] = 128;     // R - grey
-            pixels[i * 4 + 1] = 128; // G - grey
-            pixels[i * 4 + 2] = 128; // B - grey
-            pixels[i * 4 + 3] = 0;   // BlendMode::Opaque
-        }
-        Self { width, height, pixels }
-    }
-
-    /// Convert BlendMode to u8 for storage
-    fn blend_to_u8(blend: crate::rasterizer::BlendMode) -> u8 {
-        match blend {
-            crate::rasterizer::BlendMode::Opaque => 0,
-            crate::rasterizer::BlendMode::Average => 1,
-            crate::rasterizer::BlendMode::Add => 2,
-            crate::rasterizer::BlendMode::Subtract => 3,
-            crate::rasterizer::BlendMode::AddQuarter => 4,
-            crate::rasterizer::BlendMode::Erase => 5,
-        }
-    }
-
-    /// Convert u8 to BlendMode
-    fn u8_to_blend(v: u8) -> crate::rasterizer::BlendMode {
-        match v {
-            0 => crate::rasterizer::BlendMode::Opaque,
-            1 => crate::rasterizer::BlendMode::Average,
-            2 => crate::rasterizer::BlendMode::Add,
-            3 => crate::rasterizer::BlendMode::Subtract,
-            4 => crate::rasterizer::BlendMode::AddQuarter,
-            _ => crate::rasterizer::BlendMode::Erase, // Default to transparent
-        }
-    }
-
-    /// Set a pixel color at (x, y)
-    pub fn set_pixel(&mut self, x: usize, y: usize, color: RasterColor) {
-        if x < self.width && y < self.height {
-            let idx = (y * self.width + x) * 4;
-            self.pixels[idx] = color.r;
-            self.pixels[idx + 1] = color.g;
-            self.pixels[idx + 2] = color.b;
-            self.pixels[idx + 3] = Self::blend_to_u8(color.blend);
-        }
-    }
-
-    /// Get pixel color at (x, y)
-    pub fn get_pixel(&self, x: usize, y: usize) -> RasterColor {
-        if x < self.width && y < self.height {
-            let idx = (y * self.width + x) * 4;
-            RasterColor::with_blend(
-                self.pixels[idx],
-                self.pixels[idx + 1],
-                self.pixels[idx + 2],
-                Self::u8_to_blend(self.pixels[idx + 3]),
-            )
-        } else {
-            RasterColor::TRANSPARENT
-        }
-    }
-
-    /// Set a pixel with blend mode
-    /// Note: This stores the color WITH the blend mode intact - blending happens at render time
-    pub fn set_pixel_blended(&mut self, x: usize, y: usize, color: RasterColor, mode: crate::rasterizer::BlendMode) {
-        if x >= self.width || y >= self.height { return; }
-        // Store the color with the specified blend mode (don't blend now, blend at render time)
-        let color_with_mode = RasterColor::with_blend(color.r, color.g, color.b, mode);
-        self.set_pixel(x, y, color_with_mode);
-    }
-
-    /// Fill a rectangle with a color
-    pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: RasterColor) {
-        for py in y..(y + h).min(self.height) {
-            for px in x..(x + w).min(self.width) {
-                self.set_pixel(px, py, color);
-            }
-        }
-    }
-
-    /// Draw a line (Bresenham's algorithm)
-    pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: RasterColor) {
-        let dx = (x1 - x0).abs();
-        let dy = -(y1 - y0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        let mut x = x0;
-        let mut y = y0;
-
-        loop {
-            if x >= 0 && y >= 0 {
-                self.set_pixel(x as usize, y as usize, color);
-            }
-            if x == x1 && y == y1 { break; }
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                x += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y += sy;
-            }
-        }
-    }
-
-    /// Clear to a solid color
-    pub fn clear(&mut self, color: RasterColor) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.set_pixel(x, y, color);
-            }
-        }
-    }
-
-    /// Flood fill starting from (x, y) with the given color
-    /// Uses a simple stack-based algorithm to avoid recursion depth issues
-    pub fn flood_fill(&mut self, x: usize, y: usize, fill_color: RasterColor) {
-        if x >= self.width || y >= self.height {
-            return;
-        }
-
-        let target_color = self.get_pixel(x, y);
-
-        // Don't fill if the target is already the fill color (same RGB and blend mode)
-        if target_color.r == fill_color.r
-            && target_color.g == fill_color.g
-            && target_color.b == fill_color.b
-            && target_color.blend == fill_color.blend {
-            return;
-        }
-
-        let mut stack = vec![(x, y)];
-
-        while let Some((cx, cy)) = stack.pop() {
-            if cx >= self.width || cy >= self.height {
-                continue;
-            }
-
-            let current = self.get_pixel(cx, cy);
-
-            // Check if this pixel matches the target color
-            if current.r != target_color.r
-                || current.g != target_color.g
-                || current.b != target_color.b
-                || current.blend != target_color.blend {
-                continue;
-            }
-
-            // Fill this pixel
-            self.set_pixel(cx, cy, fill_color);
-
-            // Add neighbors to stack
-            if cx > 0 { stack.push((cx - 1, cy)); }
-            if cx + 1 < self.width { stack.push((cx + 1, cy)); }
-            if cy > 0 { stack.push((cx, cy - 1)); }
-            if cy + 1 < self.height { stack.push((cx, cy + 1)); }
-        }
-    }
-
-    /// Convert to a rasterizer Texture for rendering
-    pub fn to_raster_texture(&self) -> crate::rasterizer::Texture {
-        let pixels: Vec<RasterColor> = (0..self.height)
-            .flat_map(|y| (0..self.width).map(move |x| self.get_pixel(x, y)))
-            .collect();
-
-        crate::rasterizer::Texture {
-            width: self.width,
-            height: self.height,
-            pixels,
-            name: String::from("atlas"),
-            blend_mode: crate::rasterizer::BlendMode::Opaque,
-        }
-    }
-
-    /// Convert to a Texture15 (RGB555) for PS1-authentic rendering
-    pub fn to_raster_texture_15(&self) -> Texture15 {
-        let pixels: Vec<Color15> = (0..self.height)
-            .flat_map(|y| {
-                (0..self.width).map(move |x| {
-                    let idx = (y * self.width + x) * 4;
-                    let r = self.pixels[idx];
-                    let g = self.pixels[idx + 1];
-                    let b = self.pixels[idx + 2];
-                    let blend_mode = Self::u8_to_blend(self.pixels[idx + 3]);
-
-                    // Map to Color15:
-                    // - BlendMode::Erase -> transparent (0x0000)
-                    // - Non-Opaque -> semi-transparent bit set
-                    if blend_mode == BlendMode::Erase {
-                        Color15::TRANSPARENT
-                    } else {
-                        let semi = blend_mode != BlendMode::Opaque;
-                        Color15::from_rgb888_semi(r, g, b, semi)
-                    }
-                })
-            })
-            .collect();
-
-        Texture15 {
-            width: self.width,
-            height: self.height,
-            pixels,
-            name: String::from("atlas"),
-            blend_mode: crate::rasterizer::BlendMode::Opaque,
-        }
-    }
-
-    /// Resize the atlas to new dimensions, preserving existing content where possible
-    /// Content at (x, y) is preserved if x < new_width and y < new_height
-    /// New areas are filled with grey (default color)
-    pub fn resize(&mut self, new_width: usize, new_height: usize) {
-        if new_width == self.width && new_height == self.height {
-            return;
-        }
-
-        let mut new_pixels = vec![0u8; new_width * new_height * 4];
-
-        // Initialize new pixels with grey default
-        for i in 0..(new_width * new_height) {
-            new_pixels[i * 4] = 128;     // R - grey
-            new_pixels[i * 4 + 1] = 128; // G - grey
-            new_pixels[i * 4 + 2] = 128; // B - grey
-            new_pixels[i * 4 + 3] = 0;   // BlendMode::Opaque
-        }
-
-        // Copy existing content that fits
-        let copy_w = self.width.min(new_width);
-        let copy_h = self.height.min(new_height);
-
-        for y in 0..copy_h {
-            for x in 0..copy_w {
-                let old_idx = (y * self.width + x) * 4;
-                let new_idx = (y * new_width + x) * 4;
-                new_pixels[new_idx] = self.pixels[old_idx];
-                new_pixels[new_idx + 1] = self.pixels[old_idx + 1];
-                new_pixels[new_idx + 2] = self.pixels[old_idx + 2];
-                new_pixels[new_idx + 3] = self.pixels[old_idx + 3];
-            }
-        }
-
-        self.width = new_width;
-        self.height = new_height;
-        self.pixels = new_pixels;
-    }
-}
-
-// Serialize TextureAtlas as base64-encoded PNG would be ideal, but for simplicity
-// we'll serialize as raw dimensions + pixel data
-impl Serialize for TextureAtlas {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("TextureAtlas", 3)?;
-        state.serialize_field("width", &self.width)?;
-        state.serialize_field("height", &self.height)?;
-        // Encode as base64 string for compactness
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        let encoded = STANDARD.encode(&self.pixels);
-        state.serialize_field("pixels", &encoded)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for TextureAtlas {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct AtlasData {
-            width: usize,
-            height: usize,
-            pixels: String,
-        }
-        let data = AtlasData::deserialize(deserializer)?;
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        let pixels = STANDARD.decode(&data.pixels)
-            .map_err(serde::de::Error::custom)?;
-        Ok(TextureAtlas {
-            width: data.width,
-            height: data.height,
-            pixels,
-        })
     }
 }
 
@@ -712,13 +418,13 @@ impl Default for ClutPool {
 }
 
 // ============================================================================
-// Indexed Atlas (parallel to TextureAtlas, stores palette indices)
+// Indexed Atlas (PS1-style palette-indexed texture)
 // ============================================================================
 
 /// Indexed texture atlas storing palette indices instead of colors
 ///
-/// Works alongside TextureAtlas - the RGBA atlas is kept for backwards
-/// compatibility and preview, while this stores the actual indexed data.
+/// PS1-authentic texture format where each pixel is a palette index (4-bit or 8-bit).
+/// Colors are resolved at render time using a CLUT (Color Look-Up Table).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedAtlas {
     pub width: usize,
@@ -793,6 +499,59 @@ impl IndexedAtlas {
     /// Total number of pixels
     pub fn pixel_count(&self) -> usize {
         self.width * self.height
+    }
+
+    /// Get pixel color using a CLUT (for preview rendering)
+    pub fn get_color(&self, x: usize, y: usize, clut: &Clut) -> Color15 {
+        let index = self.get_index(x, y);
+        clut.lookup(index)
+    }
+
+    /// Resize the atlas (resamples indices using nearest-neighbor)
+    pub fn resize(&mut self, new_width: usize, new_height: usize) {
+        if new_width == self.width && new_height == self.height {
+            return;
+        }
+        let mut new_indices = vec![0u8; new_width * new_height];
+        for y in 0..new_height {
+            for x in 0..new_width {
+                // Nearest-neighbor sampling from old atlas
+                let src_x = (x * self.width) / new_width;
+                let src_y = (y * self.height) / new_height;
+                let src_idx = src_y * self.width + src_x;
+                let dst_idx = y * new_width + x;
+                new_indices[dst_idx] = self.indices.get(src_idx).copied().unwrap_or(0);
+            }
+        }
+        self.width = new_width;
+        self.height = new_height;
+        self.indices = new_indices;
+    }
+
+    /// Convert to 24-bit raster Texture for rendering (non-indexed)
+    /// Uses the provided CLUT to look up colors
+    pub fn to_raster_texture(&self, clut: &Clut, name: &str) -> crate::rasterizer::Texture {
+        let mut pixels = Vec::with_capacity(self.width * self.height);
+        for &index in &self.indices {
+            let c15 = clut.lookup(index);
+            // Convert Color15 to RGB24 (5-bit to 8-bit)
+            let r = (c15.r5() << 3) | (c15.r5() >> 2);
+            let g = (c15.g5() << 3) | (c15.g5() >> 2);
+            let b = (c15.b5() << 3) | (c15.b5() >> 2);
+            let blend = if index == 0 {
+                crate::rasterizer::BlendMode::Erase // Index 0 = transparent
+            } else {
+                crate::rasterizer::BlendMode::Opaque
+            };
+            pixels.push(crate::rasterizer::Color::with_blend(r, g, b, blend));
+        }
+        crate::rasterizer::Texture {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: name.to_string(),
+            blend_mode: crate::rasterizer::BlendMode::Opaque,
+        }
     }
 }
 

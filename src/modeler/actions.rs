@@ -14,15 +14,11 @@ pub mod flags {
     pub const VERTEX_MODE: u32 = 1 << 1;
     /// In edge selection mode
     pub const EDGE_MODE: u32 = 1 << 2;
-    /// In texture/UV editing mode
-    pub const TEXTURE_MODE: u32 = 1 << 3;
-    /// In build/geometry mode
-    pub const BUILD_MODE: u32 = 1 << 4;
     /// Has a mesh loaded
     pub const HAS_MESH: u32 = 1 << 5;
     /// Currently dragging/transforming
     pub const DRAGGING: u32 = 1 << 6;
-    /// In paint mode (within texture mode)
+    /// In paint mode
     pub const PAINT_MODE: u32 = 1 << 7;
 }
 
@@ -222,15 +218,6 @@ pub fn create_modeler_actions() -> ActionRegistry {
     // View Actions
     // ========================================================================
     registry.register(
-        Action::new("view.toggle_mode")
-            .label("Toggle Build/Texture")
-            .shortcut(Shortcut::key(KeyCode::V))
-            .status_tip("Switch between Build and Texture editing modes")
-            .category("View")
-            .checked_when(|ctx| ctx.has_flag(flags::TEXTURE_MODE)),
-    );
-
-    registry.register(
         Action::new("view.toggle_fullscreen")
             .label("Toggle Fullscreen Viewport")
             .shortcut(Shortcut::key(KeyCode::Space))
@@ -265,7 +252,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .icon(icon::FLIP_HORIZONTAL)
             .status_tip("Flip UVs horizontally")
             .category("UV")
-            .enabled_when(|ctx| ctx.has_face_selection && ctx.has_flag(flags::TEXTURE_MODE)),
+            .enabled_when(|ctx| ctx.has_face_selection),
     );
 
     registry.register(
@@ -275,7 +262,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .icon(icon::FLIP_VERTICAL)
             .status_tip("Flip UVs vertically")
             .category("UV")
-            .enabled_when(|ctx| ctx.has_face_selection && ctx.has_flag(flags::TEXTURE_MODE)),
+            .enabled_when(|ctx| ctx.has_face_selection),
     );
 
     registry.register(
@@ -284,7 +271,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .icon(icon::ROTATE_CW)
             .status_tip("Rotate UVs clockwise 90°")
             .category("UV")
-            .enabled_when(|ctx| ctx.has_face_selection && ctx.has_flag(flags::TEXTURE_MODE)),
+            .enabled_when(|ctx| ctx.has_face_selection),
     );
 
     registry.register(
@@ -359,16 +346,8 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     // ========================================================================
-    // Atlas/Paint Mode Actions
+    // Paint Mode Actions
     // ========================================================================
-    registry.register(
-        Action::new("atlas.toggle_mode")
-            .label("Toggle UV/Paint")
-            .status_tip("Toggle between UV editing and Paint mode")
-            .category("Atlas")
-            .enabled_when(|ctx| ctx.has_flag(flags::TEXTURE_MODE)),
-    );
-
     registry.register(
         Action::new("brush.square")
             .label("Square Brush")
@@ -486,7 +465,6 @@ pub fn build_context(
     has_selection: bool,
     has_face_selection: bool,
     has_vertex_selection: bool,
-    is_texture_mode: bool,
     select_mode: &str, // "vertex", "edge", or "face"
     text_editing: bool,
     is_dirty: bool,
@@ -505,13 +483,6 @@ pub fn build_context(
         is_dirty,
         flags: 0,
     };
-
-    // Set mode flags
-    if is_texture_mode {
-        ctx.flags |= flags::TEXTURE_MODE;
-    } else {
-        ctx.flags |= flags::BUILD_MODE;
-    }
 
     match select_mode {
         "vertex" => ctx.flags |= flags::VERTEX_MODE,
