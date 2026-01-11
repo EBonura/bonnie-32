@@ -25,30 +25,48 @@ pub fn draw_texture_palette(
     state: &mut EditorState,
     icon_font: Option<&Font>,
 ) {
+    // Set focus on click anywhere in this panel
+    if ctx.mouse.inside(&rect) && ctx.mouse.left_pressed {
+        state.active_panel = super::ActivePanel::TexturePalette;
+    }
+
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(25, 25, 30, 255));
 
+    // Draw panel title bar with focus color
+    let title_height = 20.0;
+    draw_rectangle(rect.x, rect.y, rect.w, title_height, Color::from_rgba(50, 50, 60, 255));
+    let title_color = if state.active_panel == super::ActivePanel::TexturePalette {
+        Color::from_rgba(80, 180, 255, 255) // Cyan when focused
+    } else {
+        WHITE
+    };
+    draw_text("Textures", rect.x + 5.0, rect.y + 14.0, 16.0, title_color);
+
+    // Adjust content rect to account for title
+    let content_rect = Rect::new(rect.x, rect.y + title_height, rect.w, rect.h - title_height);
+
     // If editing a texture, show the texture editor instead
     if state.editing_texture.is_some() {
-        draw_texture_editor_panel(ctx, rect, state, icon_font);
+        draw_texture_editor_panel(ctx, content_rect, state, icon_font);
         return;
     }
 
     // Mode toggle tabs (Source PNGs | User Textures)
-    let mode_rect = Rect::new(rect.x, rect.y, rect.w, MODE_TOGGLE_HEIGHT);
+    let mode_rect = Rect::new(content_rect.x, content_rect.y, content_rect.w, MODE_TOGGLE_HEIGHT);
     draw_mode_toggle(ctx, mode_rect, state);
 
     // Header area (folder selector for source PNGs, action buttons for user textures)
-    let header_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT, rect.w, HEADER_HEIGHT);
+    let header_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT, content_rect.w, HEADER_HEIGHT);
 
     if state.texture_palette_user_mode {
         draw_user_texture_header(ctx, header_rect, state, icon_font);
-        let content_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, rect.w, rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
-        draw_user_texture_grid(ctx, content_rect, state);
+        let grid_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, content_rect.w, content_rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
+        draw_user_texture_grid(ctx, grid_rect, state);
     } else {
         draw_folder_selector(ctx, header_rect, state, icon_font);
-        let content_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, rect.w, rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
-        draw_source_texture_grid(ctx, content_rect, state);
+        let grid_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, content_rect.w, content_rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
+        draw_source_texture_grid(ctx, grid_rect, state);
     }
 }
 

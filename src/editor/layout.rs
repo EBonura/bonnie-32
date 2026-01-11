@@ -355,7 +355,17 @@ pub fn draw_editor(
 
     // === 3D VIEWPORT ===
     let viewport_start = EditorFrameTimings::start();
-    draw_panel(center_rect, Some("3D Viewport"), Color::from_rgba(25, 25, 30, 255));
+    // Draw panel without title, then draw title with focus color
+    draw_panel(center_rect, None, Color::from_rgba(25, 25, 30, 255));
+    // Title bar
+    let title_height = 20.0;
+    draw_rectangle(center_rect.x, center_rect.y, center_rect.w, title_height, Color::from_rgba(50, 50, 60, 255));
+    let title_color = if state.active_panel == super::state::ActivePanel::Viewport3D {
+        Color::from_rgba(80, 180, 255, 255) // Cyan when focused
+    } else {
+        WHITE
+    };
+    draw_text("3D Viewport", center_rect.x + 5.0, center_rect.y + 14.0, 16.0, title_color);
     draw_viewport_3d(ctx, panel_content_rect(center_rect, true), state, textures, fb, input, icon_font);
     let viewport_3d_ms = EditorFrameTimings::elapsed_ms(viewport_start);
 
@@ -384,7 +394,11 @@ pub fn draw_editor(
     let textures_h = if textures_collapsed { header_h } else { expanded_panel_height };
     let texture_rect = Rect::new(right_rect.x, y, right_rect.w, textures_h);
     let (clicked, textures_content) = draw_collapsible_panel(ctx, texture_rect, "Textures", textures_collapsed, panel_bg);
-    if clicked { state.textures_section_expanded = !state.textures_section_expanded; }
+    if clicked {
+        state.textures_section_expanded = !state.textures_section_expanded;
+        // Also set focus when clicking on the header
+        state.active_panel = super::state::ActivePanel::TexturePalette;
+    }
     if let Some(content) = textures_content {
         draw_texture_palette(ctx, content, state, icon_font);
     }

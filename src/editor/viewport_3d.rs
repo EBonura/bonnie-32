@@ -280,6 +280,11 @@ pub fn draw_viewport_3d(
     let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let inside_viewport = ctx.mouse.inside(&rect);
 
+    // Set focus to viewport on click
+    if inside_viewport && ctx.mouse.left_pressed {
+        state.active_panel = super::state::ActivePanel::Viewport3D;
+    }
+
     // Pre-calculate viewport scaling (used multiple times)
     let fb_width = fb.width;
     let fb_height = fb.height;
@@ -5252,6 +5257,7 @@ pub fn draw_viewport_3d(
     if crate::ui::icon_button(ctx, btn_rect, crate::ui::icon::SQUARE_SQUARE, icon_font, "Center 3D camera on current room") {
         state.center_3d_on_current_room();
     }
+
 }
 
 /// Delete a single face from a sector, returns true if something was deleted
@@ -5862,11 +5868,12 @@ fn handle_camera_input(
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
             // Skip when Ctrl is held to avoid conflict with Ctrl+A select all
-            // WASD requires mouse in viewport (not just gamepad connected)
+            // WASD requires viewport focused (not just mouse position)
             let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
             let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
+            let viewport_focused = state.active_panel == super::state::ActivePanel::Viewport3D;
 
-            if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() && !ctrl_held {
+            if viewport_focused && state.dragging_sector_vertices.is_empty() && !ctrl_held {
                 if is_key_down(KeyCode::W) {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
                 }
@@ -5887,8 +5894,9 @@ fn handle_camera_input(
                 }
             }
 
-            // Gamepad movement (works regardless of mouse position)
-            if has_gamepad_input && state.dragging_sector_vertices.is_empty() {
+            // Gamepad movement (works regardless of mouse position, but requires viewport focus)
+            // Note: left_stick() combines keyboard WASD with gamepad, so this must be focus-gated
+            if viewport_focused && has_gamepad_input && state.dragging_sector_vertices.is_empty() {
                 // Gamepad left stick: move forward/back, strafe left/right
                 let gamepad_speed = 1500.0 * delta; // Frame-rate independent
                 if left_stick.length() > 0.1 {
