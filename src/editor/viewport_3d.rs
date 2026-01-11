@@ -5862,9 +5862,11 @@ fn handle_camera_input(
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
             // Skip when Ctrl is held to avoid conflict with Ctrl+A select all
+            // WASD requires mouse in viewport (not just gamepad connected)
             let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
             let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured || has_gamepad_input) && state.dragging_sector_vertices.is_empty() && !ctrl_held {
+
+            if (inside_viewport || state.viewport_mouse_captured) && state.dragging_sector_vertices.is_empty() && !ctrl_held {
                 if is_key_down(KeyCode::W) {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
                 }
@@ -5883,7 +5885,10 @@ fn handle_camera_input(
                 if is_key_down(KeyCode::E) {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
                 }
+            }
 
+            // Gamepad movement (works regardless of mouse position)
+            if has_gamepad_input && state.dragging_sector_vertices.is_empty() {
                 // Gamepad left stick: move forward/back, strafe left/right
                 let gamepad_speed = 1500.0 * delta; // Frame-rate independent
                 if left_stick.length() > 0.1 {
