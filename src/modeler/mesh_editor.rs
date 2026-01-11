@@ -197,12 +197,20 @@ pub struct MeshProject {
 
 impl MeshProject {
     pub fn new(name: impl Into<String>) -> Self {
+        // Create pool first so we can link its first CLUT to the atlas
+        let clut_pool = ClutPool::default();
+        let first_clut_id = clut_pool.first_id().unwrap_or(ClutId::NONE);
+
+        // Create atlas with default CLUT linked to pool's first CLUT
+        let mut atlas = IndexedAtlas::new(128, 128, ClutDepth::Bpp4);
+        atlas.default_clut = first_clut_id;
+
         Self {
             name: name.into(),
             // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
             objects: vec![MeshObject::cube("object", 1024.0)],
-            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
-            clut_pool: ClutPool::default(),
+            atlas,
+            clut_pool,
             preview_clut: None,
             selected_object: Some(0),
         }

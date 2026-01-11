@@ -1123,9 +1123,33 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
         get_internal_gl().quad_gl.scissor(None);
     }
 
-    // Handle single-click to select
+    // Handle single-click to select and assign texture to project
     if let Some(name) = clicked_texture {
-        state.selected_user_texture = Some(name);
+        state.selected_user_texture = Some(name.clone());
+
+        // Copy the texture to the project's atlas
+        if let Some(tex) = state.user_textures.get(&name) {
+            // Copy indices to atlas (resize if needed)
+            state.project.atlas.width = tex.width;
+            state.project.atlas.height = tex.height;
+            state.project.atlas.depth = tex.depth;
+            state.project.atlas.indices = tex.indices.clone();
+
+            // Update the default CLUT with the texture's palette
+            if let Some(clut) = state.project.clut_pool.get_mut(state.project.atlas.default_clut) {
+                clut.colors = tex.palette.clone();
+                clut.depth = tex.depth;
+            } else if let Some(first_clut) = state.project.clut_pool.iter_mut().next() {
+                // Fallback to first CLUT if default isn't set
+                first_clut.colors = tex.palette.clone();
+                first_clut.depth = tex.depth;
+                state.project.atlas.default_clut = first_clut.id;
+            }
+
+            // Update the editing texture to match
+            state.editing_texture = Some(tex.clone());
+            state.dirty = true;
+        }
     }
 
     // Handle double-click to edit (also sets selection)
