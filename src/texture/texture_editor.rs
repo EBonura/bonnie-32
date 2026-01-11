@@ -2625,24 +2625,20 @@ pub fn draw_palette_panel(
             let rgb = Color::new(r as f32 / 31.0, g as f32 / 31.0, b as f32 / 31.0, 1.0);
             draw_rectangle(sx, y, swatch_size, swatch_size, rgb);
 
-            // Selection highlight if editing this color
+            // Selection highlight if editing this key color
             if state.palette_gen_editing == Some(i) {
                 draw_rectangle_lines(sx - 1.0, y - 1.0, swatch_size + 2.0, swatch_size + 2.0, 2.0, WHITE);
             } else if ctx.mouse.inside(&swatch_rect) {
                 draw_rectangle_lines(sx, y, swatch_size, swatch_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.5));
             }
 
-            // Click to toggle editing (picks color from currently editing_index)
+            // Click to select this key color for editing (mutually exclusive with palette selection)
             if ctx.mouse.clicked(&swatch_rect) {
                 if state.palette_gen_editing == Some(i) {
                     // Already editing, deselect
                     state.palette_gen_editing = None;
                 } else {
-                    // Copy current editing color to this key color
-                    if state.editing_index < texture.palette.len() {
-                        let c = texture.palette[state.editing_index];
-                        state.palette_gen_colors[i] = (c.r5(), c.g5(), c.b5());
-                    }
+                    // Select this key color - RGB sliders will now edit it
                     state.palette_gen_editing = Some(i);
                 }
             }
@@ -2712,9 +2708,9 @@ pub fn draw_palette_panel(
                 }
             }
 
-            // Selection/editing highlight
+            // Selection/editing highlight (editing only shown when no key color selected)
             let is_selected = state.selected_index == 0;
-            let is_editing = state.editing_index == 0;
+            let is_editing = state.editing_index == 0 && state.palette_gen_editing.is_none();
             let hovered = ctx.mouse.inside(&cell_rect);
 
             if is_selected {
@@ -2728,9 +2724,11 @@ pub fn draw_palette_panel(
             if ctx.mouse.clicked(&cell_rect) {
                 state.selected_index = 0;
                 state.editing_index = 0;
+                state.palette_gen_editing = None; // Deselect key color
             }
             if hovered && ctx.mouse.right_pressed {
                 state.editing_index = 0;
+                state.palette_gen_editing = None;
             }
         }
 
@@ -2764,9 +2762,9 @@ pub fn draw_palette_panel(
                     );
                 }
 
-                // Selection highlight
+                // Selection highlight (editing only shown when no key color selected)
                 let is_selected = state.selected_index == idx as u8;
-                let is_editing = state.editing_index == idx;
+                let is_editing = state.editing_index == idx && state.palette_gen_editing.is_none();
                 let hovered = ctx.mouse.inside(&cell_rect);
 
                 if is_selected {
@@ -2780,9 +2778,11 @@ pub fn draw_palette_panel(
                 if ctx.mouse.clicked(&cell_rect) {
                     state.selected_index = idx as u8;
                     state.editing_index = idx;
+                    state.palette_gen_editing = None; // Deselect key color
                 }
                 if hovered && ctx.mouse.right_pressed {
                     state.editing_index = idx;
+                    state.palette_gen_editing = None;
                 }
             }
         }
@@ -2826,9 +2826,9 @@ pub fn draw_palette_panel(
                         Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0));
                 }
 
-                // Selection highlight
+                // Selection highlight (editing only shown when no key color selected)
                 let is_selected = state.selected_index == idx as u8;
-                let is_editing = state.editing_index == idx;
+                let is_editing = state.editing_index == idx && state.palette_gen_editing.is_none();
                 let hovered = ctx.mouse.inside(&cell_rect);
 
                 if is_selected {
@@ -2842,9 +2842,11 @@ pub fn draw_palette_panel(
                 if ctx.mouse.clicked(&cell_rect) {
                     state.selected_index = idx as u8;
                     state.editing_index = idx;
+                    state.palette_gen_editing = None; // Deselect key color
                 }
                 if hovered && ctx.mouse.right_pressed {
                     state.editing_index = idx;
+                    state.palette_gen_editing = None;
                 }
             }
         }
@@ -2854,16 +2856,33 @@ pub fn draw_palette_panel(
 
     y += grid_height + 8.0;
 
-    // Color editor for editing_index - only show if there's enough space
+    // Color editor - shows RGB sliders for either:
+    // 1. Selected key color (palette_gen_editing) - for generator
+    // 2. Selected palette index (editing_index) - for direct editing
     let remaining_height = rect.bottom() - y;
     let slider_section_height = 16.0 + 3.0 * (10.0 + 4.0); // label + 3 sliders
 
-    if state.editing_index < texture.palette.len() && remaining_height >= slider_section_height {
-        let color = texture.palette[state.editing_index];
+    // Determine what we're editing: key color or palette color
+    let editing_key_color = state.palette_gen_editing;
+    let show_sliders = if editing_key_color.is_some() {
+        remaining_height >= slider_section_height
+    } else {
+        state.editing_index < texture.palette.len() && remaining_height >= slider_section_height
+    };
 
-        // Index label
+    if show_sliders {
+        // Get current RGB values based on what's selected
+        let (current_r, current_g, current_b, label_text) = if let Some(key_idx) = editing_key_color {
+            let (r, g, b) = state.palette_gen_colors[key_idx];
+            (r, g, b, format!("Key {}", key_idx + 1))
+        } else {
+            let color = texture.palette[state.editing_index];
+            (color.r5(), color.g5(), color.b5(), format!("Color {}", state.editing_index))
+        };
+
+        // Label
         draw_text(
-            &format!("Color {}", state.editing_index),
+            &label_text,
             rect.x + padding,
             y + 11.0,
             12.0,
@@ -2876,9 +2895,9 @@ pub fn draw_palette_panel(
         let slider_h = 10.0;
 
         let channels = [
-            ("R", color.r5(), Color::new(0.7, 0.3, 0.3, 1.0), 0),
-            ("G", color.g5(), Color::new(0.3, 0.7, 0.3, 1.0), 1),
-            ("B", color.b5(), Color::new(0.3, 0.3, 0.7, 1.0), 2),
+            ("R", current_r, Color::new(0.7, 0.3, 0.3, 1.0), 0),
+            ("G", current_g, Color::new(0.3, 0.7, 0.3, 1.0), 1),
+            ("B", current_b, Color::new(0.3, 0.3, 0.7, 1.0), 2),
         ];
 
         for (label, value, tint, slider_idx) in channels {
@@ -2911,15 +2930,26 @@ pub fn draw_palette_panel(
                     let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
                     let new_val = ((rel_x / track_rect.w) * 31.0).round() as u8;
 
-                    let c = texture.palette[state.editing_index];
-                    let semi = c.is_semi_transparent();
-                    let (r, g, b) = match slider_idx {
-                        0 => (new_val, c.g5(), c.b5()),
-                        1 => (c.r5(), new_val, c.b5()),
-                        _ => (c.r5(), c.g5(), new_val),
-                    };
-                    texture.palette[state.editing_index] = Color15::new_semi(r, g, b, semi);
-                    state.dirty = true;
+                    if let Some(key_idx) = editing_key_color {
+                        // Editing a key color for the generator
+                        let (r, g, b) = state.palette_gen_colors[key_idx];
+                        state.palette_gen_colors[key_idx] = match slider_idx {
+                            0 => (new_val, g, b),
+                            1 => (r, new_val, b),
+                            _ => (r, g, new_val),
+                        };
+                    } else {
+                        // Editing a palette color
+                        let c = texture.palette[state.editing_index];
+                        let semi = c.is_semi_transparent();
+                        let (r, g, b) = match slider_idx {
+                            0 => (new_val, c.g5(), c.b5()),
+                            1 => (c.r5(), new_val, c.b5()),
+                            _ => (c.r5(), c.g5(), new_val),
+                        };
+                        texture.palette[state.editing_index] = Color15::new_semi(r, g, b, semi);
+                        state.dirty = true;
+                    }
                 } else {
                     state.color_slider = None;
                 }
@@ -2928,8 +2958,10 @@ pub fn draw_palette_panel(
             y += slider_h + 4.0;
         }
 
-        // Effect checkbox + blend mode dropdown - only if there's space
-        if y + 16.0 <= rect.bottom() - padding {
+        // Effect checkbox + blend mode dropdown - only show for palette colors (not key colors)
+        let show_effect = editing_key_color.is_none() && y + 16.0 <= rect.bottom() - padding;
+        if show_effect {
+            let color = texture.palette[state.editing_index];
             let checkbox_size = 12.0;
             let checkbox_rect = Rect::new(rect.x + padding, y, checkbox_size, checkbox_size);
             let is_stp = color.is_semi_transparent();
