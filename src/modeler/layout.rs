@@ -3829,6 +3829,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     };
     let is_dragging = state.drag_manager.is_dragging() || state.modal_transform != ModalTransform::None;
     let is_paint_mode = state.paint_section_expanded;
+    // UV editor is focused when paint section is open and in UV mode
+    let uv_editor_focused = state.paint_section_expanded
+        && state.texture_editor.mode == crate::texture::TextureEditorMode::Uv;
 
     let ctx = build_context(
         state.can_undo(),
@@ -3841,6 +3844,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         state.dirty,
         is_dragging,
         is_paint_mode,
+        uv_editor_focused,
     );
 
     let mut action = ModelerAction::None;

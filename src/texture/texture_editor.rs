@@ -3176,6 +3176,19 @@ fn handle_uv_input(
     };
 
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+
+    // Ctrl+A: Select all UV vertices
+    if ctrl_held && is_key_pressed(KeyCode::A) {
+        state.uv_selection.clear();
+        for uv_vert in &uv_data.vertices {
+            state.uv_selection.push(uv_vert.vertex_index);
+        }
+        if !state.uv_selection.is_empty() {
+            state.set_status(&format!("Selected {} vertices", state.uv_selection.len()));
+        }
+    }
 
     // Handle keyboard shortcuts for modal transforms
     if is_key_pressed(KeyCode::G) && !state.uv_selection.is_empty() {
@@ -3191,7 +3204,7 @@ fn handle_uv_input(
         state.set_status("Grab: Move mouse, click to confirm, Esc to cancel");
     }
 
-    if is_key_pressed(KeyCode::S) && !state.uv_selection.is_empty() {
+    if is_key_pressed(KeyCode::T) && !state.uv_selection.is_empty() {
         state.uv_modal_transform = UvModalTransform::Scale;
         state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
         state.uv_modal_start_uvs.clear();
