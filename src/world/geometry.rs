@@ -3,11 +3,19 @@
 //! Sector-based geometry system inspired by TRLE.
 //! Rooms contain a 2D grid of sectors, each with floor, ceiling, and walls.
 
-use serde::{Serialize, Deserialize};
-use crate::rasterizer::{Vec3, Vec2, Vertex, Face as RasterFace, BlendMode, Color};
+use serde::{Serialize, Deserialize, Deserializer};
+use serde::de::{self, SeqAccess, Visitor};
+use crate::rasterizer::{Vec3, Vec2, IVec3, IVec2, IAabb, Vertex, Face as RasterFace, BlendMode, Color};
 
-/// TRLE sector size in world units
+/// TRLE sector size in world units (float, for display/legacy)
 pub const SECTOR_SIZE: f32 = 1024.0;
+
+/// Integer sector size (SECTOR_SIZE * INT_SCALE = 1024 * 4 = 4096)
+/// Matches PS1 GTE's 4.12 fixed-point where 4096 = 1.0
+pub const SECTOR_SIZE_INT: i32 = 4096;
+
+/// Scale factor: 1 float unit = 4 integers (shared with modeler)
+pub const INT_SCALE: i32 = 4;
 
 /// UV scale factor: how much UV space one sector consumes
 /// 0.5 means one sector uses UV range [0, 0.5], so a 64x64 texture covers 2x2 blocks (32 texels per block)
@@ -16,6 +24,276 @@ pub const UV_SCALE: f32 = 0.5;
 
 /// Reserved pack name for user-created textures (from textures-user/)
 pub const USER_TEXTURE_PACK: &str = "_USER";
+
+// ============================================================================
+// Serde Migration Helpers - Deserialize f32 or i32 into i32 (for legacy files)
+// ============================================================================
+
+/// Helper to parse a single numeric value (f32 or i32) into i32.
+/// Floats are scaled by INT_SCALE.
+struct HeightVisitor;
+
+impl<'de> Visitor<'de> for HeightVisitor {
+    type Value = i32;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a number (i32 or f32)")
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(v as i32)
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(v as i32)
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok((v * INT_SCALE as f64).round() as i32)
+    }
+}
+
+/// Deserialize a 4-element height array, accepting either f32 or i32 values.
+/// f32 values are converted to i32 by multiplying by INT_SCALE.
+/// Handles both RON tuple syntax (0.0, 0.0, 0.0, 0.0) and array syntax [0, 0, 0, 0].
+fn deserialize_heights_4<'de, D>(deserializer: D) -> Result<[i32; 4], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Heights4Visitor;
+
+    impl<'de> Visitor<'de> for Heights4Visitor {
+        type Value = [i32; 4];
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a tuple or array of 4 numbers (i32 or f32)")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut result = [0i32; 4];
+            for i in 0..4 {
+                result[i] = seq
+                    .next_element_seed(HeightDeserializer)?
+                    .ok_or_else(|| de::Error::invalid_length(i, &self))?;
+            }
+            Ok(result)
+        }
+    }
+
+    // Use deserialize_any to handle both tuple (...) and array [...] syntax
+    deserializer.deserialize_any(Heights4Visitor)
+}
+
+/// Seed for deserializing a single height value
+struct HeightDeserializer;
+
+impl<'de> serde::de::DeserializeSeed<'de> for HeightDeserializer {
+    type Value = i32;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(HeightVisitor)
+    }
+}
+
+/// Deserialize an optional 4-element height array.
+fn deserialize_heights_4_opt<'de, D>(deserializer: D) -> Result<Option<[i32; 4]>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Heights4OptVisitor;
+
+    impl<'de> Visitor<'de> for Heights4OptVisitor {
+        type Value = Option<[i32; 4]>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("null or an array of 4 numbers (i32 or f32)")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserialize_heights_4(deserializer).map(Some)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut result = [0i32; 4];
+            for i in 0..4 {
+                result[i] = seq
+                    .next_element_seed(HeightDeserializer)?
+                    .ok_or_else(|| de::Error::invalid_length(i, &self))?;
+            }
+            Ok(Some(result))
+        }
+    }
+
+    deserializer.deserialize_any(Heights4OptVisitor)
+}
+
+/// Deserialize a single height value (f32 or i32 -> i32).
+fn deserialize_height<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(HeightVisitor)
+}
+
+/// Visitor for facing angle deserialization
+struct FacingVisitor;
+
+impl<'de> Visitor<'de> for FacingVisitor {
+    type Value = i32;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a number (BAM i32 or radians f32)")
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        // Already BAM
+        Ok(v as i32)
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(v as i32)
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        // Convert from radians to BAM: radians * (4096 / TAU) = BAM
+        let bam = (v * (4096.0 / std::f64::consts::TAU)).round() as i32;
+        // Normalize to 0-4095 range
+        Ok(((bam % 4096) + 4096) % 4096)
+    }
+}
+
+/// Deserialize a facing angle (radians f32 -> BAM i32, or already BAM i32).
+/// BAM (Binary Angular Measurement): 0-4095 = 0-360 degrees
+fn deserialize_facing<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(FacingVisitor)
+}
+
+/// Helper enum for deserializing Vec3 (float) or IVec3 (int) into IVec3.
+/// Uses serde's untagged enum to try both formats.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Vec3OrIVec3 {
+    /// Float format (legacy): x, y, z as f32
+    Float { x: f32, y: f32, z: f32 },
+    /// Integer format (new): x, y, z as i32
+    Int { x: i32, y: i32, z: i32 },
+}
+
+impl Vec3OrIVec3 {
+    fn to_ivec3(self) -> IVec3 {
+        match self {
+            Vec3OrIVec3::Float { x, y, z } => IVec3::new(
+                (x * INT_SCALE as f32).round() as i32,
+                (y * INT_SCALE as f32).round() as i32,
+                (z * INT_SCALE as f32).round() as i32,
+            ),
+            Vec3OrIVec3::Int { x, y, z } => IVec3::new(x, y, z),
+        }
+    }
+}
+
+/// Deserialize a Vec3 or IVec3 into IVec3.
+/// Uses untagged enum to handle both legacy float and new integer formats.
+fn deserialize_ivec3<'de, D>(deserializer: D) -> Result<IVec3, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec3OrIVec3::deserialize(deserializer).map(|v| v.to_ivec3())
+}
+
+/// Deserialize an array of 4 Vec3 or IVec3 into [IVec3; 4].
+/// Handles both RON tuple and array syntax.
+fn deserialize_ivec3_array_4<'de, D>(deserializer: D) -> Result<[IVec3; 4], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct IVec3Array4Visitor;
+
+    impl<'de> Visitor<'de> for IVec3Array4Visitor {
+        type Value = [IVec3; 4];
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a tuple or array of 4 Vec3/IVec3 structs")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut result = [IVec3::ZERO; 4];
+            for i in 0..4 {
+                result[i] = seq
+                    .next_element_seed(IVec3DeserializerSeed)?
+                    .ok_or_else(|| de::Error::invalid_length(i, &self))?;
+            }
+            Ok(result)
+        }
+    }
+
+    // Use deserialize_any to handle both tuple (...) and array [...] syntax
+    deserializer.deserialize_any(IVec3Array4Visitor)
+}
+
+/// Seed for deserializing a single IVec3
+struct IVec3DeserializerSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for IVec3DeserializerSeed {
+    type Value = IVec3;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec3OrIVec3::deserialize(deserializer).map(|v| v.to_ivec3())
+    }
+}
 
 /// Texture reference by pack and name
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1102,9 +1380,10 @@ impl SplitDirection {
 /// Consists of 2 triangles that share 4 corner heights but can have different textures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizontalFace {
-    /// Corner heights [NW, NE, SE, SW] - allows sloped surfaces
+    /// Corner heights [NW, NE, SE, SW] - allows sloped surfaces (integer world units)
     /// NW = (-X, -Z), NE = (+X, -Z), SE = (+X, +Z), SW = (-X, +Z)
-    pub heights: [f32; 4],
+    #[serde(deserialize_with = "deserialize_heights_4")]
+    pub heights: [i32; 4],
 
     /// Direction of diagonal split (which diagonal divides the quad into 2 triangles)
     #[serde(default)]
@@ -1130,10 +1409,10 @@ pub struct HorizontalFace {
     /// Vertex colors for triangle 2 (None = use same as triangle 1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colors_2: Option<[Color; 4]>,
-    /// Corner heights for triangle 2 (None = use same as triangle 1)
+    /// Corner heights for triangle 2 (None = use same as triangle 1) (integer world units)
     /// When set, allows each triangle to have independent height levels
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heights_2: Option<[f32; 4]>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_heights_4_opt")]
+    pub heights_2: Option<[i32; 4]>,
 
     // === Shared properties ===
     /// Is this surface walkable? (for collision/AI)
@@ -1151,8 +1430,8 @@ pub struct HorizontalFace {
 }
 
 impl HorizontalFace {
-    /// Create a flat horizontal face at the given height
-    pub fn flat(height: f32, texture: TextureRef) -> Self {
+    /// Create a flat horizontal face at the given height (integer world units)
+    pub fn flat(height: i32, texture: TextureRef) -> Self {
         Self {
             heights: [height, height, height, height],
             split_direction: SplitDirection::NwSe,
@@ -1170,8 +1449,8 @@ impl HorizontalFace {
         }
     }
 
-    /// Create a sloped horizontal face
-    pub fn sloped(heights: [f32; 4], texture: TextureRef) -> Self {
+    /// Create a sloped horizontal face (integer world units)
+    pub fn sloped(heights: [i32; 4], texture: TextureRef) -> Self {
         Self {
             heights,
             split_direction: SplitDirection::NwSe,
@@ -1205,7 +1484,7 @@ impl HorizontalFace {
     }
 
     /// Get effective heights for triangle 2 (returns heights_2 or falls back to heights)
-    pub fn get_heights_2(&self) -> &[f32; 4] {
+    pub fn get_heights_2(&self) -> &[i32; 4] {
         self.heights_2.as_ref().unwrap_or(&self.heights)
     }
 
@@ -1237,21 +1516,27 @@ impl HorizontalFace {
         self.colors[0].b == self.colors[1].b && self.colors[0].b == self.colors[2].b && self.colors[0].b == self.colors[3].b
     }
 
-    /// Get average height of the face
-    pub fn avg_height(&self) -> f32 {
-        (self.heights[0] + self.heights[1] + self.heights[2] + self.heights[3]) / 4.0
+    /// Get average height of the face (integer world units)
+    pub fn avg_height(&self) -> i32 {
+        (self.heights[0] + self.heights[1] + self.heights[2] + self.heights[3]) / 4
+    }
+
+    /// Get average height as float (for rendering/display)
+    pub fn avg_height_f32(&self) -> f32 {
+        self.avg_height() as f32 / INT_SCALE as f32
     }
 
     /// Check if the face is flat (all corners at same height)
     pub fn is_flat(&self) -> bool {
         let h = self.heights[0];
-        self.heights.iter().all(|&corner| (corner - h).abs() < 0.001)
+        self.heights.iter().all(|&corner| corner == h)
     }
 
     /// Get interpolated height at a position within the sector.
     /// `u` and `v` are normalized coordinates within the sector (0.0 to 1.0).
     /// u = 0 is West (-X), u = 1 is East (+X)
     /// v = 0 is North (-Z), v = 1 is South (+Z)
+    /// Returns float for physics/collision precision.
     ///
     /// Heights layout: [NW, NE, SE, SW] = [0, 1, 2, 3]
     /// NW = (u=0, v=0), NE = (u=1, v=0), SE = (u=1, v=1), SW = (u=0, v=1)
@@ -1264,45 +1549,44 @@ impl HorizontalFace {
         let u = u.clamp(0.0, 1.0);
         let v = v.clamp(0.0, 1.0);
 
-        match self.split_direction {
+        // Convert heights to float for interpolation
+        let h = [
+            self.heights[0] as f32,
+            self.heights[1] as f32,
+            self.heights[2] as f32,
+            self.heights[3] as f32,
+        ];
+
+        let result = match self.split_direction {
             SplitDirection::NwSe => {
                 // Split along NW-SE diagonal
                 if u >= v {
                     // Triangle 1: NW, NE, SE
-                    let h_nw = self.heights[0];
-                    let h_ne = self.heights[1];
-                    let h_se = self.heights[2];
-                    h_nw + u * (h_ne - h_nw) + v * (h_se - h_ne)
+                    h[0] + u * (h[1] - h[0]) + v * (h[2] - h[1])
                 } else {
                     // Triangle 2: NW, SE, SW
-                    let h_nw = self.heights[0];
-                    let h_se = self.heights[2];
-                    let h_sw = self.heights[3];
-                    h_nw + u * (h_se - h_sw) + v * (h_sw - h_nw)
+                    h[0] + u * (h[2] - h[3]) + v * (h[3] - h[0])
                 }
             }
             SplitDirection::NeSw => {
                 // Split along NE-SW diagonal
                 if u + v <= 1.0 {
                     // Triangle 1: NW, NE, SW
-                    let h_nw = self.heights[0];
-                    let h_ne = self.heights[1];
-                    let h_sw = self.heights[3];
-                    h_nw + u * (h_ne - h_nw) + v * (h_sw - h_nw)
+                    h[0] + u * (h[1] - h[0]) + v * (h[3] - h[0])
                 } else {
                     // Triangle 2: NE, SE, SW
-                    let h_ne = self.heights[1];
-                    let h_se = self.heights[2];
-                    let h_sw = self.heights[3];
-                    h_sw + u * (h_se - h_sw) + (1.0 - v) * (h_ne - h_se)
+                    h[3] + u * (h[2] - h[3]) + (1.0 - v) * (h[1] - h[2])
                 }
             }
-        }
+        };
+
+        // Return in integer world units (not scaled to float display units)
+        result
     }
 
     /// Get heights at a specific edge (left_corner, right_corner) when looking from inside the sector
-    /// Returns (left_height, right_height) for the edge in that direction
-    pub fn edge_heights(&self, dir: Direction) -> (f32, f32) {
+    /// Returns (left_height, right_height) for the edge in that direction (integer world units)
+    pub fn edge_heights(&self, dir: Direction) -> (i32, i32) {
         // Heights are [NW, NE, SE, SW] = [0, 1, 2, 3]
         // NW = (-X, -Z), NE = (+X, -Z), SE = (+X, +Z), SW = (-X, +Z)
         match dir {
@@ -1316,14 +1600,14 @@ impl HorizontalFace {
         }
     }
 
-    /// Get max height at a specific edge
-    pub fn edge_max(&self, dir: Direction) -> f32 {
+    /// Get max height at a specific edge (integer world units)
+    pub fn edge_max(&self, dir: Direction) -> i32 {
         let (h1, h2) = self.edge_heights(dir);
         h1.max(h2)
     }
 
-    /// Get min height at a specific edge
-    pub fn edge_min(&self, dir: Direction) -> f32 {
+    /// Get min height at a specific edge (integer world units)
+    pub fn edge_min(&self, dir: Direction) -> i32 {
         let (h1, h2) = self.edge_heights(dir);
         h1.min(h2)
     }
@@ -1332,8 +1616,9 @@ impl HorizontalFace {
 /// A vertical face (wall) on a sector edge
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerticalFace {
-    /// Corner heights: [bottom-left, bottom-right, top-right, top-left]
-    pub heights: [f32; 4],
+    /// Corner heights: [bottom-left, bottom-right, top-right, top-left] (integer world units)
+    #[serde(deserialize_with = "deserialize_heights_4")]
+    pub heights: [i32; 4],
     /// Texture reference
     pub texture: TextureRef,
     /// Custom UV coordinates (None = use default)
@@ -1364,12 +1649,12 @@ pub struct VerticalFace {
 impl VerticalFace {
     /// Compute 1:1 texel UV mapping based on wall height
     /// x_scale = UV_SCALE (wall width maps to UV_SCALE of texture)
-    /// y_scale = wall_height / SECTOR_SIZE * UV_SCALE
-    fn compute_1to1_uv(heights: &[f32; 4]) -> [Vec2; 4] {
-        let bottom = (heights[0] + heights[1]) / 2.0;
-        let top = (heights[2] + heights[3]) / 2.0;
-        let wall_height = (top - bottom).abs();
-        let v_scale = wall_height / SECTOR_SIZE * UV_SCALE;
+    /// y_scale = wall_height / SECTOR_SIZE_INT * UV_SCALE
+    fn compute_1to1_uv(heights: &[i32; 4]) -> [Vec2; 4] {
+        let bottom = (heights[0] + heights[1]) / 2;
+        let top = (heights[2] + heights[3]) / 2;
+        let wall_height = (top - bottom).abs() as f32;
+        let v_scale = wall_height / SECTOR_SIZE_INT as f32 * UV_SCALE;
 
         // UV corners: [bottom-left, bottom-right, top-right, top-left]
         // Default UV with x_scale=UV_SCALE, y_scale=v_scale, no rotation, no offset
@@ -1381,9 +1666,9 @@ impl VerticalFace {
         ]
     }
 
-    /// Create a wall from bottom to top (all corners at same heights)
+    /// Create a wall from bottom to top (all corners at same heights, integer world units)
     /// UVs default to None so world-aligned tiling is used during rendering
-    pub fn new(y_bottom: f32, y_top: f32, texture: TextureRef) -> Self {
+    pub fn new(y_bottom: i32, y_top: i32, texture: TextureRef) -> Self {
         let heights = [y_bottom, y_bottom, y_top, y_top];
         Self {
             uv: None,  // Use world-aligned default UVs
@@ -1398,10 +1683,10 @@ impl VerticalFace {
         }
     }
 
-    /// Create a wall with individual corner heights for sloped surfaces
+    /// Create a wall with individual corner heights for sloped surfaces (integer world units)
     /// Heights order: [bottom-left, bottom-right, top-right, top-left]
     /// UVs default to None so world-aligned tiling is used during rendering
-    pub fn new_sloped(bl: f32, br: f32, tr: f32, tl: f32, texture: TextureRef) -> Self {
+    pub fn new_sloped(bl: i32, br: i32, tr: i32, tl: i32, texture: TextureRef) -> Self {
         let heights = [bl, br, tr, tl];
         Self {
             uv: None,  // Use world-aligned default UVs
@@ -1428,47 +1713,47 @@ impl VerticalFace {
         self.colors[0].b == self.colors[1].b && self.colors[0].b == self.colors[2].b && self.colors[0].b == self.colors[3].b
     }
 
-    /// Get the average height of this wall
-    pub fn height(&self) -> f32 {
-        let bottom = (self.heights[0] + self.heights[1]) / 2.0;
-        let top = (self.heights[2] + self.heights[3]) / 2.0;
+    /// Get the average height of this wall (integer world units)
+    pub fn height(&self) -> i32 {
+        let bottom = (self.heights[0] + self.heights[1]) / 2;
+        let top = (self.heights[2] + self.heights[3]) / 2;
         top - bottom
     }
 
-    /// Get the bottom Y (average of bottom corners)
-    pub fn y_bottom(&self) -> f32 {
-        (self.heights[0] + self.heights[1]) / 2.0
+    /// Get the bottom Y (average of bottom corners, integer world units)
+    pub fn y_bottom(&self) -> i32 {
+        (self.heights[0] + self.heights[1]) / 2
     }
 
-    /// Get the top Y (average of top corners)
-    pub fn y_top(&self) -> f32 {
-        (self.heights[2] + self.heights[3]) / 2.0
+    /// Get the top Y (average of top corners, integer world units)
+    pub fn y_top(&self) -> i32 {
+        (self.heights[2] + self.heights[3]) / 2
     }
 
-    /// Get the absolute minimum Y of any corner
-    pub fn y_min(&self) -> f32 {
-        self.heights.iter().cloned().fold(f32::INFINITY, f32::min)
+    /// Get the absolute minimum Y of any corner (integer world units)
+    pub fn y_min(&self) -> i32 {
+        *self.heights.iter().min().unwrap()
     }
 
-    /// Get the absolute maximum Y of any corner
-    pub fn y_max(&self) -> f32 {
-        self.heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    /// Get the absolute maximum Y of any corner (integer world units)
+    pub fn y_max(&self) -> i32 {
+        *self.heights.iter().max().unwrap()
     }
 
-    /// Get the left side coverage (bottom-left to top-left)
-    pub fn left_coverage(&self) -> (f32, f32) {
+    /// Get the left side coverage (bottom-left to top-left, integer world units)
+    pub fn left_coverage(&self) -> (i32, i32) {
         (self.heights[0], self.heights[3])  // bottom-left, top-left
     }
 
-    /// Get the right side coverage (bottom-right to top-right)
-    pub fn right_coverage(&self) -> (f32, f32) {
+    /// Get the right side coverage (bottom-right to top-right, integer world units)
+    pub fn right_coverage(&self) -> (i32, i32) {
         (self.heights[1], self.heights[2])  // bottom-right, top-right
     }
 
     /// Check if wall has uniform heights (all bottom same, all top same)
     pub fn is_flat(&self) -> bool {
-        let bottom_same = (self.heights[0] - self.heights[1]).abs() < 0.001;
-        let top_same = (self.heights[2] - self.heights[3]).abs() < 0.001;
+        let bottom_same = self.heights[0] == self.heights[1];
+        let top_same = self.heights[2] == self.heights[3];
         bottom_same && top_same
     }
 }
@@ -1507,15 +1792,15 @@ impl Sector {
     }
 
     /// Create a sector with just a floor
-    pub fn with_floor(height: f32, texture: TextureRef) -> Self {
+    pub fn with_floor(height: i32, texture: TextureRef) -> Self {
         Self {
             floor: Some(HorizontalFace::flat(height, texture)),
             ..Default::default()
         }
     }
 
-    /// Create a sector with floor and ceiling
-    pub fn with_floor_and_ceiling(floor_height: f32, ceiling_height: f32, texture: TextureRef) -> Self {
+    /// Create a sector with floor and ceiling (integer world units)
+    pub fn with_floor_and_ceiling(floor_height: i32, ceiling_height: i32, texture: TextureRef) -> Self {
         Self {
             floor: Some(HorizontalFace::flat(floor_height, texture.clone())),
             ceiling: Some(HorizontalFace::flat(ceiling_height, texture)),
@@ -1559,43 +1844,43 @@ impl Sector {
         }
     }
 
-    /// Find the highest point of all walls on an edge
+    /// Find the highest point of all walls on an edge (integer world units)
     /// Returns None if no walls exist on that edge
-    pub fn walls_max_height(&self, direction: Direction) -> Option<f32> {
+    pub fn walls_max_height(&self, direction: Direction) -> Option<i32> {
         let walls = self.walls(direction);
         if walls.is_empty() {
             return None;
         }
-        walls.iter().map(|w| w.y_top()).max_by(|a, b| a.partial_cmp(b).unwrap())
+        walls.iter().map(|w| w.y_top()).max()
     }
 
-    /// Find the lowest point of all walls on an edge
+    /// Find the lowest point of all walls on an edge (integer world units)
     /// Returns None if no walls exist on that edge
-    pub fn walls_min_height(&self, direction: Direction) -> Option<f32> {
+    pub fn walls_min_height(&self, direction: Direction) -> Option<i32> {
         let walls = self.walls(direction);
         if walls.is_empty() {
             return None;
         }
-        walls.iter().map(|w| w.y_bottom()).min_by(|a, b| a.partial_cmp(b).unwrap())
+        walls.iter().map(|w| w.y_bottom()).min()
     }
 
-    /// Get the floor height at a specific edge (average of the two corners on that edge)
-    pub fn floor_height_at_edge(&self, direction: Direction) -> Option<f32> {
+    /// Get the floor height at a specific edge (average of the two corners, integer world units)
+    pub fn floor_height_at_edge(&self, direction: Direction) -> Option<i32> {
         self.floor.as_ref().map(|f| {
             let (h1, h2) = f.edge_heights(direction);
-            (h1 + h2) / 2.0
+            (h1 + h2) / 2
         })
     }
 
-    /// Get the ceiling height at a specific edge (average of the two corners on that edge)
-    pub fn ceiling_height_at_edge(&self, direction: Direction) -> Option<f32> {
+    /// Get the ceiling height at a specific edge (average of the two corners, integer world units)
+    pub fn ceiling_height_at_edge(&self, direction: Direction) -> Option<i32> {
         self.ceiling.as_ref().map(|c| {
             let (h1, h2) = c.edge_heights(direction);
-            (h1 + h2) / 2.0
+            (h1 + h2) / 2
         })
     }
 
-    /// Calculate where a new wall should be placed on this edge.
+    /// Calculate where a new wall should be placed on this edge (integer world units).
     ///
     /// Logic (max 3 walls per edge):
     /// - 0 walls: fill floor-to-ceiling with slanted heights
@@ -1606,9 +1891,9 @@ impl Sector {
     ///
     /// Returns corner heights [bottom-left, bottom-right, top-right, top-left] for the new wall,
     /// or None if edge is fully covered.
-    pub fn next_wall_position(&self, direction: Direction, fallback_bottom: f32, fallback_top: f32, mouse_y: Option<f32>) -> Option<[f32; 4]> {
-        // Minimum gap size to consider fillable (one click = SECTOR_SIZE / 4)
-        const MIN_GAP: f32 = 256.0;
+    pub fn next_wall_position(&self, direction: Direction, fallback_bottom: i32, fallback_top: i32, mouse_y: Option<i32>) -> Option<[i32; 4]> {
+        // Minimum gap size to consider fillable (one click = SECTOR_SIZE_INT / 4)
+        const MIN_GAP: i32 = 256 * INT_SCALE;
 
         // Get individual corner heights for floor and ceiling (preserves slant)
         // edge_heights returns (left, right) when looking from INSIDE the sector,
@@ -1647,7 +1932,7 @@ impl Sector {
                 // Sloped floor/ceiling - offer triangular gaps based on mouse_y preference
                 let floor_max = floor_left.max(floor_right);
                 let ceiling_min = ceiling_left.min(ceiling_right);
-                let mid_height = (floor_max + ceiling_min) / 2.0;
+                let mid_height = (floor_max + ceiling_min) / 2;
 
                 if let Some(y) = mouse_y {
                     if y < mid_height {
@@ -1672,14 +1957,10 @@ impl Sector {
         // Sort walls by their bottom height to find gaps
         // Use AVERAGE of bottom corners to handle triangular walls correctly
         let mut sorted_walls: Vec<_> = walls.iter().collect();
-        sorted_walls.sort_by(|a, b| {
-            let a_bottom = (a.heights[0] + a.heights[1]) / 2.0;
-            let b_bottom = (b.heights[0] + b.heights[1]) / 2.0;
-            a_bottom.partial_cmp(&b_bottom).unwrap()
-        });
+        sorted_walls.sort_by_key(|w| (w.heights[0] + w.heights[1]) / 2);
 
         // Collect all gaps: (heights, bottom_y, top_y)
-        let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
+        let mut gaps: Vec<([i32; 4], i32, i32)> = Vec::new();
 
         // Check gap at bottom (floor to lowest wall)
         // For triangular gaps, check each corner separately
@@ -1702,8 +1983,8 @@ impl Sector {
                 (floor_right, floor_right)
             };
             // Use average Y for selection purposes
-            let avg_bottom = (bl + br) / 2.0;
-            let avg_top = (tl + tr) / 2.0;
+            let avg_bottom = (bl + br) / 2;
+            let avg_top = (tl + tr) / 2;
             gaps.push((
                 [bl, br, tr, tl],
                 avg_bottom,
@@ -1722,8 +2003,8 @@ impl Sector {
             let gap_size = left_gap.max(right_gap);
             if gap_size > MIN_GAP {
                 // Use average Y for selection purposes
-                let avg_bottom = (lower.heights[2] + lower.heights[3]) / 2.0;
-                let avg_top = (upper.heights[0] + upper.heights[1]) / 2.0;
+                let avg_bottom = (lower.heights[2] + lower.heights[3]) / 2;
+                let avg_top = (upper.heights[0] + upper.heights[1]) / 2;
                 gaps.push((
                     [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
                     avg_bottom,
@@ -1753,8 +2034,8 @@ impl Sector {
                 (ceiling_right, ceiling_right)
             };
             // Use average Y for selection purposes
-            let avg_bottom = (bl + br) / 2.0;
-            let avg_top = (tl + tr) / 2.0;
+            let avg_bottom = (bl + br) / 2;
+            let avg_top = (tl + tr) / 2;
             gaps.push((
                 [bl, br, tr, tl],
                 avg_bottom,
@@ -1770,23 +2051,16 @@ impl Sector {
         if let Some(y) = mouse_y {
             // Find gap containing mouse_y, or closest to it
             let best = gaps.into_iter()
-                .min_by(|a, b| {
+                .min_by_key(|(_, bottom, top)| {
                     // Distance from mouse_y to gap center
-                    let a_center = (a.1 + a.2) / 2.0;
-                    let b_center = (b.1 + b.2) / 2.0;
-                    let a_dist = (y - a_center).abs();
-                    let b_dist = (y - b_center).abs();
-                    a_dist.partial_cmp(&b_dist).unwrap()
+                    let center = (bottom + top) / 2;
+                    (y - center).abs()
                 });
             best.map(|(heights, _, _)| heights)
         } else {
             // No mouse position - return largest gap
             gaps.into_iter()
-                .max_by(|a, b| {
-                    let a_size = a.2 - a.1;
-                    let b_size = b.2 - b.1;
-                    a_size.partial_cmp(&b_size).unwrap()
-                })
+                .max_by_key(|(_, bottom, top)| top - bottom)
                 .map(|(heights, _, _)| heights)
         }
     }
@@ -1799,8 +2073,8 @@ impl Sector {
     ///
     /// Returns corner heights [corner1_bot, corner2_bot, corner2_top, corner1_top] for the new wall,
     /// or None if the diagonal is fully covered.
-    pub fn next_diagonal_wall_position(&self, is_nwse: bool, fallback_bottom: f32, fallback_top: f32, mouse_y: Option<f32>) -> Option<[f32; 4]> {
-        const MIN_GAP: f32 = 256.0;
+    pub fn next_diagonal_wall_position(&self, is_nwse: bool, fallback_bottom: i32, fallback_top: i32, mouse_y: Option<i32>) -> Option<[i32; 4]> {
+        const MIN_GAP: i32 = 256;
 
         // Get floor/ceiling heights at the diagonal corners
         let (corner1_idx, corner2_idx) = if is_nwse {
@@ -1831,7 +2105,7 @@ impl Sector {
                 // if extended (or just use average for simpler selection)
                 let floor_max = floor_c1.max(floor_c2);
                 let ceiling_min = ceiling_c1.min(ceiling_c2);
-                let mid_height = (floor_max + ceiling_min) / 2.0;
+                let mid_height = (floor_max + ceiling_min) / 2;
 
                 if let Some(y) = mouse_y {
                     if y < mid_height {
@@ -1857,14 +2131,14 @@ impl Sector {
         // Use AVERAGE of bottom corners to handle triangular walls correctly
         let mut sorted_walls: Vec<_> = walls.iter().collect();
         sorted_walls.sort_by(|a, b| {
-            let a_bottom = (a.heights[0] + a.heights[1]) / 2.0;
-            let b_bottom = (b.heights[0] + b.heights[1]) / 2.0;
-            a_bottom.partial_cmp(&b_bottom).unwrap()
+            let a_bottom = (a.heights[0] + a.heights[1]) / 2;
+            let b_bottom = (b.heights[0] + b.heights[1]) / 2;
+            a_bottom.cmp(&b_bottom)
         });
 
         // Collect gaps: (heights, bottom_y, top_y)
         // For triangular gaps, check each corner separately (same as axis-aligned walls)
-        let mut gaps: Vec<([f32; 4], f32, f32)> = Vec::new();
+        let mut gaps: Vec<([i32; 4], i32, i32)> = Vec::new();
 
         // Gap at bottom (floor to lowest wall)
         // Check each corner separately for triangular gap support
@@ -1884,8 +2158,8 @@ impl Sector {
             } else {
                 (floor_c2, floor_c2)  // Collapse to floor
             };
-            let avg_bottom = (c1_bot + c2_bot) / 2.0;
-            let avg_top = (c1_top + c2_top) / 2.0;
+            let avg_bottom = (c1_bot + c2_bot) / 2;
+            let avg_top = (c1_top + c2_top) / 2;
             gaps.push((
                 [c1_bot, c2_bot, c2_top, c1_top],
                 avg_bottom,
@@ -1902,8 +2176,8 @@ impl Sector {
             let c2_gap = upper.heights[1] - lower.heights[2];  // Corner 2
             let gap_size = c1_gap.max(c2_gap);
             if gap_size > MIN_GAP {
-                let avg_bottom = (lower.heights[2] + lower.heights[3]) / 2.0;
-                let avg_top = (upper.heights[0] + upper.heights[1]) / 2.0;
+                let avg_bottom = (lower.heights[2] + lower.heights[3]) / 2;
+                let avg_top = (upper.heights[0] + upper.heights[1]) / 2;
                 gaps.push((
                     [lower.heights[3], lower.heights[2], upper.heights[1], upper.heights[0]],
                     avg_bottom,
@@ -1930,8 +2204,8 @@ impl Sector {
             } else {
                 (ceiling_c2, ceiling_c2)  // Collapse to ceiling
             };
-            let avg_bottom = (c1_bot + c2_bot) / 2.0;
-            let avg_top = (c1_top + c2_top) / 2.0;
+            let avg_bottom = (c1_bot + c2_bot) / 2;
+            let avg_top = (c1_top + c2_top) / 2;
             gaps.push((
                 [c1_bot, c2_bot, c2_top, c1_top],
                 avg_bottom,
@@ -1947,14 +2221,14 @@ impl Sector {
         if let Some(y) = mouse_y {
             gaps.into_iter()
                 .min_by(|a, b| {
-                    let a_center = (a.1 + a.2) / 2.0;
-                    let b_center = (b.1 + b.2) / 2.0;
-                    (y - a_center).abs().partial_cmp(&(y - b_center).abs()).unwrap()
+                    let a_center = (a.1 + a.2) / 2;
+                    let b_center = (b.1 + b.2) / 2;
+                    (y - a_center).abs().cmp(&(y - b_center).abs())
                 })
                 .map(|(heights, _, _)| heights)
         } else {
             gaps.into_iter()
-                .max_by(|a, b| (a.2 - a.1).partial_cmp(&(b.2 - b.1)).unwrap())
+                .max_by(|a, b| (a.2 - a.1).cmp(&(b.2 - b.1)))
                 .map(|(heights, _, _)| heights)
         }
     }
@@ -1962,7 +2236,7 @@ impl Sector {
     /// Extrude the floor upward by `amount` units.
     /// Creates walls around the perimeter connecting the old floor height to the new height.
     /// Returns true if extrusion was performed, false if no floor exists.
-    pub fn extrude_floor(&mut self, amount: f32, wall_texture: TextureRef) -> bool {
+    pub fn extrude_floor(&mut self, amount: i32, wall_texture: TextureRef) -> bool {
         let Some(floor) = &mut self.floor else {
             return false;
         };
@@ -2163,51 +2437,115 @@ pub enum SpawnPointType {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayerSettings {
-    /// Collision cylinder radius
-    pub radius: f32,
-    /// Character height (collision cylinder)
-    pub height: f32,
-    /// Maximum step-up height
-    pub step_height: f32,
-    /// Walk speed (units per second)
-    pub walk_speed: f32,
-    /// Run speed (units per second)
-    pub run_speed: f32,
-    /// Gravity acceleration (units per second squared)
-    pub gravity: f32,
-    /// Jump velocity (initial upward velocity when jumping)
-    pub jump_velocity: f32,
+    /// Collision cylinder radius (integer world units, scaled by INT_SCALE)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub radius: i32,
+    /// Character height (collision cylinder, integer world units)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub height: i32,
+    /// Maximum step-up height (integer world units)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub step_height: i32,
+    /// Walk speed (integer units per second, scaled by INT_SCALE)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub walk_speed: i32,
+    /// Run speed (integer units per second)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub run_speed: i32,
+    /// Gravity acceleration (integer units per second squared)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub gravity: i32,
+    /// Jump velocity (initial upward velocity when jumping, integer units)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub jump_velocity: i32,
     /// Sprint jump velocity multiplier (1.0 = same as normal, 1.2 = 20% higher)
+    /// Kept as float since it's a pure multiplier
     pub sprint_jump_multiplier: f32,
-    /// Camera distance from player (orbit radius)
-    pub camera_distance: f32,
-    /// Camera vertical offset above player feet (look-at target height)
-    pub camera_vertical_offset: f32,
+    /// Camera distance from player (orbit radius, integer world units)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub camera_distance: i32,
+    /// Camera vertical offset above player feet (look-at target height, integer units)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub camera_vertical_offset: i32,
     /// Minimum camera pitch (looking up, radians, negative = up)
+    /// Kept as float since it's a viewing angle, not world-space
     pub camera_pitch_min: f32,
     /// Maximum camera pitch (looking down, radians, positive = down)
     pub camera_pitch_max: f32,
-    /// Camera height offset (legacy, kept for compatibility)
-    pub camera_height: f32,
+    /// Camera height offset (legacy, kept for compatibility, integer units)
+    #[serde(deserialize_with = "deserialize_height")]
+    pub camera_height: i32,
 }
 
 impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
-            radius: 300.0,
-            height: 1800.0,
-            step_height: 384.0,
-            walk_speed: 3000.0,
-            run_speed: 5000.0,
-            gravity: 2400.0,
-            jump_velocity: 1200.0,          // Initial upward velocity for jump
-            sprint_jump_multiplier: 1.15,   // 15% higher jump when sprinting
-            camera_distance: 6000.0,
-            camera_vertical_offset: 2000.0,
-            camera_pitch_min: -0.8,         // Can look up ~45 degrees
-            camera_pitch_max: 0.8,          // Can look down ~45 degrees
-            camera_height: 610.0,           // Legacy, kept for compatibility
+            radius: 300 * INT_SCALE,           // 1200 integer units
+            height: 1800 * INT_SCALE,          // 7200 integer units
+            step_height: 384 * INT_SCALE,      // 1536 integer units
+            walk_speed: 3000 * INT_SCALE,      // 12000 integer units/sec
+            run_speed: 5000 * INT_SCALE,       // 20000 integer units/sec
+            gravity: 2400 * INT_SCALE,         // 9600 integer units/sec^2
+            jump_velocity: 1200 * INT_SCALE,   // 4800 integer units/sec
+            sprint_jump_multiplier: 1.15,      // 15% higher jump when sprinting
+            camera_distance: 6000 * INT_SCALE, // 24000 integer units
+            camera_vertical_offset: 2000 * INT_SCALE, // 8000 integer units
+            camera_pitch_min: -0.8,            // Can look up ~45 degrees
+            camera_pitch_max: 0.8,             // Can look down ~45 degrees
+            camera_height: 610 * INT_SCALE,    // 2440 integer units (legacy)
         }
+    }
+}
+
+impl PlayerSettings {
+    /// Get radius as float for physics calculations
+    pub fn radius_f32(&self) -> f32 {
+        self.radius as f32 / INT_SCALE as f32
+    }
+
+    /// Get height as float for physics calculations
+    pub fn height_f32(&self) -> f32 {
+        self.height as f32 / INT_SCALE as f32
+    }
+
+    /// Get step height as float
+    pub fn step_height_f32(&self) -> f32 {
+        self.step_height as f32 / INT_SCALE as f32
+    }
+
+    /// Get walk speed as float
+    pub fn walk_speed_f32(&self) -> f32 {
+        self.walk_speed as f32 / INT_SCALE as f32
+    }
+
+    /// Get run speed as float
+    pub fn run_speed_f32(&self) -> f32 {
+        self.run_speed as f32 / INT_SCALE as f32
+    }
+
+    /// Get gravity as float
+    pub fn gravity_f32(&self) -> f32 {
+        self.gravity as f32 / INT_SCALE as f32
+    }
+
+    /// Get jump velocity as float
+    pub fn jump_velocity_f32(&self) -> f32 {
+        self.jump_velocity as f32 / INT_SCALE as f32
+    }
+
+    /// Get camera distance as float
+    pub fn camera_distance_f32(&self) -> f32 {
+        self.camera_distance as f32 / INT_SCALE as f32
+    }
+
+    /// Get camera height as float
+    pub fn camera_height_f32(&self) -> f32 {
+        self.camera_height as f32 / INT_SCALE as f32
+    }
+
+    /// Get camera vertical offset as float
+    pub fn camera_vertical_offset_f32(&self) -> f32 {
+        self.camera_vertical_offset as f32 / INT_SCALE as f32
     }
 }
 
@@ -2297,12 +2635,12 @@ pub struct LevelObject {
     pub sector_x: usize,
     /// Sector Z coordinate within the room
     pub sector_z: usize,
-    /// Height offset from sector floor (in world units)
-    #[serde(default)]
-    pub height: f32,
-    /// Facing direction (yaw angle in radians, 0 = +Z)
-    #[serde(default)]
-    pub facing: f32,
+    /// Height offset from sector floor (integer world units)
+    #[serde(default, deserialize_with = "deserialize_height")]
+    pub height: i32,
+    /// Facing direction (BAM: 0-4095 = 0-360 degrees, matches PS1 GTE)
+    #[serde(default, deserialize_with = "deserialize_facing")]
+    pub facing: i32,
     /// The object type and its specific properties
     pub object_type: ObjectType,
     /// Optional name/identifier
@@ -2319,8 +2657,8 @@ impl LevelObject {
         Self {
             sector_x,
             sector_z,
-            height: 0.0,
-            facing: 0.0,
+            height: 0,
+            facing: 0,
             object_type,
             name: String::new(),
             enabled: true,
@@ -2342,14 +2680,14 @@ impl LevelObject {
         Self::new(sector_x, sector_z, ObjectType::Prop(model_name.into()))
     }
 
-    /// Set height offset
-    pub fn with_height(mut self, height: f32) -> Self {
+    /// Set height offset (integer world units)
+    pub fn with_height(mut self, height: i32) -> Self {
         self.height = height;
         self
     }
 
-    /// Set facing direction
-    pub fn with_facing(mut self, facing: f32) -> Self {
+    /// Set facing direction (BAM: 0-4095 = 0-360 degrees)
+    pub fn with_facing(mut self, facing: i32) -> Self {
         self.facing = facing;
         self
     }
@@ -2360,11 +2698,16 @@ impl LevelObject {
         self
     }
 
-    /// Calculate world-space position of this object
+    /// Get facing as radians (for rendering)
+    pub fn facing_radians(&self) -> f32 {
+        (self.facing as f32) * (std::f32::consts::TAU / 4096.0)
+    }
+
+    /// Calculate world-space position of this object (integer world units)
     /// Requires the room to calculate the sector's floor height
-    pub fn world_position(&self, room: &Room) -> Vec3 {
-        let base_x = room.position.x + (self.sector_x as f32) * SECTOR_SIZE + SECTOR_SIZE * 0.5;
-        let base_z = room.position.z + (self.sector_z as f32) * SECTOR_SIZE + SECTOR_SIZE * 0.5;
+    pub fn world_position(&self, room: &Room) -> IVec3 {
+        let base_x = room.position.x + (self.sector_x as i32) * SECTOR_SIZE_INT + SECTOR_SIZE_INT / 2;
+        let base_z = room.position.z + (self.sector_z as i32) * SECTOR_SIZE_INT + SECTOR_SIZE_INT / 2;
 
         // Get floor height at this sector (average if sloped)
         let base_y = room.get_sector(self.sector_x, self.sector_z)
@@ -2372,7 +2715,7 @@ impl LevelObject {
             .map(|f| f.avg_height())
             .unwrap_or(room.position.y);
 
-        Vec3::new(base_x, base_y + self.height, base_z)
+        IVec3::new(base_x, base_y + self.height, base_z)
     }
 
     /// Check if this object is a spawn point
@@ -2399,27 +2742,53 @@ impl LevelObject {
 pub struct Portal {
     /// Target room ID
     pub target_room: usize,
-    /// Portal corners in room-relative coordinates (4 vertices)
-    pub vertices: [Vec3; 4],
-    /// Portal facing direction (points into the room)
-    pub normal: Vec3,
+    /// Portal corners in room-relative coordinates (4 vertices, integer world units)
+    #[serde(deserialize_with = "deserialize_ivec3_array_4")]
+    pub vertices: [IVec3; 4],
+    /// Portal facing direction (points into the room, integer unit vector * 4096)
+    #[serde(deserialize_with = "deserialize_ivec3")]
+    pub normal: IVec3,
 }
 
 impl Portal {
-    pub fn new(target_room: usize, vertices: [Vec3; 4], normal: Vec3) -> Self {
+    pub fn new(target_room: usize, vertices: [IVec3; 4], normal: IVec3) -> Self {
+        // Normalize the normal vector by scaling to unit length * 4096 (PS1 fixed-point)
+        let len_sq = (normal.x as i64 * normal.x as i64
+            + normal.y as i64 * normal.y as i64
+            + normal.z as i64 * normal.z as i64) as f64;
+        let len = len_sq.sqrt();
+        let normalized = if len > 0.0 {
+            IVec3::new(
+                ((normal.x as f64 / len) * 4096.0).round() as i32,
+                ((normal.y as f64 / len) * 4096.0).round() as i32,
+                ((normal.z as f64 / len) * 4096.0).round() as i32,
+            )
+        } else {
+            normal
+        };
         Self {
             target_room,
             vertices,
-            normal: normal.normalize(),
+            normal: normalized,
         }
     }
 
-    /// Get portal center
-    pub fn center(&self) -> Vec3 {
+    /// Get portal center (integer world units)
+    pub fn center(&self) -> IVec3 {
+        IVec3::new(
+            (self.vertices[0].x + self.vertices[1].x + self.vertices[2].x + self.vertices[3].x) / 4,
+            (self.vertices[0].y + self.vertices[1].y + self.vertices[2].y + self.vertices[3].y) / 4,
+            (self.vertices[0].z + self.vertices[1].z + self.vertices[2].z + self.vertices[3].z) / 4,
+        )
+    }
+
+    /// Get portal center as float for rendering
+    pub fn center_f32(&self) -> Vec3 {
+        let c = self.center();
         Vec3::new(
-            (self.vertices[0].x + self.vertices[1].x + self.vertices[2].x + self.vertices[3].x) * 0.25,
-            (self.vertices[0].y + self.vertices[1].y + self.vertices[2].y + self.vertices[3].y) * 0.25,
-            (self.vertices[0].z + self.vertices[1].z + self.vertices[2].z + self.vertices[3].z) * 0.25,
+            c.x as f32 / INT_SCALE as f32,
+            c.y as f32 / INT_SCALE as f32,
+            c.z as f32 / INT_SCALE as f32,
         )
     }
 }
@@ -2467,8 +2836,9 @@ impl Default for RoomFog {
 pub struct Room {
     /// Unique room identifier
     pub id: usize,
-    /// Room position in world space (origin of sector grid)
-    pub position: Vec3,
+    /// Room position in world space (origin of sector grid, integer world units)
+    #[serde(deserialize_with = "deserialize_ivec3")]
+    pub position: IVec3,
     /// Grid width (number of sectors in X direction)
     pub width: usize,
     /// Grid depth (number of sectors in Z direction)
@@ -2478,9 +2848,9 @@ pub struct Room {
     /// Portals to adjacent rooms
     #[serde(default)]
     pub portals: Vec<Portal>,
-    /// Bounding box (room-relative) - computed from sectors, not serialized
+    /// Bounding box (room-relative, integer world units) - computed from sectors, not serialized
     #[serde(skip)]
-    pub bounds: Aabb,
+    pub bounds: IAabb,
     /// Ambient light level (0.0 = dark, 1.0 = bright)
     #[serde(default = "default_ambient")]
     pub ambient: f32,
@@ -2497,8 +2867,8 @@ fn default_ambient() -> f32 {
 }
 
 impl Room {
-    /// Create a new empty room with the given grid size
-    pub fn new(id: usize, position: Vec3, width: usize, depth: usize) -> Self {
+    /// Create a new empty room with the given grid size (integer world units)
+    pub fn new(id: usize, position: IVec3, width: usize, depth: usize) -> Self {
         // Initialize 2D grid with None
         let sectors = (0..width)
             .map(|_| (0..depth).map(|_| None).collect())
@@ -2511,11 +2881,20 @@ impl Room {
             depth,
             sectors,
             portals: Vec::new(),
-            bounds: Aabb::default(),
+            bounds: IAabb::default(),
             ambient: 0.5,
             objects: Vec::new(),
             fog: RoomFog::default(),
         }
+    }
+
+    /// Get position as float for rendering/display
+    pub fn position_f32(&self) -> Vec3 {
+        Vec3::new(
+            self.position.x as f32 / INT_SCALE as f32,
+            self.position.y as f32 / INT_SCALE as f32,
+            self.position.z as f32 / INT_SCALE as f32,
+        )
     }
 
     /// Get sector at grid position (returns None if out of bounds or empty)
@@ -2554,40 +2933,40 @@ impl Room {
         }
     }
 
-    /// Set floor at grid position
-    pub fn set_floor(&mut self, x: usize, z: usize, height: f32, texture: TextureRef) {
+    /// Set floor at grid position (integer world units)
+    pub fn set_floor(&mut self, x: usize, z: usize, height: i32, texture: TextureRef) {
         let sector = self.ensure_sector(x, z);
         sector.floor = Some(HorizontalFace::flat(height, texture));
     }
 
-    /// Set ceiling at grid position
-    pub fn set_ceiling(&mut self, x: usize, z: usize, height: f32, texture: TextureRef) {
+    /// Set ceiling at grid position (integer world units)
+    pub fn set_ceiling(&mut self, x: usize, z: usize, height: i32, texture: TextureRef) {
         let sector = self.ensure_sector(x, z);
         sector.ceiling = Some(HorizontalFace::flat(height, texture));
     }
 
-    /// Add a wall on a sector edge
-    pub fn add_wall(&mut self, x: usize, z: usize, direction: Direction, y_bottom: f32, y_top: f32, texture: TextureRef) {
+    /// Add a wall on a sector edge (integer world units)
+    pub fn add_wall(&mut self, x: usize, z: usize, direction: Direction, y_bottom: i32, y_top: i32, texture: TextureRef) {
         let sector = self.ensure_sector(x, z);
         sector.walls_mut(direction).push(VerticalFace::new(y_bottom, y_top, texture));
     }
 
-    /// Add a portal to another room
-    pub fn add_portal(&mut self, target_room: usize, vertices: [Vec3; 4], normal: Vec3) {
+    /// Add a portal to another room (integer world units)
+    pub fn add_portal(&mut self, target_room: usize, vertices: [IVec3; 4], normal: IVec3) {
         self.portals.push(Portal::new(target_room, vertices, normal));
     }
 
-    /// Convert world position to grid coordinates
-    pub fn world_to_grid(&self, world_x: f32, world_z: f32) -> Option<(usize, usize)> {
+    /// Convert world position to grid coordinates (integer world units)
+    pub fn world_to_grid(&self, world_x: i32, world_z: i32) -> Option<(usize, usize)> {
         let local_x = world_x - self.position.x;
         let local_z = world_z - self.position.z;
 
-        if local_x < 0.0 || local_z < 0.0 {
+        if local_x < 0 || local_z < 0 {
             return None;
         }
 
-        let grid_x = (local_x / SECTOR_SIZE) as usize;
-        let grid_z = (local_z / SECTOR_SIZE) as usize;
+        let grid_x = (local_x / SECTOR_SIZE_INT) as usize;
+        let grid_z = (local_z / SECTOR_SIZE_INT) as usize;
 
         if grid_x < self.width && grid_z < self.depth {
             Some((grid_x, grid_z))
@@ -2596,20 +2975,51 @@ impl Room {
         }
     }
 
-    /// Convert grid coordinates to world position (returns corner of sector)
-    pub fn grid_to_world(&self, x: usize, z: usize) -> Vec3 {
-        Vec3::new(
-            self.position.x + (x as f32) * SECTOR_SIZE,
+    /// Convert world position to grid coordinates (float, for collision/physics)
+    pub fn world_to_grid_f32(&self, world_x: f32, world_z: f32) -> Option<(usize, usize)> {
+        let pos_x = self.position.x as f32;
+        let pos_z = self.position.z as f32;
+        let local_x = world_x - pos_x;
+        let local_z = world_z - pos_z;
+
+        if local_x < 0.0 || local_z < 0.0 {
+            return None;
+        }
+
+        let grid_x = (local_x / SECTOR_SIZE_INT as f32) as usize;
+        let grid_z = (local_z / SECTOR_SIZE_INT as f32) as usize;
+
+        if grid_x < self.width && grid_z < self.depth {
+            Some((grid_x, grid_z))
+        } else {
+            None
+        }
+    }
+
+    /// Convert grid coordinates to world position (returns corner of sector, integer world units)
+    pub fn grid_to_world(&self, x: usize, z: usize) -> IVec3 {
+        IVec3::new(
+            self.position.x + (x as i32) * SECTOR_SIZE_INT,
             self.position.y,
-            self.position.z + (z as f32) * SECTOR_SIZE,
+            self.position.z + (z as i32) * SECTOR_SIZE_INT,
         )
     }
 
-    /// Get effective vertical bounds for wall placement.
-    /// Ensures minimum height of 3072 when room has no vertical extent.
-    pub fn effective_height_bounds(&self) -> (f32, f32) {
-        const MIN_GAP: f32 = 256.0;
-        const DEFAULT_CEILING: f32 = 3072.0;
+    /// Convert grid coordinates to world position as float for rendering
+    pub fn grid_to_world_f32(&self, x: usize, z: usize) -> Vec3 {
+        let pos = self.grid_to_world(x, z);
+        Vec3::new(
+            pos.x as f32 / INT_SCALE as f32,
+            pos.y as f32 / INT_SCALE as f32,
+            pos.z as f32 / INT_SCALE as f32,
+        )
+    }
+
+    /// Get effective vertical bounds for wall placement (integer world units).
+    /// Ensures minimum height when room has no vertical extent.
+    pub fn effective_height_bounds(&self) -> (i32, i32) {
+        const MIN_GAP: i32 = 256 * INT_SCALE;  // 1024 integer units
+        const DEFAULT_CEILING: i32 = 3072 * INT_SCALE;  // 12288 integer units
 
         let bottom = self.bounds.min.y;
         let top = if self.bounds.max.y - self.bounds.min.y < MIN_GAP {
@@ -2622,28 +3032,25 @@ impl Room {
 
     /// Recalculate bounds from sectors (call after loading from file)
     pub fn recalculate_bounds(&mut self) {
-        self.bounds = Aabb::new(
-            Vec3::new(f32::MAX, f32::MAX, f32::MAX),
-            Vec3::new(f32::MIN, f32::MIN, f32::MIN),
-        );
+        self.bounds = IAabb::EMPTY;
 
         for x in 0..self.width {
             for z in 0..self.depth {
                 if let Some(sector) = &self.sectors[x][z] {
-                    let base_x = (x as f32) * SECTOR_SIZE;
-                    let base_z = (z as f32) * SECTOR_SIZE;
+                    let base_x = (x as i32) * SECTOR_SIZE_INT;
+                    let base_z = (z as i32) * SECTOR_SIZE_INT;
 
                     // Expand bounds for floor corners
                     if let Some(floor) = &sector.floor {
                         for (i, &h) in floor.heights.iter().enumerate() {
                             let (dx, dz) = match i {
-                                0 => (0.0, 0.0),           // NW
-                                1 => (SECTOR_SIZE, 0.0),   // NE
-                                2 => (SECTOR_SIZE, SECTOR_SIZE), // SE
-                                3 => (0.0, SECTOR_SIZE),   // SW
+                                0 => (0, 0),              // NW
+                                1 => (SECTOR_SIZE_INT, 0),   // NE
+                                2 => (SECTOR_SIZE_INT, SECTOR_SIZE_INT), // SE
+                                3 => (0, SECTOR_SIZE_INT),   // SW
                                 _ => unreachable!(),
                             };
-                            self.bounds.expand(Vec3::new(base_x + dx, h, base_z + dz));
+                            self.bounds.expand(IVec3::new(base_x + dx, h, base_z + dz));
                         }
                     }
 
@@ -2651,48 +3058,48 @@ impl Room {
                     if let Some(ceiling) = &sector.ceiling {
                         for (i, &h) in ceiling.heights.iter().enumerate() {
                             let (dx, dz) = match i {
-                                0 => (0.0, 0.0),
-                                1 => (SECTOR_SIZE, 0.0),
-                                2 => (SECTOR_SIZE, SECTOR_SIZE),
-                                3 => (0.0, SECTOR_SIZE),
+                                0 => (0, 0),
+                                1 => (SECTOR_SIZE_INT, 0),
+                                2 => (SECTOR_SIZE_INT, SECTOR_SIZE_INT),
+                                3 => (0, SECTOR_SIZE_INT),
                                 _ => unreachable!(),
                             };
-                            self.bounds.expand(Vec3::new(base_x + dx, h, base_z + dz));
+                            self.bounds.expand(IVec3::new(base_x + dx, h, base_z + dz));
                         }
                     }
 
                     // Expand bounds for wall corners (walls can extend beyond floor/ceiling)
                     for wall in &sector.walls_north {
                         for &h in &wall.heights {
-                            self.bounds.expand(Vec3::new(base_x, h, base_z));
+                            self.bounds.expand(IVec3::new(base_x, h, base_z));
                         }
                     }
                     for wall in &sector.walls_east {
                         for &h in &wall.heights {
-                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z));
+                            self.bounds.expand(IVec3::new(base_x + SECTOR_SIZE_INT, h, base_z));
                         }
                     }
                     for wall in &sector.walls_south {
                         for &h in &wall.heights {
-                            self.bounds.expand(Vec3::new(base_x, h, base_z + SECTOR_SIZE));
+                            self.bounds.expand(IVec3::new(base_x, h, base_z + SECTOR_SIZE_INT));
                         }
                     }
                     for wall in &sector.walls_west {
                         for &h in &wall.heights {
-                            self.bounds.expand(Vec3::new(base_x, h, base_z));
+                            self.bounds.expand(IVec3::new(base_x, h, base_z));
                         }
                     }
                     // Diagonal walls go corner-to-corner, so expand for both corners
                     for wall in &sector.walls_nwse {
                         for &h in &wall.heights {
-                            self.bounds.expand(Vec3::new(base_x, h, base_z)); // NW corner
-                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z + SECTOR_SIZE)); // SE corner
+                            self.bounds.expand(IVec3::new(base_x, h, base_z)); // NW corner
+                            self.bounds.expand(IVec3::new(base_x + SECTOR_SIZE_INT, h, base_z + SECTOR_SIZE_INT)); // SE corner
                         }
                     }
                     for wall in &sector.walls_nesw {
                         for &h in &wall.heights {
-                            self.bounds.expand(Vec3::new(base_x + SECTOR_SIZE, h, base_z)); // NE corner
-                            self.bounds.expand(Vec3::new(base_x, h, base_z + SECTOR_SIZE)); // SW corner
+                            self.bounds.expand(IVec3::new(base_x + SECTOR_SIZE_INT, h, base_z)); // NE corner
+                            self.bounds.expand(IVec3::new(base_x, h, base_z + SECTOR_SIZE_INT)); // SW corner
                         }
                     }
                 }
@@ -2783,8 +3190,8 @@ impl Room {
         // Apply trimming if needed
         if first_col > 0 || first_row > 0 || last_col < self.width || last_row < self.depth {
             // Adjust room position for removed columns/rows at the start
-            self.position.x += (first_col as f32) * SECTOR_SIZE;
-            self.position.z += (first_row as f32) * SECTOR_SIZE;
+            self.position.x += (first_col as i32) * SECTOR_SIZE_INT;
+            self.position.z += (first_row as i32) * SECTOR_SIZE_INT;
 
             // Adjust object sector coordinates to account for trimmed rows/columns
             // Objects need their sector_x/sector_z reduced by the trimmed amount
@@ -2830,26 +3237,29 @@ impl Room {
 
     /// Check if a world-space point is inside this room's bounds
     pub fn contains_point(&self, point: Vec3) -> bool {
+        let pos = self.position.to_render_f32();
         let relative = Vec3::new(
-            point.x - self.position.x,
-            point.y - self.position.y,
-            point.z - self.position.z,
+            point.x - pos.x,
+            point.y - pos.y,
+            point.z - pos.z,
         );
-        self.bounds.contains(relative)
+        self.bounds.to_aabb().contains(relative)
     }
 
     /// Get world-space bounds
     pub fn world_bounds(&self) -> Aabb {
+        let pos = self.position.to_render_f32();
+        let bounds = self.bounds.to_aabb();
         Aabb::new(
             Vec3::new(
-                self.bounds.min.x + self.position.x,
-                self.bounds.min.y + self.position.y,
-                self.bounds.min.z + self.position.z,
+                bounds.min.x + pos.x,
+                bounds.min.y + pos.y,
+                bounds.min.z + pos.z,
             ),
             Vec3::new(
-                self.bounds.max.x + self.position.x,
-                self.bounds.max.y + self.position.y,
-                self.bounds.max.z + self.position.z,
+                bounds.max.x + pos.x,
+                bounds.max.y + pos.y,
+                bounds.max.z + pos.z,
             ),
         )
     }
@@ -2871,10 +3281,11 @@ impl Room {
     {
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
+        let pos = self.position.to_render_f32();
 
         for (grid_x, grid_z, sector) in self.iter_sectors() {
-            let base_x = self.position.x + (grid_x as f32) * SECTOR_SIZE;
-            let base_z = self.position.z + (grid_z as f32) * SECTOR_SIZE;
+            let base_x = pos.x + (grid_x as f32) * SECTOR_SIZE;
+            let base_z = pos.z + (grid_z as f32) * SECTOR_SIZE;
 
             // Render floor
             if let Some(floor) = &sector.floor {
@@ -2884,6 +3295,7 @@ impl Room {
                     floor,
                     base_x,
                     base_z,
+                    pos.y,
                     grid_x,
                     grid_z,
                     true, // is_floor
@@ -2899,6 +3311,7 @@ impl Room {
                     ceiling,
                     base_x,
                     base_z,
+                    pos.y,
                     grid_x,
                     grid_z,
                     false, // is_ceiling
@@ -2908,23 +3321,23 @@ impl Room {
 
             // Render walls on each edge
             for wall in &sector.walls_north {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::North, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, pos.y, grid_x, grid_z, Direction::North, &resolve_texture);
             }
             for wall in &sector.walls_east {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::East, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, pos.y, grid_x, grid_z, Direction::East, &resolve_texture);
             }
             for wall in &sector.walls_south {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::South, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, pos.y, grid_x, grid_z, Direction::South, &resolve_texture);
             }
             for wall in &sector.walls_west {
-                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::West, &resolve_texture);
+                self.add_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, pos.y, grid_x, grid_z, Direction::West, &resolve_texture);
             }
             // Diagonal walls
             for wall in &sector.walls_nwse {
-                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, true, &resolve_texture);
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, pos.y, grid_x, grid_z, true, &resolve_texture);
             }
             for wall in &sector.walls_nesw {
-                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, false, &resolve_texture);
+                self.add_diagonal_wall_to_render_data(&mut vertices, &mut faces, wall, base_x, base_z, pos.y, grid_x, grid_z, false, &resolve_texture);
             }
         }
 
@@ -2939,6 +3352,7 @@ impl Room {
         face: &HorizontalFace,
         base_x: f32,
         base_z: f32,
+        room_y: f32,  // Room's Y position in float (render boundary)
         grid_x: usize,
         grid_z: usize,
         is_floor: bool,
@@ -2947,22 +3361,25 @@ impl Room {
     where
         F: Fn(&TextureRef) -> Option<usize>,
     {
+        // Convert integer heights to float at render boundary
+        let h = |h: i32| room_y + h as f32 / INT_SCALE as f32;
+
         // Corner positions for triangle 1: NW, NE, SE, SW
         // Heights are room-relative, so add room.position.y for world-space rendering
         let corners_1 = [
-            Vec3::new(base_x, self.position.y + face.heights[0], base_z),                         // NW
-            Vec3::new(base_x + SECTOR_SIZE, self.position.y + face.heights[1], base_z),           // NE
-            Vec3::new(base_x + SECTOR_SIZE, self.position.y + face.heights[2], base_z + SECTOR_SIZE), // SE
-            Vec3::new(base_x, self.position.y + face.heights[3], base_z + SECTOR_SIZE),           // SW
+            Vec3::new(base_x, h(face.heights[0]), base_z),                         // NW
+            Vec3::new(base_x + SECTOR_SIZE, h(face.heights[1]), base_z),           // NE
+            Vec3::new(base_x + SECTOR_SIZE, h(face.heights[2]), base_z + SECTOR_SIZE), // SE
+            Vec3::new(base_x, h(face.heights[3]), base_z + SECTOR_SIZE),           // SW
         ];
 
         // Corner positions for triangle 2 (may use different heights if unlinked)
         let heights_2 = face.get_heights_2();
         let corners_2 = [
-            Vec3::new(base_x, self.position.y + heights_2[0], base_z),                         // NW
-            Vec3::new(base_x + SECTOR_SIZE, self.position.y + heights_2[1], base_z),           // NE
-            Vec3::new(base_x + SECTOR_SIZE, self.position.y + heights_2[2], base_z + SECTOR_SIZE), // SE
-            Vec3::new(base_x, self.position.y + heights_2[3], base_z + SECTOR_SIZE),           // SW
+            Vec3::new(base_x, h(heights_2[0]), base_z),                         // NW
+            Vec3::new(base_x + SECTOR_SIZE, h(heights_2[1]), base_z),           // NE
+            Vec3::new(base_x + SECTOR_SIZE, h(heights_2[2]), base_z + SECTOR_SIZE), // SE
+            Vec3::new(base_x, h(heights_2[3]), base_z + SECTOR_SIZE),           // SW
         ];
 
         // Default UVs for triangle 1 (scaled by UV_SCALE, offset by grid position for tiling)
@@ -3064,6 +3481,7 @@ impl Room {
         wall: &VerticalFace,
         base_x: f32,
         base_z: f32,
+        room_y: f32,  // Room's Y position in float (render boundary)
         grid_x: usize,
         grid_z: usize,
         direction: Direction,
@@ -3072,49 +3490,51 @@ impl Room {
     where
         F: Fn(&TextureRef) -> Option<usize>,
     {
+        // Convert integer heights to float at render boundary
+        let h = |h: i32| room_y + h as f32 / INT_SCALE as f32;
+
         // Wall corners based on direction
         // Each wall has 4 corners: bottom-left, bottom-right, top-right, top-left (from inside room)
         // wall.heights = [bottom-left, bottom-right, top-right, top-left]
         // Heights are room-relative, so add room.position.y for world-space rendering
-        let y_offset = self.position.y;
         let (corners, front_normal) = match direction {
             Direction::North => {
                 // Wall at -Z edge, facing +Z (into room)
                 let corners = [
-                    Vec3::new(base_x, y_offset + wall.heights[0], base_z),                    // bottom-left
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[1], base_z),      // bottom-right
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[2], base_z),      // top-right
-                    Vec3::new(base_x, y_offset + wall.heights[3], base_z),                    // top-left
+                    Vec3::new(base_x, h(wall.heights[0]), base_z),                    // bottom-left
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[1]), base_z),      // bottom-right
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[2]), base_z),      // top-right
+                    Vec3::new(base_x, h(wall.heights[3]), base_z),                    // top-left
                 ];
                 (corners, Vec3::new(0.0, 0.0, 1.0))
             }
             Direction::East => {
                 // Wall at +X edge, facing -X (into room)
                 let corners = [
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[0], base_z),
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[1], base_z + SECTOR_SIZE),
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[2], base_z + SECTOR_SIZE),
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[3], base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[0]), base_z),
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[1]), base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[2]), base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[3]), base_z),
                 ];
                 (corners, Vec3::new(-1.0, 0.0, 0.0))
             }
             Direction::South => {
                 // Wall at +Z edge, facing -Z (into room)
                 let corners = [
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[0], base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, y_offset + wall.heights[1], base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, y_offset + wall.heights[2], base_z + SECTOR_SIZE),
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[3], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[0]), base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, h(wall.heights[1]), base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, h(wall.heights[2]), base_z + SECTOR_SIZE),
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[3]), base_z + SECTOR_SIZE),
                 ];
                 (corners, Vec3::new(0.0, 0.0, -1.0))
             }
             Direction::West => {
                 // Wall at -X edge, facing +X (into room)
                 let corners = [
-                    Vec3::new(base_x, y_offset + wall.heights[0], base_z + SECTOR_SIZE),
-                    Vec3::new(base_x, y_offset + wall.heights[1], base_z),
-                    Vec3::new(base_x, y_offset + wall.heights[2], base_z),
-                    Vec3::new(base_x, y_offset + wall.heights[3], base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, h(wall.heights[0]), base_z + SECTOR_SIZE),
+                    Vec3::new(base_x, h(wall.heights[1]), base_z),
+                    Vec3::new(base_x, h(wall.heights[2]), base_z),
+                    Vec3::new(base_x, h(wall.heights[3]), base_z + SECTOR_SIZE),
                 ];
                 (corners, Vec3::new(1.0, 0.0, 0.0))
             }
@@ -3123,10 +3543,10 @@ impl Room {
                 // NW = (base_x, base_z), SE = (base_x + SECTOR_SIZE, base_z + SECTOR_SIZE)
                 // Normal faces NE-SW direction (perpendicular to NW-SE)
                 let corners = [
-                    Vec3::new(base_x, y_offset + wall.heights[0], base_z),                                 // NW bottom
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[1], base_z + SECTOR_SIZE),     // SE bottom
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[2], base_z + SECTOR_SIZE),     // SE top
-                    Vec3::new(base_x, y_offset + wall.heights[3], base_z),                                 // NW top
+                    Vec3::new(base_x, h(wall.heights[0]), base_z),                                 // NW bottom
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[1]), base_z + SECTOR_SIZE),     // SE bottom
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[2]), base_z + SECTOR_SIZE),     // SE top
+                    Vec3::new(base_x, h(wall.heights[3]), base_z),                                 // NW top
                 ];
                 // Normal perpendicular to NW-SE line, normalized: (1, 0, -1) / sqrt(2)
                 let n = 1.0 / 2.0_f32.sqrt();
@@ -3137,10 +3557,10 @@ impl Room {
                 // NE = (base_x + SECTOR_SIZE, base_z), SW = (base_x, base_z + SECTOR_SIZE)
                 // Normal faces NW-SE direction (perpendicular to NE-SW)
                 let corners = [
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[0], base_z),                   // NE bottom
-                    Vec3::new(base_x, y_offset + wall.heights[1], base_z + SECTOR_SIZE),                   // SW bottom
-                    Vec3::new(base_x, y_offset + wall.heights[2], base_z + SECTOR_SIZE),                   // SW top
-                    Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[3], base_z),                   // NE top
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[0]), base_z),                   // NE bottom
+                    Vec3::new(base_x, h(wall.heights[1]), base_z + SECTOR_SIZE),                   // SW bottom
+                    Vec3::new(base_x, h(wall.heights[2]), base_z + SECTOR_SIZE),                   // SW top
+                    Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[3]), base_z),                   // NE top
                 ];
                 // Normal perpendicular to NE-SW line, normalized: (-1, 0, -1) / sqrt(2)
                 let n = 1.0 / 2.0_f32.sqrt();
@@ -3182,10 +3602,10 @@ impl Room {
             // Calculate world Y positions (including room y_offset)
             // heights order: [bottom-left, bottom-right, top-right, top-left]
             let world_heights = [
-                y_offset + wall.heights[0],
-                y_offset + wall.heights[1],
-                y_offset + wall.heights[2],
-                y_offset + wall.heights[3],
+                h(wall.heights[0]),
+                h(wall.heights[1]),
+                h(wall.heights[2]),
+                h(wall.heights[3]),
             ];
 
             // Calculate V based on absolute world position (scaled by UV_SCALE)
@@ -3246,6 +3666,7 @@ impl Room {
         wall: &VerticalFace,
         base_x: f32,
         base_z: f32,
+        room_y: f32,  // Room's Y position in float (render boundary)
         grid_x: usize,
         _grid_z: usize,
         is_nwse: bool,
@@ -3254,8 +3675,8 @@ impl Room {
     where
         F: Fn(&TextureRef) -> Option<usize>,
     {
-        // Heights are room-relative, so add room.position.y for world-space rendering
-        let y_offset = self.position.y;
+        // Convert integer heights to float at render boundary
+        let h = |h: i32| room_y + h as f32 / INT_SCALE as f32;
 
         // Diagonal walls span corner-to-corner
         // wall.heights = [corner1_bottom, corner2_bottom, corner2_top, corner1_top]
@@ -3264,10 +3685,10 @@ impl Room {
             // NW-SE diagonal: wall cuts off SW corner, front faces NE (into room)
             // Corners: SE (bottom), NW (bottom), NW (top), SE (top) - reversed winding
             let corners = [
-                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[1], base_z + SECTOR_SIZE),   // SE bottom
-                Vec3::new(base_x, y_offset + wall.heights[0], base_z),                               // NW bottom
-                Vec3::new(base_x, y_offset + wall.heights[3], base_z),                               // NW top
-                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[2], base_z + SECTOR_SIZE),   // SE top
+                Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[1]), base_z + SECTOR_SIZE),   // SE bottom
+                Vec3::new(base_x, h(wall.heights[0]), base_z),                               // NW bottom
+                Vec3::new(base_x, h(wall.heights[3]), base_z),                               // NW top
+                Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[2]), base_z + SECTOR_SIZE),   // SE top
             ];
             // Normal points NE (into room): (n, 0, -n)
             let n = 1.0 / (2.0_f32).sqrt();
@@ -3276,10 +3697,10 @@ impl Room {
             // NE-SW diagonal: wall cuts off NW corner, front faces SE (into room)
             // Corners: SW (bottom), NE (bottom), NE (top), SW (top) - reversed winding
             let corners = [
-                Vec3::new(base_x, y_offset + wall.heights[1], base_z + SECTOR_SIZE),                 // SW bottom
-                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[0], base_z),                 // NE bottom
-                Vec3::new(base_x + SECTOR_SIZE, y_offset + wall.heights[3], base_z),                 // NE top
-                Vec3::new(base_x, y_offset + wall.heights[2], base_z + SECTOR_SIZE),                 // SW top
+                Vec3::new(base_x, h(wall.heights[1]), base_z + SECTOR_SIZE),                 // SW bottom
+                Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[0]), base_z),                 // NE bottom
+                Vec3::new(base_x + SECTOR_SIZE, h(wall.heights[3]), base_z),                 // NE top
+                Vec3::new(base_x, h(wall.heights[2]), base_z + SECTOR_SIZE),                 // SW top
             ];
             // Normal points SE (into room): (n, 0, n)
             let n = 1.0 / (2.0_f32).sqrt();
@@ -3304,10 +3725,10 @@ impl Room {
             ]);
 
             let world_heights = [
-                y_offset + wall.heights[0],
-                y_offset + wall.heights[1],
-                y_offset + wall.heights[2],
-                y_offset + wall.heights[3],
+                h(wall.heights[0]),
+                h(wall.heights[1]),
+                h(wall.heights[2]),
+                h(wall.heights[3]),
             ];
 
             [
@@ -3639,10 +4060,11 @@ impl Level {
     pub fn get_floor_info(&self, point: Vec3, room_hint: Option<usize>) -> Option<FloorInfo> {
         let room_idx = self.find_room_at_with_hint(point, room_hint)?;
         let room = &self.rooms[room_idx];
+        let pos = room.position.to_render_f32();
 
         // Convert world position to sector coordinates
-        let local_x = point.x - room.position.x;
-        let local_z = point.z - room.position.z;
+        let local_x = point.x - pos.x;
+        let local_z = point.z - pos.z;
 
         let sector_x = (local_x / SECTOR_SIZE).floor() as isize;
         let sector_z = (local_z / SECTOR_SIZE).floor() as isize;
@@ -3666,14 +4088,15 @@ impl Level {
         let v = (local_z - sector_base_z) / SECTOR_SIZE;
 
         // Get floor height using proper triangle interpolation for slopes
+        // interpolate_height returns raw integer-scaled height, convert to float at render boundary
         let floor_y = sector.floor.as_ref()
-            .map(|f| room.position.y + f.interpolate_height(u, v))
-            .unwrap_or(room.position.y);
+            .map(|f| pos.y + f.interpolate_height(u, v) / INT_SCALE as f32)
+            .unwrap_or(pos.y);
 
         // Get ceiling height using proper triangle interpolation
         let ceiling_y = sector.ceiling.as_ref()
-            .map(|c| room.position.y + c.interpolate_height(u, v))
-            .unwrap_or(room.position.y + 2048.0); // Default 2 sectors high
+            .map(|c| pos.y + c.interpolate_height(u, v) / INT_SCALE as f32)
+            .unwrap_or(pos.y + 2048.0); // Default 2 sectors high
 
         Some(FloorInfo {
             room: room_idx,
@@ -3716,14 +4139,14 @@ impl Level {
         // We need to check if any sector edges in room A are adjacent to sector edges in room B
         // Two sectors are adjacent if they share an edge at the same world position
 
-        // Get room data (positions and dimensions)
+        // Get room data (positions converted to float and dimensions)
         let (pos_a, width_a, depth_a) = {
             let room = &self.rooms[room_a_idx];
-            (room.position, room.width, room.depth)
+            (room.position.to_render_f32(), room.width, room.depth)
         };
         let (pos_b, width_b, depth_b) = {
             let room = &self.rooms[room_b_idx];
-            (room.position, room.width, room.depth)
+            (room.position.to_render_f32(), room.width, room.depth)
         };
 
         // Check all directions for adjacency
@@ -3793,34 +4216,35 @@ impl Level {
 
                     // Calculate portal opening at each corner (trapezoidal portal for sloped surfaces)
                     // Get edge heights from both sectors: (left, right) when looking from inside
-                    // The edge_heights function returns room-relative heights, so we must add room.position.y
-                    // to get world-space heights for proper comparison between rooms at different Y levels.
+                    // The edge_heights function returns room-relative heights (i32), so we must convert
+                    // to float and add room.position.y to get world-space heights for proper comparison.
                     //
                     // For open-air sectors (no ceiling), we use INFINITY to represent unbounded height.
                     // This is valid for rendering but must be handled specially during serialization.
+                    let h_to_f = |h: i32| h as f32 / INT_SCALE as f32;
                     let (floor_a_left, floor_a_right) = sector_a.floor.as_ref()
                         .map(|f| {
                             let (l, r) = f.edge_heights(dir);
-                            (l + pos_a.y, r + pos_a.y)  // Convert to world-space
+                            (h_to_f(l) + pos_a.y, h_to_f(r) + pos_a.y)  // Convert to world-space float
                         })
                         .unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
                     let (floor_b_left, floor_b_right) = sector_b.floor.as_ref()
                         .map(|f| {
                             let (l, r) = f.edge_heights(opposite_dir);
-                            (l + pos_b.y, r + pos_b.y)  // Convert to world-space
+                            (h_to_f(l) + pos_b.y, h_to_f(r) + pos_b.y)  // Convert to world-space float
                         })
                         .unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
 
                     let (ceil_a_left, ceil_a_right) = sector_a.ceiling.as_ref()
                         .map(|c| {
                             let (l, r) = c.edge_heights(dir);
-                            (l + pos_a.y, r + pos_a.y)  // Convert to world-space
+                            (h_to_f(l) + pos_a.y, h_to_f(r) + pos_a.y)  // Convert to world-space float
                         })
                         .unwrap_or((f32::INFINITY, f32::INFINITY));
                     let (ceil_b_left, ceil_b_right) = sector_b.ceiling.as_ref()
                         .map(|c| {
                             let (l, r) = c.edge_heights(opposite_dir);
-                            (l + pos_b.y, r + pos_b.y)  // Convert to world-space
+                            (h_to_f(l) + pos_b.y, h_to_f(r) + pos_b.y)  // Convert to world-space float
                         })
                         .unwrap_or((f32::INFINITY, f32::INFINITY));
 
@@ -3889,23 +4313,26 @@ impl Level {
 
                     // Convert to room-relative coordinates and add portals to both rooms
                     // Portal in room A points to room B
+                    // Convert float coordinates to integer (multiply by INT_SCALE)
                     let vertices_a = [
-                        Vec3::new(v0.x - pos_a.x, v0.y - pos_a.y, v0.z - pos_a.z),
-                        Vec3::new(v1.x - pos_a.x, v1.y - pos_a.y, v1.z - pos_a.z),
-                        Vec3::new(v2.x - pos_a.x, v2.y - pos_a.y, v2.z - pos_a.z),
-                        Vec3::new(v3.x - pos_a.x, v3.y - pos_a.y, v3.z - pos_a.z),
+                        IVec3::from_legacy_f32(Vec3::new(v0.x - pos_a.x, v0.y - pos_a.y, v0.z - pos_a.z)),
+                        IVec3::from_legacy_f32(Vec3::new(v1.x - pos_a.x, v1.y - pos_a.y, v1.z - pos_a.z)),
+                        IVec3::from_legacy_f32(Vec3::new(v2.x - pos_a.x, v2.y - pos_a.y, v2.z - pos_a.z)),
+                        IVec3::from_legacy_f32(Vec3::new(v3.x - pos_a.x, v3.y - pos_a.y, v3.z - pos_a.z)),
                     ];
-                    self.rooms[room_a_idx].portals.push(Portal::new(room_b_idx, vertices_a, normal_a));
+                    let normal_a_int = IVec3::from_unit_normal(normal_a);
+                    self.rooms[room_a_idx].portals.push(Portal::new(room_b_idx, vertices_a, normal_a_int));
 
                     // Portal in room B points to room A (opposite normal)
                     let normal_b = Vec3::new(-normal_a.x, -normal_a.y, -normal_a.z);
+                    let normal_b_int = IVec3::from_unit_normal(normal_b);
                     let vertices_b = [
-                        Vec3::new(v1.x - pos_b.x, v1.y - pos_b.y, v1.z - pos_b.z), // Swap order for opposite facing
-                        Vec3::new(v0.x - pos_b.x, v0.y - pos_b.y, v0.z - pos_b.z),
-                        Vec3::new(v3.x - pos_b.x, v3.y - pos_b.y, v3.z - pos_b.z),
-                        Vec3::new(v2.x - pos_b.x, v2.y - pos_b.y, v2.z - pos_b.z),
+                        IVec3::from_legacy_f32(Vec3::new(v1.x - pos_b.x, v1.y - pos_b.y, v1.z - pos_b.z)), // Swap order for opposite facing
+                        IVec3::from_legacy_f32(Vec3::new(v0.x - pos_b.x, v0.y - pos_b.y, v0.z - pos_b.z)),
+                        IVec3::from_legacy_f32(Vec3::new(v3.x - pos_b.x, v3.y - pos_b.y, v3.z - pos_b.z)),
+                        IVec3::from_legacy_f32(Vec3::new(v2.x - pos_b.x, v2.y - pos_b.y, v2.z - pos_b.z)),
                     ];
-                    self.rooms[room_b_idx].portals.push(Portal::new(room_a_idx, vertices_b, normal_b));
+                    self.rooms[room_b_idx].portals.push(Portal::new(room_a_idx, vertices_b, normal_b_int));
                 }
             }
         }
@@ -3965,36 +4392,48 @@ impl Level {
                     ];
 
                     // Portal in lower room pointing up
+                    // Convert to room-relative integer coordinates
                     let lower_verts = [
-                        Vec3::new(verts[0].x - lower_pos.x, verts[0].y - lower_pos.y, verts[0].z - lower_pos.z),
-                        Vec3::new(verts[1].x - lower_pos.x, verts[1].y - lower_pos.y, verts[1].z - lower_pos.z),
-                        Vec3::new(verts[2].x - lower_pos.x, verts[2].y - lower_pos.y, verts[2].z - lower_pos.z),
-                        Vec3::new(verts[3].x - lower_pos.x, verts[3].y - lower_pos.y, verts[3].z - lower_pos.z),
+                        IVec3::from_legacy_f32(Vec3::new(verts[0].x - lower_pos.x, verts[0].y - lower_pos.y, verts[0].z - lower_pos.z)),
+                        IVec3::from_legacy_f32(Vec3::new(verts[1].x - lower_pos.x, verts[1].y - lower_pos.y, verts[1].z - lower_pos.z)),
+                        IVec3::from_legacy_f32(Vec3::new(verts[2].x - lower_pos.x, verts[2].y - lower_pos.y, verts[2].z - lower_pos.z)),
+                        IVec3::from_legacy_f32(Vec3::new(verts[3].x - lower_pos.x, verts[3].y - lower_pos.y, verts[3].z - lower_pos.z)),
                     ];
 
                     // Portal in upper room pointing down (reversed winding)
                     let upper_verts = [
-                        Vec3::new(verts[0].x - upper_pos.x, verts[0].y - upper_pos.y, verts[0].z - upper_pos.z),
-                        Vec3::new(verts[3].x - upper_pos.x, verts[3].y - upper_pos.y, verts[3].z - upper_pos.z),
-                        Vec3::new(verts[2].x - upper_pos.x, verts[2].y - upper_pos.y, verts[2].z - upper_pos.z),
-                        Vec3::new(verts[1].x - upper_pos.x, verts[1].y - upper_pos.y, verts[1].z - upper_pos.z),
+                        IVec3::from_legacy_f32(Vec3::new(verts[0].x - upper_pos.x, verts[0].y - upper_pos.y, verts[0].z - upper_pos.z)),
+                        IVec3::from_legacy_f32(Vec3::new(verts[3].x - upper_pos.x, verts[3].y - upper_pos.y, verts[3].z - upper_pos.z)),
+                        IVec3::from_legacy_f32(Vec3::new(verts[2].x - upper_pos.x, verts[2].y - upper_pos.y, verts[2].z - upper_pos.z)),
+                        IVec3::from_legacy_f32(Vec3::new(verts[1].x - upper_pos.x, verts[1].y - upper_pos.y, verts[1].z - upper_pos.z)),
                     ];
 
+                    // Unit normals converted to integer
+                    let normal_up = IVec3::from_unit_normal(Vec3::new(0.0, 1.0, 0.0));
+                    let normal_down = IVec3::from_unit_normal(Vec3::new(0.0, -1.0, 0.0));
+
                     if lower_room_idx == room_a_idx {
-                        portals_a.push(Portal::new(upper_room_idx, lower_verts, Vec3::new(0.0, 1.0, 0.0)));
-                        portals_b.push(Portal::new(lower_room_idx, upper_verts, Vec3::new(0.0, -1.0, 0.0)));
+                        portals_a.push(Portal::new(upper_room_idx, lower_verts, normal_up));
+                        portals_b.push(Portal::new(lower_room_idx, upper_verts, normal_down));
                     } else {
-                        portals_b.push(Portal::new(upper_room_idx, lower_verts, Vec3::new(0.0, 1.0, 0.0)));
-                        portals_a.push(Portal::new(lower_room_idx, upper_verts, Vec3::new(0.0, -1.0, 0.0)));
+                        portals_b.push(Portal::new(upper_room_idx, lower_verts, normal_up));
+                        portals_a.push(Portal::new(lower_room_idx, upper_verts, normal_down));
                     }
                 };
 
+                // Helper to convert integer height to world-space float
+                let h_to_world = |h: i32, room_y: f32| h as f32 / INT_SCALE as f32 + room_y;
+
                 // Case 1: A's ceiling meets B's floor (A is below B)
                 if let (Some(ceil_a), Some(floor_b)) = (&sector_a.ceiling, &sector_b.floor) {
-                    let ceil_heights = [ceil_a.heights[0] + pos_a.y, ceil_a.heights[1] + pos_a.y,
-                                        ceil_a.heights[2] + pos_a.y, ceil_a.heights[3] + pos_a.y];
-                    let floor_heights = [floor_b.heights[0] + pos_b.y, floor_b.heights[1] + pos_b.y,
-                                         floor_b.heights[2] + pos_b.y, floor_b.heights[3] + pos_b.y];
+                    let ceil_heights = [
+                        h_to_world(ceil_a.heights[0], pos_a.y), h_to_world(ceil_a.heights[1], pos_a.y),
+                        h_to_world(ceil_a.heights[2], pos_a.y), h_to_world(ceil_a.heights[3], pos_a.y)
+                    ];
+                    let floor_heights = [
+                        h_to_world(floor_b.heights[0], pos_b.y), h_to_world(floor_b.heights[1], pos_b.y),
+                        h_to_world(floor_b.heights[2], pos_b.y), h_to_world(floor_b.heights[3], pos_b.y)
+                    ];
 
                     if (0..4).all(|i| (ceil_heights[i] - floor_heights[i]).abs() < HEIGHT_TOLERANCE) {
                         add_portal_pair(ceil_heights, room_b_idx, room_a_idx, pos_b, pos_a);
@@ -4003,10 +4442,14 @@ impl Level {
 
                 // Case 2: B's ceiling meets A's floor (B is below A)
                 if let (Some(ceil_b), Some(floor_a)) = (&sector_b.ceiling, &sector_a.floor) {
-                    let ceil_heights = [ceil_b.heights[0] + pos_b.y, ceil_b.heights[1] + pos_b.y,
-                                        ceil_b.heights[2] + pos_b.y, ceil_b.heights[3] + pos_b.y];
-                    let floor_heights = [floor_a.heights[0] + pos_a.y, floor_a.heights[1] + pos_a.y,
-                                         floor_a.heights[2] + pos_a.y, floor_a.heights[3] + pos_a.y];
+                    let ceil_heights = [
+                        h_to_world(ceil_b.heights[0], pos_b.y), h_to_world(ceil_b.heights[1], pos_b.y),
+                        h_to_world(ceil_b.heights[2], pos_b.y), h_to_world(ceil_b.heights[3], pos_b.y)
+                    ];
+                    let floor_heights = [
+                        h_to_world(floor_a.heights[0], pos_a.y), h_to_world(floor_a.heights[1], pos_a.y),
+                        h_to_world(floor_a.heights[2], pos_a.y), h_to_world(floor_a.heights[3], pos_a.y)
+                    ];
 
                     if (0..4).all(|i| (ceil_heights[i] - floor_heights[i]).abs() < HEIGHT_TOLERANCE) {
                         add_portal_pair(ceil_heights, room_a_idx, room_b_idx, pos_a, pos_b);
@@ -4038,11 +4481,11 @@ pub fn create_empty_level() -> Level {
     let mut level = Level::new();
 
     // Create a single starter room with one sector (1x1 grid)
-    let mut room0 = Room::new(0, Vec3::ZERO, 1, 1);
+    let mut room0 = Room::new(0, IVec3::ZERO, 1, 1);
 
-    // Add floor at height 0
+    // Add floor at height 0 (in integer units)
     let texture = TextureRef::new("retro-texture-pack", "FLOOR_1A");
-    room0.set_floor(0, 0, 0.0, texture);
+    room0.set_floor(0, 0, 0, texture);
 
     room0.recalculate_bounds();
     level.rooms.push(room0);
@@ -4055,22 +4498,23 @@ pub fn create_empty_level() -> Level {
 pub fn create_test_level() -> Level {
     let mut level = Level::new();
 
-    // Room 0: Single sector room (1024×1024, height 1024 = 4 clicks)
-    let mut room0 = Room::new(0, Vec3::ZERO, 1, 1);
+    // Room 0: Single sector room (4096×4096 integer units = 1024×1024 float units)
+    // Height 4096 integer units = 1024 float units
+    let mut room0 = Room::new(0, IVec3::ZERO, 1, 1);
 
-    // Floor at y=0, ceiling at y=1024
+    // Floor at y=0, ceiling at y=4096 (= 1024 float units)
     let floor_tex = TextureRef::new("retro-texture-pack", "FLOOR_1A");
     let ceiling_tex = TextureRef::new("retro-texture-pack", "FLOOR_1A");
     let wall_tex = TextureRef::new("retro-texture-pack", "WALL_1A");
 
-    room0.set_floor(0, 0, 0.0, floor_tex);
-    room0.set_ceiling(0, 0, 1024.0, ceiling_tex);
+    room0.set_floor(0, 0, 0, floor_tex);
+    room0.set_ceiling(0, 0, SECTOR_SIZE_INT, ceiling_tex);
 
-    // Four walls around the single sector
-    room0.add_wall(0, 0, Direction::North, 0.0, 1024.0, wall_tex.clone());
-    room0.add_wall(0, 0, Direction::East, 0.0, 1024.0, wall_tex.clone());
-    room0.add_wall(0, 0, Direction::South, 0.0, 1024.0, wall_tex.clone());
-    room0.add_wall(0, 0, Direction::West, 0.0, 1024.0, wall_tex);
+    // Four walls around the single sector (heights in integer units)
+    room0.add_wall(0, 0, Direction::North, 0, SECTOR_SIZE_INT, wall_tex.clone());
+    room0.add_wall(0, 0, Direction::East, 0, SECTOR_SIZE_INT, wall_tex.clone());
+    room0.add_wall(0, 0, Direction::South, 0, SECTOR_SIZE_INT, wall_tex.clone());
+    room0.add_wall(0, 0, Direction::West, 0, SECTOR_SIZE_INT, wall_tex);
 
     room0.recalculate_bounds();
     level.add_room(room0);

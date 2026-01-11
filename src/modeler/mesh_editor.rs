@@ -7,7 +7,7 @@
 //! - Reading: Auto-detects format by checking for valid RON start
 //! - Writing: Always uses brotli compression
 
-use crate::rasterizer::{Vec3, IntVertex, IVec3, IVec2, INT_SCALE, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
+use crate::rasterizer::{Vec3, IntVertex, IVec3, IVec2, INT_SCALE, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture, fixed_sin, fixed_cos, TRIG_SCALE, TRIG_TABLE_SIZE};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1138,23 +1138,28 @@ impl EditableMesh {
     }
 
     /// Create a cylinder primitive with given segments
+    /// Uses fixed-point sin/cos lookup tables for PS1-authentic geometry
     pub fn cylinder(radius: f32, height: f32, segments: usize) -> Self {
-        use std::f32::consts::PI;
-
         let segments = segments.max(3);
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
         let scale = INT_SCALE as i32;
         let h_int = (height * INT_SCALE as f32).round() as i32;
+        let radius_int = (radius * INT_SCALE as f32).round() as i64;
 
         // Ring vertices for caps
         let bottom_ring_start = vertices.len();
         for i in 0..segments {
-            let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
-            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
-            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
-            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            // Convert segment index to angle (0-4095 range)
+            let angle_idx = ((i * TRIG_TABLE_SIZE) / segments) as u16;
+            let cos_a = fixed_cos(angle_idx) as i64;
+            let sin_a = fixed_sin(angle_idx) as i64;
+
+            let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
+            // UV: map cos/sin from [-4096,4096] to [0,255] via (val/4096 + 1) * 127.5
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
 
             // Bottom ring (for cap)
             vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None });
@@ -1162,11 +1167,14 @@ impl EditableMesh {
 
         let top_ring_start = vertices.len();
         for i in 0..segments {
-            let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
-            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
-            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
-            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let angle_idx = ((i * TRIG_TABLE_SIZE) / segments) as u16;
+            let cos_a = fixed_cos(angle_idx) as i64;
+            let sin_a = fixed_sin(angle_idx) as i64;
+
+            let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
 
             // Top ring (for cap)
             vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None });
@@ -1175,24 +1183,31 @@ impl EditableMesh {
         // Side vertices (need separate for proper normals)
         let side_bottom_start = vertices.len();
         for i in 0..segments {
-            let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
-            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
-            let normal_x = (angle.cos() * INT_SCALE as f32).round() as i32;
-            let normal_z = (angle.sin() * INT_SCALE as f32).round() as i32;
-            let u = ((i as f32 / segments as f32) * 255.0).clamp(0.0, 255.0) as u8;
+            let angle_idx = ((i * TRIG_TABLE_SIZE) / segments) as u16;
+            let cos_a = fixed_cos(angle_idx) as i64;
+            let sin_a = fixed_sin(angle_idx) as i64;
+
+            let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
+            // Normal points outward (cos, 0, sin) scaled by INT_SCALE
+            let normal_x = ((cos_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
+            let normal_z = ((sin_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
+            let u = ((i * 255) / segments) as u8;
 
             vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, 255), normal: IVec3::new(normal_x, 0, normal_z), color: RasterColor::WHITE, bone_index: None });
         }
 
         let side_top_start = vertices.len();
         for i in 0..segments {
-            let angle = (i as f32 / segments as f32) * 2.0 * PI;
-            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
-            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
-            let normal_x = (angle.cos() * INT_SCALE as f32).round() as i32;
-            let normal_z = (angle.sin() * INT_SCALE as f32).round() as i32;
-            let u = ((i as f32 / segments as f32) * 255.0).clamp(0.0, 255.0) as u8;
+            let angle_idx = ((i * TRIG_TABLE_SIZE) / segments) as u16;
+            let cos_a = fixed_cos(angle_idx) as i64;
+            let sin_a = fixed_sin(angle_idx) as i64;
+
+            let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let normal_x = ((cos_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
+            let normal_z = ((sin_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
+            let u = ((i * 255) / segments) as u8;
 
             vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, 0), normal: IVec3::new(normal_x, 0, normal_z), color: RasterColor::WHITE, bone_index: None });
         }
@@ -1263,34 +1278,40 @@ impl EditableMesh {
     }
 
     /// Create an N-sided prism (generalized)
+    /// Uses fixed-point sin/cos lookup tables for PS1-authentic geometry
     pub fn ngon_prism(sides: usize, radius: f32, height: f32) -> Self {
-        use std::f32::consts::PI;
-
         let sides = sides.max(3);
         let mut vertices = Vec::new();
         let mut faces = Vec::new();
         let scale = INT_SCALE as i32;
         let h_int = (height * INT_SCALE as f32).round() as i32;
+        let radius_int = (radius * INT_SCALE as f32).round() as i64;
 
         // Bottom ring
         let bottom_start = vertices.len();
         for i in 0..sides {
-            let angle = (i as f32 / sides as f32) * 2.0 * PI;
-            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
-            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
-            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
-            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let angle_idx = ((i * TRIG_TABLE_SIZE) / sides) as u16;
+            let cos_a = fixed_cos(angle_idx) as i64;
+            let sin_a = fixed_sin(angle_idx) as i64;
+
+            let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
             vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
         // Top ring
         let top_start = vertices.len();
         for i in 0..sides {
-            let angle = (i as f32 / sides as f32) * 2.0 * PI;
-            let x_int = (angle.cos() * radius * INT_SCALE as f32).round() as i32;
-            let z_int = (angle.sin() * radius * INT_SCALE as f32).round() as i32;
-            let u = ((0.5 + angle.cos() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
-            let v = ((0.5 + angle.sin() * 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let angle_idx = ((i * TRIG_TABLE_SIZE) / sides) as u16;
+            let cos_a = fixed_cos(angle_idx) as i64;
+            let sin_a = fixed_sin(angle_idx) as i64;
+
+            let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
             vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
@@ -1387,8 +1408,37 @@ impl EditableMesh {
         }
     }
 
+    /// Compute face direction as unnormalized integer vector (pure integer math)
+    /// Returns the raw cross product - useful for direction checks without sqrt
+    /// For CW winding, this points outward from the face
+    pub fn face_direction_int(&self, face_idx: usize) -> Option<IVec3> {
+        let face = self.faces.get(face_idx)?;
+        if face.vertices.len() < 3 {
+            return Some(IVec3::new(0, INT_SCALE, 0)); // Default up for degenerate
+        }
+
+        let v0 = self.vertices.get(face.vertices[0])?.pos;
+        let v1 = self.vertices.get(face.vertices[1])?.pos;
+        let v2 = self.vertices.get(face.vertices[2])?.pos;
+
+        // Edge vectors (integer)
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+
+        // Cross product: e2 x e1 for CW winding
+        let normal = e2.cross(e1);
+
+        // Return raw direction (unnormalized)
+        if normal.length_squared() > 0 {
+            Some(normal)
+        } else {
+            Some(IVec3::new(0, INT_SCALE, 0)) // Default up if degenerate
+        }
+    }
+
     /// Compute face normal for CW-wound faces (pointing outward)
     /// Uses first 3 vertices for normal calculation (works for n-gons)
+    /// NOTE: Uses float for normalization (requires sqrt)
     pub fn face_normal(&self, face_idx: usize) -> Option<Vec3> {
         let face = self.faces.get(face_idx)?;
         if face.vertices.len() < 3 {

@@ -245,22 +245,25 @@ impl GameToolState {
         if let Some((room_idx, spawn)) = level.get_player_start() {
             // Get the room to calculate world position
             if let Some(room) = level.rooms.get(room_idx) {
-                let spawn_pos = spawn.world_position(room);
+                let spawn_pos = spawn.world_position(room).to_render_f32();
                 // Position camera to look at spawn point from above and behind
                 self.orbit_target = spawn_pos + Vec3::new(0.0, 200.0, 0.0); // Slightly above ground
                 self.orbit_distance = 1500.0; // Closer than default
-                self.orbit_azimuth = spawn.facing + std::f32::consts::PI; // Behind the spawn facing
+                // Convert BAM to radians: facing is in BAM (0-4095 = 0-360 degrees)
+                let facing_rad = (spawn.facing as f32 / 4096.0) * 2.0 * std::f32::consts::PI;
+                self.orbit_azimuth = facing_rad + std::f32::consts::PI; // Behind the spawn facing
                 self.orbit_elevation = 0.4;
                 self.sync_camera_from_orbit();
             }
         } else if !level.rooms.is_empty() {
             // Fall back to room center if no spawn point
             let room = &level.rooms[0];
-            let center = room.bounds.center();
+            let center = room.bounds.center().to_render_f32();
+            let room_pos = room.position.to_render_f32();
             self.orbit_target = Vec3::new(
-                room.position.x + center.x,
-                room.position.y + center.y + 200.0,
-                room.position.z + center.z,
+                room_pos.x + center.x,
+                room_pos.y + center.y + 200.0,
+                room_pos.z + center.z,
             );
             self.orbit_distance = 2000.0;
             self.sync_camera_from_orbit();
@@ -322,7 +325,7 @@ impl GameToolState {
         let settings = &level.player_settings;
 
         // Target point: player position + vertical offset (shoulder/chest height)
-        let look_at = player_pos + Vec3::new(0.0, settings.camera_vertical_offset, 0.0);
+        let look_at = player_pos + Vec3::new(0.0, settings.camera_vertical_offset_f32(), 0.0);
 
         // Calculate camera position using spherical coordinates around player
         // yaw = horizontal rotation, pitch = vertical angle
@@ -331,8 +334,9 @@ impl GameToolState {
 
         // Spherical to cartesian: camera position relative to target
         // Pitch: 0 = level, positive = looking down (camera above), negative = looking up (camera below)
-        let horizontal_dist = settings.camera_distance * pitch.cos();
-        let vertical_offset = settings.camera_distance * pitch.sin();
+        let cam_dist = settings.camera_distance_f32();
+        let horizontal_dist = cam_dist * pitch.cos();
+        let vertical_offset = cam_dist * pitch.sin();
 
         let cam_offset = Vec3::new(
             -yaw.sin() * horizontal_dist,

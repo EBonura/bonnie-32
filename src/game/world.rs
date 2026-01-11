@@ -264,13 +264,13 @@ impl World {
     pub fn spawn_player(&mut self, position: Vec3, max_health: i32, settings: &crate::world::PlayerSettings) -> Entity {
         let entity = self.spawn_at(position);
         self.players.insert(entity, Player);
-        // Create controller with settings from Level
-        let mut controller = CharacterController::new(settings.radius, settings.height);
-        controller.step_height = settings.step_height;
+        // Create controller with settings from Level (convert integers to floats for physics)
+        let mut controller = CharacterController::new(settings.radius_f32(), settings.height_f32());
+        controller.step_height = settings.step_height_f32();
         self.controllers.insert(entity, controller);
         self.health.insert(entity, Health::new(max_health));
         self.velocities.insert(entity, Velocity::default());
-        self.hurtboxes.insert(entity, Hurtbox::sphere(settings.radius));
+        self.hurtboxes.insert(entity, Hurtbox::sphere(settings.radius_f32()));
         entity
     }
 

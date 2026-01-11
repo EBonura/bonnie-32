@@ -11,7 +11,8 @@
 //! - Pickers: Propose positions along lines, planes, circles
 //! - Snappers: Snap positions to grid (relative or absolute)
 
-use crate::rasterizer::{Vec3, Camera, screen_to_ray, ray_line_closest_point, ray_plane_intersection, ray_circle_angle};
+use crate::rasterizer::{Vec3, IVec3, Camera, screen_to_ray, ray_line_closest_point, ray_plane_intersection, ray_circle_angle, INT_SCALE};
+use crate::world::SECTOR_SIZE_INT;
 
 /// The status of a drag operation after an update
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +261,78 @@ pub fn pick_plane(
 
     let t = ray_plane_intersection(&ray, plane_origin - handle_offset, plane_normal)?;
     Some(ray.at(t) + handle_offset)
+}
+
+/// Pick a position on a horizontal plane (Y-up) and return integer world coordinates.
+/// This is the primary picking function for the world editor - does float ray math
+/// internally but returns IVec3 directly.
+///
+/// `plane_y_int`: The Y coordinate of the plane in integer world units
+pub fn pick_plane_int(
+    plane_y_int: i32,
+    mouse_pos: (f32, f32),
+    camera: &Camera,
+    viewport_width: usize,
+    viewport_height: usize,
+) -> Option<IVec3> {
+    // Convert plane Y to render coordinates for ray intersection
+    let plane_y_f32 = plane_y_int as f32 / INT_SCALE as f32;
+    let plane_origin = Vec3::new(0.0, plane_y_f32, 0.0);
+    let plane_normal = Vec3::new(0.0, 1.0, 0.0);
+
+    let ray = screen_to_ray(mouse_pos.0, mouse_pos.1, viewport_width, viewport_height, camera);
+    let t = ray_plane_intersection(&ray, plane_origin, plane_normal)?;
+    let hit = ray.at(t);
+
+    // Convert float result to integer world coordinates
+    Some(IVec3::new(
+        (hit.x * INT_SCALE as f32).round() as i32,
+        plane_y_int,  // Use exact plane Y (no floating point error)
+        (hit.z * INT_SCALE as f32).round() as i32,
+    ))
+}
+
+/// Pick a position on a horizontal plane and snap to grid.
+/// Returns the integer grid cell position (sector coordinates).
+///
+/// `plane_y_int`: The Y coordinate of the plane in integer world units
+/// Returns: (gx, gz) grid coordinates relative to world origin, or None if ray misses plane
+pub fn pick_grid_cell(
+    plane_y_int: i32,
+    mouse_pos: (f32, f32),
+    camera: &Camera,
+    viewport_width: usize,
+    viewport_height: usize,
+) -> Option<(i32, i32)> {
+    let world_pos = pick_plane_int(plane_y_int, mouse_pos, camera, viewport_width, viewport_height)?;
+
+    // Integer floor division for grid snapping
+    // For positive numbers: x / SECTOR_SIZE_INT
+    // For negative numbers: need proper floor division
+    let gx = world_pos.x.div_euclid(SECTOR_SIZE_INT);
+    let gz = world_pos.z.div_euclid(SECTOR_SIZE_INT);
+
+    Some((gx, gz))
+}
+
+/// Pick a position on a horizontal plane and snap to grid, returning world position of grid corner.
+/// Returns the snapped integer world position (corner of grid cell).
+///
+/// `plane_y_int`: The Y coordinate of the plane in integer world units
+pub fn pick_grid_snap(
+    plane_y_int: i32,
+    mouse_pos: (f32, f32),
+    camera: &Camera,
+    viewport_width: usize,
+    viewport_height: usize,
+) -> Option<IVec3> {
+    let (gx, gz) = pick_grid_cell(plane_y_int, mouse_pos, camera, viewport_width, viewport_height)?;
+
+    Some(IVec3::new(
+        gx * SECTOR_SIZE_INT,
+        plane_y_int,
+        gz * SECTOR_SIZE_INT,
+    ))
 }
 
 /// Pick a rotation angle on a circle using ray casting

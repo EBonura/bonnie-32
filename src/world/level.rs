@@ -62,15 +62,22 @@ impl std::fmt::Display for LevelError {
     }
 }
 
-/// Check if a float is valid (not NaN or Inf)
+/// Check if an integer height is valid (within i32 bounds for world coordinates)
+fn is_valid_height(h: i32) -> bool {
+    // Heights are in integer units (INT_SCALE = 4)
+    // Allow up to ~500,000 float units which is ~2,000,000 integer units
+    h.abs() < 4_000_000
+}
+
+/// Check if a float is valid (not NaN or Inf) - used for legacy float fields
 fn is_valid_float(f: f32) -> bool {
     f.is_finite() && f.abs() <= limits::MAX_COORD
 }
 
-/// Check if a portal coordinate is valid (allows infinity for unbounded portals)
-/// Portal Y coordinates can be infinite for open-air sectors with no ceiling
-fn is_valid_portal_coord(f: f32) -> bool {
-    !f.is_nan() && (f.is_finite() && f.abs() <= limits::MAX_COORD || f.is_infinite())
+/// Check if a portal coordinate is valid (integer, reasonable bounds)
+fn is_valid_portal_coord(c: i32) -> bool {
+    // Portal coordinates are in integer units
+    c.abs() < 4_000_000
 }
 
 /// Validate a texture reference
@@ -89,7 +96,7 @@ fn validate_texture_ref(tex: &TextureRef, context: &str) -> Result<(), String> {
 /// Validate a horizontal face (floor/ceiling)
 fn validate_horizontal_face(face: &HorizontalFace, context: &str) -> Result<(), String> {
     for (i, h) in face.heights.iter().enumerate() {
-        if !is_valid_float(*h) {
+        if !is_valid_height(*h) {
             return Err(format!("{}: invalid height[{}] = {}", context, i, h));
         }
     }
@@ -100,7 +107,7 @@ fn validate_horizontal_face(face: &HorizontalFace, context: &str) -> Result<(), 
 /// Validate a vertical face (wall)
 fn validate_vertical_face(face: &VerticalFace, context: &str) -> Result<(), String> {
     for (i, h) in face.heights.iter().enumerate() {
-        if !is_valid_float(*h) {
+        if !is_valid_height(*h) {
             return Err(format!("{}: invalid height[{}] = {}", context, i, h));
         }
     }
@@ -166,8 +173,8 @@ fn validate_room(room: &Room, room_idx: usize, total_rooms: usize) -> Result<(),
             context, room.depth, limits::MAX_ROOM_SIZE));
     }
 
-    // Check position is valid
-    if !is_valid_float(room.position.x) || !is_valid_float(room.position.y) || !is_valid_float(room.position.z) {
+    // Check position is valid (now integer coordinates)
+    if !is_valid_portal_coord(room.position.x) || !is_valid_portal_coord(room.position.y) || !is_valid_portal_coord(room.position.z) {
         return Err(format!("{}: invalid position ({}, {}, {})",
             context, room.position.x, room.position.y, room.position.z));
     }
@@ -190,15 +197,15 @@ fn validate_room(room: &Room, room_idx: usize, total_rooms: usize) -> Result<(),
             return Err(format!("{} portal[{}]: invalid target_room {} (only {} rooms)",
                 context, i, portal.target_room, total_rooms));
         }
-        // Validate portal vertices (Y can be infinite for open-air sectors)
+        // Validate portal vertices (integer coordinates now)
         for (j, v) in portal.vertices.iter().enumerate() {
             if !is_valid_portal_coord(v.x) || !is_valid_portal_coord(v.y) || !is_valid_portal_coord(v.z) {
                 return Err(format!("{} portal[{}] vertex[{}]: invalid coordinates ({}, {}, {})",
                     context, i, j, v.x, v.y, v.z));
             }
         }
-        // Validate portal normal
-        if !is_valid_float(portal.normal.x) || !is_valid_float(portal.normal.y) || !is_valid_float(portal.normal.z) {
+        // Validate portal normal (integer normal * 4096)
+        if !is_valid_portal_coord(portal.normal.x) || !is_valid_portal_coord(portal.normal.y) || !is_valid_portal_coord(portal.normal.z) {
             return Err(format!("{} portal[{}]: invalid normal", context, i));
         }
     }

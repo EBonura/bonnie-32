@@ -91,10 +91,11 @@ impl ExampleBrowser {
         let mut max_z = f32::MIN;
 
         for room in &level.rooms {
-            let room_min_x = room.position.x;
-            let room_max_x = room.position.x + (room.width as f32) * SECTOR_SIZE;
-            let room_min_z = room.position.z;
-            let room_max_z = room.position.z + (room.depth as f32) * SECTOR_SIZE;
+            let room_pos = room.position.to_render_f32();
+            let room_min_x = room_pos.x;
+            let room_max_x = room_pos.x + (room.width as f32) * SECTOR_SIZE;
+            let room_min_z = room_pos.z;
+            let room_max_z = room_pos.z + (room.depth as f32) * SECTOR_SIZE;
 
             min_x = min_x.min(room_min_x);
             max_x = max_x.max(room_max_x);
@@ -102,19 +103,22 @@ impl ExampleBrowser {
             max_z = max_z.max(room_max_z);
 
             // Check floor/ceiling heights in sectors
+            let scale = crate::world::INT_SCALE as f32;
             for row in &room.sectors {
                 for sector_opt in row {
                     if let Some(sector) = sector_opt {
                         if let Some(floor) = &sector.floor {
                             for h in &floor.heights {
-                                min_y = min_y.min(*h);
-                                max_y = max_y.max(*h);
+                                let hf = *h as f32 / scale;
+                                min_y = min_y.min(hf);
+                                max_y = max_y.max(hf);
                             }
                         }
                         if let Some(ceiling) = &sector.ceiling {
                             for h in &ceiling.heights {
-                                min_y = min_y.min(*h);
-                                max_y = max_y.max(*h);
+                                let hf = *h as f32 / scale;
+                                min_y = min_y.min(hf);
+                                max_y = max_y.max(hf);
                             }
                         }
                     }
@@ -412,7 +416,7 @@ fn draw_orbit_preview(
     for room in &level.rooms {
         for obj in room.objects.iter().filter(|o| o.enabled) {
             if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                let world_pos = obj.world_position(room);
+                let world_pos = obj.world_position(room).to_render_f32();
                 let mut light = Light::point(world_pos, *radius, *intensity);
                 light.color = *color;
                 lights.push(light);

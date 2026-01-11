@@ -21,7 +21,7 @@ pub use math::*;
 pub use types::*;
 pub use render::*;
 pub use ray::{screen_to_ray, ray_line_closest_point, ray_plane_intersection, ray_circle_angle};
-pub use fixed::{fixed_sin, fixed_cos, degrees_to_angle, TRIG_SCALE, TRIG_TABLE_SIZE, SIN_TABLE, COS_TABLE};
+pub use fixed::{fixed_sin, fixed_cos, degrees_to_angle, TRIG_SCALE, TRIG_TABLE_SIZE, SIN_TABLE, COS_TABLE, project_fixed_int};
 
 /// Screen dimensions (authentic PS1 resolution)
 pub const WIDTH: usize = 320;

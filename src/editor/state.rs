@@ -479,7 +479,7 @@ pub struct EditorState {
     /// corner_idx: 0=NW, 1=NE, 2=SE, 3=SW for horizontal faces
     /// For walls: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
     pub dragging_sector_vertices: Vec<(usize, usize, usize, SectorFace, usize)>,
-    pub drag_initial_heights: Vec<f32>, // Initial Y/height values for each vertex
+    pub drag_initial_heights: Vec<i32>, // Initial Y/height values for each vertex (integer world units)
 
     /// 3D viewport object dragging state
     pub dragging_object: Option<(usize, usize)>, // (room_idx, object_idx)
@@ -537,8 +537,8 @@ pub struct EditorState {
     pub wall_drag_start: Option<(i32, i32, crate::world::Direction)>,
     /// Current position during drag: (grid_x, grid_z, direction)
     pub wall_drag_current: Option<(i32, i32, crate::world::Direction)>,
-    /// Room-relative Y position when wall drag started (for consistent gap selection)
-    pub wall_drag_mouse_y: Option<f32>,
+    /// Room-relative Y position when wall drag started (integer world units)
+    pub wall_drag_mouse_y: Option<i32>,
     /// Current wall direction for DrawWall mode (rotated with R key)
     pub wall_direction: crate::world::Direction,
     /// Prefer high gap when placing walls (toggled with F key)
@@ -1078,22 +1078,24 @@ impl EditorState {
             Selection::None => None,
             Selection::Room(room_idx) => {
                 self.level.rooms.get(*room_idx).map(|room| {
-                    let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
-                    let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
-                    let center_y = room.position.y + 512.0; // Approximate middle height
+                    let pos = room.position.to_render_f32();
+                    let center_x = pos.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+                    let center_z = pos.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+                    let center_y = pos.y + 512.0; // Approximate middle height
                     Vec3::new(center_x, center_y, center_z)
                 })
             }
             Selection::Sector { room, x, z } | Selection::SectorFace { room, x, z, .. } | Selection::Vertex { room, x, z, .. } => {
                 self.level.rooms.get(*room).and_then(|r| {
+                    let pos = r.position.to_render_f32();
                     r.get_sector(*x, *z).map(|sector| {
-                        let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;
-                        let base_z = r.position.z + (*z as f32) * SECTOR_SIZE;
+                        let base_x = pos.x + (*x as f32) * SECTOR_SIZE;
+                        let base_z = pos.z + (*z as f32) * SECTOR_SIZE;
                         let center_x = base_x + SECTOR_SIZE / 2.0;
                         let center_z = base_z + SECTOR_SIZE / 2.0;
-                        // Calculate average height from floor/ceiling
-                        let floor_y = sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
-                        let ceiling_y = sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(2048.0);
+                        // Calculate average height from floor/ceiling (convert to float)
+                        let floor_y = sector.floor.as_ref().map(|f| pos.y + f.avg_height_f32()).unwrap_or(0.0);
+                        let ceiling_y = sector.ceiling.as_ref().map(|c| pos.y + c.avg_height_f32()).unwrap_or(2048.0);
                         let center_y = (floor_y + ceiling_y) / 2.0;
                         Vec3::new(center_x, center_y, center_z)
                     })
@@ -1102,13 +1104,14 @@ impl EditorState {
             Selection::Edge { room, x, z, .. } => {
                 // Same as sector for now
                 self.level.rooms.get(*room).and_then(|r| {
+                    let pos = r.position.to_render_f32();
                     r.get_sector(*x, *z).map(|sector| {
-                        let base_x = r.position.x + (*x as f32) * SECTOR_SIZE;
-                        let base_z = r.position.z + (*z as f32) * SECTOR_SIZE;
+                        let base_x = pos.x + (*x as f32) * SECTOR_SIZE;
+                        let base_z = pos.z + (*z as f32) * SECTOR_SIZE;
                         let center_x = base_x + SECTOR_SIZE / 2.0;
                         let center_z = base_z + SECTOR_SIZE / 2.0;
-                        let floor_y = sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
-                        let ceiling_y = sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(2048.0);
+                        let floor_y = sector.floor.as_ref().map(|f| pos.y + f.avg_height_f32()).unwrap_or(0.0);
+                        let ceiling_y = sector.ceiling.as_ref().map(|c| pos.y + c.avg_height_f32()).unwrap_or(2048.0);
                         let center_y = (floor_y + ceiling_y) / 2.0;
                         Vec3::new(center_x, center_y, center_z)
                     })
@@ -1116,18 +1119,19 @@ impl EditorState {
             }
             Selection::Portal { room, portal } => {
                 self.level.rooms.get(*room).and_then(|r| {
+                    let pos = r.position.to_render_f32();
                     r.portals.get(*portal).map(|p| {
-                        // Average of portal vertices
-                        let sum = p.vertices.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
+                        // Average of portal vertices (convert from IVec3 to Vec3)
+                        let sum = p.vertices.iter().fold(Vec3::ZERO, |acc, v| acc + v.to_render_f32());
                         let count = p.vertices.len() as f32;
-                        Vec3::new(sum.x / count, sum.y / count, sum.z / count)
+                        Vec3::new(pos.x + sum.x / count, pos.y + sum.y / count, pos.z + sum.z / count)
                     })
                 })
             }
             Selection::Object { room: room_idx, index } => {
                 self.level.rooms.get(*room_idx).and_then(|room| {
                     room.objects.get(*index).map(|obj| {
-                        obj.world_position(room)
+                        obj.world_position(room).to_render_f32()
                     })
                 })
             }
@@ -1252,10 +1256,13 @@ impl EditorState {
         use crate::world::SECTOR_SIZE;
 
         if let Some(room) = self.level.rooms.get(self.current_room) {
+            // Convert position and bounds to float for calculations
+            let pos = room.position.to_render_f32();
+            let bounds = room.bounds.to_aabb();
             // Calculate room center in world coordinates based on view mode
-            let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
-            let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
-            let center_y = room.position.y + (room.bounds.max.y + room.bounds.min.y) / 2.0;
+            let center_x = pos.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = pos.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = pos.y + (bounds.max.y + bounds.min.y) / 2.0;
 
             // The grid view uses: screen_x = center_x + world_a * scale
             // where center_x = rect.x + rect.w * 0.5 + grid_offset_x
@@ -1283,10 +1290,13 @@ impl EditorState {
         use crate::rasterizer::Vec3;
 
         if let Some(room) = self.level.rooms.get(self.current_room) {
+            // Convert position and bounds to float for calculations
+            let pos = room.position.to_render_f32();
+            let bounds = room.bounds.to_aabb();
             // Calculate room center
-            let center_x = room.position.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
-            let center_z = room.position.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
-            let center_y = room.position.y + (room.bounds.max.y + room.bounds.min.y) / 2.0;
+            let center_x = pos.x + (room.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = pos.z + (room.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = pos.y + (bounds.max.y + bounds.min.y) / 2.0;
 
             // Calculate room size to determine camera distance
             let room_size_x = room.width as f32 * SECTOR_SIZE;

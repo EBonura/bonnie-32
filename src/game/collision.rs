@@ -50,7 +50,7 @@ pub fn collide_cylinder(
     let mut new_pos = position + Vec3::new(velocity.x, 0.0, velocity.z) * delta_time;
 
     // Apply gravity to vertical velocity (accumulates over time like OpenLara)
-    let gravity = level.player_settings.gravity;
+    let gravity = level.player_settings.gravity_f32();
     let mut vert_vel = controller.vertical_velocity;
     if !controller.grounded {
         // Accumulate gravity into velocity

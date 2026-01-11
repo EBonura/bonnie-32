@@ -5,7 +5,7 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, dra
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
 use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard, GeometryClipboard, CopiedFace, CopiedFaceData};
-use crate::world::{UV_SCALE, Sector};
+use crate::world::{UV_SCALE, Sector, SECTOR_SIZE_INT};
 use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
@@ -112,7 +112,7 @@ impl EditorLayout {
 /// Result from drawing a player property field
 struct PlayerPropResult {
     new_y: f32,
-    new_value: Option<f32>,
+    new_value: Option<i32>,
 }
 
 /// Draw a click-to-edit property field for player settings
@@ -124,7 +124,7 @@ fn draw_player_prop_field(
     container_width: f32,
     line_height: f32,
     label: &str,
-    value: f32,
+    value: i32,
     field_id: usize,
     editing: &mut Option<usize>,
     buffer: &mut String,
@@ -189,7 +189,7 @@ fn draw_player_prop_field(
 
         // Handle Enter - confirm edit
         if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
-            if let Ok(v) = buffer.parse::<f32>() {
+            if let Ok(v) = buffer.parse::<i32>() {
                 new_value = Some(v);
             }
             *editing = None;
@@ -204,7 +204,7 @@ fn draw_player_prop_field(
 
         // Click outside to confirm
         if ctx.mouse.left_pressed && !hovered {
-            if let Ok(v) = buffer.parse::<f32>() {
+            if let Ok(v) = buffer.parse::<i32>() {
                 new_value = Some(v);
             }
             *editing = None;
@@ -212,12 +212,12 @@ fn draw_player_prop_field(
         }
     } else {
         // Display mode
-        draw_text(&format!("{:.0}", value), value_x + 4.0, (y + 13.0).floor(), 12.0, value_color);
+        draw_text(&format!("{}", value), value_x + 4.0, (y + 13.0).floor(), 12.0, value_color);
 
         // Click to start editing
         if hovered && ctx.mouse.left_pressed {
             *editing = Some(field_id);
-            *buffer = format!("{:.0}", value);
+            *buffer = format!("{}", value);
         }
     }
 
@@ -1351,7 +1351,7 @@ fn transform_clipboard_position(
 }
 
 /// Rotate heights array for horizontal faces (90° CW per step)
-fn rotate_heights(heights: [f32; 4], rotation: u8) -> [f32; 4] {
+fn rotate_heights(heights: [i32; 4], rotation: u8) -> [i32; 4] {
     match rotation {
         1 => [heights[3], heights[0], heights[1], heights[2]], // 90° CW: SW→NW, NW→NE, NE→SE, SE→SW
         2 => [heights[2], heights[3], heights[0], heights[1]], // 180°
@@ -1473,7 +1473,7 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
     if let Some(room) = state.level.rooms.get_mut(room_idx) {
         // Expand in negative X direction
         while target_min_x + offset_x < 0 {
-            room.position.x -= SECTOR_SIZE;
+            room.position.x -= SECTOR_SIZE_INT;
             room.sectors.insert(0, (0..room.depth).map(|_| None).collect());
             room.width += 1;
             offset_x += 1;
@@ -1481,7 +1481,7 @@ fn paste_geometry_at_impl(state: &mut EditorState, gc: &GeometryClipboard, room_
 
         // Expand in negative Z direction
         while target_min_z + offset_z < 0 {
-            room.position.z -= SECTOR_SIZE;
+            room.position.z -= SECTOR_SIZE_INT;
             for col in &mut room.sectors {
                 col.insert(0, None);
             }
@@ -2982,14 +2982,14 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         // Calculate position: offset from the last room or origin
         let offset_x = if let Some(last_room) = state.level.rooms.last() {
             // Place new room to the east of the last room
-            last_room.position.x + (last_room.width as f32) * SECTOR_SIZE + SECTOR_SIZE
+            last_room.position.x + (last_room.width as i32) * SECTOR_SIZE_INT + SECTOR_SIZE_INT
         } else {
-            0.0
+            0
         };
 
         let new_room = crate::world::Room::new(
             new_id,
-            crate::rasterizer::Vec3::new(offset_x, 0.0, 0.0),
+            crate::rasterizer::IVec3::new(offset_x, 0, 0),
             1, // 1x1 grid to start
             1,
         );
@@ -3838,7 +3838,7 @@ fn draw_horizontal_face_container(
                     let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
                     if let Some(f) = face_ref {
                         for h in &mut f.heights {
-                            *h -= 256.0;
+                            *h -= 256;
                         }
                     }
                 }
@@ -3852,7 +3852,7 @@ fn draw_horizontal_face_container(
                     let face_ref = if is_floor { &mut s.floor } else { &mut s.ceiling };
                     if let Some(f) = face_ref {
                         for h in &mut f.heights {
-                            *h += 256.0;
+                            *h += 256;
                         }
                     }
                 }
@@ -3875,7 +3875,7 @@ fn draw_horizontal_face_container(
                     if let Some(f) = face_ref {
                         if let Some(h2) = &mut f.heights_2 {
                             for h in h2 {
-                                *h -= 256.0;
+                                *h -= 256;
                             }
                         }
                     }
@@ -3891,7 +3891,7 @@ fn draw_horizontal_face_container(
                     if let Some(f) = face_ref {
                         if let Some(h2) = &mut f.heights_2 {
                             for h in h2 {
-                                *h += 256.0;
+                                *h += 256;
                             }
                         }
                     }
@@ -4252,7 +4252,7 @@ fn draw_horizontal_face_container(
             if let Some(r) = state.level.rooms.get_mut(room_idx) {
                 if let Some(s) = r.get_sector_mut(gx, gz) {
                     // Extrude by 256 units (quarter sector)
-                    if s.extrude_floor(256.0, wall_texture) {
+                    if s.extrude_floor(256, wall_texture) {
                         state.set_status("Extruded floor by 256 units", 2.0);
                     }
                 }
@@ -4820,7 +4820,7 @@ fn draw_wall_face_container(
                         if let Some(w) = get_wall_mut(s, &face) {
                             // Calculate V scale based on wall height relative to SECTOR_SIZE
                             // Scale is normalized: 1.0 = one block width
-                            let wall_height = w.height();
+                            let wall_height = w.height() as f32 / crate::world::INT_SCALE as f32;
                             let v_scale = wall_height / crate::world::SECTOR_SIZE;
                             let mut params = extract_uv_params(&w.uv);
                             params.x_scale = 1.0; // Wall width = 1 block
@@ -5430,8 +5430,8 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
             // Get vertex coordinates
             if let Some(room_data) = state.level.rooms.get(*room) {
                 if let Some(sector) = room_data.get_sector(*gx, *gz) {
-                    let base_x = room_data.position.x + (*gx as f32) * crate::world::SECTOR_SIZE;
-                    let base_z = room_data.position.z + (*gz as f32) * crate::world::SECTOR_SIZE;
+                    let base_x = room_data.position.x + (*gx as i32) * SECTOR_SIZE_INT;
+                    let base_z = room_data.position.z + (*gz as i32) * SECTOR_SIZE_INT;
 
                     // Get heights based on face type
                     let heights = if *face_idx == 0 {
@@ -5474,9 +5474,9 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                             // Floor/ceiling corners
                             let corners = [
                                 (base_x, base_z),                                           // NW - 0
-                                (base_x + crate::world::SECTOR_SIZE, base_z),               // NE - 1
-                                (base_x + crate::world::SECTOR_SIZE, base_z + crate::world::SECTOR_SIZE), // SE - 2
-                                (base_x, base_z + crate::world::SECTOR_SIZE),               // SW - 3
+                                (base_x + SECTOR_SIZE_INT, base_z),                         // NE - 1
+                                (base_x + SECTOR_SIZE_INT, base_z + SECTOR_SIZE_INT),       // SE - 2
+                                (base_x, base_z + SECTOR_SIZE_INT),                         // SW - 3
                             ];
 
                             draw_text("Vertex 1:", x, (y + 12.0).floor(), 13.0, Color::from_rgba(150, 150, 150, 255));
@@ -5515,8 +5515,8 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     obj_room_idx, obj.sector_x, obj.sector_z),
                     x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
                 y += LINE_HEIGHT;
-                draw_text(&format!("  Height: {:.0}  Facing: {:.1}°",
-                    obj.height, obj.facing.to_degrees()),
+                draw_text(&format!("  Height: {}  Facing: {:.1}°",
+                    obj.height, obj.facing as f32 * 360.0 / 4096.0),
                     x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
                 y += 20.0;
 
@@ -5680,24 +5680,26 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                 draw_text("Preview", x, (y + 12.0).floor(), 11.0, section_color);
                                 y += 18.0;
 
-                                // Calculate player world position
+                                // Calculate player world position (convert to float for camera)
                                 let player_world_pos = if let Some(room) = state.level.rooms.get(obj_room_idx) {
-                                    obj.world_position(room)
+                                    obj.world_position(room).to_render_f32()
                                 } else {
                                     Vec3::new(0.0, 0.0, 0.0)
                                 };
 
                                 // Camera position: behind and above the player (orbit style preview)
                                 let settings = &state.level.player_settings;
+                                let cam_v_offset = settings.camera_vertical_offset as f32 / crate::world::INT_SCALE as f32;
+                                let cam_dist = settings.camera_distance as f32 / crate::world::INT_SCALE as f32;
                                 let look_at = Vec3::new(
                                     player_world_pos.x,
-                                    player_world_pos.y + settings.camera_vertical_offset,
+                                    player_world_pos.y + cam_v_offset,
                                     player_world_pos.z,
                                 );
                                 let cam_pos = Vec3::new(
                                     player_world_pos.x,
-                                    player_world_pos.y + settings.camera_vertical_offset + settings.camera_distance * 0.2,
-                                    player_world_pos.z - settings.camera_distance,
+                                    player_world_pos.y + cam_v_offset + cam_dist * 0.2,
+                                    player_world_pos.z - cam_dist,
                                 );
 
                                 // Preview dimensions (4:3 aspect ratio)
@@ -5713,8 +5715,8 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                                     cam_pos,
                                     look_at,
                                     player_world_pos,
-                                    settings.radius,
-                                    settings.height,
+                                    settings.radius as f32 / crate::world::INT_SCALE as f32,
+                                    settings.height as f32 / crate::world::INT_SCALE as f32,
                                     &state.level,
                                     &state.texture_packs,
                                     &state.user_textures,
@@ -6107,7 +6109,7 @@ fn draw_player_camera_preview(
         // Collect lights from room objects
         for obj in room.objects.iter().filter(|o| o.enabled) {
             if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                let world_pos = obj.world_position(room);
+                let world_pos = obj.world_position(room).to_render_f32();
                 let mut light = Light::point(world_pos, *radius, *intensity);
                 light.color = *color;
                 lights.push(light);

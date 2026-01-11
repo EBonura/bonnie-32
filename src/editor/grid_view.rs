@@ -189,9 +189,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     let mut hovered_edge: Option<Direction> = None;
     if inside {
         let (wx, wz) = screen_to_world(mouse_pos.0, mouse_pos.1);
-        // Convert to grid coords relative to room position
-        let local_x = wx - room.position.x;
-        let local_z = wz - room.position.z;
+        // Convert to grid coords relative to room position (room.position is IVec3)
+        let room_pos = room.position.to_render_f32();
+        let local_x = wx - room_pos.x;
+        let local_z = wz - room_pos.z;
         if local_x >= 0.0 && local_z >= 0.0 {
             let gx = (local_x / SECTOR_SIZE) as usize;
             let gz = (local_z / SECTOR_SIZE) as usize;
@@ -222,13 +223,14 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
 
         // Draw non-current room sectors with dimmed colors
+        let room_pos = r.position.to_render_f32();
         for (gx, gz, sector) in r.iter_sectors() {
-            let base_x = r.position.x + (gx as f32) * SECTOR_SIZE;
-            let base_z = r.position.z + (gz as f32) * SECTOR_SIZE;
+            let base_x = room_pos.x + (gx as f32) * SECTOR_SIZE;
+            let base_z = room_pos.z + (gz as f32) * SECTOR_SIZE;
 
             // Get floor and ceiling heights for side views
-            let floor_y = r.position.y + sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
-            let ceil_y = r.position.y + sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(CEILING_HEIGHT);
+            let floor_y = room_pos.y + sector.floor.as_ref().map(|f| f.avg_height_f32()).unwrap_or(0.0);
+            let ceil_y = room_pos.y + sector.ceiling.as_ref().map(|c| c.avg_height_f32()).unwrap_or(CEILING_HEIGHT);
 
             // Calculate screen corners based on view mode
             let (sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3) = match view_mode {
@@ -315,13 +317,14 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     }
 
     // Draw current room sectors (on top, with full colors)
+    let current_room_pos = room.position.to_render_f32();
     for (gx, gz, sector) in room.iter_sectors() {
-        let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-        let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+        let base_x = current_room_pos.x + (gx as f32) * SECTOR_SIZE;
+        let base_z = current_room_pos.z + (gz as f32) * SECTOR_SIZE;
 
         // Get floor and ceiling heights for side views
-        let floor_y = room.position.y + sector.floor.as_ref().map(|f| f.avg_height()).unwrap_or(0.0);
-        let ceil_y = room.position.y + sector.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(CEILING_HEIGHT);
+        let floor_y = current_room_pos.y + sector.floor.as_ref().map(|f| f.avg_height_f32()).unwrap_or(0.0);
+        let ceil_y = current_room_pos.y + sector.ceiling.as_ref().map(|c| c.avg_height_f32()).unwrap_or(CEILING_HEIGHT);
 
         // Calculate screen corners based on view mode
         let (sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3) = match view_mode {
@@ -488,8 +491,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     // Draw wall edge highlight when in wall mode with hovered sector (Top view only)
     if view_mode == GridViewMode::Top && state.tool == super::EditorTool::DrawWall {
         if let (Some((gx, gz)), Some(edge_dir)) = (hovered_sector, hovered_edge) {
-            let base_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-            let base_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+            let base_x = current_room_pos.x + (gx as f32) * SECTOR_SIZE;
+            let base_z = current_room_pos.z + (gz as f32) * SECTOR_SIZE;
 
             // Get screen coords for sector corners
             let (sx0, sy0) = world_to_screen(base_x, base_z);                          // NW
@@ -519,30 +522,35 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
     // Draw portals (view-mode-aware)
     for portal in &room.portals {
-        // Portal vertices are room-relative, convert to world space
+        // Portal vertices are room-relative IVec3, convert to world space floats
+        let pv0 = portal.vertices[0].to_render_f32();
+        let pv1 = portal.vertices[1].to_render_f32();
+        let pv2 = portal.vertices[2].to_render_f32();
+        let pv3 = portal.vertices[3].to_render_f32();
         let v0 = Vec3::new(
-            portal.vertices[0].x + room.position.x,
-            portal.vertices[0].y + room.position.y,
-            portal.vertices[0].z + room.position.z,
+            pv0.x + current_room_pos.x,
+            pv0.y + current_room_pos.y,
+            pv0.z + current_room_pos.z,
         );
         let v1 = Vec3::new(
-            portal.vertices[1].x + room.position.x,
-            portal.vertices[1].y + room.position.y,
-            portal.vertices[1].z + room.position.z,
+            pv1.x + current_room_pos.x,
+            pv1.y + current_room_pos.y,
+            pv1.z + current_room_pos.z,
         );
         let v2 = Vec3::new(
-            portal.vertices[2].x + room.position.x,
-            portal.vertices[2].y + room.position.y,
-            portal.vertices[2].z + room.position.z,
+            pv2.x + current_room_pos.x,
+            pv2.y + current_room_pos.y,
+            pv2.z + current_room_pos.z,
         );
         let v3 = Vec3::new(
-            portal.vertices[3].x + room.position.x,
-            portal.vertices[3].y + room.position.y,
-            portal.vertices[3].z + room.position.z,
+            pv3.x + current_room_pos.x,
+            pv3.y + current_room_pos.y,
+            pv3.z + current_room_pos.z,
         );
 
         // Check if this is a horizontal portal (normal pointing up or down)
-        let is_horizontal = portal.normal.y.abs() > 0.9;
+        // Normal is IVec3 scaled by 4096, so compare magnitude
+        let is_horizontal = portal.normal.y.abs() > 3686; // ~0.9 * 4096
 
         // Convert to screen coordinates based on view mode
         let (sx0, sy0) = {
@@ -601,9 +609,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
     let mut hovered_object: Option<usize> = None;
     for (obj_idx, obj) in room.objects.iter().enumerate() {
         // Calculate world position (center of sector)
-        let world_x = room.position.x + (obj.sector_x as f32 + 0.5) * SECTOR_SIZE;
-        let world_y = room.position.y + obj.height;
-        let world_z = room.position.z + (obj.sector_z as f32 + 0.5) * SECTOR_SIZE;
+        let obj_height = obj.height as f32 / crate::world::INT_SCALE as f32;
+        let world_x = current_room_pos.x + (obj.sector_x as f32 + 0.5) * SECTOR_SIZE;
+        let world_y = current_room_pos.y + obj_height;
+        let world_z = current_room_pos.z + (obj.sector_z as f32 + 0.5) * SECTOR_SIZE;
         // Convert to 2D plane based on view mode
         let (plane_a, plane_b) = world_pos_to_plane(world_x, world_y, world_z);
         let (sx, sy) = world_to_screen(plane_a, plane_b);
@@ -648,7 +657,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             // Draw facing direction arrow for spawns
             if matches!(obj.object_type, crate::world::ObjectType::Spawn(_)) {
                 let arrow_len = center_radius + 6.0;
-                let angle = obj.facing;
+                // Convert BAM (0-4095) to radians: BAM / 4096 * 2*PI
+                let angle = obj.facing as f32 * std::f32::consts::TAU / 4096.0;
                 // In our coordinate system: facing 0 = +Z = screen down
                 let dx = angle.sin() * arrow_len;
                 let dy = angle.cos() * arrow_len;
@@ -694,9 +704,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         }
 
         // Calculate room center (not origin corner) - depends on view mode
-        let center_x = r.position.x + (r.width as f32 * SECTOR_SIZE) / 2.0;
-        let center_z = r.position.z + (r.depth as f32 * SECTOR_SIZE) / 2.0;
-        let center_y = r.position.y + (r.bounds.max.y + r.bounds.min.y) / 2.0;
+        let room_pos = r.position.to_render_f32();
+        let room_bounds = r.bounds.to_aabb();
+        let center_x = room_pos.x + (r.width as f32 * SECTOR_SIZE) / 2.0;
+        let center_z = room_pos.z + (r.depth as f32 * SECTOR_SIZE) / 2.0;
+        let center_y = room_pos.y + (room_bounds.max.y + room_bounds.min.y) / 2.0;
 
         let (ox, oy) = match view_mode {
             GridViewMode::Top => world_to_screen(center_x, center_z),
@@ -740,8 +752,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
         for &(room_idx, gx, gz) in &state.grid_dragging_sectors {
             if let Some(r) = state.level.rooms.get(room_idx) {
-                let base_x = r.position.x + (gx as f32) * SECTOR_SIZE + offset_x;
-                let base_z = r.position.z + (gz as f32) * SECTOR_SIZE + offset_z;
+                let room_pos = r.position.to_render_f32();
+                let base_x = room_pos.x + (gx as f32) * SECTOR_SIZE + offset_x;
+                let base_z = room_pos.z + (gz as f32) * SECTOR_SIZE + offset_z;
 
                 let (sx0, sy0) = world_to_screen(base_x, base_z);
                 let (sx1, sy1) = world_to_screen(base_x + SECTOR_SIZE, base_z);
@@ -776,9 +789,11 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         let (offset_a, offset_b) = state.grid_sector_drag_offset;
         if let Some(r) = state.level.rooms.get(current_room_idx) {
             // Ghost at new center position - offset applies to the current view plane
-            let center_x = r.position.x + (r.width as f32 * SECTOR_SIZE) / 2.0;
-            let center_z = r.position.z + (r.depth as f32 * SECTOR_SIZE) / 2.0;
-            let center_y = r.position.y + (r.bounds.max.y + r.bounds.min.y) / 2.0;
+            let room_pos = r.position.to_render_f32();
+            let room_bounds = r.bounds.to_aabb();
+            let center_x = room_pos.x + (r.width as f32 * SECTOR_SIZE) / 2.0;
+            let center_z = room_pos.z + (r.depth as f32 * SECTOR_SIZE) / 2.0;
+            let center_y = room_pos.y + (room_bounds.max.y + room_bounds.min.y) / 2.0;
 
             let (ox, oy) = match view_mode {
                 GridViewMode::Top => world_to_screen(center_x + offset_a, center_z + offset_b),
@@ -806,8 +821,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
             if let Some(drag_room) = state.level.rooms.get(drag_room_idx) {
                 if let Some(obj) = drag_room.objects.get(obj_idx) {
-                    // Get current world position
-                    let current_pos = obj.world_position(drag_room);
+                    // Get current world position (convert IVec3 to float)
+                    let current_pos = obj.world_position(drag_room).to_render_f32();
                     // Calculate ghost position in world space
                     let new_world_x = current_pos.x + snapped_dx;
                     let new_world_y = current_pos.y + snapped_dy;
@@ -916,7 +931,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
                     let mut final_sector_x = 0;
                     let mut final_sector_z = 0;
-                    let mut final_height = 0.0;
+                    let mut final_height = 0i32;
 
                     if let Some(obj) = state.level.get_object_mut(drag_room_idx, obj_idx) {
                         // Update sector coordinates (horizontal movement)
@@ -928,8 +943,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         }
 
                         // Update height (vertical movement in Front/Side views)
+                        // Convert float world units to integer (multiply by INT_SCALE)
                         if has_vertical_movement {
-                            obj.height += snapped_dy;
+                            let height_delta = (snapped_dy * crate::world::INT_SCALE as f32).round() as i32;
+                            obj.height += height_delta;
                         }
 
                         // Store final values for status message
@@ -982,14 +999,18 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     state.save_undo();
 
                     if state.grid_dragging_room_origin {
-                    // Move entire room position
+                    // Move entire room position (convert float delta to integer)
+                    let pos_dx = (snapped_dx * crate::world::INT_SCALE as f32).round() as i32;
+                    let pos_dy = (snapped_dy * crate::world::INT_SCALE as f32).round() as i32;
+                    let pos_dz = (snapped_dz * crate::world::INT_SCALE as f32).round() as i32;
                     if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
-                        room.position.x += snapped_dx;
-                        room.position.y += snapped_dy;
-                        room.position.z += snapped_dz;
+                        room.position.x += pos_dx;
+                        room.position.y += pos_dy;
+                        room.position.z += pos_dz;
                     }
                     if let Some(room) = state.level.rooms.get(current_room_idx) {
-                        state.set_status(&format!("Moved room to ({:.0}, {:.0}, {:.0})", room.position.x, room.position.y, room.position.z), 2.0);
+                        let pos = room.position.to_render_f32();
+                        state.set_status(&format!("Moved room to ({:.0}, {:.0}, {:.0})", pos.x, pos.y, pos.z), 2.0);
                     }
                     state.mark_portals_dirty();
                 } else {
@@ -1041,9 +1062,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 room.width += shift_x;
                             }
 
-                            // Adjust room origin to compensate for grid shift
-                            room.position.x -= (shift_x as f32) * SECTOR_SIZE;
-                            room.position.z -= (shift_z as f32) * SECTOR_SIZE;
+                            // Adjust room origin to compensate for grid shift (use integer SECTOR_SIZE_INT)
+                            room.position.x -= (shift_x as i32) * crate::world::SECTOR_SIZE_INT;
+                            room.position.z -= (shift_z as i32) * crate::world::SECTOR_SIZE_INT;
                         }
 
                         // Clear old positions (adjusted for shift)
@@ -1107,8 +1128,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     // Find all sectors within the world rect
                     let mut selected_sectors = Vec::new();
                     for (gx, gz, _sector) in room.iter_sectors() {
-                        let sector_x = room.position.x + (gx as f32) * SECTOR_SIZE;
-                        let sector_z = room.position.z + (gz as f32) * SECTOR_SIZE;
+                        let sector_x = current_room_pos.x + (gx as f32) * SECTOR_SIZE;
+                        let sector_z = current_room_pos.z + (gz as f32) * SECTOR_SIZE;
                         let sector_center_x = sector_x + SECTOR_SIZE * 0.5;
                         let sector_center_z = sector_z + SECTOR_SIZE * 0.5;
 
@@ -1249,8 +1270,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     let snapped_z = (wz / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
                     // Calculate grid coords as signed integers
-                    let local_x = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
-                    let local_z = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
+                    let local_x = ((snapped_x - current_room_pos.x) / SECTOR_SIZE).floor() as i32;
+                    let local_z = ((snapped_z - current_room_pos.z) / SECTOR_SIZE).floor() as i32;
 
                     // Check if sector already has a floor (only if in current bounds)
                     let has_floor = if local_x >= 0 && local_z >= 0 {
@@ -1270,8 +1291,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             // Expand room in negative X direction if needed
                             if local_x < 0 {
                                 let shift = (-local_x) as usize;
-                                // Shift room position
-                                room.position.x -= shift as f32 * SECTOR_SIZE;
+                                // Shift room position (use integer SECTOR_SIZE_INT)
+                                room.position.x -= (shift as i32) * crate::world::SECTOR_SIZE_INT;
                                 // Insert empty columns at the beginning
                                 let mut new_sectors = Vec::with_capacity(room.width + shift);
                                 for _ in 0..shift {
@@ -1285,8 +1306,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             // Expand room in negative Z direction if needed
                             if local_z < 0 {
                                 let shift = (-local_z) as usize;
-                                // Shift room position
-                                room.position.z -= shift as f32 * SECTOR_SIZE;
+                                // Shift room position (use integer SECTOR_SIZE_INT)
+                                room.position.z -= (shift as i32) * crate::world::SECTOR_SIZE_INT;
                                 // Insert empty rows at the beginning of each column
                                 for col in &mut room.sectors {
                                     let mut new_col = (0..shift).map(|_| None).collect::<Vec<_>>();
@@ -1296,9 +1317,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 room.depth += shift;
                             }
 
-                            // Recalculate grid coords after potential shift
-                            let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as usize;
-                            let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as usize;
+                            // Recalculate grid coords after potential shift (use current float position)
+                            let room_pos = room.position.to_render_f32();
+                            let gx = ((snapped_x - room_pos.x) / SECTOR_SIZE).floor() as usize;
+                            let gz = ((snapped_z - room_pos.z) / SECTOR_SIZE).floor() as usize;
 
                             // Expand room grid in positive direction if needed
                             while gx >= room.width {
@@ -1312,8 +1334,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 }
                             }
 
-                            // Floor at 0.0 = room-relative base (will render at room.position.y in world space)
-                            room.set_floor(gx, gz, 0.0, state.selected_texture.clone());
+                            // Floor at 0 = room-relative base (will render at room.position.y in world space)
+                            room.set_floor(gx, gz, 0, state.selected_texture.clone());
                             room.recalculate_bounds();
                             state.mark_portals_dirty();
                             state.set_status("Created floor sector", 2.0);
@@ -1327,8 +1349,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     let snapped_z = (wz / SECTOR_SIZE).floor() * SECTOR_SIZE;
 
                     // Calculate grid coords as signed integers
-                    let local_x = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as i32;
-                    let local_z = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as i32;
+                    let local_x = ((snapped_x - current_room_pos.x) / SECTOR_SIZE).floor() as i32;
+                    let local_z = ((snapped_z - current_room_pos.z) / SECTOR_SIZE).floor() as i32;
 
                     // Check if sector already has a ceiling (only if in current bounds)
                     let has_ceiling = if local_x >= 0 && local_z >= 0 {
@@ -1348,7 +1370,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             // Expand room in negative X direction if needed
                             if local_x < 0 {
                                 let shift = (-local_x) as usize;
-                                room.position.x -= shift as f32 * SECTOR_SIZE;
+                                room.position.x -= (shift as i32) * crate::world::SECTOR_SIZE_INT;
                                 let mut new_sectors = Vec::with_capacity(room.width + shift);
                                 for _ in 0..shift {
                                     new_sectors.push((0..room.depth).map(|_| None).collect());
@@ -1361,7 +1383,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             // Expand room in negative Z direction if needed
                             if local_z < 0 {
                                 let shift = (-local_z) as usize;
-                                room.position.z -= shift as f32 * SECTOR_SIZE;
+                                room.position.z -= (shift as i32) * crate::world::SECTOR_SIZE_INT;
                                 for col in &mut room.sectors {
                                     let mut new_col = (0..shift).map(|_| None).collect::<Vec<_>>();
                                     new_col.append(col);
@@ -1370,9 +1392,10 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 room.depth += shift;
                             }
 
-                            // Recalculate grid coords after potential shift
-                            let gx = ((snapped_x - room.position.x) / SECTOR_SIZE).floor() as usize;
-                            let gz = ((snapped_z - room.position.z) / SECTOR_SIZE).floor() as usize;
+                            // Recalculate grid coords after potential shift (use current float position)
+                            let room_pos = room.position.to_render_f32();
+                            let gx = ((snapped_x - room_pos.x) / SECTOR_SIZE).floor() as usize;
+                            let gz = ((snapped_z - room_pos.z) / SECTOR_SIZE).floor() as usize;
 
                             // Expand room grid in positive direction if needed
                             while gx >= room.width {
@@ -1386,8 +1409,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                                 }
                             }
 
-                            // Ceiling at CEILING_HEIGHT = room-relative (will render at room.position.y + CEILING_HEIGHT)
-                            room.set_ceiling(gx, gz, CEILING_HEIGHT, state.selected_texture.clone());
+                            // Ceiling at CEILING_HEIGHT = room-relative (convert to integer)
+                            let ceiling_height_int = (CEILING_HEIGHT * crate::world::INT_SCALE as f32) as i32;
+                            room.set_ceiling(gx, gz, ceiling_height_int, state.selected_texture.clone());
                             room.recalculate_bounds();
                             state.mark_portals_dirty();
                             state.set_status("Created ceiling sector", 2.0);
@@ -1421,7 +1445,8 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                         } else {
                             state.save_undo();
                             if let Some(room) = state.level.rooms.get_mut(current_room_idx) {
-                                room.add_wall(gx, gz, edge_dir, 0.0, CEILING_HEIGHT, state.selected_texture.clone());
+                                let ceiling_height_int = (CEILING_HEIGHT * crate::world::INT_SCALE as f32) as i32;
+                                room.add_wall(gx, gz, edge_dir, 0, ceiling_height_int, state.selected_texture.clone());
                                 room.recalculate_bounds();
                                 state.mark_portals_dirty();
                                 state.set_status(&format!("Created {} wall", edge_dir.name().to_lowercase()), 1.5);
@@ -1439,8 +1464,9 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
 
                     // Gather sector data first (immutable borrow)
                     let sector_data = state.level.rooms.get(current_room_idx).and_then(|room| {
-                        let local_x = snapped_x - room.position.x;
-                        let local_z = snapped_z - room.position.z;
+                        let room_pos = room.position.to_render_f32();
+                        let local_x = snapped_x - room_pos.x;
+                        let local_z = snapped_z - room_pos.z;
                         let gx = (local_x / SECTOR_SIZE).floor() as i32;
                         let gz = (local_z / SECTOR_SIZE).floor() as i32;
 

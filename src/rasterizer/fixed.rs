@@ -245,6 +245,19 @@ impl FixedVec3 {
         )
     }
 
+    /// Create from IVec3 directly (no float conversion!)
+    /// IVec3 uses INT_SCALE=4, Fixed32 uses 4.12 format (4096=1.0)
+    /// Conversion: multiply by 1024 (= 4096/4)
+    #[inline]
+    pub fn from_ivec3(v: super::IVec3) -> Self {
+        const IVEC_TO_FIXED: i32 = 1024; // 4096 / INT_SCALE
+        Self {
+            x: Fixed32(v.x * IVEC_TO_FIXED),
+            y: Fixed32(v.y * IVEC_TO_FIXED),
+            z: Fixed32(v.z * IVEC_TO_FIXED),
+        }
+    }
+
     /// Dot product in fixed-point
     #[inline]
     pub fn dot(self, other: Self) -> Fixed32 {
@@ -365,6 +378,54 @@ pub fn project_fixed(
 ) -> (i32, i32, f32) {
     // Transform to camera space (in fixed-point)
     let cam_pos = transform_to_camera_space(world_pos, camera_pos, basis_x, basis_y, basis_z);
+
+    // Project to screen (in fixed-point, returns integers)
+    let (sx, sy, depth) = project_to_screen(cam_pos, width, height);
+
+    // Return screen integers + depth as float (for z-buffer compatibility)
+    (sx, sy, depth.to_f32())
+}
+
+/// Transform IVec3 to camera space directly (no float conversion!)
+/// Camera position and basis vectors are still float (they come from the editor camera)
+pub fn transform_to_camera_space_int(
+    world_pos: super::IVec3,
+    camera_pos: super::Vec3,
+    basis_x: super::Vec3,
+    basis_y: super::Vec3,
+    basis_z: super::Vec3,
+) -> FixedVec3 {
+    // Convert world pos directly from integer to fixed-point (no float!)
+    let world_fixed = FixedVec3::from_ivec3(world_pos);
+    // Camera is still float (editor camera position)
+    let cam_fixed = FixedVec3::from_vec3(camera_pos);
+    let rel = world_fixed - cam_fixed;
+
+    let bx = FixedVec3::from_vec3(basis_x);
+    let by = FixedVec3::from_vec3(basis_y);
+    let bz = FixedVec3::from_vec3(basis_z);
+
+    FixedVec3::new(
+        rel.dot(bx),
+        rel.dot(by),
+        rel.dot(bz),
+    )
+}
+
+/// Complete PS1-style vertex transformation from integer coordinates
+/// Takes IVec3 world position, returns integer screen coordinates
+/// This is the optimal path for mesh editor: IVec3 → Fixed32 → screen integers
+pub fn project_fixed_int(
+    world_pos: super::IVec3,
+    camera_pos: super::Vec3,
+    basis_x: super::Vec3,
+    basis_y: super::Vec3,
+    basis_z: super::Vec3,
+    width: usize,
+    height: usize,
+) -> (i32, i32, f32) {
+    // Transform to camera space (integer → fixed-point, no float conversion!)
+    let cam_pos = transform_to_camera_space_int(world_pos, camera_pos, basis_x, basis_y, basis_z);
 
     // Project to screen (in fixed-point, returns integers)
     let (sx, sy, depth) = project_to_screen(cam_pos, width, height);

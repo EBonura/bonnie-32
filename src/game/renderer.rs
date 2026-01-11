@@ -116,7 +116,7 @@ pub fn draw_test_viewport(
                     .filter(|obj| obj.enabled)
                     .filter_map(|obj| {
                         if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                            let world_pos = obj.world_position(room);
+                            let world_pos = obj.world_position(room).to_render_f32();
                             let mut light = Light::point(world_pos, *radius, *intensity);
                             light.color = *color;
                             Some(light)
@@ -194,8 +194,8 @@ pub fn draw_test_viewport(
                 fb,
                 &game.camera,
                 player_pos,
-                settings.radius,
-                settings.height,
+                settings.radius_f32(),
+                settings.height_f32(),
                 12, // segments
                 RasterColor::new(80, 255, 80), // Bright green wireframe
             );
@@ -412,9 +412,9 @@ fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, inp
             }
 
             let speed = if sprinting {
-                settings.run_speed
+                settings.run_speed_f32()
             } else {
-                settings.walk_speed
+                settings.walk_speed_f32()
             };
 
             if let Some(velocity) = game.world.velocities.get_mut(player) {
@@ -435,10 +435,11 @@ fn handle_player_input(game: &mut GameToolState, level: &Level, rect: &Rect, inp
             if let Some(controller) = game.world.controllers.get_mut(player) {
                 if controller.grounded {
                     // Calculate jump velocity (sprint-jump is higher)
+                    let base_jump = settings.jump_velocity_f32();
                     let jump_vel = if sprinting {
-                        settings.jump_velocity * settings.sprint_jump_multiplier
+                        base_jump * settings.sprint_jump_multiplier
                     } else {
-                        settings.jump_velocity
+                        base_jump
                     };
                     controller.vertical_velocity = jump_vel;
                     controller.grounded = false; // Immediately leave ground
@@ -730,7 +731,7 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                         game.options_menu_open = false;
                         if let Some((room_idx, spawn)) = level.get_player_start() {
                             if let Some(room) = level.rooms.get(room_idx) {
-                                let spawn_pos = spawn.world_position(room);
+                                let spawn_pos = spawn.world_position(room).to_render_f32();
                                 game.spawn_player(spawn_pos, level);
                             }
                         }

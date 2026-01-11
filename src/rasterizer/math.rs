@@ -574,6 +574,25 @@ pub fn world_to_screen_with_ortho(
     }
 }
 
+/// Project an integer world-space point to framebuffer coordinates.
+/// Takes IVec3 directly - avoids IVec3 → Vec3 conversion for mesh editor UI.
+/// Camera position/basis are still floats (editor camera uses floats).
+pub fn world_to_screen_int(
+    world_pos: IVec3,
+    camera_pos: Vec3,
+    basis_x: Vec3,
+    basis_y: Vec3,
+    basis_z: Vec3,
+    fb_width: usize,
+    fb_height: usize,
+    ortho: Option<&super::OrthoProjection>,
+) -> Option<(f32, f32)> {
+    // Convert IVec3 to float only once, at the boundary
+    // This is more efficient than converting in the caller and passing Vec3
+    let world_f32 = world_pos.to_render_f32();
+    world_to_screen_with_ortho(world_f32, camera_pos, basis_x, basis_y, basis_z, fb_width, fb_height, ortho)
+}
+
 /// Project a world-space point to framebuffer coordinates with depth.
 /// Returns (screen_x, screen_y, depth) where depth is camera-space Z.
 pub fn world_to_screen_with_depth(
@@ -803,6 +822,24 @@ impl IVec3 {
         }
     }
 
+    /// Squared length (avoids sqrt, useful for comparisons)
+    #[inline]
+    pub fn length_squared(self) -> i64 {
+        self.x as i64 * self.x as i64
+            + self.y as i64 * self.y as i64
+            + self.z as i64 * self.z as i64
+    }
+
+    /// Multiply by scalar (integer)
+    #[inline]
+    pub fn mul_scalar(self, s: i32) -> IVec3 {
+        IVec3 {
+            x: self.x * s,
+            y: self.y * s,
+            z: self.z * s,
+        }
+    }
+
     /// Convert from legacy float Vec3 (for migration only)
     /// Multiplies by INT_SCALE and rounds to nearest integer
     #[inline]
@@ -821,6 +858,18 @@ impl IVec3 {
             x: self.x as f32 / INT_SCALE as f32,
             y: self.y as f32 / INT_SCALE as f32,
             z: self.z as f32 / INT_SCALE as f32,
+        }
+    }
+
+    /// Convert from float unit normal to integer normal
+    /// Multiplies by 4096 (PS1 GTE scale) so (0, 1, 0) becomes (0, 4096, 0)
+    #[inline]
+    pub fn from_unit_normal(n: Vec3) -> Self {
+        const NORMAL_SCALE: f32 = 4096.0;
+        Self {
+            x: (n.x * NORMAL_SCALE).round() as i32,
+            y: (n.y * NORMAL_SCALE).round() as i32,
+            z: (n.z * NORMAL_SCALE).round() as i32,
         }
     }
 }
@@ -855,6 +904,79 @@ impl Sub for IVec3 {
 pub struct IVec2 {
     pub x: u8,
     pub y: u8,
+}
+
+/// Integer axis-aligned bounding box
+/// Used for world geometry bounds in integer coordinates
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IAabb {
+    pub min: IVec3,
+    pub max: IVec3,
+}
+
+impl IAabb {
+    pub const EMPTY: IAabb = IAabb {
+        min: IVec3 { x: i32::MAX, y: i32::MAX, z: i32::MAX },
+        max: IVec3 { x: i32::MIN, y: i32::MIN, z: i32::MIN },
+    };
+
+    pub fn new(min: IVec3, max: IVec3) -> Self {
+        Self { min, max }
+    }
+
+    /// Expand bounds to include a point
+    pub fn expand(&mut self, point: IVec3) {
+        self.min.x = self.min.x.min(point.x);
+        self.min.y = self.min.y.min(point.y);
+        self.min.z = self.min.z.min(point.z);
+        self.max.x = self.max.x.max(point.x);
+        self.max.y = self.max.y.max(point.y);
+        self.max.z = self.max.z.max(point.z);
+    }
+
+    /// Check if a point is inside the bounds
+    pub fn contains(&self, point: IVec3) -> bool {
+        point.x >= self.min.x && point.x <= self.max.x &&
+        point.y >= self.min.y && point.y <= self.max.y &&
+        point.z >= self.min.z && point.z <= self.max.z
+    }
+
+    /// Get center point
+    pub fn center(&self) -> IVec3 {
+        IVec3::new(
+            (self.min.x + self.max.x) / 2,
+            (self.min.y + self.max.y) / 2,
+            (self.min.z + self.max.z) / 2,
+        )
+    }
+
+    /// Convert to float Aabb for rendering
+    pub fn to_aabb(&self) -> Aabb {
+        Aabb {
+            min: self.min.to_render_f32(),
+            max: self.max.to_render_f32(),
+        }
+    }
+}
+
+/// Float axis-aligned bounding box (for rendering)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Aabb {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl Aabb {
+    pub fn new(min: Vec3, max: Vec3) -> Self {
+        Self { min, max }
+    }
+
+    /// Check if a point is inside the bounds
+    pub fn contains(&self, point: Vec3) -> bool {
+        point.x >= self.min.x && point.x <= self.max.x &&
+        point.y >= self.min.y && point.y <= self.max.y &&
+        point.z >= self.min.z && point.z <= self.max.z
+    }
 }
 
 impl IVec2 {
