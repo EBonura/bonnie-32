@@ -5,7 +5,7 @@
 
 use serde::{Serialize, Deserialize, Deserializer};
 use serde::de::{self, SeqAccess, Visitor};
-use crate::rasterizer::{Vec3, Vec2, IVec3, IVec2, IAabb, Vertex, Face as RasterFace, BlendMode, Color};
+use crate::rasterizer::{Vec3, Vec2, IVec3, IVec2, IAabb, Vertex, IntVertex, Face as RasterFace, BlendMode, Color};
 
 /// TRLE sector size in world units (float, for display/legacy)
 pub const SECTOR_SIZE: f32 = 1024.0;
@@ -3838,6 +3838,439 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, wall.colors[i]));
             }
             // Reverse winding order for back face
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
+        }
+    }
+
+    // =========================================================================
+    // Integer Render Data - Native IntVertex output (no float intermediate)
+    // =========================================================================
+
+    /// Convert room to render data with native integer vertices.
+    /// This is the PS1-authentic path: all coordinates stay integer until rasterization.
+    pub fn to_render_data_int<F>(&self, resolve_texture: F) -> (Vec<IntVertex>, Vec<RasterFace>)
+    where
+        F: Fn(&TextureRef) -> Option<usize>,
+    {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+
+        for (grid_x, grid_z, sector) in self.iter_sectors() {
+            // Integer base position (room position + grid offset)
+            let base_x = self.position.x + (grid_x as i32) * SECTOR_SIZE_INT;
+            let base_z = self.position.z + (grid_z as i32) * SECTOR_SIZE_INT;
+
+            // Render floor
+            if let Some(floor) = &sector.floor {
+                self.add_horizontal_face_int(
+                    &mut vertices,
+                    &mut faces,
+                    floor,
+                    base_x,
+                    base_z,
+                    grid_x,
+                    grid_z,
+                    true, // is_floor
+                    &resolve_texture,
+                );
+            }
+
+            // Render ceiling
+            if let Some(ceiling) = &sector.ceiling {
+                self.add_horizontal_face_int(
+                    &mut vertices,
+                    &mut faces,
+                    ceiling,
+                    base_x,
+                    base_z,
+                    grid_x,
+                    grid_z,
+                    false, // is_ceiling
+                    &resolve_texture,
+                );
+            }
+
+            // Render walls on each edge
+            for wall in &sector.walls_north {
+                self.add_wall_int(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::North, &resolve_texture);
+            }
+            for wall in &sector.walls_east {
+                self.add_wall_int(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::East, &resolve_texture);
+            }
+            for wall in &sector.walls_south {
+                self.add_wall_int(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::South, &resolve_texture);
+            }
+            for wall in &sector.walls_west {
+                self.add_wall_int(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, Direction::West, &resolve_texture);
+            }
+            // Diagonal walls
+            for wall in &sector.walls_nwse {
+                self.add_diagonal_wall_int(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, true, &resolve_texture);
+            }
+            for wall in &sector.walls_nesw {
+                self.add_diagonal_wall_int(&mut vertices, &mut faces, wall, base_x, base_z, grid_x, grid_z, false, &resolve_texture);
+            }
+        }
+
+        (vertices, faces)
+    }
+
+    /// Helper to add a horizontal face (floor or ceiling) with integer vertices
+    fn add_horizontal_face_int<F>(
+        &self,
+        vertices: &mut Vec<IntVertex>,
+        faces: &mut Vec<RasterFace>,
+        face: &HorizontalFace,
+        base_x: i32,
+        base_z: i32,
+        grid_x: usize,
+        grid_z: usize,
+        is_floor: bool,
+        resolve_texture: &F,
+    )
+    where
+        F: Fn(&TextureRef) -> Option<usize>,
+    {
+        // Height helper: room-relative heights are already integer
+        let h = |height: i32| self.position.y + height;
+
+        // Corner positions for triangle 1: NW, NE, SE, SW (all integer)
+        let corners_1 = [
+            IVec3::new(base_x, h(face.heights[0]), base_z),                           // NW
+            IVec3::new(base_x + SECTOR_SIZE_INT, h(face.heights[1]), base_z),         // NE
+            IVec3::new(base_x + SECTOR_SIZE_INT, h(face.heights[2]), base_z + SECTOR_SIZE_INT), // SE
+            IVec3::new(base_x, h(face.heights[3]), base_z + SECTOR_SIZE_INT),         // SW
+        ];
+
+        // Corner positions for triangle 2 (may use different heights)
+        let heights_2 = face.get_heights_2();
+        let corners_2 = [
+            IVec3::new(base_x, h(heights_2[0]), base_z),
+            IVec3::new(base_x + SECTOR_SIZE_INT, h(heights_2[1]), base_z),
+            IVec3::new(base_x + SECTOR_SIZE_INT, h(heights_2[2]), base_z + SECTOR_SIZE_INT),
+            IVec3::new(base_x, h(heights_2[3]), base_z + SECTOR_SIZE_INT),
+        ];
+
+        // Convert UVs to integer (256 = 1.0)
+        // UV_SCALE = 0.5, so grid_x * UV_SCALE = grid_x * 0.5 -> grid_x * 128 in integer scale
+        let uv_scale_int: i16 = 128; // 0.5 * 256
+        let uvs_1 = if let Some(float_uvs) = &face.uv {
+            [
+                IVec2::from_legacy_uv(float_uvs[0]),
+                IVec2::from_legacy_uv(float_uvs[1]),
+                IVec2::from_legacy_uv(float_uvs[2]),
+                IVec2::from_legacy_uv(float_uvs[3]),
+            ]
+        } else {
+            // World-aligned UVs based on grid position
+            let u_offset = (grid_x as i16) * uv_scale_int;
+            let v_offset = (grid_z as i16) * uv_scale_int;
+            [
+                IVec2::new(u_offset, v_offset),                               // NW
+                IVec2::new(u_offset + uv_scale_int, v_offset),                // NE
+                IVec2::new(u_offset + uv_scale_int, v_offset + uv_scale_int), // SE
+                IVec2::new(u_offset, v_offset + uv_scale_int),                // SW
+            ]
+        };
+
+        // UVs for triangle 2
+        let uvs_2 = if let Some(float_uvs) = face.get_uv_2() {
+            [
+                IVec2::from_legacy_uv(float_uvs[0]),
+                IVec2::from_legacy_uv(float_uvs[1]),
+                IVec2::from_legacy_uv(float_uvs[2]),
+                IVec2::from_legacy_uv(float_uvs[3]),
+            ]
+        } else {
+            uvs_1
+        };
+
+        // Colors for each triangle
+        let colors_1 = &face.colors;
+        let colors_2 = face.get_colors_2();
+
+        // Texture IDs
+        let texture_id_1 = resolve_texture(&face.texture).unwrap_or(0);
+        let texture_id_2 = resolve_texture(face.get_texture_2()).unwrap_or(0);
+
+        // Normal mode handling
+        let render_front = face.normal_mode != FaceNormalMode::Back;
+        let render_back = face.normal_mode != FaceNormalMode::Front;
+
+        // Get corner indices based on split direction
+        let split = face.split_direction;
+        let tri1_corners = split.triangle_1_corners();
+        let tri2_corners = split.triangle_2_corners();
+
+        // Calculate integer normals (scaled by INT_SCALE for unit length)
+        // For horizontal faces, normals point up (+Y) for floors, down (-Y) for ceilings
+        let normal_scale = INT_SCALE * 32; // Scale for normal precision
+        let front_normal = if is_floor {
+            IVec3::new(0, normal_scale, 0)
+        } else {
+            IVec3::new(0, -normal_scale, 0)
+        };
+        let back_normal = IVec3::new(-front_normal.x, -front_normal.y, -front_normal.z);
+
+        // Helper to add a single triangle
+        let add_triangle = |vertices: &mut Vec<IntVertex>, faces: &mut Vec<RasterFace>,
+                           corners: &[IVec3; 4], c: [usize; 3], uvs: &[IVec2; 4], colors: &[Color; 4],
+                           normal: IVec3, texture_id: usize, flip_winding: bool, black_transparent: bool| {
+            let base_idx = vertices.len();
+            vertices.push(IntVertex { pos: corners[c[0]], uv: uvs[c[0]], normal, color: colors[c[0]], bone_index: None });
+            vertices.push(IntVertex { pos: corners[c[1]], uv: uvs[c[1]], normal, color: colors[c[1]], bone_index: None });
+            vertices.push(IntVertex { pos: corners[c[2]], uv: uvs[c[2]], normal, color: colors[c[2]], bone_index: None });
+
+            if flip_winding {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id)
+                    .with_black_transparent(black_transparent));
+            } else {
+                faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id)
+                    .with_black_transparent(black_transparent));
+            }
+        };
+
+        // Render triangle 1
+        if render_front {
+            let flip = !is_floor;
+            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, front_normal, texture_id_1, flip, face.black_transparent);
+        }
+        if render_back {
+            let flip = is_floor;
+            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, back_normal, texture_id_1, flip, face.black_transparent);
+        }
+
+        // Render triangle 2
+        if render_front {
+            let flip = !is_floor;
+            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, front_normal, texture_id_2, flip, face.black_transparent);
+        }
+        if render_back {
+            let flip = is_floor;
+            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, back_normal, texture_id_2, flip, face.black_transparent);
+        }
+    }
+
+    /// Helper to add a wall with integer vertices
+    fn add_wall_int<F>(
+        &self,
+        vertices: &mut Vec<IntVertex>,
+        faces: &mut Vec<RasterFace>,
+        wall: &VerticalFace,
+        base_x: i32,
+        base_z: i32,
+        grid_x: usize,
+        grid_z: usize,
+        direction: Direction,
+        resolve_texture: &F,
+    )
+    where
+        F: Fn(&TextureRef) -> Option<usize>,
+    {
+        let h = |height: i32| self.position.y + height;
+        let normal_scale = INT_SCALE * 32;
+
+        // Wall corners and normal based on direction (all integer)
+        let (corners, front_normal) = match direction {
+            Direction::North => {
+                let corners = [
+                    IVec3::new(base_x, h(wall.heights[0]), base_z),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[1]), base_z),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[2]), base_z),
+                    IVec3::new(base_x, h(wall.heights[3]), base_z),
+                ];
+                (corners, IVec3::new(0, 0, normal_scale))
+            }
+            Direction::East => {
+                let corners = [
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[0]), base_z),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[1]), base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[2]), base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[3]), base_z),
+                ];
+                (corners, IVec3::new(-normal_scale, 0, 0))
+            }
+            Direction::South => {
+                let corners = [
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[0]), base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x, h(wall.heights[1]), base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x, h(wall.heights[2]), base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[3]), base_z + SECTOR_SIZE_INT),
+                ];
+                (corners, IVec3::new(0, 0, -normal_scale))
+            }
+            Direction::West => {
+                let corners = [
+                    IVec3::new(base_x, h(wall.heights[0]), base_z + SECTOR_SIZE_INT),
+                    IVec3::new(base_x, h(wall.heights[1]), base_z),
+                    IVec3::new(base_x, h(wall.heights[2]), base_z),
+                    IVec3::new(base_x, h(wall.heights[3]), base_z + SECTOR_SIZE_INT),
+                ];
+                (corners, IVec3::new(normal_scale, 0, 0))
+            }
+            Direction::NwSe | Direction::NeSw => {
+                // Diagonal walls handled by add_diagonal_wall_int
+                return;
+            }
+        };
+
+        // Calculate integer UVs
+        let uv_scale_int: i16 = 128; // UV_SCALE = 0.5 -> 128 in 256 scale
+        let (u_left, u_right) = match direction {
+            Direction::North | Direction::South => {
+                let u = (grid_x as i16) * uv_scale_int;
+                (u, u + uv_scale_int)
+            }
+            Direction::East | Direction::West => {
+                let u = (grid_z as i16) * uv_scale_int;
+                (u, u + uv_scale_int)
+            }
+            _ => (0, uv_scale_int),
+        };
+
+        let uvs = if let Some(float_uvs) = &wall.uv {
+            [
+                IVec2::from_legacy_uv(float_uvs[0]),
+                IVec2::from_legacy_uv(float_uvs[1]),
+                IVec2::from_legacy_uv(float_uvs[2]),
+                IVec2::from_legacy_uv(float_uvs[3]),
+            ]
+        } else if wall.uv_projection == UvProjection::Projected {
+            // Projected mode: V based on absolute world Y
+            // V = -world_y / SECTOR_SIZE * UV_SCALE
+            // In integer: v = -height * uv_scale_int / SECTOR_SIZE_INT
+            [
+                IVec2::new(u_left, (-(h(wall.heights[0]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+                IVec2::new(u_right, (-(h(wall.heights[1]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+                IVec2::new(u_right, (-(h(wall.heights[2]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+                IVec2::new(u_left, (-(h(wall.heights[3]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+            ]
+        } else {
+            // Default mode
+            [
+                IVec2::new(u_left, uv_scale_int),   // bottom-left
+                IVec2::new(u_right, uv_scale_int), // bottom-right
+                IVec2::new(u_right, 0),            // top-right
+                IVec2::new(u_left, 0),             // top-left
+            ]
+        };
+
+        let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
+        let back_normal = IVec3::new(-front_normal.x, -front_normal.y, -front_normal.z);
+
+        let render_front = wall.normal_mode != FaceNormalMode::Back;
+        let render_back = wall.normal_mode != FaceNormalMode::Front;
+
+        // Add front face
+        if render_front {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(IntVertex { pos: corners[i], uv: uvs[i], normal: front_normal, color: wall.colors[i], bone_index: None });
+            }
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+        }
+
+        // Add back face
+        if render_back {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(IntVertex { pos: corners[i], uv: uvs[i], normal: back_normal, color: wall.colors[i], bone_index: None });
+            }
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
+        }
+    }
+
+    /// Helper to add a diagonal wall with integer vertices
+    fn add_diagonal_wall_int<F>(
+        &self,
+        vertices: &mut Vec<IntVertex>,
+        faces: &mut Vec<RasterFace>,
+        wall: &VerticalFace,
+        base_x: i32,
+        base_z: i32,
+        grid_x: usize,
+        _grid_z: usize,
+        is_nwse: bool,
+        resolve_texture: &F,
+    )
+    where
+        F: Fn(&TextureRef) -> Option<usize>,
+    {
+        let h = |height: i32| self.position.y + height;
+        let normal_scale = INT_SCALE * 32;
+
+        // Diagonal normal: (1, 0, -1) or (-1, 0, -1) normalized, scaled
+        // For integer: scale by normal_scale / sqrt(2) ≈ normal_scale * 724 / 1024
+        let diag_scale = normal_scale * 724 / 1024;
+
+        let (corners, front_normal) = if is_nwse {
+            let corners = [
+                IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[1]), base_z + SECTOR_SIZE_INT),
+                IVec3::new(base_x, h(wall.heights[0]), base_z),
+                IVec3::new(base_x, h(wall.heights[3]), base_z),
+                IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[2]), base_z + SECTOR_SIZE_INT),
+            ];
+            (corners, IVec3::new(diag_scale, 0, -diag_scale))
+        } else {
+            let corners = [
+                IVec3::new(base_x, h(wall.heights[1]), base_z + SECTOR_SIZE_INT),
+                IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[0]), base_z),
+                IVec3::new(base_x + SECTOR_SIZE_INT, h(wall.heights[3]), base_z),
+                IVec3::new(base_x, h(wall.heights[2]), base_z + SECTOR_SIZE_INT),
+            ];
+            (corners, IVec3::new(diag_scale, 0, diag_scale))
+        };
+
+        let uv_scale_int: i16 = 128;
+        let u_left = (grid_x as i16) * uv_scale_int;
+        let u_right = u_left + uv_scale_int;
+
+        let uvs = if let Some(float_uvs) = &wall.uv {
+            [
+                IVec2::from_legacy_uv(float_uvs[0]),
+                IVec2::from_legacy_uv(float_uvs[1]),
+                IVec2::from_legacy_uv(float_uvs[2]),
+                IVec2::from_legacy_uv(float_uvs[3]),
+            ]
+        } else if wall.uv_projection == UvProjection::Projected {
+            [
+                IVec2::new(u_left, (-(h(wall.heights[0]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+                IVec2::new(u_right, (-(h(wall.heights[1]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+                IVec2::new(u_right, (-(h(wall.heights[2]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+                IVec2::new(u_left, (-(h(wall.heights[3]) as i64) * uv_scale_int as i64 / SECTOR_SIZE_INT as i64) as i16),
+            ]
+        } else {
+            [
+                IVec2::new(u_left, uv_scale_int),
+                IVec2::new(u_right, uv_scale_int),
+                IVec2::new(u_right, 0),
+                IVec2::new(u_left, 0),
+            ]
+        };
+
+        let texture_id = resolve_texture(&wall.texture).unwrap_or(0);
+        let back_normal = IVec3::new(-front_normal.x, -front_normal.y, -front_normal.z);
+
+        let render_front = wall.normal_mode != FaceNormalMode::Back;
+        let render_back = wall.normal_mode != FaceNormalMode::Front;
+
+        if render_front {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(IntVertex { pos: corners[i], uv: uvs[i], normal: front_normal, color: wall.colors[i], bone_index: None });
+            }
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+        }
+
+        if render_back {
+            let base_idx = vertices.len();
+            for i in 0..4 {
+                vertices.push(IntVertex { pos: corners[i], uv: uvs[i], normal: back_normal, color: wall.colors[i], bone_index: None });
+            }
             faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
             faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
         }

@@ -3565,31 +3565,31 @@ fn get_uv_vertices_from_selection(state: &ModelerState) -> Vec<usize> {
 }
 
 /// Compute center of UV coordinates for given vertices
-/// UVs are u8 (0-255), returns center as u8 values
-fn compute_uv_center(state: &ModelerState, verts: &[usize]) -> Option<(u8, u8)> {
+/// UVs are i16, returns center as i16 values
+fn compute_uv_center(state: &ModelerState, verts: &[usize]) -> Option<(i16, i16)> {
     if verts.is_empty() {
         return None;
     }
     let obj = state.project.selected()?;
-    let mut sum_u = 0u32;
-    let mut sum_v = 0u32;
-    let mut count = 0u32;
+    let mut sum_u = 0i32;
+    let mut sum_v = 0i32;
+    let mut count = 0i32;
     for &vi in verts {
         if let Some(v) = obj.mesh.vertices.get(vi) {
-            sum_u += v.uv.x as u32;
-            sum_v += v.uv.y as u32;
+            sum_u += v.uv.x as i32;
+            sum_v += v.uv.y as i32;
             count += 1;
         }
     }
     if count == 0 {
         return None;
     }
-    Some(((sum_u / count) as u8, (sum_v / count) as u8))
+    Some(((sum_u / count) as i16, (sum_v / count) as i16))
 }
 
-/// Snap UV (u8, 0-255) to pixel boundary given atlas size
-fn snap_uv_int(u: u8, v: u8, _atlas_size: u32) -> (u8, u8) {
-    // UVs are already integer (0-255), snapping is inherent
+/// Snap UV (i16) to pixel boundary given atlas size
+fn snap_uv_int(u: i16, v: i16, _atlas_size: u32) -> (i16, i16) {
+    // UVs are already integer, snapping is inherent
     (u, v)
 }
 
@@ -3616,11 +3616,11 @@ fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
                 // Flip around center using integer math
                 // new = center - (old - center) = 2*center - old
                 if flip_h {
-                    let new_x = (2 * center.0 as i16 - v.uv.x as i16).clamp(0, 255) as u8;
+                    let new_x = (2 * center.0 as i16 - v.uv.x).clamp(0, 255);
                     v.uv.x = new_x;
                 }
                 if flip_v {
-                    let new_y = (2 * center.1 as i16 - v.uv.y as i16).clamp(0, 255) as u8;
+                    let new_y = (2 * center.1 as i16 - v.uv.y).clamp(0, 255);
                     v.uv.y = new_y;
                 }
                 // Snap to pixel boundary (already integer)
@@ -3657,8 +3657,8 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
         for &vi in &verts {
             if let Some(v) = obj.mesh.vertices.get_mut(vi) {
                 // Translate to origin using signed integers
-                let du = v.uv.x as i16 - center.0 as i16;
-                let dv = v.uv.y as i16 - center.1 as i16;
+                let du = v.uv.x - center.0 as i16;
+                let dv = v.uv.y - center.1 as i16;
                 // Rotate 90 degrees
                 let (new_du, new_dv) = if clockwise {
                     (dv, -du)  // CW: (x,y) -> (y,-x)
@@ -3666,8 +3666,8 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
                     (-dv, du)  // CCW: (x,y) -> (-y,x)
                 };
                 // Translate back and clamp to valid range
-                v.uv.x = (center.0 as i16 + new_du).clamp(0, 255) as u8;
-                v.uv.y = (center.1 as i16 + new_dv).clamp(0, 255) as u8;
+                v.uv.x = (center.0 as i16 + new_du).clamp(0, 255);
+                v.uv.y = (center.1 as i16 + new_dv).clamp(0, 255);
                 // Snap to pixel boundary (already integer)
                 let (su, sv) = snap_uv_int(v.uv.x, v.uv.y, atlas_size);
                 v.uv.x = su;
@@ -3745,8 +3745,8 @@ fn reset_selected_uvs(state: &mut ModelerState) {
                         let u_raw = get_axis(pos, u_axis_idx);
                         let v_raw = get_axis(pos, v_axis_idx);
                         // Map position to UV: modulo 64 integer units -> 0-255
-                        let u = ((u_raw.rem_euclid(64) * 255) / 64).clamp(0, 255) as u8;
-                        let v = ((v_raw.rem_euclid(64) * 255) / 64).clamp(0, 255) as u8;
+                        let u = ((u_raw.rem_euclid(64) * 255) / 64).clamp(0, 255) as i16;
+                        let v = ((v_raw.rem_euclid(64) * 255) / 64).clamp(0, 255) as i16;
                         obj.mesh.vertices[vi].uv = crate::rasterizer::IVec2::new(u, v);
                     }
                 }

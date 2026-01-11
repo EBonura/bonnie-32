@@ -898,17 +898,17 @@ impl Sub for IVec3 {
     }
 }
 
-/// Integer 2D vector for texture UV coordinates (0-255)
-/// PS1 used 8-bit UVs, so we use u8 for authenticity.
+/// Integer 2D vector for texture UV coordinates
+/// Uses i16 to allow values > 255 for tiling (PS1 GTE output larger values,
+/// GPU wrapped them to 0-255 when sampling). Scale: 256 = 1.0 UV
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IVec2 {
-    pub x: u8,
-    pub y: u8,
+    pub x: i16,
+    pub y: i16,
 }
 
 /// Integer axis-aligned bounding box
-/// Used for world geometry bounds in integer coordinates
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IAabb {
     pub min: IVec3,
     pub max: IVec3,
@@ -983,26 +983,27 @@ impl IVec2 {
     pub const ZERO: IVec2 = IVec2 { x: 0, y: 0 };
 
     #[inline]
-    pub fn new(x: u8, y: u8) -> Self {
+    pub fn new(x: i16, y: i16) -> Self {
         Self { x, y }
     }
 
     /// Convert from legacy float UV (for migration only)
-    /// Assumes input is 0.0-1.0, converts to 0-255
+    /// Scale: 256 = 1.0 UV, preserves full range for tiling
     #[inline]
     pub fn from_legacy_uv(v: Vec2) -> Self {
         Self {
-            x: (v.x.clamp(0.0, 1.0) * 255.0).round() as u8,
-            y: (v.y.clamp(0.0, 1.0) * 255.0).round() as u8,
+            x: (v.x * 256.0).round() as i16,
+            y: (v.y * 256.0).round() as i16,
         }
     }
 
     /// Convert to float UV for rendering (render boundary only)
+    /// Wraps to 0-1 range for texture sampling
     #[inline]
     pub fn to_render_uv(self) -> Vec2 {
         Vec2 {
-            x: self.x as f32 / 255.0,
-            y: self.y as f32 / 255.0,
+            x: self.x as f32 / 256.0,
+            y: self.y as f32 / 256.0,
         }
     }
 }

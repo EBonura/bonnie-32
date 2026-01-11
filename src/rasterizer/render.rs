@@ -2312,6 +2312,263 @@ pub fn render_mesh_15(
     timings
 }
 
+/// Render a mesh from integer vertices using RGB555 textures (PS1-authentic mode)
+/// This is the optimal path: IntVertex → Fixed32 projection → rasterization
+/// No float conversion for vertex positions during projection!
+///
+/// The `fog` parameter enables PS1-style depth cueing: (start, falloff, cull_distance, fog_color)
+pub fn render_mesh_15_int(
+    fb: &mut Framebuffer,
+    vertices: &[super::IntVertex],
+    faces: &[Face],
+    textures: &[Texture15],
+    face_blend_modes: Option<&[BlendMode]>,
+    camera: &Camera,
+    settings: &RasterSettings,
+    fog: Option<(f32, f32, f32, Color)>,
+) -> RasterTimings {
+    let mut timings = RasterTimings::default();
+
+    // === TRANSFORM PHASE ===
+    let transform_start = get_time();
+
+    // Transform all vertices to camera space using integer path
+    let mut cam_space_positions: Vec<Vec3> = Vec::with_capacity(vertices.len());
+    let mut cam_space_normals: Vec<Vec3> = Vec::with_capacity(vertices.len());
+    let mut projected: Vec<Vec3> = Vec::with_capacity(vertices.len());
+
+    for v in vertices {
+        // Project using integer path (IVec3 → Fixed32 → screen integers)
+        let (screen_pos, cam_pos) = if let Some(ref ortho) = settings.ortho_projection {
+            // Ortho: convert to float for ortho projection (rare path)
+            let world_f32 = v.pos.to_render_f32();
+            let rel_pos = world_f32 - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            let screen = project_ortho(cam_pos, ortho.zoom, ortho.center_x, ortho.center_y, fb.width, fb.height);
+            (screen, cam_pos)
+        } else {
+            // PS1-style: use integer projection path (no float conversion for position!)
+            let (sx, sy, depth) = super::fixed::project_fixed_int(
+                v.pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+            );
+            // Still need cam_pos for culling/shading (convert here, minimal)
+            let world_f32 = v.pos.to_render_f32();
+            let rel_pos = world_f32 - camera.position;
+            let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
+            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
+        };
+
+        cam_space_positions.push(cam_pos);
+        projected.push(screen_pos);
+
+        // Transform normal to camera space (convert from integer)
+        let normal_f32 = v.normal.to_render_f32();
+        let cam_normal = perspective_transform(normal_f32, camera.basis_x, camera.basis_y, camera.basis_z);
+        cam_space_normals.push(cam_normal.normalize());
+    }
+
+    timings.transform_ms = ((get_time() - transform_start) * 1000.0) as f32;
+
+    // === CULL PHASE ===
+    let cull_start = get_time();
+    let mut fog_total_time = 0.0f64;
+
+    let mut surfaces: Vec<Surface> = Vec::with_capacity(faces.len());
+    let mut backface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+    let mut frontface_wireframes: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+
+    for (face_idx, face) in faces.iter().enumerate() {
+        let cv1 = cam_space_positions[face.v0];
+        let cv2 = cam_space_positions[face.v1];
+        let cv3 = cam_space_positions[face.v2];
+
+        // Near plane culling
+        if settings.ortho_projection.is_none() {
+            if cv1.z <= NEAR_PLANE || cv2.z <= NEAR_PLANE || cv3.z <= NEAR_PLANE {
+                continue;
+            }
+        }
+
+        let v1 = projected[face.v0];
+        let v2 = projected[face.v1];
+        let v3 = projected[face.v2];
+
+        // 2D screen-space backface culling
+        let signed_area = (v2.x - v1.x) * (v3.y - v1.y) - (v3.x - v1.x) * (v2.y - v1.y);
+        let is_backface = signed_area <= 0.0;
+
+        // Geometric normal for shading
+        let edge1 = cv2 - cv1;
+        let edge2 = cv3 - cv1;
+        let normal = edge1.cross(edge2).normalize();
+
+        // Check transparency
+        let has_transparency = {
+            let tex_blend = face.texture_id
+                .and_then(|id| textures.get(id))
+                .map(|t| t.blend_mode);
+            let face_blend = face_blend_modes
+                .and_then(|modes| modes.get(face_idx))
+                .copied();
+            match (tex_blend, face_blend) {
+                (Some(b), _) if b != BlendMode::Opaque => true,
+                (None, Some(b)) if b != BlendMode::Opaque => true,
+                _ => false,
+            }
+        };
+
+        // Fog calculations
+        let fog_start_time = get_time();
+        let (vc1, vc2, vc3) = if let Some((fog_start, fog_falloff, cull_distance, fog_color)) = fog {
+            if cv1.z > cull_distance && cv2.z > cull_distance && cv3.z > cull_distance {
+                fog_total_time += get_time() - fog_start_time;
+                continue;
+            }
+            let f1 = calculate_fog_factor(cv1.z, fog_start, fog_falloff);
+            let f2 = calculate_fog_factor(cv2.z, fog_start, fog_falloff);
+            let f3 = calculate_fog_factor(cv3.z, fog_start, fog_falloff);
+            (
+                apply_fog_to_color(vertices[face.v0].color, fog_color, f1),
+                apply_fog_to_color(vertices[face.v1].color, fog_color, f2),
+                apply_fog_to_color(vertices[face.v2].color, fog_color, f3),
+            )
+        } else {
+            (vertices[face.v0].color, vertices[face.v1].color, vertices[face.v2].color)
+        };
+        fog_total_time += get_time() - fog_start_time;
+
+        // Convert world positions and normals for lighting (only here!)
+        let w1 = vertices[face.v0].pos.to_render_f32();
+        let w2 = vertices[face.v1].pos.to_render_f32();
+        let w3 = vertices[face.v2].pos.to_render_f32();
+        let wn1 = vertices[face.v0].normal.to_render_f32().normalize();
+        let wn2 = vertices[face.v1].normal.to_render_f32().normalize();
+        let wn3 = vertices[face.v2].normal.to_render_f32().normalize();
+        let uv1 = vertices[face.v0].uv.to_render_uv();
+        let uv2 = vertices[face.v1].uv.to_render_uv();
+        let uv3 = vertices[face.v2].uv.to_render_uv();
+
+        if is_backface {
+            backface_wireframes.push((v1, v2, v3));
+            if !settings.backface_cull {
+                surfaces.push(Surface {
+                    v1, v2, v3, w1, w2, w3,
+                    vn1: cam_space_normals[face.v0].scale(-1.0),
+                    vn2: cam_space_normals[face.v1].scale(-1.0),
+                    vn3: cam_space_normals[face.v2].scale(-1.0),
+                    wn1: wn1.scale(-1.0), wn2: wn2.scale(-1.0), wn3: wn3.scale(-1.0),
+                    uv1, uv2, uv3, vc1, vc2, vc3,
+                    normal: normal.scale(-1.0),
+                    face_idx, black_transparent: face.black_transparent, has_transparency,
+                });
+            }
+        } else {
+            surfaces.push(Surface {
+                v1, v2, v3, w1, w2, w3,
+                vn1: cam_space_normals[face.v0],
+                vn2: cam_space_normals[face.v1],
+                vn3: cam_space_normals[face.v2],
+                wn1, wn2, wn3, uv1, uv2, uv3, vc1, vc2, vc3,
+                normal, face_idx, black_transparent: face.black_transparent, has_transparency,
+            });
+            if settings.wireframe_overlay {
+                frontface_wireframes.push((v1, v2, v3));
+            }
+        }
+    }
+
+    timings.cull_ms = ((get_time() - cull_start) * 1000.0) as f32;
+
+    // === SORT PHASE ===
+    let sort_start = get_time();
+    if !settings.use_zbuffer {
+        surfaces.sort_by(|a, b| {
+            let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
+            let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
+            b_max_z.partial_cmp(&a_max_z).unwrap()
+        });
+    }
+    timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
+    timings.triangles_drawn = surfaces.len() as u32;
+
+    // === DRAW PHASE ===
+    let draw_start = get_time();
+    if !settings.wireframe_overlay {
+        // Two-pass: opaque first, then transparent
+        for surface in &surfaces {
+            if !surface.has_transparency {
+                let texture = faces[surface.face_idx].texture_id.and_then(|id| textures.get(id));
+                let blend_mode = face_blend_modes.and_then(|m| m.get(surface.face_idx)).copied().unwrap_or(BlendMode::Opaque);
+                rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, false);
+            }
+        }
+        for surface in &surfaces {
+            if surface.has_transparency {
+                let texture = faces[surface.face_idx].texture_id.and_then(|id| textures.get(id));
+                let blend_mode = face_blend_modes.and_then(|m| m.get(surface.face_idx)).copied().unwrap_or(BlendMode::Opaque);
+                rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, true);
+            }
+        }
+    }
+    timings.draw_ms = ((get_time() - draw_start) * 1000.0) as f32;
+
+    // === WIREFRAME PHASE ===
+    let wireframe_start = get_time();
+    // Only draw backface wireframes if backface culling is enabled AND backface wireframe is enabled
+    if settings.backface_cull && settings.backface_wireframe && !backface_wireframes.is_empty() {
+        // Deduplicate edges to avoid drawing shared edges twice
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
+        for (v1, v2, v3) in &backface_wireframes {
+            let edges = [
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
+            ];
+            for (x0, y0, z0, x1, y1, z1) in edges {
+                let edge = if (x0, y0) < (x1, y1) { (x0, y0, z0, x1, y1, z1) } else { (x1, y1, z1, x0, y0, z0) };
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
+                    unique_edges.push(edge);
+                }
+            }
+        }
+        // Draw with depth testing so wireframes are hidden by front geometry
+        let back_wireframe_color = Color::new(80, 80, 100);
+        for (x0, y0, z0, x1, y1, z1) in unique_edges {
+            fb.draw_line_3d(x0, y0, z0, x1, y1, z1, back_wireframe_color);
+        }
+    }
+    if settings.wireframe_overlay && !frontface_wireframes.is_empty() {
+        let mut unique_edges: Vec<(i32, i32, f32, i32, i32, f32)> = Vec::new();
+        for (v1, v2, v3) in &frontface_wireframes {
+            let edges = [
+                (v1.x as i32, v1.y as i32, v1.z, v2.x as i32, v2.y as i32, v2.z),
+                (v2.x as i32, v2.y as i32, v2.z, v3.x as i32, v3.y as i32, v3.z),
+                (v3.x as i32, v3.y as i32, v3.z, v1.x as i32, v1.y as i32, v1.z),
+            ];
+            for (x0, y0, z0, x1, y1, z1) in edges {
+                let edge = if (x0, y0) < (x1, y1) { (x0, y0, z0, x1, y1, z1) } else { (x1, y1, z1, x0, y0, z0) };
+                if !unique_edges.iter().any(|e| e.0 == edge.0 && e.1 == edge.1 && e.3 == edge.3 && e.4 == edge.4) {
+                    unique_edges.push(edge);
+                }
+            }
+        }
+        // Front wireframes use overlay mode (draw on co-planar surfaces)
+        let front_wireframe_color = Color::new(200, 200, 220);
+        for (x0, y0, z0, x1, y1, z1) in unique_edges {
+            fb.draw_line_3d_overlay(x0, y0, z0, x1, y1, z1, front_wireframe_color);
+        }
+    }
+    timings.wireframe_ms = ((get_time() - wireframe_start) * 1000.0) as f32;
+
+    timings
+}
+
 /// Create a simple test cube mesh
 pub fn create_test_cube() -> (Vec<Vertex>, Vec<Face>) {
     use super::math::Vec2;

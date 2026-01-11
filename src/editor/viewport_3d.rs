@@ -13,7 +13,7 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, drag_tracker::pick_plane};
 use crate::rasterizer::{
-    Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
+    Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, render_mesh_15_int, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
     world_to_screen, world_to_screen_with_depth,
     point_to_segment_distance, point_in_triangle_2d,
@@ -3204,11 +3204,6 @@ pub fn draw_viewport_3d(
             ..state.raster_settings.clone()
         };
 
-        // Time mesh generation
-        let meshgen_start = EditorFrameTimings::start();
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        vp_meshgen_ms += EditorFrameTimings::elapsed_ms(meshgen_start);
-
         // Build fog parameter from room settings
         let fog = if room.fog.enabled {
             let (r, g, b) = room.fog.color;
@@ -3223,14 +3218,26 @@ pub fn draw_viewport_3d(
             None
         };
 
-        // Time rasterization
-        let raster_start = EditorFrameTimings::start();
+        // Time mesh generation and rasterization
         if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, None, &state.camera_3d, &render_settings, fog);
+            // Native integer path: generate IntVertex directly (PS1-authentic)
+            let meshgen_start = EditorFrameTimings::start();
+            let (int_vertices, faces) = room.to_render_data_int(&resolve_texture);
+            vp_meshgen_ms += EditorFrameTimings::elapsed_ms(meshgen_start);
+
+            let raster_start = EditorFrameTimings::start();
+            render_mesh_15_int(fb, &int_vertices, &faces, &state.textures_15_cache, None, &state.camera_3d, &render_settings, fog);
+            vp_raster_ms += EditorFrameTimings::elapsed_ms(raster_start);
         } else {
+            // Float path for non-rgb555 mode
+            let meshgen_start = EditorFrameTimings::start();
+            let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
+            vp_meshgen_ms += EditorFrameTimings::elapsed_ms(meshgen_start);
+
+            let raster_start = EditorFrameTimings::start();
             render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
+            vp_raster_ms += EditorFrameTimings::elapsed_ms(raster_start);
         }
-        vp_raster_ms += EditorFrameTimings::elapsed_ms(raster_start);
     }
 
     let _render_total_ms = EditorFrameTimings::elapsed_ms(render_start);

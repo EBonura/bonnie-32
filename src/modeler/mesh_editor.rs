@@ -1158,8 +1158,8 @@ impl EditableMesh {
             let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
             let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
             // UV: map cos/sin from [-4096,4096] to [0,255] via (val/4096 + 1) * 127.5
-            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
-            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
 
             // Bottom ring (for cap)
             vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None });
@@ -1173,8 +1173,8 @@ impl EditableMesh {
 
             let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
             let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
-            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
-            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
 
             // Top ring (for cap)
             vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None });
@@ -1192,7 +1192,7 @@ impl EditableMesh {
             // Normal points outward (cos, 0, sin) scaled by INT_SCALE
             let normal_x = ((cos_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
             let normal_z = ((sin_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
-            let u = ((i * 255) / segments) as u8;
+            let u = ((i * 255) / segments) as i16;
 
             vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, 255), normal: IVec3::new(normal_x, 0, normal_z), color: RasterColor::WHITE, bone_index: None });
         }
@@ -1207,7 +1207,7 @@ impl EditableMesh {
             let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
             let normal_x = ((cos_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
             let normal_z = ((sin_a * INT_SCALE as i64) / TRIG_SCALE as i64) as i32;
-            let u = ((i * 255) / segments) as u8;
+            let u = ((i * 255) / segments) as i16;
 
             vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, 0), normal: IVec3::new(normal_x, 0, normal_z), color: RasterColor::WHITE, bone_index: None });
         }
@@ -1296,8 +1296,8 @@ impl EditableMesh {
 
             let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
             let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
-            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
-            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
             vertices.push(IntVertex { pos: IVec3::new(x_int, 0, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, -scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
@@ -1310,8 +1310,8 @@ impl EditableMesh {
 
             let x_int = ((cos_a * radius_int) / TRIG_SCALE as i64) as i32;
             let z_int = ((sin_a * radius_int) / TRIG_SCALE as i64) as i32;
-            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
-            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as u8;
+            let u = ((cos_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
+            let v = ((sin_a + TRIG_SCALE as i64) * 127 / TRIG_SCALE as i64).clamp(0, 255) as i16;
             vertices.push(IntVertex { pos: IVec3::new(x_int, h_int, z_int), uv: IVec2::new(u, v), normal: IVec3::new(0, scale, 0), color: RasterColor::WHITE, bone_index: None });
         }
 
