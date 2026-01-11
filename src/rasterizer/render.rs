@@ -595,31 +595,40 @@ impl Framebuffer {
             (x1 as f32 + px, y1 as f32 + py),
         ];
 
-        // Find bounding box
+        // Find bounding box and clamp to screen bounds
         let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min) as i32;
         let max_x = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max) as i32;
         let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min) as i32;
         let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max) as i32;
 
+        // Clamp to screen bounds to avoid iterating over off-screen pixels
+        let min_x = min_x.max(0);
+        let max_x = max_x.min(self.width as i32 - 1);
+        let min_y = min_y.max(0);
+        let max_y = max_y.min(self.height as i32 - 1);
+
+        // Early exit if completely off-screen
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
+
         // Rasterize quad using scanline - test each pixel in bounding box
         for py in min_y..=max_y {
             for px in min_x..=max_x {
-                if px >= 0 && px < self.width as i32 && py >= 0 && py < self.height as i32 {
-                    // Point-in-quad test using cross products (convex quad)
-                    let p = (px as f32 + 0.5, py as f32 + 0.5);
-                    let mut inside = true;
-                    for i in 0..4 {
-                        let a = corners[i];
-                        let b = corners[(i + 1) % 4];
-                        let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
-                        if cross < 0.0 {
-                            inside = false;
-                            break;
-                        }
+                // Point-in-quad test using cross products (convex quad)
+                let p = (px as f32 + 0.5, py as f32 + 0.5);
+                let mut inside = true;
+                for i in 0..4 {
+                    let a = corners[i];
+                    let b = corners[(i + 1) % 4];
+                    let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+                    if cross < 0.0 {
+                        inside = false;
+                        break;
                     }
-                    if inside {
-                        self.set_pixel(px as usize, py as usize, color);
-                    }
+                }
+                if inside {
+                    self.set_pixel(px as usize, py as usize, color);
                 }
             }
         }
