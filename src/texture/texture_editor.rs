@@ -327,6 +327,8 @@ pub struct TextureEditorState {
     pub fill_shapes: bool,
     /// Show pixel grid overlay
     pub show_grid: bool,
+    /// Show tiling preview (8 copies around center for seamless texture editing)
+    pub show_tiling: bool,
     /// Current selection (None = no selection)
     pub selection: Option<Selection>,
     /// Clipboard for copy/paste
@@ -422,6 +424,7 @@ impl Default for TextureEditorState {
             redo_requested: false,
             fill_shapes: false,
             show_grid: true, // Grid on by default
+            show_tiling: false, // Tiling preview off by default
             selection: None,
             clipboard: None,
             selection_drag_start: None,
@@ -1394,22 +1397,28 @@ pub fn draw_texture_canvas(
 
     // Draw checkerboard background for transparency
     // The checkerboard moves smoothly with the texture by anchoring to tex_x/tex_y
+    // When tiling preview is on, extend to 3x3 tile area
     let check_size = (state.zoom * 2.0).max(4.0);
-    let clip_x = tex_x.max(canvas_rect.x);
-    let clip_y = tex_y.max(canvas_rect.y);
-    let end_x = (tex_x + tex_screen_w).min(canvas_rect.x + canvas_rect.w);
-    let end_y = (tex_y + tex_screen_h).min(canvas_rect.y + canvas_rect.h);
+    let (checker_x, checker_y, checker_w, checker_h) = if state.show_tiling {
+        (tex_x - tex_screen_w, tex_y - tex_screen_h, tex_screen_w * 3.0, tex_screen_h * 3.0)
+    } else {
+        (tex_x, tex_y, tex_screen_w, tex_screen_h)
+    };
+    let clip_x = checker_x.max(canvas_rect.x);
+    let clip_y = checker_y.max(canvas_rect.y);
+    let end_x = (checker_x + checker_w).min(canvas_rect.x + canvas_rect.w);
+    let end_y = (checker_y + checker_h).min(canvas_rect.y + canvas_rect.h);
 
     // Calculate the first row/col indices that are visible
-    let first_row = ((clip_y - tex_y) / check_size).floor() as i32;
-    let first_col = ((clip_x - tex_x) / check_size).floor() as i32;
+    let first_row = ((clip_y - checker_y) / check_size).floor() as i32;
+    let first_col = ((clip_x - checker_x) / check_size).floor() as i32;
 
     // Start drawing from the actual grid position (may be before clip region)
     let mut row = first_row;
-    let mut cy = tex_y + first_row as f32 * check_size;
+    let mut cy = checker_y + first_row as f32 * check_size;
     while cy < end_y {
         let mut col = first_col;
-        let mut cx = tex_x + first_col as f32 * check_size;
+        let mut cx = checker_x + first_col as f32 * check_size;
         while cx < end_x {
             let c = if (row + col) % 2 == 0 {
                 Color::new(0.25, 0.25, 0.28, 1.0)
@@ -1431,55 +1440,107 @@ pub fn draw_texture_canvas(
         row += 1;
     }
 
-    // Draw texture pixels
-    for py in 0..texture.height {
-        for px in 0..texture.width {
-            let screen_x = tex_x + px as f32 * state.zoom;
-            let screen_y = tex_y + py as f32 * state.zoom;
+    // Draw texture pixels (with optional tiling preview)
+    // When tiling is enabled, we draw 9 copies: center + 8 surrounding
+    let tile_offsets: &[(i32, i32, f32)] = if state.show_tiling {
+        // Outer tiles are slightly dimmed to emphasize the center
+        &[
+            (-1, -1, 0.6), (0, -1, 0.6), (1, -1, 0.6),
+            (-1,  0, 0.6),               (1,  0, 0.6),
+            (-1,  1, 0.6), (0,  1, 0.6), (1,  1, 0.6),
+            ( 0,  0, 1.0), // Center tile drawn last (on top) at full brightness
+        ]
+    } else {
+        &[(0, 0, 1.0)] // Just center tile
+    };
 
-            // Clip to canvas
-            if screen_x + state.zoom < canvas_rect.x
-                || screen_x > canvas_rect.x + canvas_rect.w
-                || screen_y + state.zoom < canvas_rect.y
-                || screen_y > canvas_rect.y + canvas_rect.h
-            {
-                continue;
-            }
+    for &(tile_ox, tile_oy, brightness) in tile_offsets {
+        let tile_offset_x = tile_ox as f32 * tex_screen_w;
+        let tile_offset_y = tile_oy as f32 * tex_screen_h;
 
-            let color = texture.get_color(px, py);
-            if !color.is_transparent() {
-                let [r, g, b, _] = color.to_rgba();
-                draw_rectangle(
-                    screen_x,
-                    screen_y,
-                    state.zoom,
-                    state.zoom,
-                    Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0),
-                );
+        for py in 0..texture.height {
+            for px in 0..texture.width {
+                let screen_x = tex_x + tile_offset_x + px as f32 * state.zoom;
+                let screen_y = tex_y + tile_offset_y + py as f32 * state.zoom;
+
+                // Clip to canvas
+                if screen_x + state.zoom < canvas_rect.x
+                    || screen_x > canvas_rect.x + canvas_rect.w
+                    || screen_y + state.zoom < canvas_rect.y
+                    || screen_y > canvas_rect.y + canvas_rect.h
+                {
+                    continue;
+                }
+
+                let color = texture.get_color(px, py);
+                if !color.is_transparent() {
+                    let [r, g, b, _] = color.to_rgba();
+                    draw_rectangle(
+                        screen_x,
+                        screen_y,
+                        state.zoom,
+                        state.zoom,
+                        Color::new(
+                            r as f32 / 255.0 * brightness,
+                            g as f32 / 255.0 * brightness,
+                            b as f32 / 255.0 * brightness,
+                            1.0,
+                        ),
+                    );
+                }
             }
         }
     }
 
     // Draw pixel grid at high zoom (when enabled)
+    // When tiling is on, extend grid to cover 3x3 tile area
     if state.show_grid && state.zoom >= 4.0 {
         let grid_color = Color::new(1.0, 1.0, 1.0, 0.1);
+        let (grid_start_x, grid_start_y, grid_tiles) = if state.show_tiling {
+            (tex_x - tex_screen_w, tex_y - tex_screen_h, 3)
+        } else {
+            (tex_x, tex_y, 1)
+        };
+        let grid_end_x = grid_start_x + tex_screen_w * grid_tiles as f32;
+        let grid_end_y = grid_start_y + tex_screen_h * grid_tiles as f32;
+
         // Vertical lines
-        for px in 0..=texture.width {
-            let x = tex_x + px as f32 * state.zoom;
-            if x >= canvas_rect.x && x <= canvas_rect.x + canvas_rect.w {
-                draw_line(x, tex_y.max(canvas_rect.y), x, (tex_y + tex_screen_h).min(canvas_rect.y + canvas_rect.h), 1.0, grid_color);
+        for tile in 0..grid_tiles {
+            let tile_offset = tile as f32 * tex_screen_w;
+            for px in 0..=texture.width {
+                let x = grid_start_x + tile_offset + px as f32 * state.zoom;
+                if x >= canvas_rect.x && x <= canvas_rect.x + canvas_rect.w {
+                    draw_line(
+                        x,
+                        grid_start_y.max(canvas_rect.y),
+                        x,
+                        grid_end_y.min(canvas_rect.y + canvas_rect.h),
+                        1.0,
+                        grid_color,
+                    );
+                }
             }
         }
         // Horizontal lines
-        for py in 0..=texture.height {
-            let y = tex_y + py as f32 * state.zoom;
-            if y >= canvas_rect.y && y <= canvas_rect.y + canvas_rect.h {
-                draw_line(tex_x.max(canvas_rect.x), y, (tex_x + tex_screen_w).min(canvas_rect.x + canvas_rect.w), y, 1.0, grid_color);
+        for tile in 0..grid_tiles {
+            let tile_offset = tile as f32 * tex_screen_h;
+            for py in 0..=texture.height {
+                let y = grid_start_y + tile_offset + py as f32 * state.zoom;
+                if y >= canvas_rect.y && y <= canvas_rect.y + canvas_rect.h {
+                    draw_line(
+                        grid_start_x.max(canvas_rect.x),
+                        y,
+                        grid_end_x.min(canvas_rect.x + canvas_rect.w),
+                        y,
+                        1.0,
+                        grid_color,
+                    );
+                }
             }
         }
     }
 
-    // Draw texture border
+    // Draw texture border (always shows center tile boundary)
     draw_rectangle_lines(tex_x, tex_y, tex_screen_w, tex_screen_h, 1.0, Color::new(0.5, 0.5, 0.5, 1.0));
 
     // Draw floating selection pixels (if any)
@@ -2071,8 +2132,14 @@ pub fn draw_tool_panel(
         state.pan_y = 0.0;
         state.zoom = 4.0;
     }
-    if draw_toggle_button_small(ctx, col1_x + btn_size + gap, y, btn_size, icon::GRID, "Toggle grid", state.show_grid, icon_font) {
+    if draw_toggle_button_small(ctx, col2_x, y, btn_size, icon::GRID, "Toggle grid", state.show_grid, icon_font) {
         state.show_grid = !state.show_grid;
+    }
+    y += btn_size + gap;
+
+    // === Row 4: Tiling preview ===
+    if draw_toggle_button_small(ctx, col1_x, y, btn_size, icon::SQUARE_SQUARE, "Tiling preview", state.show_tiling, icon_font) {
+        state.show_tiling = !state.show_tiling;
     }
     y += btn_size + gap;
 

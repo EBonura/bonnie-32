@@ -450,8 +450,8 @@ pub enum BrushType {
     Fill,
 }
 
-// Note: AtlasEditMode removed - replaced with collapsible sections
-// (uv_section_expanded, paint_section_expanded in ModelerState)
+// Note: AtlasEditMode removed - replaced with collapsible paint section
+// and tab-based mode switching in TextureEditorState
 
 /// Axis constraint for transforms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,19 +588,6 @@ pub struct ModelerState {
     pub viewport_h_split: f32,         // Horizontal divider (left/right, default 0.5)
     pub viewport_v_split: f32,         // Vertical divider (top/bottom, default 0.5)
 
-    // UV Editor state
-    pub uv_zoom: f32,
-    pub uv_offset: Vec2,
-    pub uv_selection: Vec<usize>,
-    pub uv_drag_active: bool,
-    pub uv_drag_start: (f32, f32),
-    pub uv_drag_start_uvs: Vec<(usize, usize, Vec2)>, // (object_idx, vertex_idx, original_uv)
-    pub uv_box_select_start: Option<(f32, f32)>, // Start of box selection in screen coords
-    pub uv_modal_transform: UvModalTransform, // G/S/R modal transforms for UV
-    pub uv_modal_start_mouse: (f32, f32), // Mouse position when modal started
-    pub uv_modal_start_uvs: Vec<(usize, crate::rasterizer::Vec2)>, // (vertex_idx, original_uv)
-    pub uv_modal_center: crate::rasterizer::Vec2, // Center of UV selection for rotation/scale
-
     // Paint state
     pub paint_color: Color,
     pub paint_blend_mode: BlendMode,
@@ -611,8 +598,7 @@ pub struct ModelerState {
     pub brush_size_slider_active: bool, // True while dragging brush size slider
     pub paint_stroke_active: bool, // True while painting (for undo grouping)
 
-    // Collapsible panel sections (replaces AtlasEditMode)
-    pub uv_section_expanded: bool,    // UV editing section
+    // Collapsible panel sections
     pub paint_section_expanded: bool, // Paint/texture editor section
     pub paint_texture_scroll: f32,    // Scroll position in paint texture browser
 
@@ -807,18 +793,6 @@ impl ModelerState {
             viewport_h_split: 0.5,
             viewport_v_split: 0.5,
 
-            uv_zoom: 1.0,
-            uv_offset: Vec2::default(),
-            uv_selection: Vec::new(),
-            uv_drag_active: false,
-            uv_drag_start: (0.0, 0.0),
-            uv_drag_start_uvs: Vec::new(),
-            uv_box_select_start: None,
-            uv_modal_transform: UvModalTransform::None,
-            uv_modal_start_mouse: (0.0, 0.0),
-            uv_modal_start_uvs: Vec::new(),
-            uv_modal_center: Vec2::default(),
-
             paint_color: Color::WHITE,
             paint_blend_mode: BlendMode::Opaque,
             brush_size: 4.0,
@@ -828,8 +802,7 @@ impl ModelerState {
             brush_size_slider_active: false,
             paint_stroke_active: false,
 
-            // Collapsible sections (both can be open)
-            uv_section_expanded: true,
+            // Collapsible sections
             paint_section_expanded: false,
             paint_texture_scroll: 0.0,
 
