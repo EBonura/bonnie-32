@@ -1455,7 +1455,7 @@ fn apply_uv_modal_transform(
             }
             state.dirty = true;
         }
-        UvModalTransform::None => {}
+        UvModalTransform::None | UvModalTransform::ScalePending => {}
     }
 }
 

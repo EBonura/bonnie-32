@@ -1672,7 +1672,7 @@ fn apply_uv_modal_transform_to_face(
                     }
                 }
             }
-            UvModalTransform::None => {}
+            UvModalTransform::None | UvModalTransform::ScalePending => {}
         }
 
         // Update the face's UV field
