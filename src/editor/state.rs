@@ -101,8 +101,12 @@ impl EditorFrameTimings {
 pub const SECTOR_SIZE: f32 = 1024.0;
 /// Height subdivision ("click") in world units (Y axis)
 pub const CLICK_HEIGHT: f32 = 256.0;
+/// Height subdivision in integer world units (CLICK_HEIGHT * INT_SCALE)
+pub const CLICK_HEIGHT_INT: i32 = 1024;
 /// Default ceiling height (3x sector size = 3 meters)
 pub const CEILING_HEIGHT: f32 = 3072.0;
+/// Default ceiling height in integer world units
+pub const CEILING_HEIGHT_INT: i32 = 12288;
 
 /// Camera mode for 3D viewport
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,11 +472,9 @@ pub struct EditorState {
     /// Object being dragged in 2D grid view (room_idx, object_idx)
     pub grid_dragging_object: Option<(usize, usize)>,
 
-    /// 3D viewport vertex dragging state (legacy - kept for compatibility)
-    pub viewport_dragging_vertices: Vec<(usize, usize)>, // List of (room_idx, vertex_idx)
+    /// 3D viewport vertex dragging state
     pub viewport_drag_started: bool,
-    pub viewport_drag_plane_y: f32, // Y height of the drag plane (reference point for delta)
-    pub viewport_drag_initial_y: Vec<f32>, // Initial Y positions of each dragged vertex
+    pub viewport_drag_plane_y: i32, // Y height of the drag plane (integer world units)
 
     /// 3D viewport sector-based vertex dragging
     /// Each entry is (room_idx, gx, gz, face_type, corner_idx)
@@ -520,11 +522,11 @@ pub struct EditorState {
     pub uv_edit_buffer: String,           // Text input buffer
 
     /// Placement height adjustment (for DrawFloor/DrawCeiling/DrawWall modes)
-    pub placement_target_y: f32,           // Current Y height for new placements
+    pub placement_target_y: i32,           // Current Y height for new placements (integer world units)
     pub height_adjust_mode: bool,          // True when Shift is held for height adjustment
     pub height_adjust_start_mouse_y: f32,  // Mouse Y when height adjust started
-    pub height_adjust_start_y: f32,        // placement_target_y when height adjust started
-    pub height_adjust_locked_pos: Option<(f32, f32)>, // Locked (x, z) position when adjusting
+    pub height_adjust_start_y: i32,        // placement_target_y when height adjust started (integer)
+    pub height_adjust_locked_pos: Option<(i32, i32)>, // Locked (gx, gz) grid position when adjusting
 
     /// Drag-to-place state (for DrawFloor/DrawCeiling modes)
     /// Start grid position when drag began (gx, gz)
@@ -727,10 +729,8 @@ impl EditorState {
             grid_sector_drag_start: None,
             grid_dragging_room_origin: false,
             grid_dragging_object: None,
-            viewport_dragging_vertices: Vec::new(),
             viewport_drag_started: false,
-            viewport_drag_plane_y: 0.0,
-            viewport_drag_initial_y: Vec::new(),
+            viewport_drag_plane_y: 0,
             dragging_sector_vertices: Vec::new(),
             drag_initial_heights: Vec::new(),
             dragging_object: None,
@@ -753,10 +753,10 @@ impl EditorState {
             uv_scale_linked: true,   // Default to linked
             uv_editing_field: None,
             uv_edit_buffer: String::new(),
-            placement_target_y: 0.0,
+            placement_target_y: 0,
             height_adjust_mode: false,
             height_adjust_start_mouse_y: 0.0,
-            height_adjust_start_y: 0.0,
+            height_adjust_start_y: 0,
             height_adjust_locked_pos: None,
             placement_drag_start: None,
             placement_drag_current: None,

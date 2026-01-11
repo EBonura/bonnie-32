@@ -610,81 +610,75 @@ pub fn draw_viewport_3d(
     // In drawing modes, find preview sector position
     if inside_viewport && (state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling) {
         if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
-            use super::{CEILING_HEIGHT, CLICK_HEIGHT};
+            use super::{CEILING_HEIGHT, CEILING_HEIGHT_INT, CLICK_HEIGHT, CLICK_HEIGHT_INT};
 
             let is_floor = state.tool == EditorTool::DrawFloor;
 
-            // For sector detection, always use floor level (0.0) so clicking on the floor
-            // selects the sector where you want to place geometry.
-            // This is more intuitive - you click on the floor to place a ceiling above it.
-            let detection_y = 0.0;
-
-            // Find sector position using ray-plane intersection (no distance limit)
-            let (snapped_x, snapped_z) = if let Some((locked_x, locked_z)) = state.height_adjust_locked_pos {
+            // Find grid position using ray-plane intersection
+            // Returns (gx, gz) grid coords or None if ray misses
+            let grid_pos: Option<(i32, i32)> = if let Some((locked_gx, locked_gz)) = state.height_adjust_locked_pos {
                 // Use locked position when in height adjust mode
-                (locked_x, locked_z)
-            } else {
+                Some((locked_gx, locked_gz))
+            } else if let Some(room) = state.level.rooms.get(state.current_room) {
                 // Get room Y offset for the detection plane
-                let room_y = state.level.rooms.get(state.current_room)
-                    .map(|r| r.position.to_render_f32().y)
-                    .unwrap_or(0.0);
+                let room_y = room.position.to_render_f32().y;
 
                 // Use ray-plane intersection to find where mouse points on floor plane
                 if let Some(world_pos) = pick_plane(
-                    Vec3::new(0.0, room_y + detection_y, 0.0),
+                    Vec3::new(0.0, room_y, 0.0),
                     Vec3::new(0.0, 1.0, 0.0),  // Y-up normal
                     Vec3::ZERO,
                     (mouse_fb_x, mouse_fb_y),
                     &state.camera_3d,
                     fb.width, fb.height,
                 ) {
-                    // Snap to grid
-                    let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
-                    let grid_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
-                    (grid_x, grid_z)
+                    // Convert world pos to integer, then to grid coords
+                    let wx_int = (world_pos.x * crate::world::INT_SCALE as f32) as i32;
+                    let wz_int = (world_pos.z * crate::world::INT_SCALE as f32) as i32;
+                    let (gx, gz) = room.world_to_grid_i(wx_int, wz_int);
+                    Some((gx, gz))
                 } else {
-                    // Ray doesn't hit plane (looking away from floor)
-                    (f32::NAN, f32::NAN)
+                    None
                 }
+            } else {
+                None
             };
 
             // Handle Shift+drag for height adjustment
             let shift_down = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
-            if shift_down && !state.height_adjust_mode && !snapped_x.is_nan() {
+            if shift_down && !state.height_adjust_mode && grid_pos.is_some() {
                 // Just started holding shift - enter height adjust mode and lock position
                 state.height_adjust_mode = true;
                 state.height_adjust_start_mouse_y = mouse_pos.1;
                 state.height_adjust_start_y = state.placement_target_y;
-                state.height_adjust_locked_pos = Some((snapped_x, snapped_z));
+                state.height_adjust_locked_pos = grid_pos;
             } else if !shift_down && state.height_adjust_mode {
                 // Released shift - exit height adjust mode and unlock position
                 state.height_adjust_mode = false;
                 state.height_adjust_locked_pos = None;
             }
 
-            // Adjust height while shift is held
+            // Adjust height while shift is held (all integer math)
             if state.height_adjust_mode {
                 let mouse_delta = state.height_adjust_start_mouse_y - mouse_pos.1;
                 let y_sensitivity = 5.0;
                 let raw_delta = mouse_delta * y_sensitivity;
-                // Snap to CLICK_HEIGHT increments
-                let snapped_delta = (raw_delta / CLICK_HEIGHT).round() * CLICK_HEIGHT;
+                // Snap to CLICK_HEIGHT_INT increments (integer)
+                let snapped_delta = ((raw_delta / CLICK_HEIGHT as f32).round() as i32) * CLICK_HEIGHT_INT;
                 state.placement_target_y = state.height_adjust_start_y + snapped_delta;
                 // Show height in status bar
-                let clicks = (state.placement_target_y / CLICK_HEIGHT) as i32;
-                state.set_status(&format!("Height: {:.0} ({} clicks)", state.placement_target_y, clicks), 0.5);
+                let clicks = state.placement_target_y / CLICK_HEIGHT_INT;
+                let height_display = state.placement_target_y as f32 / crate::world::INT_SCALE as f32;
+                state.set_status(&format!("Height: {:.0} ({} clicks)", height_display, clicks), 0.5);
             }
 
             // Set preview sector if we have a valid position
-            if !snapped_x.is_nan() {
-                // Check if sector is occupied using new sector API
+            if let Some((gx, gz)) = grid_pos {
+                // Check if sector is occupied
                 let occupied = if let Some(room) = state.level.rooms.get(state.current_room) {
-                    // Convert world coords to grid coords (convert float to integer world units)
-                    let wx_int = ((snapped_x + SECTOR_SIZE * 0.5) * crate::world::INT_SCALE as f32) as i32;
-                    let wz_int = ((snapped_z + SECTOR_SIZE * 0.5) * crate::world::INT_SCALE as f32) as i32;
-                    if let Some((gx, gz)) = room.world_to_grid(wx_int, wz_int) {
-                        if let Some(sector) = room.get_sector(gx, gz) {
+                    if room.grid_in_bounds(gx, gz) {
+                        if let Some(sector) = room.get_sector(gx as usize, gz as usize) {
                             if is_floor { sector.floor.is_some() } else { sector.ceiling.is_some() }
                         } else {
                             false
@@ -697,14 +691,21 @@ pub fn draw_viewport_3d(
                 };
 
                 // Use current target_y for preview (may have been updated by height adjust)
-                let preview_y = state.placement_target_y;
-                let final_y = if preview_y == 0.0 && !state.height_adjust_mode {
-                    if is_floor { 0.0 } else { CEILING_HEIGHT }
+                let preview_y_int = state.placement_target_y;
+                let final_y_int = if preview_y_int == 0 && !state.height_adjust_mode {
+                    if is_floor { 0 } else { CEILING_HEIGHT_INT }
                 } else {
-                    preview_y
+                    preview_y_int
                 };
 
-                preview_sector = Some((snapped_x, snapped_z, final_y, occupied));
+                // Convert grid coords to world coords for rendering
+                if let Some(room) = state.level.rooms.get(state.current_room) {
+                    let world_pos = room.grid_to_world_i(gx, gz);
+                    let world_x = world_pos.x as f32 / crate::world::INT_SCALE as f32;
+                    let world_z = world_pos.z as f32 / crate::world::INT_SCALE as f32;
+                    let world_y = final_y_int as f32 / crate::world::INT_SCALE as f32;
+                    preview_sector = Some((world_x, world_z, world_y, occupied));
+                }
             }
         }
     }
@@ -1118,10 +1119,10 @@ pub fn draw_viewport_3d(
                         }
                     }
 
-                    // Set initial drag plane Y (convert integer sum to float for averaging)
+                    // Set initial drag plane Y (average in integer world units)
                     if !state.drag_initial_heights.is_empty() {
                         let sum_int: i64 = state.drag_initial_heights.iter().map(|&h| h as i64).sum();
-                        state.viewport_drag_plane_y = (sum_int as f32 / state.drag_initial_heights.len() as f32) / crate::world::INT_SCALE as f32;
+                        state.viewport_drag_plane_y = (sum_int / state.drag_initial_heights.len() as i64) as i32;
                     }
 
                     // If linking mode is on, find coincident vertices across ALL rooms
@@ -1158,7 +1159,7 @@ pub fn draw_viewport_3d(
                         // Update drag plane Y with all vertices (convert integer sum to float)
                         if !state.drag_initial_heights.is_empty() {
                             let sum_int: i64 = state.drag_initial_heights.iter().map(|&h| h as i64).sum();
-                            state.viewport_drag_plane_y = (sum_int as f32 / state.drag_initial_heights.len() as f32) / crate::world::INT_SCALE as f32;
+                            state.viewport_drag_plane_y = (sum_int / state.drag_initial_heights.len() as i64) as i32;
                         }
                     }
                 } else if let Some((room_idx, gx, gz, face_idx, edge_idx, wall_face, _)) = hovered_edge {
@@ -1482,7 +1483,7 @@ pub fn draw_viewport_3d(
                     // This prevents jumping when linked vertices have different room-relative heights
                     if !state.drag_initial_heights.is_empty() {
                         let sum_int: i64 = state.drag_initial_heights.iter().map(|&h| h as i64).sum();
-                        state.viewport_drag_plane_y = (sum_int as f32 / state.drag_initial_heights.len() as f32) / crate::world::INT_SCALE as f32;
+                        state.viewport_drag_plane_y = (sum_int / state.drag_initial_heights.len() as i64) as i32;
                     }
                 } else if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
                     // Object selection/dragging - checked before lights and faces
@@ -1850,7 +1851,7 @@ pub fn draw_viewport_3d(
                     // This prevents jumping when linked vertices have different room-relative heights
                     if !state.drag_initial_heights.is_empty() {
                         let sum_int: i64 = state.drag_initial_heights.iter().map(|&h| h as i64).sum();
-                        state.viewport_drag_plane_y = (sum_int as f32 / state.drag_initial_heights.len() as f32) / crate::world::INT_SCALE as f32;
+                        state.viewport_drag_plane_y = (sum_int / state.drag_initial_heights.len() as i64) as i32;
                     }
                     } else {
                         // X/Z relocation mode: move faces in the horizontal plane
@@ -2000,7 +2001,7 @@ pub fn draw_viewport_3d(
 
         // Continue dragging (Y-axis only - TRLE constraint)
         if ctx.mouse.left_down && !state.dragging_sector_vertices.is_empty() {
-            use super::CLICK_HEIGHT;
+            use super::CLICK_HEIGHT_INT;
 
             // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
             let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
@@ -2010,26 +2011,26 @@ pub fn draw_viewport_3d(
                 state.save_undo();
                 state.viewport_drag_started = true;
             }
-            let y_sensitivity = 5.0;
-            let y_delta = mouse_delta_y * y_sensitivity;
 
-            // Accumulate delta
-            state.viewport_drag_plane_y += y_delta;
+            // Convert mouse delta to integer world units
+            let y_sensitivity = 5.0 * crate::world::INT_SCALE as f32;
+            let y_delta_int = (mouse_delta_y * y_sensitivity) as i32;
 
-            // Calculate delta from initial average (heights are in integer world units)
-            let scale = crate::world::INT_SCALE as f32;
+            // Accumulate delta (integer world units)
+            state.viewport_drag_plane_y += y_delta_int;
+
+            // Calculate delta from initial average (all in integer world units)
             let sum_int: i64 = state.drag_initial_heights.iter().map(|&h| h as i64).sum();
-            let initial_avg_f32: f32 = (sum_int as f32 / state.drag_initial_heights.len().max(1) as f32) / scale;
-            let delta_from_initial = state.viewport_drag_plane_y - initial_avg_f32;
+            let initial_avg_int = (sum_int / state.drag_initial_heights.len().max(1) as i64) as i32;
+            let delta_from_initial = state.viewport_drag_plane_y - initial_avg_int;
 
             // Apply delta to each vertex
             for (i, &(room_idx, gx, gz, face, corner_idx)) in state.dragging_sector_vertices.clone().iter().enumerate() {
                 if let Some(&initial_h_int) = state.drag_initial_heights.get(i) {
-                    // Convert initial height to float, add delta, snap, convert back to int
-                    let initial_h_f32 = initial_h_int as f32 / scale;
-                    let new_h = initial_h_f32 + delta_from_initial;
-                    let snapped_h_f32 = (new_h / CLICK_HEIGHT).round() * CLICK_HEIGHT;
-                    let snapped_h = (snapped_h_f32 * scale).round() as i32;
+                    // Add delta to initial, snap to CLICK_HEIGHT_INT increments
+                    let new_h = initial_h_int + delta_from_initial;
+                    // Round to nearest CLICK_HEIGHT_INT
+                    let snapped_h = ((new_h + CLICK_HEIGHT_INT / 2) / CLICK_HEIGHT_INT) * CLICK_HEIGHT_INT;
 
                     if let Some(room) = state.level.rooms.get_mut(room_idx) {
                         if let Some(sector) = room.get_sector_mut(gx, gz) {
@@ -2250,11 +2251,11 @@ pub fn draw_viewport_3d(
                     let min_gz = start_gz.min(end_gz);
                     let max_gz = start_gz.max(end_gz);
 
-                    // Get target Y (integer world units) and texture
-                    let target_y = if state.placement_target_y == 0.0 && !state.height_adjust_mode {
-                        if is_floor { 0 } else { (super::CEILING_HEIGHT * crate::world::INT_SCALE as f32).round() as i32 }
+                    // Get target Y (already in integer world units) and texture
+                    let target_y = if state.placement_target_y == 0 && !state.height_adjust_mode {
+                        if is_floor { 0 } else { super::CEILING_HEIGHT_INT }
                     } else {
-                        (state.placement_target_y * crate::world::INT_SCALE as f32).round() as i32
+                        state.placement_target_y
                     };
                     let texture = state.selected_texture.clone();
 
@@ -2849,12 +2850,14 @@ pub fn draw_viewport_3d(
                 .map(|r| r.position.to_render_f32())
                 .unwrap_or_default();
 
-            let target_y = if state.placement_target_y == 0.0 && !state.height_adjust_mode {
-                if is_floor { 0.0 } else { super::CEILING_HEIGHT }
+            // Convert integer target_y to float for rendering
+            let target_y_int = if state.placement_target_y == 0 && !state.height_adjust_mode {
+                if is_floor { 0 } else { super::CEILING_HEIGHT_INT }
             } else {
                 state.placement_target_y
             };
-            let grid_y = room_pos.y + target_y;
+            let target_y_f32 = target_y_int as f32 / crate::world::INT_SCALE as f32;
+            let grid_y = room_pos.y + target_y_f32;
 
             // Calculate rectangle bounds in world space
             let min_gx = start_gx.min(end_gx);

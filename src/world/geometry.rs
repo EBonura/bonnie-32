@@ -217,13 +217,15 @@ where
 
 /// Helper enum for deserializing Vec3 (float) or IVec3 (int) into IVec3.
 /// Uses serde's untagged enum to try both formats.
+/// IMPORTANT: Int must be listed FIRST so serde tries it before Float.
+/// Otherwise integers like -65536 would parse as f32 and get scaled again!
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Vec3OrIVec3 {
+    /// Integer format (new): x, y, z as i32 - must be first!
+    Int { x: i32, y: i32, z: i32 },
     /// Float format (legacy): x, y, z as f32
     Float { x: f32, y: f32, z: f32 },
-    /// Integer format (new): x, y, z as i32
-    Int { x: i32, y: i32, z: i32 },
 }
 
 impl Vec3OrIVec3 {
@@ -2890,11 +2892,75 @@ impl Room {
 
     /// Get position as float for rendering/display
     pub fn position_f32(&self) -> Vec3 {
-        Vec3::new(
-            self.position.x as f32 / INT_SCALE as f32,
-            self.position.y as f32 / INT_SCALE as f32,
-            self.position.z as f32 / INT_SCALE as f32,
+        self.position.to_render_f32()
+    }
+
+    // =========================================================================
+    // Integer Grid Helpers - Pure integer math for sector/world conversions
+    // =========================================================================
+
+    /// Convert signed grid coordinates to world position (integer).
+    /// Unlike grid_to_world(), this accepts i32 and works with negative coords.
+    #[inline]
+    pub fn grid_to_world_i(&self, gx: i32, gz: i32) -> IVec3 {
+        IVec3::new(
+            self.position.x + gx * SECTOR_SIZE_INT,
+            self.position.y,
+            self.position.z + gz * SECTOR_SIZE_INT,
         )
+    }
+
+    /// Convert signed grid coordinates to world position with Y offset (integer).
+    #[inline]
+    pub fn grid_to_world_iy(&self, gx: i32, gz: i32, y: i32) -> IVec3 {
+        IVec3::new(
+            self.position.x + gx * SECTOR_SIZE_INT,
+            self.position.y + y,
+            self.position.z + gz * SECTOR_SIZE_INT,
+        )
+    }
+
+    /// Convert world position to signed grid coordinates (integer).
+    /// Returns (gx, gz) sector indices, which may be negative or out of bounds.
+    /// Use grid_in_bounds() to check validity.
+    #[inline]
+    pub fn world_to_grid_i(&self, world_x: i32, world_z: i32) -> (i32, i32) {
+        let local_x = world_x - self.position.x;
+        let local_z = world_z - self.position.z;
+        (
+            local_x.div_euclid(SECTOR_SIZE_INT),
+            local_z.div_euclid(SECTOR_SIZE_INT),
+        )
+    }
+
+    /// Check if signed grid coordinates are within room bounds.
+    #[inline]
+    pub fn grid_in_bounds(&self, gx: i32, gz: i32) -> bool {
+        gx >= 0 && gz >= 0 && (gx as usize) < self.width && (gz as usize) < self.depth
+    }
+
+    /// Get the center of a sector in world coordinates (integer).
+    #[inline]
+    pub fn sector_center_i(&self, gx: i32, gz: i32) -> IVec3 {
+        IVec3::new(
+            self.position.x + gx * SECTOR_SIZE_INT + SECTOR_SIZE_INT / 2,
+            self.position.y,
+            self.position.z + gz * SECTOR_SIZE_INT + SECTOR_SIZE_INT / 2,
+        )
+    }
+
+    /// Get a corner of a sector in world coordinates (integer).
+    /// Corner indices: 0=NW(-X,-Z), 1=NE(+X,-Z), 2=SE(+X,+Z), 3=SW(-X,+Z)
+    #[inline]
+    pub fn sector_corner_i(&self, gx: i32, gz: i32, corner: usize) -> IVec3 {
+        let base = self.grid_to_world_i(gx, gz);
+        match corner {
+            0 => base,                                                          // NW
+            1 => IVec3::new(base.x + SECTOR_SIZE_INT, base.y, base.z),          // NE
+            2 => IVec3::new(base.x + SECTOR_SIZE_INT, base.y, base.z + SECTOR_SIZE_INT), // SE
+            3 => IVec3::new(base.x, base.y, base.z + SECTOR_SIZE_INT),          // SW
+            _ => base,
+        }
     }
 
     /// Get sector at grid position (returns None if out of bounds or empty)
