@@ -3,13 +3,50 @@
 //! Provides a reusable UI component for editing indexed textures with:
 //! - Canvas with zoom/pan
 //! - Drawing tools (pencil, brush, fill, shapes)
+//! - UV editing with vertex manipulation
 //! - Palette editing with RGB555 sliders
 //! - Undo/redo support
 
 use macroquad::prelude::*;
-use crate::rasterizer::{BlendMode, ClutDepth, Color15};
+use crate::rasterizer::{BlendMode, ClutDepth, Color15, Vec2 as RastVec2};
 use crate::ui::{Rect, UiContext, icon};
 use super::user_texture::UserTexture;
+
+/// Editor mode - Paint or UV editing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureEditorMode {
+    /// Texture painting mode (default)
+    #[default]
+    Paint,
+    /// UV coordinate editing mode
+    Uv,
+}
+
+/// Modal transform for UV editing (G/S/R keys)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UvModalTransform {
+    #[default]
+    None,
+    /// G key - move UV selection
+    Grab,
+    /// S key - scale UV selection
+    Scale,
+    /// R key - rotate UV selection
+    Rotate,
+}
+
+/// Pending UV operation requested by button click
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UvOperation {
+    /// Flip UVs horizontally around center
+    FlipHorizontal,
+    /// Flip UVs vertically around center
+    FlipVertical,
+    /// Rotate UVs 90 degrees clockwise
+    RotateCW,
+    /// Reset UVs to default positions
+    ResetUVs,
+}
 
 // UI constants
 const TEXT_COLOR: Color = Color::new(0.85, 0.85, 0.85, 1.0);
@@ -213,6 +250,33 @@ pub struct TextureUndoEntry {
     pub palette: Vec<Color15>,
 }
 
+/// UV vertex data for overlay rendering
+#[derive(Debug, Clone, Copy)]
+pub struct UvVertex {
+    /// UV coordinate (0.0-1.0 range)
+    pub uv: RastVec2,
+    /// Global vertex index (for selection tracking)
+    pub vertex_index: usize,
+}
+
+/// Face data for UV overlay
+#[derive(Debug, Clone)]
+pub struct UvFace {
+    /// Indices into the UvVertex array
+    pub vertex_indices: Vec<usize>,
+}
+
+/// UV overlay data passed to the texture canvas for rendering
+#[derive(Debug, Clone)]
+pub struct UvOverlayData {
+    /// All UV vertices
+    pub vertices: Vec<UvVertex>,
+    /// Faces referencing vertices
+    pub faces: Vec<UvFace>,
+    /// Which faces are selected (indices into faces array)
+    pub selected_faces: Vec<usize>,
+}
+
 /// State for the texture editor
 #[derive(Debug)]
 pub struct TextureEditorState {
@@ -292,6 +356,30 @@ pub struct TextureEditorState {
     pub palette_gen_hue_shift: f32,
     /// Which palette generator color is being edited (0-2), None if not editing
     pub palette_gen_editing: Option<usize>,
+
+    // === UV Editing State ===
+    /// Current editor mode (Paint or UV)
+    pub mode: TextureEditorMode,
+    /// Selected UV vertex indices (indices into the vertices array)
+    pub uv_selection: Vec<usize>,
+    /// Is currently dragging UV vertices
+    pub uv_drag_active: bool,
+    /// Drag start position in screen coords
+    pub uv_drag_start: (f32, f32),
+    /// Original UV positions when drag started: (object_idx, vertex_idx, original_uv)
+    pub uv_drag_start_uvs: Vec<(usize, usize, RastVec2)>,
+    /// Start of box selection in screen coords
+    pub uv_box_select_start: Option<(f32, f32)>,
+    /// Current modal transform mode (G/S/R)
+    pub uv_modal_transform: UvModalTransform,
+    /// Mouse position when modal transform started
+    pub uv_modal_start_mouse: (f32, f32),
+    /// Original UV positions when modal transform started: (vertex_idx, original_uv)
+    pub uv_modal_start_uvs: Vec<(usize, RastVec2)>,
+    /// Center of UV selection for rotation/scale operations
+    pub uv_modal_center: RastVec2,
+    /// Pending UV operation (flip/rotate/reset) requested by button
+    pub uv_operation_pending: Option<UvOperation>,
 }
 
 /// Edge or corner being resized
@@ -349,6 +437,18 @@ impl Default for TextureEditorState {
             palette_gen_brightness: 0.7,
             palette_gen_hue_shift: 10.0,
             palette_gen_editing: None,
+            // UV editing state
+            mode: TextureEditorMode::Paint,
+            uv_selection: Vec::new(),
+            uv_drag_active: false,
+            uv_drag_start: (0.0, 0.0),
+            uv_drag_start_uvs: Vec::new(),
+            uv_box_select_start: None,
+            uv_modal_transform: UvModalTransform::None,
+            uv_modal_start_mouse: (0.0, 0.0),
+            uv_modal_start_uvs: Vec::new(),
+            uv_modal_center: RastVec2::new(0.0, 0.0),
+            uv_operation_pending: None,
         }
     }
 }
@@ -392,6 +492,13 @@ impl TextureEditorState {
         self.selection_drag_start = None;
         self.creating_selection = false;
         self.palette_gen_editing = None;
+        // UV state reset
+        self.mode = TextureEditorMode::Paint;
+        self.uv_selection.clear();
+        self.uv_drag_active = false;
+        self.uv_box_select_start = None;
+        self.uv_modal_transform = UvModalTransform::None;
+        self.uv_modal_start_uvs.clear();
         // Note: clipboard and palette_gen_colors are NOT reset - allow reuse across textures
     }
 
@@ -1015,6 +1122,76 @@ fn commit_floating_selection(texture: &mut UserTexture, state: &mut TextureEdito
     state.selection = None;
 }
 
+/// Draw the mode tabs (Paint / UV) at the top of the editor
+/// Returns the remaining rect below the tabs for content
+pub fn draw_mode_tabs(
+    ctx: &mut UiContext,
+    rect: Rect,
+    state: &mut TextureEditorState,
+) -> Rect {
+    const TAB_HEIGHT: f32 = 26.0;
+    const TAB_BG: Color = Color::new(0.14, 0.14, 0.16, 1.0);
+    const TAB_ACTIVE: Color = Color::new(0.22, 0.22, 0.25, 1.0);
+    const TAB_HOVER: Color = Color::new(0.18, 0.18, 0.20, 1.0);
+
+    // Draw tab bar background
+    let tab_bar_rect = Rect::new(rect.x, rect.y, rect.w, TAB_HEIGHT);
+    draw_rectangle(tab_bar_rect.x, tab_bar_rect.y, tab_bar_rect.w, tab_bar_rect.h, TAB_BG);
+
+    // Two tabs: Paint and UV
+    let tab_width = rect.w / 2.0;
+    let tabs = [
+        (TextureEditorMode::Paint, "Paint"),
+        (TextureEditorMode::Uv, "UV"),
+    ];
+
+    for (i, (mode, label)) in tabs.iter().enumerate() {
+        let tab_x = rect.x + i as f32 * tab_width;
+        let tab_rect = Rect::new(tab_x, rect.y, tab_width, TAB_HEIGHT);
+        let is_active = state.mode == *mode;
+        let hovered = ctx.mouse.inside(&tab_rect);
+
+        // Tab background
+        let bg = if is_active {
+            TAB_ACTIVE
+        } else if hovered {
+            TAB_HOVER
+        } else {
+            TAB_BG
+        };
+        draw_rectangle(tab_rect.x, tab_rect.y, tab_rect.w, tab_rect.h, bg);
+
+        // Active indicator (bottom line)
+        if is_active {
+            draw_rectangle(tab_rect.x, tab_rect.y + TAB_HEIGHT - 2.0, tab_rect.w, 2.0, ACCENT_COLOR);
+        }
+
+        // Tab label
+        let text_color = if is_active { TEXT_COLOR } else { TEXT_DIM };
+        let text_size = 14.0;
+        let text_dims = measure_text(label, None, text_size as u16, 1.0);
+        let text_x = tab_rect.x + (tab_rect.w - text_dims.width) / 2.0;
+        let text_y = tab_rect.y + (TAB_HEIGHT + text_dims.height) / 2.0 - 2.0;
+        draw_text(label, text_x, text_y, text_size, text_color);
+
+        // Handle click
+        if hovered && ctx.mouse.left_pressed {
+            state.mode = *mode;
+            // Clear UV selection when switching modes to avoid stale state
+            if *mode == TextureEditorMode::Paint {
+                state.uv_selection.clear();
+                state.uv_modal_transform = UvModalTransform::None;
+            }
+        }
+    }
+
+    // Separator line
+    draw_line(rect.x, rect.y + TAB_HEIGHT, rect.x + rect.w, rect.y + TAB_HEIGHT, 1.0, Color::new(0.25, 0.25, 0.28, 1.0));
+
+    // Return content rect below tabs
+    Rect::new(rect.x, rect.y + TAB_HEIGHT, rect.w, rect.h - TAB_HEIGHT)
+}
+
 /// Convert screen position to texture pixel coordinates
 pub fn screen_to_texture(
     screen_x: f32,
@@ -1178,12 +1355,16 @@ pub fn generate_palette_from_keys(
     palette
 }
 
-/// Draw the texture canvas
+/// Draw the texture canvas with optional UV overlay
+///
+/// When `uv_data` is Some and state.mode is Uv, draws UV wireframe overlay on top of texture.
+/// The texture is always drawn as background (useful for seeing UV placement).
 pub fn draw_texture_canvas(
     ctx: &mut UiContext,
     canvas_rect: Rect,
     texture: &mut UserTexture,
     state: &mut TextureEditorState,
+    uv_data: Option<&UvOverlayData>,
 ) {
     // Update selection animation frame
     state.selection_anim_frame = state.selection_anim_frame.wrapping_add(1);
@@ -1355,6 +1536,22 @@ pub fn draw_texture_canvas(
         }
     }
 
+    // Draw UV overlay when in UV mode
+    if state.mode == TextureEditorMode::Uv {
+        if let Some(uv) = uv_data {
+            draw_uv_overlay(
+                &canvas_rect,
+                texture.width as f32,
+                texture.height as f32,
+                tex_x,
+                tex_y,
+                state.zoom,
+                uv,
+                &state.uv_selection,
+            );
+        }
+    }
+
     // Disable scissor clipping
     unsafe {
         get_internal_gl().quad_gl.scissor(None);
@@ -1477,7 +1674,10 @@ pub fn draw_texture_canvas(
 
     // Drawing and selection
     if inside && !state.panning {
-        if let Some((px, py)) = screen_to_texture(ctx.mouse.x, ctx.mouse.y, &canvas_rect, texture, state) {
+        // UV mode: handle UV-specific input
+        if state.mode == TextureEditorMode::Uv {
+            handle_uv_input(ctx, &canvas_rect, texture, state, uv_data);
+        } else if let Some((px, py)) = screen_to_texture(ctx.mouse.x, ctx.mouse.y, &canvas_rect, texture, state) {
             // Handle Select tool
             if state.tool == DrawTool::Select {
                 // Check for edge hover (for resize cursor feedback)
@@ -1881,40 +2081,86 @@ pub fn draw_tool_panel(
     draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
     y += 4.0;
 
-    // === Drawing tools in 2-column grid ===
-    // Note: No Eraser tool - just paint with index 0 (transparent) to erase
-    let mut clicked_tool: Option<DrawTool> = None;
-    let all_tools = [
-        DrawTool::Select,
-        DrawTool::Brush,
-        DrawTool::Fill,
-        DrawTool::Line,
-        DrawTool::Rectangle,
-        DrawTool::Ellipse,
-    ];
+    // Mode-specific tools
+    match state.mode {
+        TextureEditorMode::Paint => {
+            // === Drawing tools in 2-column grid ===
+            // Note: No Eraser tool - just paint with index 0 (transparent) to erase
+            let mut clicked_tool: Option<DrawTool> = None;
+            let all_tools = [
+                DrawTool::Select,
+                DrawTool::Brush,
+                DrawTool::Fill,
+                DrawTool::Line,
+                DrawTool::Rectangle,
+                DrawTool::Ellipse,
+            ];
 
-    for (i, tool) in all_tools.iter().enumerate() {
-        let x = if i % 2 == 0 { col1_x } else { col2_x };
-        if draw_tool_button_small(ctx, x, y, btn_size, *tool, state.tool == *tool, icon_font) {
-            clicked_tool = Some(*tool);
+            for (i, tool) in all_tools.iter().enumerate() {
+                let x = if i % 2 == 0 { col1_x } else { col2_x };
+                if draw_tool_button_small(ctx, x, y, btn_size, *tool, state.tool == *tool, icon_font) {
+                    clicked_tool = Some(*tool);
+                }
+                if i % 2 == 1 {
+                    y += btn_size + gap;
+                }
+            }
+            // If odd number of tools, advance y
+            if all_tools.len() % 2 == 1 {
+                y += btn_size + gap;
+            }
+
+            // Apply tool selection
+            if let Some(tool) = clicked_tool {
+                state.tool = tool;
+            }
         }
-        if i % 2 == 1 {
+        TextureEditorMode::Uv => {
+            // === UV tools ===
+            // Flip H / Flip V
+            if draw_action_button_small(ctx, col1_x, y, btn_size, icon::FLIP_HORIZONTAL, "Flip H", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::FlipHorizontal);
+                state.set_status("Flip Horizontal");
+            }
+            if draw_action_button_small(ctx, col2_x, y, btn_size, icon::FLIP_VERTICAL, "Flip V", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::FlipVertical);
+                state.set_status("Flip Vertical");
+            }
             y += btn_size + gap;
+
+            // Rotate CW / Reset UVs
+            if draw_action_button_small(ctx, col1_x, y, btn_size, icon::ROTATE_CW, "Rotate 90", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::RotateCW);
+                state.set_status("Rotate 90° CW");
+            }
+            if draw_action_button_small(ctx, col2_x, y, btn_size, icon::REFRESH_CW, "Reset UV", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::ResetUVs);
+                state.set_status("Reset UVs");
+            }
+            y += btn_size + gap;
+
+            // Separator
+            y += 2.0;
+            draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+            y += 4.0;
+
+            // Hint text for keyboard shortcuts
+            let hint_color = Color::new(0.5, 0.5, 0.52, 1.0);
+            draw_text("G: Move", col1_x, y + 10.0, 11.0, hint_color);
+            y += 14.0;
+            draw_text("S: Scale", col1_x, y + 10.0, 11.0, hint_color);
+            y += 14.0;
+            draw_text("R: Rotate", col1_x, y + 10.0, 11.0, hint_color);
+            y += 14.0;
         }
     }
-    // If odd number of tools, advance y
-    if all_tools.len() % 2 == 1 {
-        y += btn_size + gap;
-    }
 
-    // Apply tool selection
-    if let Some(tool) = clicked_tool {
-        state.tool = tool;
-    }
+    let _ = y; // silence unused warning
 
-    // === Tool options section (size, fill toggle) ===
+    // === Tool options section (size, fill toggle) - Paint mode only ===
     // Show for tools that use brush size OR shape tools
-    let show_options = state.tool.uses_brush_size() || matches!(state.tool, DrawTool::Rectangle | DrawTool::Ellipse);
+    let show_options = state.mode == TextureEditorMode::Paint
+        && (state.tool.uses_brush_size() || matches!(state.tool, DrawTool::Rectangle | DrawTool::Ellipse));
     if show_options {
         y += 2.0;
         draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
@@ -2715,6 +2961,293 @@ pub fn draw_palette_panel(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Draw UV overlay on the texture canvas
+///
+/// Renders UV wireframe edges and vertex handles for selected faces.
+fn draw_uv_overlay(
+    _canvas_rect: &Rect,
+    tex_width: f32,
+    tex_height: f32,
+    tex_x: f32,
+    tex_y: f32,
+    zoom: f32,
+    uv_data: &UvOverlayData,
+    uv_selection: &[usize],
+) {
+    const EDGE_COLOR: Color = Color::new(1.0, 0.78, 0.39, 1.0);      // Orange
+    const VERTEX_COLOR: Color = Color::new(1.0, 1.0, 1.0, 1.0);      // White
+    const SELECTED_COLOR: Color = Color::new(0.39, 0.78, 1.0, 1.0);  // Light blue
+
+    // Convert UV coords (0-1) to screen coords
+    let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
+        // U goes left-to-right, V goes top-to-bottom (inverted from typical UV)
+        let px = u * tex_width;
+        let py = (1.0 - v) * tex_height;
+        (tex_x + (px + 0.5) * zoom, tex_y + (py + 0.5) * zoom)
+    };
+
+    // Draw selected faces
+    for &face_idx in &uv_data.selected_faces {
+        if let Some(face) = uv_data.faces.get(face_idx) {
+            // Collect screen positions for all vertices
+            let screen_uvs: Vec<_> = face.vertex_indices.iter()
+                .filter_map(|&vi| uv_data.vertices.get(vi))
+                .map(|v| uv_to_screen(v.uv.x, v.uv.y))
+                .collect();
+
+            // Draw edges (all edges of n-gon)
+            let n = screen_uvs.len();
+            for i in 0..n {
+                let j = (i + 1) % n;
+                draw_line(
+                    screen_uvs[i].0, screen_uvs[i].1,
+                    screen_uvs[j].0, screen_uvs[j].1,
+                    2.0, EDGE_COLOR,
+                );
+            }
+
+            // Draw vertices
+            for (i, &vi) in face.vertex_indices.iter().enumerate() {
+                if let Some((sx, sy)) = screen_uvs.get(i) {
+                    if let Some(uv_vert) = uv_data.vertices.get(vi) {
+                        let is_selected = uv_selection.contains(&uv_vert.vertex_index);
+                        let color = if is_selected { SELECTED_COLOR } else { VERTEX_COLOR };
+                        let size = if is_selected { 8.0 } else { 6.0 };
+                        draw_rectangle(sx - size * 0.5, sy - size * 0.5, size, size, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handle UV mode input (vertex selection, transforms)
+fn handle_uv_input(
+    ctx: &mut UiContext,
+    canvas_rect: &Rect,
+    texture: &UserTexture,
+    state: &mut TextureEditorState,
+    uv_data: Option<&UvOverlayData>,
+) {
+    let uv_data = match uv_data {
+        Some(d) => d,
+        None => return, // No UV data, nothing to interact with
+    };
+
+    let tex_width = texture.width as f32;
+    let tex_height = texture.height as f32;
+
+    // Extract values from state to avoid borrow issues with closures
+    let zoom = state.zoom;
+    let pan_x = state.pan_x;
+    let pan_y = state.pan_y;
+
+    // Calculate texture position (same as in draw_texture_canvas)
+    let canvas_cx = canvas_rect.x + canvas_rect.w / 2.0;
+    let canvas_cy = canvas_rect.y + canvas_rect.h / 2.0;
+    let tex_screen_w = tex_width * zoom;
+    let tex_screen_h = tex_height * zoom;
+    let tex_x = canvas_cx - tex_screen_w / 2.0 + pan_x;
+    let tex_y = canvas_cy - tex_screen_h / 2.0 + pan_y;
+
+    // Helper: Convert UV to screen coords
+    let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
+        let px = u * tex_width;
+        let py = (1.0 - v) * tex_height;
+        (tex_x + (px + 0.5) * zoom, tex_y + (py + 0.5) * zoom)
+    };
+
+    // Find nearest vertex to a screen position
+    let find_nearest_vertex = |sx: f32, sy: f32, threshold: f32| -> Option<usize> {
+        let mut nearest: Option<(usize, f32)> = None;
+        for uv_vert in &uv_data.vertices {
+            let (vx, vy) = uv_to_screen(uv_vert.uv.x, uv_vert.uv.y);
+            let dist = ((sx - vx).powi(2) + (sy - vy).powi(2)).sqrt();
+            if dist < threshold {
+                if nearest.is_none() || dist < nearest.unwrap().1 {
+                    nearest = Some((uv_vert.vertex_index, dist));
+                }
+            }
+        }
+        nearest.map(|(idx, _)| idx)
+    };
+
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+    // Handle keyboard shortcuts for modal transforms
+    if is_key_pressed(KeyCode::G) && !state.uv_selection.is_empty() {
+        state.uv_modal_transform = UvModalTransform::Grab;
+        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        // Store original UVs for all selected vertices
+        state.uv_modal_start_uvs.clear();
+        for &vi in &state.uv_selection {
+            if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                state.uv_modal_start_uvs.push((vi, uv_vert.uv));
+            }
+        }
+        state.set_status("Grab: Move mouse, click to confirm, Esc to cancel");
+    }
+
+    if is_key_pressed(KeyCode::S) && !state.uv_selection.is_empty() {
+        state.uv_modal_transform = UvModalTransform::Scale;
+        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        state.uv_modal_start_uvs.clear();
+        // Calculate selection center
+        let mut center = RastVec2::new(0.0, 0.0);
+        let mut count = 0;
+        for &vi in &state.uv_selection {
+            if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                center.x += uv_vert.uv.x;
+                center.y += uv_vert.uv.y;
+                count += 1;
+                state.uv_modal_start_uvs.push((vi, uv_vert.uv));
+            }
+        }
+        if count > 0 {
+            center.x /= count as f32;
+            center.y /= count as f32;
+        }
+        state.uv_modal_center = center;
+        state.set_status("Scale: Move mouse, click to confirm, Esc to cancel");
+    }
+
+    if is_key_pressed(KeyCode::R) && !state.uv_selection.is_empty() {
+        state.uv_modal_transform = UvModalTransform::Rotate;
+        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        state.uv_modal_start_uvs.clear();
+        // Calculate selection center
+        let mut center = RastVec2::new(0.0, 0.0);
+        let mut count = 0;
+        for &vi in &state.uv_selection {
+            if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                center.x += uv_vert.uv.x;
+                center.y += uv_vert.uv.y;
+                count += 1;
+                state.uv_modal_start_uvs.push((vi, uv_vert.uv));
+            }
+        }
+        if count > 0 {
+            center.x /= count as f32;
+            center.y /= count as f32;
+        }
+        state.uv_modal_center = center;
+        state.set_status("Rotate: Move mouse, click to confirm, Esc to cancel");
+    }
+
+    // Cancel modal transform with Escape
+    if is_key_pressed(KeyCode::Escape) {
+        if state.uv_modal_transform != UvModalTransform::None {
+            state.uv_modal_transform = UvModalTransform::None;
+            state.uv_modal_start_uvs.clear();
+            state.set_status("Transform cancelled");
+        } else {
+            // Clear selection
+            state.uv_selection.clear();
+        }
+    }
+
+    // Confirm modal transform with click
+    if ctx.mouse.left_pressed && state.uv_modal_transform != UvModalTransform::None {
+        // The transform is applied by the caller (modeler) based on state.uv_modal_start_uvs
+        // Here we just clear the modal state
+        state.uv_modal_transform = UvModalTransform::None;
+        state.uv_modal_start_uvs.clear();
+        state.set_status("Transform applied");
+        return; // Don't process click as selection
+    }
+
+    // Handle direct drag continuation
+    if state.uv_drag_active {
+        if ctx.mouse.left_down {
+            // Continue dragging - the actual vertex movement is handled by apply_uv_direct_drag in modeler
+        } else {
+            // Mouse released - end drag
+            state.uv_drag_active = false;
+            state.uv_drag_start_uvs.clear();
+            state.set_status("Drag complete");
+        }
+        return; // Don't process other input while dragging
+    }
+
+    // Vertex selection and drag initiation with click
+    if ctx.mouse.left_pressed {
+        let click_threshold = 12.0; // Pixels
+
+        if let Some(vi) = find_nearest_vertex(ctx.mouse.x, ctx.mouse.y, click_threshold) {
+            let is_already_selected = state.uv_selection.contains(&vi);
+
+            if shift_held {
+                // Toggle selection
+                if let Some(pos) = state.uv_selection.iter().position(|&x| x == vi) {
+                    state.uv_selection.remove(pos);
+                } else {
+                    state.uv_selection.push(vi);
+                }
+            } else if is_already_selected {
+                // Clicked on already-selected vertex - start dragging all selected
+                state.uv_drag_active = true;
+                state.uv_drag_start = (ctx.mouse.x, ctx.mouse.y);
+                state.uv_drag_start_uvs.clear();
+                // Store original UVs for all selected vertices (object_idx=0 since we don't track that here)
+                for &sel_vi in &state.uv_selection {
+                    if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == sel_vi) {
+                        state.uv_drag_start_uvs.push((0, sel_vi, uv_vert.uv));
+                    }
+                }
+                state.set_status("Dragging vertices (pixel snap enabled)");
+            } else {
+                // Click on unselected vertex - select and start drag
+                state.uv_selection.clear();
+                state.uv_selection.push(vi);
+                // Start dragging this vertex
+                state.uv_drag_active = true;
+                state.uv_drag_start = (ctx.mouse.x, ctx.mouse.y);
+                state.uv_drag_start_uvs.clear();
+                if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                    state.uv_drag_start_uvs.push((0, vi, uv_vert.uv));
+                }
+                state.set_status("Dragging vertices (pixel snap enabled)");
+            }
+        } else if !shift_held {
+            // Click on empty space - start box selection or clear selection
+            state.uv_box_select_start = Some((ctx.mouse.x, ctx.mouse.y));
+        }
+    }
+
+    // Box selection drag
+    if let Some((start_x, start_y)) = state.uv_box_select_start {
+        if ctx.mouse.left_down {
+            // Draw box selection rectangle
+            let min_x = start_x.min(ctx.mouse.x);
+            let min_y = start_y.min(ctx.mouse.y);
+            let max_x = start_x.max(ctx.mouse.x);
+            let max_y = start_y.max(ctx.mouse.y);
+            draw_rectangle_lines(min_x, min_y, max_x - min_x, max_y - min_y, 1.0, Color::new(1.0, 1.0, 1.0, 0.8));
+        } else {
+            // Mouse released - finalize box selection
+            let min_x = start_x.min(ctx.mouse.x);
+            let min_y = start_y.min(ctx.mouse.y);
+            let max_x = start_x.max(ctx.mouse.x);
+            let max_y = start_y.max(ctx.mouse.y);
+
+            // Find all vertices within the box
+            if !shift_held {
+                state.uv_selection.clear();
+            }
+            for uv_vert in &uv_data.vertices {
+                let (vx, vy) = uv_to_screen(uv_vert.uv.x, uv_vert.uv.y);
+                if vx >= min_x && vx <= max_x && vy >= min_y && vy <= max_y {
+                    if !state.uv_selection.contains(&uv_vert.vertex_index) {
+                        state.uv_selection.push(uv_vert.vertex_index);
+                    }
+                }
+            }
+
+            state.uv_box_select_start = None;
         }
     }
 }

@@ -6,7 +6,11 @@ use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoP
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
 use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode};
-use crate::texture::{UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel};
+use crate::texture::{
+    UserTexture, TextureSize,
+    draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
+    TextureEditorMode, UvOverlayData, UvVertex, UvFace,
+};
 use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
 use super::mesh_editor::EditableMesh;
@@ -719,78 +723,24 @@ fn draw_shortcuts_section(x: f32, y: &mut f32, _width: f32, max_y: f32) {
 
 fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     let mut y = rect.y + 4.0;
-    let padding = 4.0;
 
-    // === UV SECTION (collapsible) ===
-    let uv_expanded = draw_collapsible_header(ctx, rect.x, &mut y, rect.w, "UV", state.uv_section_expanded, icon_font);
-    if uv_expanded != state.uv_section_expanded {
-        state.uv_section_expanded = uv_expanded;
-    }
-
-    if state.uv_section_expanded {
-        // Calculate atlas area for UV section
-        let atlas = &state.project.atlas;
-        let atlas_w = atlas.width as f32;
-        let atlas_h = atlas.height as f32;
-        let available_w = rect.w - padding * 2.0;
-
-        // Atlas preview takes up to 40% of remaining height when both sections open
-        let max_atlas_h = if state.paint_section_expanded {
-            (rect.bottom() - y) * 0.35
-        } else {
-            (rect.bottom() - y) * 0.5
-        };
-        let atlas_scale = (available_w / atlas_w).min(max_atlas_h / atlas_h);
-        let atlas_screen_w = atlas_w * atlas_scale;
-        let atlas_screen_h = atlas_h * atlas_scale;
-
-        let atlas_x = rect.x + (rect.w - atlas_screen_w) * 0.5;
-        let atlas_y = y;
-
-        // Draw atlas preview with UV overlay
-        draw_atlas_preview(ctx, atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, atlas_scale, state);
-
-        y = atlas_y + atlas_screen_h + 8.0;
-
-        // Atlas size selector
-        draw_atlas_size_selector(ctx, rect.x, &mut y, rect.w, state);
-        y += 4.0;
-
-        // UV Tools
-        draw_uv_tools_content(ctx, rect.x, &mut y, rect.w, state, icon_font);
-        y += 4.0;
-
-        // Face Properties (when faces selected)
-        if let super::state::ModelerSelection::Faces(face_indices) = &state.selection {
-            if !face_indices.is_empty() {
-                draw_section_label(rect.x, &mut y, rect.w, "Face Properties");
-                draw_face_properties(ctx, rect.x, &mut y, rect.w, state, icon_font);
-            }
-        }
-
-        // Handle UV interactions
-        let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
-        handle_uv_interaction(ctx, atlas_rect, atlas_scale, state);
-
-        y += 8.0;
-    }
-
-    // === PAINT SECTION (collapsible) ===
-    let paint_expanded = draw_collapsible_header(ctx, rect.x, &mut y, rect.w, "Paint", state.paint_section_expanded, icon_font);
-    if paint_expanded != state.paint_section_expanded {
-        state.paint_section_expanded = paint_expanded;
-        // Initialize editing texture when expanding paint section
-        if paint_expanded && state.editing_texture.is_none() {
+    // === UNIFIED TEXTURE EDITOR (collapsible) ===
+    // Combines Paint + UV modes with tab-based switching
+    let editor_expanded = draw_collapsible_header(ctx, rect.x, &mut y, rect.w, "Texture", state.paint_section_expanded, icon_font);
+    if editor_expanded != state.paint_section_expanded {
+        state.paint_section_expanded = editor_expanded;
+        // Initialize editing texture when expanding
+        if editor_expanded && state.editing_texture.is_none() {
             state.editing_texture = Some(create_editing_texture(state));
             state.texture_editor.reset();
         }
     }
 
     if state.paint_section_expanded {
-        // Draw the unified texture editor
+        // Draw the unified texture editor with Paint/UV tabs
         let remaining_h = rect.bottom() - y - 4.0;
-        let paint_rect = Rect::new(rect.x, y, rect.w, remaining_h);
-        draw_paint_section(ctx, paint_rect, state, icon_font);
+        let editor_rect = Rect::new(rect.x, y, rect.w, remaining_h);
+        draw_paint_section(ctx, editor_rect, state, icon_font);
     }
 }
 
@@ -1210,13 +1160,24 @@ fn user_texture_to_mq_texture(texture: &UserTexture) -> Texture2D {
 
 /// Draw the texture editor panel (when editing a texture)
 fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
-    let tex = match &mut state.editing_texture {
-        Some(t) => t,
-        None => {
-            state.editing_indexed_atlas = false;
-            return;
-        }
+    // Early return if no texture being edited
+    if state.editing_texture.is_none() {
+        state.editing_indexed_atlas = false;
+        return;
+    }
+
+    // Build UV overlay data BEFORE getting mutable borrow of tex (avoids borrow conflict)
+    let uv_data = if state.texture_editor.mode == TextureEditorMode::Uv {
+        build_uv_overlay_data(state)
+    } else {
+        None
     };
+
+    // Now get mutable reference to the texture
+    let tex = state.editing_texture.as_mut().unwrap();
+    // Extract dimensions for later use (to avoid borrow conflicts)
+    let tex_width_f = tex.width as f32;
+    let tex_height_f = tex.height as f32;
 
     // Header with texture name and buttons (match main toolbar sizing: 36px height, 32px buttons, 16px icons)
     let header_h = 36.0;
@@ -1263,11 +1224,14 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + header_h / 2.0 + 4.0).floor(), 12.0, WHITE);
 
     // Content area below header
-    let content_rect = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
+    let content_rect_full = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
+
+    // Draw mode tabs (Paint / UV) at the top
+    let content_rect = draw_mode_tabs(ctx, content_rect_full, &mut state.texture_editor);
 
     // Layout: Canvas (square, capped size) + Tool panel (right), Palette panel (below, gets remaining space)
     // This matches the World Editor's texture_palette.rs layout exactly
-    let tool_panel_w = 36.0;  // Vertical toolbar (32px buttons + padding)
+    let tool_panel_w = 66.0;  // 2-column layout: 2 * 28px buttons + 2px gap + 4px padding each side
     let canvas_w = content_rect.w - tool_panel_w;
     // Tool panel needs ~280px height (6 tools + undo/redo/zoom/grid + size/shape options)
     // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190
@@ -1282,9 +1246,18 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let palette_rect = Rect::new(content_rect.x, content_rect.y + canvas_h, content_rect.w, palette_panel_h);
 
     // Draw panels using the shared texture editor components
-    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor);
+    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor, uv_data.as_ref());
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
     draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
+
+    // Handle UV modal transforms (G/S/R) - apply to actual mesh vertices
+    apply_uv_modal_transform(ctx, &canvas_rect, tex_width_f, tex_height_f, state);
+
+    // Handle direct UV dragging (with pixel snapping)
+    apply_uv_direct_drag(ctx, &canvas_rect, tex_width_f, tex_height_f, state);
+
+    // Handle UV operations (flip/rotate/reset buttons)
+    apply_uv_operation(tex_width_f, tex_height_f, state);
 
     // Handle undo save signals from texture editor (save BEFORE the action is applied)
     if state.texture_editor.undo_save_pending.take().is_some() {
@@ -1300,6 +1273,309 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.texture_editor.redo_requested = false;
         state.redo();
     }
+}
+
+/// Apply UV modal transforms (G/S/R) to actual mesh vertices
+fn apply_uv_modal_transform(
+    ctx: &UiContext,
+    canvas_rect: &Rect,
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut ModelerState,
+) {
+    use crate::texture::UvModalTransform;
+
+    let transform = state.texture_editor.uv_modal_transform;
+    if transform == UvModalTransform::None {
+        return;
+    }
+
+    // Get the mesh to modify
+    let obj = match state.project.selected_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Calculate transform parameters
+    let zoom = state.texture_editor.zoom;
+    let pan_x = state.texture_editor.pan_x;
+    let pan_y = state.texture_editor.pan_y;
+    let (start_mx, start_my) = state.texture_editor.uv_modal_start_mouse;
+
+    // Calculate texture position on screen
+    let canvas_cx = canvas_rect.x + canvas_rect.w / 2.0;
+    let canvas_cy = canvas_rect.y + canvas_rect.h / 2.0;
+    let tex_x = canvas_cx - tex_width * zoom / 2.0 + pan_x;
+    let tex_y = canvas_cy - tex_height * zoom / 2.0 + pan_y;
+
+    // Screen delta in UV space
+    let delta_screen_x = ctx.mouse.x - start_mx;
+    let delta_screen_y = ctx.mouse.y - start_my;
+    let delta_u = delta_screen_x / (tex_width * zoom);
+    let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
+
+    match transform {
+        UvModalTransform::Grab => {
+            // Move selected vertices by delta with pixel snapping
+            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    let new_u = original_uv.x + delta_u;
+                    let new_v = original_uv.y + delta_v;
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+            state.dirty = true;
+        }
+        UvModalTransform::Scale => {
+            // Scale around center with pixel snapping
+            let center = state.texture_editor.uv_modal_center;
+            // Scale factor based on horizontal mouse movement
+            let scale = 1.0 + delta_screen_x * 0.01;
+            let scale = scale.max(0.01); // Prevent negative/zero scale
+
+            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    let offset_x = original_uv.x - center.x;
+                    let offset_y = original_uv.y - center.y;
+                    let new_u = center.x + offset_x * scale;
+                    let new_v = center.y + offset_y * scale;
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+            state.dirty = true;
+        }
+        UvModalTransform::Rotate => {
+            // Rotate around center with pixel snapping
+            let center = state.texture_editor.uv_modal_center;
+            // Rotation angle based on horizontal mouse movement
+            let angle = delta_screen_x * 0.01; // Radians
+            let cos_a = angle.cos();
+            let sin_a = angle.sin();
+
+            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    let offset_x = original_uv.x - center.x;
+                    let offset_y = original_uv.y - center.y;
+                    let new_u = center.x + offset_x * cos_a - offset_y * sin_a;
+                    let new_v = center.y + offset_x * sin_a + offset_y * cos_a;
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+            state.dirty = true;
+        }
+        UvModalTransform::None => {}
+    }
+}
+
+/// Apply direct UV drag with pixel snapping
+fn apply_uv_direct_drag(
+    ctx: &UiContext,
+    _canvas_rect: &Rect,
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut ModelerState,
+) {
+    if !state.texture_editor.uv_drag_active {
+        return;
+    }
+
+    // Get the mesh to modify
+    let obj = match state.project.selected_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Calculate transform parameters
+    let zoom = state.texture_editor.zoom;
+    let (start_mx, start_my) = state.texture_editor.uv_drag_start;
+
+    // Screen delta in UV space
+    let delta_screen_x = ctx.mouse.x - start_mx;
+    let delta_screen_y = ctx.mouse.y - start_my;
+    let delta_u = delta_screen_x / (tex_width * zoom);
+    let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
+
+    // Move selected vertices by delta with pixel snapping
+    for &(_, vi, original_uv) in &state.texture_editor.uv_drag_start_uvs {
+        if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+            // Calculate new UV
+            let new_u = original_uv.x + delta_u;
+            let new_v = original_uv.y + delta_v;
+
+            // Snap to pixel boundaries
+            // UV coords are 0-1, pixels are 0 to tex_width-1
+            // Snap u to n/tex_width and v to m/tex_height
+            let snapped_u = (new_u * tex_width).round() / tex_width;
+            let snapped_v = (new_v * tex_height).round() / tex_height;
+
+            v.uv.x = snapped_u;
+            v.uv.y = snapped_v;
+        }
+    }
+    state.dirty = true;
+}
+
+/// Apply a UV operation (flip/rotate/reset) to selected vertices
+fn apply_uv_operation(
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut ModelerState,
+) {
+    use crate::texture::UvOperation;
+
+    let operation = match state.texture_editor.uv_operation_pending.take() {
+        Some(op) => op,
+        None => return,
+    };
+
+    // Get the mesh to modify
+    let obj = match state.project.selected_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Get selected vertex indices
+    let selected_vertices = state.texture_editor.uv_selection.clone();
+    if selected_vertices.is_empty() {
+        state.texture_editor.set_status("No vertices selected");
+        return;
+    }
+
+    // Calculate center of selection (for flip/rotate operations)
+    let mut center_u = 0.0f32;
+    let mut center_v = 0.0f32;
+    let mut count = 0;
+    for &vi in &selected_vertices {
+        if let Some(v) = obj.mesh.vertices.get(vi) {
+            center_u += v.uv.x;
+            center_v += v.uv.y;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        center_u /= count as f32;
+        center_v /= count as f32;
+    }
+
+    match operation {
+        UvOperation::FlipHorizontal => {
+            // Flip UVs horizontally around center
+            for &vi in &selected_vertices {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let offset = v.uv.x - center_u;
+                    let new_u = center_u - offset;
+                    // Snap to pixels
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                }
+            }
+        }
+        UvOperation::FlipVertical => {
+            // Flip UVs vertically around center
+            for &vi in &selected_vertices {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let offset = v.uv.y - center_v;
+                    let new_v = center_v - offset;
+                    // Snap to pixels
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+        }
+        UvOperation::RotateCW => {
+            // Rotate UVs 90 degrees clockwise around center
+            for &vi in &selected_vertices {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let offset_u = v.uv.x - center_u;
+                    let offset_v = v.uv.y - center_v;
+                    // 90 deg CW rotation: (x, y) -> (y, -x)
+                    let new_u = center_u + offset_v;
+                    let new_v = center_v - offset_u;
+                    // Snap to pixels
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+        }
+        UvOperation::ResetUVs => {
+            // Reset UVs to default positions (0-1 range covering texture)
+            // For a typical face, distribute vertices evenly
+            // Simple approach: reset to corners of unit square based on vertex order
+            let defaults = [
+                (0.0, 0.0),  // bottom-left
+                (1.0, 0.0),  // bottom-right
+                (1.0, 1.0),  // top-right
+                (0.0, 1.0),  // top-left
+            ];
+            for (i, &vi) in selected_vertices.iter().enumerate() {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let (u, vv) = defaults[i % defaults.len()];
+                    v.uv.x = u;
+                    v.uv.y = vv;
+                }
+            }
+        }
+    }
+
+    state.dirty = true;
+}
+
+/// Build UV overlay data from currently selected faces
+fn build_uv_overlay_data(state: &ModelerState) -> Option<UvOverlayData> {
+    let obj = state.project.selected()?;
+
+    // Get selected face indices
+    let selected_faces = match &state.selection {
+        super::state::ModelerSelection::Faces(indices) => indices.clone(),
+        _ => return None, // No faces selected
+    };
+
+    if selected_faces.is_empty() {
+        return None;
+    }
+
+    // Collect all unique vertices from selected faces
+    let mut vertex_map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+
+    for &fi in &selected_faces {
+        if let Some(face) = obj.mesh.faces.get(fi) {
+            let mut face_vertex_indices = Vec::new();
+
+            for &vi in &face.vertices {
+                let uv_idx = if let Some(&existing_idx) = vertex_map.get(&vi) {
+                    existing_idx
+                } else {
+                    let new_idx = vertices.len();
+                    if let Some(v) = obj.mesh.vertices.get(vi) {
+                        vertices.push(UvVertex {
+                            uv: v.uv,
+                            vertex_index: vi,
+                        });
+                    }
+                    vertex_map.insert(vi, new_idx);
+                    new_idx
+                };
+                face_vertex_indices.push(uv_idx);
+            }
+
+            faces.push(UvFace {
+                vertex_indices: face_vertex_indices,
+            });
+        }
+    }
+
+    let num_faces = faces.len();
+    Some(UvOverlayData {
+        vertices,
+        faces,
+        selected_faces: (0..num_faces).collect(), // All faces in our list are "selected"
+    })
 }
 
 /// Handle UV-specific interactions (separate from paint)

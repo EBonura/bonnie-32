@@ -31,6 +31,8 @@ pub use user_texture::{UserTexture, TextureSize, TextureError};
 pub use texture_library::{TextureLibrary, TEXTURES_USER_DIR};
 pub use texture_editor::{
     DrawTool, BrushShape, TextureEditorState, TextureUndoEntry,
+    TextureEditorMode, UvModalTransform, UvOperation,
+    UvOverlayData, UvVertex, UvFace,
     draw_texture_canvas, draw_tool_panel, draw_palette_panel,
-    screen_to_texture,
+    draw_mode_tabs, screen_to_texture,
 };

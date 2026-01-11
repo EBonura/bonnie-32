@@ -981,8 +981,8 @@ fn draw_texture_editor_panel(
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
     let palette_rect = Rect::new(content_rect.x, content_rect.y + canvas_h, content_rect.w, palette_panel_h);
 
-    // Draw panels
-    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor);
+    // Draw panels (pass None for UV data in world editor - UV editing handled separately)
+    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor, None);
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
     draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
 
