@@ -22,14 +22,16 @@ pub enum TextureEditorMode {
     Uv,
 }
 
-/// Modal transform for UV editing (G/S/R keys)
+/// Modal transform for UV editing (G/T/R keys)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UvModalTransform {
     #[default]
     None,
     /// G key - move UV selection
     Grab,
-    /// S key - scale UV selection
+    /// T key pressed - waiting for user to click and drag to scale
+    ScalePending,
+    /// T key - actively scaling UV selection (after click)
     Scale,
     /// R key - rotate UV selection
     Rotate,
@@ -3205,10 +3207,10 @@ fn handle_uv_input(
     }
 
     if is_key_pressed(KeyCode::T) && !state.uv_selection.is_empty() {
-        state.uv_modal_transform = UvModalTransform::Scale;
-        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        // Enter scale pending mode - wait for user to click and drag
+        state.uv_modal_transform = UvModalTransform::ScalePending;
         state.uv_modal_start_uvs.clear();
-        // Calculate selection center
+        // Pre-calculate selection center and store original UVs
         let mut center = RastVec2::new(0.0, 0.0);
         let mut count = 0;
         for &vi in &state.uv_selection {
@@ -3224,7 +3226,23 @@ fn handle_uv_input(
             center.y /= count as f32;
         }
         state.uv_modal_center = center;
-        state.set_status("Scale: Move mouse, click to confirm, Esc to cancel");
+        state.set_status("Scale: Click and drag to scale, Esc to cancel");
+    }
+
+    // Handle ScalePending → Scale transition when mouse is pressed
+    if state.uv_modal_transform == UvModalTransform::ScalePending && ctx.mouse.left_pressed {
+        state.uv_modal_transform = UvModalTransform::Scale;
+        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        state.set_status("Scale: Release to confirm, Esc to cancel");
+        return; // Don't process this click as anything else
+    }
+
+    // Handle Scale → None transition when mouse is released
+    if state.uv_modal_transform == UvModalTransform::Scale && !ctx.mouse.left_down {
+        state.uv_modal_transform = UvModalTransform::None;
+        state.uv_modal_start_uvs.clear();
+        state.set_status("Scale applied");
+        return;
     }
 
     if is_key_pressed(KeyCode::R) && !state.uv_selection.is_empty() {
@@ -3262,14 +3280,20 @@ fn handle_uv_input(
         }
     }
 
-    // Confirm modal transform with click
-    if ctx.mouse.left_pressed && state.uv_modal_transform != UvModalTransform::None {
-        // The transform is applied by the caller (modeler) based on state.uv_modal_start_uvs
-        // Here we just clear the modal state
-        state.uv_modal_transform = UvModalTransform::None;
-        state.uv_modal_start_uvs.clear();
-        state.set_status("Transform applied");
-        return; // Don't process click as selection
+    // Confirm modal transform with click (except Scale modes which use drag)
+    if ctx.mouse.left_pressed {
+        match state.uv_modal_transform {
+            UvModalTransform::Grab | UvModalTransform::Rotate => {
+                // The transform is applied by the caller (modeler) based on state.uv_modal_start_uvs
+                // Here we just clear the modal state
+                state.uv_modal_transform = UvModalTransform::None;
+                state.uv_modal_start_uvs.clear();
+                state.set_status("Transform applied");
+                return; // Don't process click as selection
+            }
+            // ScalePending and Scale are handled separately above
+            _ => {}
+        }
     }
 
     // Handle direct drag continuation

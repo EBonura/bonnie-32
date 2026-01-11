@@ -1362,7 +1362,8 @@ fn apply_uv_modal_transform(
     use crate::texture::UvModalTransform;
 
     let transform = state.texture_editor.uv_modal_transform;
-    if transform == UvModalTransform::None {
+    // Only apply transforms for active states (not None or ScalePending)
+    if transform == UvModalTransform::None || transform == UvModalTransform::ScalePending {
         return;
     }
 
