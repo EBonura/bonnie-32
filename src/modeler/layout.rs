@@ -1210,7 +1210,9 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let header_rect = Rect::new(rect.x, rect.y, rect.w, header_h);
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, Color::from_rgba(45, 45, 55, 255));
 
-    // Back button (arrow-big-left) - closes editor
+    let is_dirty = state.texture_editor.dirty;
+
+    // Back button (arrow-big-left) - far right
     let back_rect = Rect::new(rect.right() - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
     let back_hovered = ctx.mouse.inside(&back_rect);
     if back_hovered {
@@ -1219,29 +1221,46 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     draw_icon_centered(icon_font, icon::ARROW_BIG_LEFT, &back_rect, icon_size, if back_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
 
     if ctx.mouse.clicked(&back_rect) {
-        // TODO: Sync texture back to atlas if needed
         state.editing_texture = None;
         state.editing_indexed_atlas = false;
         return;
     }
 
-    // Save button
-    let save_rect = Rect::new(back_rect.x - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
-    let save_hovered = ctx.mouse.inside(&save_rect);
-    if save_hovered {
-        draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, Color::from_rgba(60, 80, 60, 255));
-    }
-    draw_icon_centered(icon_font, icon::SAVE, &save_rect, icon_size, if save_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
-
     // Get texture name for save and display (clone before we use tex mutably)
     let tex_name = tex.name.clone();
 
-    // Check save button now (will handle later after editing is done)
-    let save_clicked = ctx.mouse.clicked(&save_rect);
+    // Save/Download button - only visible when dirty
+    let mut save_clicked = false;
+    if is_dirty {
+        let save_rect = Rect::new(back_rect.x - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
+        let save_hovered = ctx.mouse.inside(&save_rect);
 
-    // Texture name (vertically centered in header)
-    let name_text = format!("Editing: {}", tex_name);
-    draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + header_h / 2.0 + 4.0).floor(), 12.0, WHITE);
+        // Highlight button to draw attention
+        let save_bg = if save_hovered {
+            Color::from_rgba(80, 100, 80, 255)
+        } else {
+            Color::from_rgba(60, 80, 60, 255)
+        };
+        draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, save_bg);
+
+        // Use SAVE icon on desktop, DOWNLOAD icon on WASM
+        #[cfg(not(target_arch = "wasm32"))]
+        let save_icon = icon::SAVE;
+        #[cfg(target_arch = "wasm32")]
+        let save_icon = icon::DOWNLOAD;
+
+        draw_icon_centered(icon_font, save_icon, &save_rect, icon_size, if save_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+        if ctx.mouse.clicked(&save_rect) {
+            save_clicked = true;
+        }
+    }
+
+    // Texture name with dirty indicator (vertically centered in header)
+    let dirty_indicator = if is_dirty { " ●" } else { "" };
+    let name_text = format!("Editing: {}{}", tex_name, dirty_indicator);
+    let name_color = if is_dirty { Color::from_rgba(255, 200, 100, 255) } else { WHITE };
+    draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + header_h / 2.0 + 4.0).floor(), 12.0, name_color);
 
     // Content area below header
     let content_rect_full = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
@@ -1324,6 +1343,9 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         // Now save to disk
         if let Err(e) = state.user_textures.save_texture(&tex_name) {
             eprintln!("Failed to save texture: {}", e);
+        } else {
+            // Clear dirty flag on successful save
+            state.texture_editor.dirty = false;
         }
         state.dirty = true;
     }
