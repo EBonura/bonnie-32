@@ -760,8 +760,47 @@ impl ModelerState {
         camera.rotation_y = 0.8;  // Looking toward origin
         camera.update_basis();
 
+        // Load user textures first so we can apply one to the default cube
+        let user_textures = {
+            let mut lib = TextureLibrary::new();
+            if let Err(e) = lib.discover() {
+                eprintln!("Failed to discover user textures: {}", e);
+            }
+            lib
+        };
+
         // Project is the single source of truth for mesh data
-        let project = MeshProject::default();
+        let mut project = MeshProject::default();
+
+        // Apply first user texture to the default cube, or create a grey fallback
+        let (editing_texture, selected_user_texture) = if let Some((name, tex)) = user_textures.iter().next() {
+            // Copy user texture to project atlas
+            project.atlas.width = tex.width;
+            project.atlas.height = tex.height;
+            project.atlas.depth = tex.depth;
+            project.atlas.indices = tex.indices.clone();
+            // Update the default CLUT with the texture's palette
+            if let Some(clut) = project.clut_pool.get_mut(project.atlas.default_clut) {
+                clut.colors = tex.palette.clone();
+                clut.depth = tex.depth;
+            }
+            (Some(tex.clone()), Some(name.to_string()))
+        } else {
+            // No user textures - create a grey checkerboard fallback
+            let grey_light = 8;  // Light grey index
+            let grey_dark = 7;   // Dark grey index
+            let size = project.atlas.width.min(project.atlas.height);
+            let check_size = size / 8; // 8x8 checker pattern
+            for y in 0..project.atlas.height {
+                for x in 0..project.atlas.width {
+                    let cx = x / check_size.max(1);
+                    let cy = y / check_size.max(1);
+                    let idx = if (cx + cy) % 2 == 0 { grey_light } else { grey_dark };
+                    project.atlas.indices[y * project.atlas.width + x] = idx;
+                }
+            }
+            (None, None)
+        };
 
         Self {
             interaction_mode: InteractionMode::Edit,
@@ -803,7 +842,7 @@ impl ModelerState {
             paint_stroke_active: false,
 
             // Collapsible sections
-            paint_section_expanded: false,
+            paint_section_expanded: true,
             paint_texture_scroll: 0.0,
 
             // CLUT editing defaults
@@ -864,17 +903,11 @@ impl ModelerState {
             tool_box: ModelerToolBox::new(),
 
             texture_editor: TextureEditorState::new(),
-            user_textures: {
-                let mut lib = TextureLibrary::new();
-                if let Err(e) = lib.discover() {
-                    eprintln!("Failed to discover user textures: {}", e);
-                }
-                lib
-            },
+            user_textures,
 
             editing_indexed_atlas: false,
-            editing_texture: None,
-            selected_user_texture: None,
+            editing_texture,
+            selected_user_texture,
             paint_thumb_size: 64.0,  // Default thumbnail size
         }
     }
