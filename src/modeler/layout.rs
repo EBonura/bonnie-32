@@ -4262,7 +4262,8 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             if !face_indices.is_empty() {
                 let indices = face_indices.clone();
                 state.push_undo("Extrude");
-                let extrude_amount = state.snap_settings.grid_size;
+                // Use 2x grid size for clearly visible extrusion
+                let extrude_amount = state.snap_settings.grid_size * 2.0;
                 let new_faces = if let Some(mesh) = state.mesh_mut() {
                     mesh.extrude_faces(&indices, extrude_amount)
                 } else {

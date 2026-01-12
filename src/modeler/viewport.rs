@@ -764,12 +764,12 @@ pub fn draw_modeler_viewport_ext(
                 state.viewport_mouse_captured = false;
             }
 
-            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
-            // Skip when Ctrl/Alt is held to avoid conflicts with shortcuts
-            // Shift is allowed - it increases movement speed
+            // Keyboard camera movement (WASD + Q/E) - only while right-click held (like Unity/Unreal)
+            // This prevents conflicts with editing shortcuts like E for extrude
+            // Shift increases movement speed
             let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
             let speed = if shift_held { base_speed * 4.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !blocking_modifier {
+            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !blocking_modifier {
                 if w_down {
                     state.camera.position = state.camera.position + state.camera.basis_z * speed;
                 }
