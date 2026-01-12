@@ -457,6 +457,11 @@ pub struct EditorState {
     pub viewport_last_mouse: (f32, f32),
     pub viewport_mouse_captured: bool,
 
+    /// macOS stuck key workaround: track modifier state for WASD camera
+    pub modifier_was_held: bool,
+    /// Track which movement keys we trust (macOS workaround)
+    pub trusted_movement_keys: [bool; 6], // W, A, S, D, Q, E
+
     /// Which panel has keyboard focus (for routing shortcuts)
     pub active_panel: ActivePanel,
 
@@ -728,6 +733,8 @@ impl EditorState {
             status_message: None,
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
+            modifier_was_held: false,
+            trusted_movement_keys: [true; 6], // All trusted initially
             active_panel: ActivePanel::Viewport3D,
             grid_last_mouse: (0.0, 0.0),
             grid_panning: false,
