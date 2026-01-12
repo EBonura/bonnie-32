@@ -10,6 +10,7 @@ use crate::rasterizer::{Texture as RasterTexture, ClutDepth};
 use crate::texture::{
     UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel,
     draw_mode_tabs, TextureEditorMode, UvOverlayData, UvVertex, UvFace,
+    draw_import_dialog, ImportAction, load_png_to_import_state,
 };
 use crate::rasterizer::Vec2 as RastVec2;
 use super::EditorState;
@@ -67,6 +68,31 @@ pub fn draw_texture_palette(
         draw_folder_selector(ctx, header_rect, state, icon_font);
         let grid_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, content_rect.w, content_rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
         draw_source_texture_grid(ctx, grid_rect, state);
+    }
+
+    // Draw import dialog (modal overlay) if active
+    if let Some(action) = draw_import_dialog(ctx, &mut state.texture_editor.import_state, icon_font) {
+        match action {
+            ImportAction::Confirm => {
+                // Create a new texture from the import state
+                let import = &state.texture_editor.import_state;
+                let name = state.user_textures.next_available_name();
+                let (size_w, _) = import.target_size.dimensions();
+                let texture = UserTexture::new_with_data(
+                    name.clone(),
+                    import.target_size,
+                    import.depth,
+                    import.preview_indices.clone(),
+                    import.preview_palette.clone(),
+                );
+                state.user_textures.add(texture);
+                state.set_status(&format!("Imported '{}' ({}x{})", name, size_w, size_w), 2.0);
+                state.texture_editor.import_state.reset();
+            }
+            ImportAction::Cancel => {
+                // Just reset the import state (already done by the dialog)
+            }
+        }
     }
 }
 
@@ -633,9 +659,63 @@ fn draw_user_texture_header(
     let btn_h = rect.h - 8.0;
     let btn_w = 60.0;
     let btn_y = rect.y + 4.0;
+    let mut btn_x = rect.x + 4.0;
+
+    // "Import" button - square icon button at the start
+    let import_btn_w = btn_h;
+    let import_rect = Rect::new(btn_x, btn_y, import_btn_w, btn_h);
+    let import_hovered = ctx.mouse.inside(&import_rect);
+    let import_bg = if import_hovered {
+        Color::from_rgba(70, 70, 80, 255)
+    } else {
+        Color::from_rgba(55, 55, 65, 255)
+    };
+    draw_rectangle(import_rect.x, import_rect.y, import_rect.w, import_rect.h, import_bg);
+    draw_rectangle_lines(import_rect.x, import_rect.y, import_rect.w, import_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    let import_icon_color = if import_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) };
+    draw_icon_centered(icon_font, icon::FOLDER_OPEN, &import_rect, 14.0, import_icon_color);
+
+    // Tooltip on hover
+    if import_hovered {
+        let tooltip = "Import PNG";
+        let tip_dims = measure_text(tooltip, None, 12, 1.0);
+        let tip_x = import_rect.x + import_rect.w / 2.0 - tip_dims.width / 2.0;
+        let tip_y = import_rect.bottom() + 4.0;
+        draw_rectangle(tip_x - 4.0, tip_y - 2.0, tip_dims.width + 8.0, tip_dims.height + 6.0, Color::from_rgba(30, 30, 35, 240));
+        draw_text(tooltip, tip_x, tip_y + tip_dims.height, 12.0, WHITE);
+    }
+
+    // Import button opens file picker
+    if ctx.mouse.clicked(&import_rect) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
+                .pick_file()
+            {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        if let Err(e) = load_png_to_import_state(&bytes, &mut state.texture_editor.import_state) {
+                            state.set_status(&format!("Import failed: {}", e), 3.0);
+                        }
+                    }
+                    Err(e) => {
+                        state.set_status(&format!("Failed to read file: {}", e), 3.0);
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            state.set_status("Import not yet available in browser", 2.0);
+        }
+    }
+
+    btn_x += import_btn_w + 4.0;
 
     // "New" button
-    let new_rect = Rect::new(rect.x + 4.0, btn_y, btn_w, btn_h);
+    let new_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
     let new_hovered = ctx.mouse.inside(&new_rect);
     let new_bg = if new_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
     draw_rectangle(new_rect.x, new_rect.y, new_rect.w, new_rect.h, new_bg);
@@ -656,9 +736,11 @@ fn draw_user_texture_header(
         state.texture_editor.reset();
     }
 
+    btn_x += btn_w + 4.0;
+
     // "Edit" button - edits the selected texture
     let has_selection = state.selected_user_texture.is_some();
-    let edit_rect = Rect::new(rect.x + 8.0 + btn_w, btn_y, btn_w, btn_h);
+    let edit_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
     let edit_hovered = ctx.mouse.inside(&edit_rect);
     let edit_enabled = has_selection;
     let edit_bg = if !edit_enabled {

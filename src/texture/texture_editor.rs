@@ -384,6 +384,10 @@ pub struct TextureEditorState {
     pub uv_modal_center: RastVec2,
     /// Pending UV operation (flip/rotate/reset) requested by button
     pub uv_operation_pending: Option<UvOperation>,
+
+    // === Import State ===
+    /// State for the texture import dialog
+    pub import_state: super::import::TextureImportState,
 }
 
 /// Edge or corner being resized
@@ -454,6 +458,8 @@ impl Default for TextureEditorState {
             uv_modal_start_uvs: Vec::new(),
             uv_modal_center: RastVec2::new(0.0, 0.0),
             uv_operation_pending: None,
+            // Import state
+            import_state: super::import::TextureImportState::default(),
         }
     }
 }
@@ -3387,4 +3393,348 @@ fn handle_uv_input(
             state.uv_box_select_start = None;
         }
     }
+}
+
+// ============================================================================
+// Import Dialog
+// ============================================================================
+
+/// Action returned by the import dialog
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportAction {
+    /// User confirmed import
+    Confirm,
+    /// User cancelled import
+    Cancel,
+}
+
+/// Draw the import dialog overlay
+/// Returns Some(ImportAction) if user clicked a button
+pub fn draw_import_dialog(
+    ctx: &mut UiContext,
+    import_state: &mut super::import::TextureImportState,
+    _icon_font: Option<&Font>,
+) -> Option<ImportAction> {
+    use super::import::{ResizeMode, generate_preview, preview_to_rgba};
+
+    if !import_state.active {
+        return None;
+    }
+
+    // Regenerate preview if settings changed
+    if import_state.preview_dirty && !import_state.source_rgba.is_empty() {
+        generate_preview(import_state);
+    }
+
+    // Darken background
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.6));
+
+    // Calculate palette height for dialog sizing
+    let num_colors = import_state.preview_palette.len();
+    let palette_rows = if num_colors == 0 { 1 } else if num_colors <= 16 { 1 } else { ((num_colors + 31) / 32).min(8) };
+    let palette_height = palette_rows as f32 * 16.0 + 24.0; // swatches + label
+
+    // Dialog dimensions
+    let dialog_w = 560.0;
+    let preview_size = 256.0;
+    let dialog_h = 50.0 + preview_size + 24.0 + 16.0 + palette_height + 48.0; // title + preview area + gap + palette + buttons
+    let dialog_x = (screen_width() - dialog_w) / 2.0;
+    let dialog_y = (screen_height() - dialog_h) / 2.0;
+
+    // Background
+    draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
+    draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Title
+    draw_text("Import Texture", dialog_x + 16.0, dialog_y + 28.0, 20.0, WHITE);
+
+    let left_margin = dialog_x + 16.0;
+    let content_y = dialog_y + 46.0;
+
+    // === LEFT SIDE: Large Preview ===
+    let (target_w, _) = import_state.target_size.dimensions();
+    let result_label = format!("Preview ({}x{})", target_w, target_w);
+    draw_text(&result_label, left_margin, content_y + 14.0, 14.0, Color::from_rgba(180, 180, 180, 255));
+
+    let preview_top = content_y + 24.0;
+
+    // Draw checkerboard background for preview
+    let check_size = 16.0;
+    for cy in 0..(preview_size / check_size) as i32 {
+        for cx in 0..(preview_size / check_size) as i32 {
+            let c = if (cx + cy) % 2 == 0 {
+                Color::from_rgba(60, 60, 65, 255)
+            } else {
+                Color::from_rgba(45, 45, 50, 255)
+            };
+            draw_rectangle(
+                left_margin + cx as f32 * check_size,
+                preview_top + cy as f32 * check_size,
+                check_size,
+                check_size,
+                c,
+            );
+        }
+    }
+
+    // Draw preview pixels
+    if !import_state.preview_indices.is_empty() {
+        let rgba = preview_to_rgba(import_state);
+        let pixel_size = preview_size / target_w as f32;
+        for py in 0..target_w {
+            for px in 0..target_w {
+                let idx = (py * target_w + px) * 4;
+                if idx + 3 < rgba.len() {
+                    let a = rgba[idx + 3];
+                    if a > 0 {
+                        let r = rgba[idx] as f32 / 255.0;
+                        let g = rgba[idx + 1] as f32 / 255.0;
+                        let b = rgba[idx + 2] as f32 / 255.0;
+                        draw_rectangle(
+                            left_margin + px as f32 * pixel_size,
+                            preview_top + py as f32 * pixel_size,
+                            pixel_size,
+                            pixel_size,
+                            Color::new(r, g, b, 1.0),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Preview border
+    draw_rectangle_lines(left_margin, preview_top, preview_size, preview_size, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    // === RIGHT SIDE: Settings (must fit within preview height) ===
+    let settings_x = left_margin + preview_size + 16.0;
+    let settings_w = dialog_w - preview_size - 48.0;
+    let btn_h = 24.0;
+    let btn_gap = 4.0;
+    let section_gap = 12.0;
+    let mut y = content_y;
+
+    // Source info (compact)
+    draw_text("Source:", settings_x, y + 12.0, 13.0, Color::from_rgba(180, 180, 180, 255));
+    let info_text = format!("{}x{}, {} colors", import_state.source_width, import_state.source_height, import_state.unique_colors);
+    draw_text(&info_text, settings_x + 55.0, y + 12.0, 11.0, Color::from_rgba(150, 150, 150, 255));
+    y += 20.0 + section_gap;
+
+    // Target size (2x2 grid)
+    draw_text("Size:", settings_x, y + 12.0, 13.0, Color::from_rgba(180, 180, 180, 255));
+    y += 18.0;
+
+    let size_btn_w = (settings_w - btn_gap) / 2.0;
+    let sizes = super::import::IMPORT_SIZES;
+    for (i, size) in sizes.iter().enumerate() {
+        let row = i / 2;
+        let col = i % 2;
+        let btn_x = settings_x + col as f32 * (size_btn_w + btn_gap);
+        let btn_y = y + row as f32 * (btn_h + btn_gap);
+
+        let is_selected = import_state.target_size == *size;
+        let btn_rect = Rect::new(btn_x, btn_y, size_btn_w, btn_h);
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_selected {
+            Color::from_rgba(70, 100, 140, 255)
+        } else if hovered {
+            Color::from_rgba(65, 65, 75, 255)
+        } else {
+            Color::from_rgba(55, 55, 65, 255)
+        };
+        draw_rectangle(btn_x, btn_y, size_btn_w, btn_h, bg);
+        draw_rectangle_lines(btn_x, btn_y, size_btn_w, btn_h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+        let text_color = if is_selected { WHITE } else { Color::from_rgba(200, 200, 200, 255) };
+        let label = size.label();
+        let dims = measure_text(label, None, 11, 1.0);
+        draw_text(label, btn_x + (size_btn_w - dims.width) / 2.0, btn_y + btn_h / 2.0 + 4.0, 11.0, text_color);
+
+        if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+            import_state.target_size = *size;
+            import_state.preview_dirty = true;
+        }
+    }
+    y += (btn_h + btn_gap) * 2.0 + section_gap;
+
+    // Resize mode (horizontal row)
+    draw_text("Resize:", settings_x, y + 12.0, 13.0, Color::from_rgba(180, 180, 180, 255));
+    y += 18.0;
+
+    let resize_btn_w = (settings_w - btn_gap * 2.0) / 3.0;
+    for (i, mode) in ResizeMode::ALL.iter().enumerate() {
+        let btn_x = settings_x + i as f32 * (resize_btn_w + btn_gap);
+
+        let is_selected = import_state.resize_mode == *mode;
+        let btn_rect = Rect::new(btn_x, y, resize_btn_w, btn_h);
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_selected {
+            Color::from_rgba(70, 100, 140, 255)
+        } else if hovered {
+            Color::from_rgba(65, 65, 75, 255)
+        } else {
+            Color::from_rgba(55, 55, 65, 255)
+        };
+        draw_rectangle(btn_x, y, resize_btn_w, btn_h, bg);
+        draw_rectangle_lines(btn_x, y, resize_btn_w, btn_h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+        let text_color = if is_selected { WHITE } else { Color::from_rgba(200, 200, 200, 255) };
+        let label = mode.label();
+        let dims = measure_text(label, None, 10, 1.0);
+        draw_text(label, btn_x + (resize_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 10.0, text_color);
+
+        if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+            import_state.resize_mode = *mode;
+            import_state.preview_dirty = true;
+        }
+    }
+    y += btn_h + section_gap;
+
+    // Palette depth (horizontal row)
+    let hint = if import_state.unique_colors <= 15 { "4-bit" } else { "8-bit" };
+    draw_text(&format!("Depth: (rec: {})", hint), settings_x, y + 12.0, 13.0, Color::from_rgba(180, 180, 180, 255));
+    y += 18.0;
+
+    let depth_btn_w = (settings_w - btn_gap) / 2.0;
+    let depths = [(ClutDepth::Bpp4, "4-bit (16)"), (ClutDepth::Bpp8, "8-bit (256)")];
+    for (i, (depth, label)) in depths.iter().enumerate() {
+        let btn_x = settings_x + i as f32 * (depth_btn_w + btn_gap);
+
+        let is_selected = import_state.depth == *depth;
+        let btn_rect = Rect::new(btn_x, y, depth_btn_w, btn_h);
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_selected {
+            Color::from_rgba(70, 100, 140, 255)
+        } else if hovered {
+            Color::from_rgba(65, 65, 75, 255)
+        } else {
+            Color::from_rgba(55, 55, 65, 255)
+        };
+        draw_rectangle(btn_x, y, depth_btn_w, btn_h, bg);
+        draw_rectangle_lines(btn_x, y, depth_btn_w, btn_h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+        let text_color = if is_selected { WHITE } else { Color::from_rgba(200, 200, 200, 255) };
+        let dims = measure_text(label, None, 10, 1.0);
+        draw_text(label, btn_x + (depth_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 10.0, text_color);
+
+        if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+            import_state.depth = *depth;
+            import_state.preview_dirty = true;
+        }
+    }
+
+    // === BOTTOM SECTION: Palette + Buttons ===
+    let bottom_section_y = preview_top + preview_size + 16.0;
+
+    // Generated Palette label
+    let palette_label = format!("Palette ({} colors)", num_colors);
+    draw_text(&palette_label, left_margin, bottom_section_y + 12.0, 13.0, Color::from_rgba(180, 180, 180, 255));
+
+    // Palette grid
+    let palette_grid_y = bottom_section_y + 20.0;
+    let max_palette_width = dialog_w - 32.0;
+
+    if num_colors > 0 {
+        let cols = if num_colors <= 16 { 16 } else { 32.min(num_colors) };
+        let rows = (num_colors + cols - 1) / cols;
+        let swatch_size = (max_palette_width / cols as f32).min(16.0);
+
+        for row in 0..rows {
+            for col in 0..cols {
+                let idx = row * cols + col;
+                if idx >= num_colors {
+                    break;
+                }
+                let sx = left_margin + col as f32 * swatch_size;
+                let sy = palette_grid_y + row as f32 * swatch_size;
+
+                // Checkerboard for transparent
+                let check_half = swatch_size / 2.0;
+                for cy in 0..2 {
+                    for cx in 0..2 {
+                        let c = if (cx + cy) % 2 == 0 {
+                            Color::from_rgba(80, 80, 85, 255)
+                        } else {
+                            Color::from_rgba(50, 50, 55, 255)
+                        };
+                        draw_rectangle(sx + cx as f32 * check_half, sy + cy as f32 * check_half, check_half, check_half, c);
+                    }
+                }
+
+                // Draw the color
+                let color = &import_state.preview_palette[idx];
+                if !color.is_transparent() {
+                    let [r, g, b, _] = color.to_rgba();
+                    draw_rectangle(sx, sy, swatch_size, swatch_size, Color::from_rgba(r, g, b, 255));
+                }
+
+                // Grid lines
+                draw_rectangle_lines(sx, sy, swatch_size, swatch_size, 1.0, Color::from_rgba(35, 35, 40, 255));
+            }
+        }
+    }
+
+    // === Bottom buttons ===
+    let button_y = dialog_y + dialog_h - 40.0;
+    let bottom_btn_w = 90.0;
+    let bottom_btn_h = 28.0;
+
+    // Cancel button
+    let cancel_x = dialog_x + dialog_w - bottom_btn_w * 2.0 - btn_gap - 16.0;
+    let cancel_rect = Rect::new(cancel_x, button_y, bottom_btn_w, bottom_btn_h);
+    let cancel_hovered = ctx.mouse.inside(&cancel_rect);
+    draw_rectangle(cancel_x, button_y, bottom_btn_w, bottom_btn_h,
+        if cancel_hovered { Color::from_rgba(80, 60, 60, 255) } else { Color::from_rgba(65, 55, 55, 255) });
+    draw_rectangle_lines(cancel_x, button_y, bottom_btn_w, bottom_btn_h, 1.0, Color::from_rgba(100, 80, 80, 255));
+    let cancel_dims = measure_text("Cancel", None, 13, 1.0);
+    draw_text("Cancel", cancel_x + (bottom_btn_w - cancel_dims.width) / 2.0, button_y + bottom_btn_h / 2.0 + 4.0, 13.0,
+        if cancel_hovered { WHITE } else { Color::from_rgba(200, 180, 180, 255) });
+
+    if cancel_hovered && ctx.mouse.clicked(&cancel_rect) {
+        import_state.reset();
+        return Some(ImportAction::Cancel);
+    }
+
+    // Import button
+    let import_x = dialog_x + dialog_w - bottom_btn_w - 16.0;
+    let import_rect = Rect::new(import_x, button_y, bottom_btn_w, bottom_btn_h);
+    let import_hovered = ctx.mouse.inside(&import_rect);
+    let has_preview = !import_state.preview_indices.is_empty();
+    let import_enabled = has_preview;
+
+    let import_bg = if !import_enabled {
+        Color::from_rgba(45, 45, 50, 255)
+    } else if import_hovered {
+        Color::from_rgba(60, 100, 80, 255)
+    } else {
+        Color::from_rgba(55, 85, 65, 255)
+    };
+    draw_rectangle(import_x, button_y, bottom_btn_w, bottom_btn_h, import_bg);
+    draw_rectangle_lines(import_x, button_y, bottom_btn_w, bottom_btn_h, 1.0,
+        if import_enabled { Color::from_rgba(80, 120, 100, 255) } else { Color::from_rgba(60, 60, 65, 255) });
+
+    let import_text_color = if !import_enabled {
+        Color::from_rgba(100, 100, 100, 255)
+    } else if import_hovered {
+        WHITE
+    } else {
+        Color::from_rgba(180, 220, 200, 255)
+    };
+    let import_dims = measure_text("Import", None, 13, 1.0);
+    draw_text("Import", import_x + (bottom_btn_w - import_dims.width) / 2.0, button_y + bottom_btn_h / 2.0 + 4.0, 13.0, import_text_color);
+
+    if import_enabled && import_hovered && ctx.mouse.clicked(&import_rect) {
+        return Some(ImportAction::Confirm);
+    }
+
+    // Escape key to cancel
+    if is_key_pressed(KeyCode::Escape) {
+        import_state.reset();
+        return Some(ImportAction::Cancel);
+    }
+
+    None
 }
