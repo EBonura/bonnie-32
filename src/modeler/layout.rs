@@ -550,11 +550,13 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 // Left Panel (Overview + Selection + Lights + Shortcuts)
 // ============================================================================
 
-/// Draw a simple section label (non-collapsible)
+/// Draw a simple section label (non-collapsible, matches World Editor panel header style)
 fn draw_section_label(x: f32, y: &mut f32, width: f32, label: &str) {
-    draw_rectangle(x, *y, width, 18.0, Color::from_rgba(45, 45, 52, 255));
-    draw_text(label, x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
-    *y += 20.0;
+    let header_h = 20.0;
+    draw_rectangle(x, *y, width, header_h, Color::from_rgba(50, 50, 60, 255));
+    draw_text(label, x + 4.0, *y + 14.0, 16.0, WHITE);
+    draw_rectangle_lines(x, *y, width, header_h, 1.0, Color::from_rgba(80, 80, 80, 255));
+    *y += header_h;
 }
 
 fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
@@ -804,6 +806,7 @@ fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, i
 }
 
 /// Draw a collapsible section header, returns (new_expanded_state, was_clicked)
+/// Matches World Editor style: 20px header, 16pt font, triangle indicators
 fn draw_collapsible_header(
     ctx: &mut UiContext,
     x: f32,
@@ -812,41 +815,57 @@ fn draw_collapsible_header(
     label: &str,
     expanded: bool,
     focused: bool,
-    icon_font: Option<&Font>,
+    _icon_font: Option<&Font>,
 ) -> (bool, bool) {
-    let header_h = 24.0;
-    let header_rect = Rect::new(x + 2.0, *y, width - 4.0, header_h);
+    let header_h = 20.0;  // Match World Editor
+    let header_rect = Rect::new(x, *y, width, header_h);
     let hovered = ctx.mouse.inside(&header_rect);
 
-    // Background
+    // Background (matching World Editor colors)
     let bg = if hovered {
-        Color::from_rgba(55, 55, 62, 255)
+        Color::from_rgba(60, 60, 70, 255)
     } else {
-        Color::from_rgba(45, 45, 52, 255)
+        Color::from_rgba(50, 50, 60, 255)
     };
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, bg);
 
-    // Text color - cyan when focused (matching World Editor)
-    let text_color = if focused { ACCENT_COLOR } else { TEXT_COLOR };
+    // Text/indicator color - cyan when focused
+    let text_color = if focused { ACCENT_COLOR } else { WHITE };
+    let indicator_color = if focused { ACCENT_COLOR } else { Color::from_rgba(180, 180, 180, 255) };
 
-    // Expand/collapse icon
-    let chevron = if expanded { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT };
-    if let Some(font) = icon_font {
-        draw_text_ex(
-            &chevron.to_string(),
-            header_rect.x + 6.0,
-            header_rect.y + 17.0,
-            TextParams { font: Some(font), font_size: 14, color: text_color, ..Default::default() },
+    // Triangle indicator (matching World Editor style)
+    let indicator_x = x + 6.0;
+    let indicator_y = *y + 10.0;
+    let indicator_size = 5.0;
+
+    if expanded {
+        // Down-pointing triangle (expanded)
+        draw_triangle(
+            macroquad::math::Vec2::new(indicator_x - 2.0, indicator_y - 3.0),
+            macroquad::math::Vec2::new(indicator_x + indicator_size + 2.0, indicator_y - 3.0),
+            macroquad::math::Vec2::new(indicator_x + indicator_size / 2.0, indicator_y + 4.0),
+            indicator_color,
+        );
+    } else {
+        // Right-pointing triangle (collapsed)
+        draw_triangle(
+            macroquad::math::Vec2::new(indicator_x, indicator_y - indicator_size),
+            macroquad::math::Vec2::new(indicator_x, indicator_y + indicator_size),
+            macroquad::math::Vec2::new(indicator_x + indicator_size, indicator_y),
+            indicator_color,
         );
     }
 
-    // Label
-    draw_text(label, header_rect.x + 24.0, header_rect.y + 16.0, FONT_SIZE_HEADER, text_color);
+    // Label (font size 16 to match World Editor)
+    draw_text(label, x + 16.0, *y + 14.0, 16.0, text_color);
 
-    *y += header_h + 2.0;
+    // Border (matching World Editor)
+    draw_rectangle_lines(header_rect.x, header_rect.y, header_rect.w, header_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
+
+    *y += header_h;
 
     // Handle click
-    let clicked = ctx.mouse.clicked(&header_rect);
+    let clicked = hovered && ctx.mouse.left_pressed;
     let new_expanded = if clicked { !expanded } else { expanded };
     (new_expanded, clicked)
 }
@@ -2407,10 +2426,10 @@ fn draw_single_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
     let header_color = Color::from_rgba(50, 50, 60, 255);
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, header_color);
 
-    // Header text - cyan when active, white when inactive
+    // Header text - cyan when active, white when inactive (font size 16 to match World Editor)
     let label = viewport_id.label();
     let text_color = if is_active { ACCENT_COLOR } else { WHITE };
-    draw_text(label, header_rect.x + 6.0, header_rect.y + 14.0, FONT_SIZE_HEADER, text_color);
+    draw_text(label, header_rect.x + 6.0, header_rect.y + 14.0, 16.0, text_color);
 
     // X-RAY label in header when enabled
     if state.xray_mode {
