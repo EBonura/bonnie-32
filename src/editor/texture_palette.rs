@@ -86,6 +86,11 @@ pub fn draw_texture_palette(
                     import.preview_palette.clone(),
                 );
                 state.user_textures.add(texture);
+                // Save to disk immediately (native only)
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Err(e) = state.user_textures.save_texture(&name) {
+                    eprintln!("Failed to save imported texture: {}", e);
+                }
                 state.set_status(&format!("Imported '{}' ({}x{})", name, size_w, size_w), 2.0);
                 state.texture_editor.import_state.reset();
             }

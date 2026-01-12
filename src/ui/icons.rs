@@ -134,6 +134,7 @@ pub mod icon {
     pub const RECTANGLE_HORIZONTAL: char = '\u{e376}'; // rectangle-horizontal
     pub const CIRCLE: char = '\u{e076}';          // circle (ellipse shape)
     pub const DROPLET: char = '\u{e0b4}';         // droplet (fill toggle)
+    pub const PIPETTE: char = '\u{e4c6}';         // pipette (eyedropper/color picker)
 }
 
 /// Draw a Lucide icon centered in a rect

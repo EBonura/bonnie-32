@@ -4,7 +4,7 @@
 
 use image::{imageops::FilterType, RgbaImage};
 use crate::rasterizer::{ClutDepth, Color15};
-use crate::modeler::{quantize_image, count_unique_colors};
+use crate::modeler::{quantize_image_with_options, count_unique_colors, QuantizeMode, QuantizeOptions};
 use super::TextureSize;
 
 /// Supported import target sizes (32x32 to 256x256)
@@ -43,6 +43,10 @@ impl ResizeMode {
     ];
 }
 
+
+/// Atlas cell sizes for spritesheet import
+pub const ATLAS_CELL_SIZES: &[usize] = &[32, 64, 128, 256];
+
 /// State for the texture import dialog
 #[derive(Debug)]
 pub struct TextureImportState {
@@ -60,6 +64,18 @@ pub struct TextureImportState {
     pub resize_mode: ResizeMode,
     /// Selected palette depth
     pub depth: ClutDepth,
+    /// Selected quantization mode
+    pub quantize_mode: QuantizeMode,
+    /// Use LAB color space for perceptually uniform quantization
+    pub use_lab: bool,
+    /// Denoise: reduce to 4-bit per channel (0=off, 1=on)
+    pub pre_quantize: u8,
+    /// Perceptual weighting (0.0-1.0) - weight green channel more
+    pub perceptual_weight: f32,
+    /// Saturation bias (0.0-1.0) - prioritize saturated colors
+    pub saturation_bias: f32,
+    /// Minimum bucket fraction (0.0-0.05) - merge tiny color clusters
+    pub min_bucket_fraction: f32,
     /// Number of unique colors detected in source
     pub unique_colors: usize,
     /// Whether preview needs regeneration
@@ -68,6 +84,13 @@ pub struct TextureImportState {
     pub preview_indices: Vec<u8>,
     /// Quantized preview palette
     pub preview_palette: Vec<Color15>,
+    // === Atlas/Spritesheet Mode ===
+    /// Whether atlas mode is enabled (subdivide source into grid)
+    pub atlas_mode: bool,
+    /// Cell size for atlas grid (32, 64, 128, or 256)
+    pub atlas_cell_size: usize,
+    /// Selected cell in atlas (col, row)
+    pub atlas_selected: (usize, usize),
 }
 
 impl Default for TextureImportState {
@@ -80,10 +103,20 @@ impl Default for TextureImportState {
             target_size: TextureSize::Size64x64, // Default to 64x64
             resize_mode: ResizeMode::default(),
             depth: ClutDepth::default(),
+            quantize_mode: QuantizeMode::default(),
+            use_lab: false,
+            pre_quantize: 0,
+            perceptual_weight: 0.0,
+            saturation_bias: 0.0,
+            min_bucket_fraction: 0.0,
             unique_colors: 0,
             preview_dirty: false,
             preview_indices: Vec::new(),
             preview_palette: Vec::new(),
+            // Atlas mode
+            atlas_mode: false,
+            atlas_cell_size: 64,
+            atlas_selected: (0, 0),
         }
     }
 }
@@ -166,6 +199,43 @@ pub fn resize_to_target(
     resized.into_raw()
 }
 
+/// Extract a cell from an atlas/spritesheet
+/// Returns RGBA data for the specified cell, or None if out of bounds
+pub fn extract_atlas_cell(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    cell_size: usize,
+    col: usize,
+    row: usize,
+) -> Option<Vec<u8>> {
+    let cell_x = col * cell_size;
+    let cell_y = row * cell_size;
+
+    // Check bounds
+    if cell_x + cell_size > width || cell_y + cell_size > height {
+        return None;
+    }
+
+    // Extract the cell
+    let mut cell_rgba = Vec::with_capacity(cell_size * cell_size * 4);
+    for y in 0..cell_size {
+        let src_y = cell_y + y;
+        let src_start = (src_y * width + cell_x) * 4;
+        let src_end = src_start + cell_size * 4;
+        cell_rgba.extend_from_slice(&rgba[src_start..src_end]);
+    }
+
+    Some(cell_rgba)
+}
+
+/// Get the number of columns and rows in an atlas
+pub fn atlas_dimensions(width: usize, height: usize, cell_size: usize) -> (usize, usize) {
+    let cols = width / cell_size;
+    let rows = height / cell_size;
+    (cols, rows)
+}
+
 /// Generate quantized preview from source image
 pub fn generate_preview(state: &mut TextureImportState) {
     if state.source_rgba.is_empty() {
@@ -175,16 +245,49 @@ pub fn generate_preview(state: &mut TextureImportState) {
     let (target_w, target_h) = state.target_size.dimensions();
     let target = target_w; // Square textures, so width == height
 
+    // In atlas mode, extract the selected cell first
+    let (source_rgba, source_w, source_h) = if state.atlas_mode {
+        let (col, row) = state.atlas_selected;
+        let cell_size = state.atlas_cell_size;
+
+        if let Some(cell) = extract_atlas_cell(
+            &state.source_rgba,
+            state.source_width,
+            state.source_height,
+            cell_size,
+            col,
+            row,
+        ) {
+            (cell, cell_size, cell_size)
+        } else {
+            // Cell out of bounds, use whole source
+            (state.source_rgba.clone(), state.source_width, state.source_height)
+        }
+    } else {
+        (state.source_rgba.clone(), state.source_width, state.source_height)
+    };
+
     let resized = resize_to_target(
-        &state.source_rgba,
-        state.source_width,
-        state.source_height,
+        &source_rgba,
+        source_w,
+        source_h,
         target,
         state.resize_mode,
     );
 
-    // Use existing quantize_image from modeler/quantize.rs
-    let result = quantize_image(&resized, target, target_h, state.depth, "preview");
+    // Build quantization options from state
+    let opts = QuantizeOptions {
+        mode: state.quantize_mode,
+        use_lab: state.use_lab,
+        pre_quantize: state.pre_quantize,
+        perceptual_weight: state.perceptual_weight,
+        saturation_bias: state.saturation_bias,
+        min_bucket_fraction: state.min_bucket_fraction,
+    };
+
+    let result = quantize_image_with_options(
+        &resized, target, target_h, state.depth, "preview", &opts
+    );
 
     state.preview_indices = result.texture.indices;
     state.preview_palette = result.clut.colors;

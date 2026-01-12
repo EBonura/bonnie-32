@@ -39,6 +39,9 @@ pub use texture_editor::{
     ImportAction, draw_import_dialog,
 };
 pub use import::{
-    TextureImportState, ResizeMode, IMPORT_SIZES,
+    TextureImportState, ResizeMode, IMPORT_SIZES, ATLAS_CELL_SIZES,
     load_png_to_import_state, generate_preview, preview_to_rgba,
+    extract_atlas_cell, atlas_dimensions,
 };
+// Re-export quantization types from modeler for use with TextureImportState
+pub use crate::modeler::{QuantizeMode, QuantizeOptions};

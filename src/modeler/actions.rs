@@ -438,6 +438,15 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .enabled_when(|ctx| ctx.has_flag(flags::PAINT_MODE)),
     );
 
+    registry.register(
+        Action::new("brush.eyedropper")
+            .label("Eyedropper")
+            .shortcut(Shortcut::key(KeyCode::I))
+            .status_tip("Pick color from canvas")
+            .category("Paint")
+            .enabled_when(|ctx| ctx.has_flag(flags::PAINT_MODE)),
+    );
+
     // ========================================================================
     // Mesh Operations
     // ========================================================================
