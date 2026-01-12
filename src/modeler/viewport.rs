@@ -1890,10 +1890,10 @@ fn find_hovered_element(
         }
     }
 
-    // Check vertices first (highest priority) - only if on front-facing face
+    // Check vertices first (highest priority) - only if on front-facing face (unless X-ray mode)
     for (idx, vert) in mesh.vertices.iter().enumerate() {
-        if !vertex_on_front_face[idx] {
-            continue; // Skip vertices only on backfaces
+        if !state.xray_mode && !vertex_on_front_face[idx] {
+            continue; // Skip vertices only on backfaces (X-ray allows selecting through)
         }
         // Skip vertices on the non-editable side when mirror is enabled
         if !state.mirror_settings.is_editable_side(vert.pos) {
@@ -1926,8 +1926,8 @@ fn find_hovered_element(
                 // Normalize edge order for consistency
                 let edge = if v0_idx < v1_idx { (v0_idx, v1_idx) } else { (v1_idx, v0_idx) };
 
-                // Skip edges only on backfaces
-                if !edge_on_front_face.contains(&edge) {
+                // Skip edges only on backfaces (unless X-ray mode)
+                if !state.xray_mode && !edge_on_front_face.contains(&edge) {
                     continue;
                 }
 
@@ -1979,8 +1979,8 @@ fn find_hovered_element(
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
-                        if signed_area <= 0.0 {
-                            continue; // Backface - skip
+                        if !state.xray_mode && signed_area <= 0.0 {
+                            continue; // Backface - skip (X-ray allows selecting through)
                         }
 
                         // Check if mouse is inside the triangle

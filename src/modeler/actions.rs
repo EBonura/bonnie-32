@@ -245,6 +245,14 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .category("View"),
     );
 
+    registry.register(
+        Action::new("view.toggle_xray")
+            .label("Toggle X-Ray")
+            .shortcut(Shortcut::alt(KeyCode::Z))
+            .status_tip("See and select through geometry (Alt+Z)")
+            .category("View"),
+    );
+
     // ========================================================================
     // Mesh Cleanup Actions
     // ========================================================================

@@ -33,6 +33,8 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
 - [ ] **Camera floor limit**: Add a minimum camera height so users can't accidentally go below the floor level. Should be slightly below the camera's current position.
 - [ ] **Scroll wheel for camera dolly**: Use mouse scroll wheel for forward/backward camera movement (dolly) in addition to zoom.
+- [ ] **Object movement like cells**: Move objects by dragging on Z/X axis, with Shift for Y axis movement (same as cell movement)
+- [ ] **Larger light indicators**: Lights are hard to see and click - make them at least 3x bigger
 
 ---
 
@@ -44,6 +46,10 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Auto-select room vs room lock**: Automatically select the room the cursor is in, rather than requiring manual room locking.
 - [ ] **Color slider lock**: Add a lock toggle to color sliders to prevent accidental changes.
 - [ ] **Increase texture cache time**: Textures are being uwnloaded too quickly from cache. Increase the retention time to avoid reloading.
+- [ ] **Environment/Objects switch**: Add a switch between environment and objects editing mode
+- [ ] **Smarter 2D diagonal display**: Only show diagonal lines in sectors when it matters (different textures or heights) for a cleaner 2D view
+- [ ] **Better fog defaults**: Default fog values should be color (5,5,5), start 8192, falloff 30k+, cull 9k. Sliders should work in sectors (1 sector = 1024)
+- [ ] **Wider right panel by default**: Default right panel width should be wider
 
 ---
 
@@ -67,6 +73,27 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] Scale and Rotate transform modes not implemented - need to add Move mode first with proper gizmos for each mode
 - [ ] Overview panel is still a stub
 - [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
+- [ ] **Default cube is transparent?**: New asset default cube appears transparent
+- [ ] **Edges hard to see**: When light colors match texture, edges become invisible. Consider always displaying semi-transparent edges (~50% opacity)
+- [ ] **Extrude barely visible**: Extrude should move the face further along normals so the extrusion is clearly visible
+- [ ] **Rotation mouse movement unintuitive**: Currently only responds to left/right movement. Should follow the rotation axis precisely
+
+#### UX Improvements
+- [ ] **Uniform scale from gizmo center**: Click center of gizmo to scale uniformly across all axes
+- [ ] **Configurable grid snap granularity**: Allow changing the Snap to Grid step size
+- [ ] **Wider right panel by default**: Default panel width should be wider
+- [ ] **Rotation pivot from selection**: Allow selecting an edge as rotation pivot (secondary selection mode) - similar to Blender's 3D cursor but simpler
+- [ ] **Extrude shortcut**: Consider Shift+E for extrude (departure from Blender but aligns with camera controls)
 
 #### Future
 - [ ] VRAM usage counter: Display usage with warning when exceeded
+- [x] **Loop selection**: Blender-style edge/face loop selection (Alt+L) - DONE
+- [ ] **Add primitive creates new object**: Adding a primitive should create a new object, not add to current
+- [ ] **Copy/paste/duplicate**: Implement copy, paste, and duplicate functionality
+- [ ] **Light support**: Asset editor should support lights. Lights in world editor become objects with only a light component (no geometry)
+
+---
+
+### Web Build
+
+- [ ] **Texture upload**: Web build can download but not upload textures. Should support uploading multiple files at once

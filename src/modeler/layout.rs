@@ -254,10 +254,16 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
         state.set_status(&format!("Aspect Ratio: {}", mode), 1.5);
     }
-    if toolbar.icon_button_active(ctx, icon::LAYERS, icon_font, "Wireframe Mode", state.raster_settings.wireframe_overlay) {
+    if toolbar.icon_button_active(ctx, icon::LAYERS, icon_font, "Wireframe Mode (Shift+Z)", state.raster_settings.wireframe_overlay) {
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "Wireframe" } else { "Solid" };
         state.set_status(&format!("Render: {}", mode), 1.5);
+    }
+    if toolbar.icon_button_active(ctx, icon::BLEND, icon_font, "X-Ray Mode (Alt+Z)", state.xray_mode) {
+        state.xray_mode = !state.xray_mode;
+        state.raster_settings.xray_mode = state.xray_mode;
+        let mode = if state.xray_mode { "ON" } else { "OFF" };
+        state.set_status(&format!("X-Ray: {}", mode), 1.5);
     }
     // Backface culling toggle (cycles through 3 states like world editor)
     // State 0: Both sides visible (backface_cull=false)
@@ -2360,7 +2366,16 @@ fn draw_single_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
     let label = viewport_id.label();
     let label_bg = Rect::new(rect.x + 2.0, rect.y + 2.0, label.len() as f32 * 7.0 + 8.0, 16.0);
     draw_rectangle(label_bg.x, label_bg.y, label_bg.w, label_bg.h, Color::from_rgba(0, 0, 0, 180));
-    draw_text(label, label_bg.x + 4.0, label_bg.y + 12.0, 12.0, TEXT_COLOR);
+    draw_text(label, label_bg.x + 4.0, label_bg.y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    // X-RAY label in top-right corner when enabled
+    if state.xray_mode {
+        let xray_label = "X-RAY";
+        let xray_w = xray_label.len() as f32 * 7.0 + 8.0;
+        let xray_bg = Rect::new(rect.right() - xray_w - 2.0, rect.y + 2.0, xray_w, 16.0);
+        draw_rectangle(xray_bg.x, xray_bg.y, xray_bg.w, xray_bg.h, Color::from_rgba(180, 80, 80, 200));
+        draw_text(xray_label, xray_bg.x + 4.0, xray_bg.y + 12.0, FONT_SIZE_CONTENT, WHITE);
+    }
 }
 
 /// Calculate distance from point to line segment (for edge hover detection)
@@ -4140,6 +4155,12 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "Wireframe" } else { "Solid" };
         state.set_status(&format!("Render: {}", mode), 1.0);
+    }
+    if actions.triggered("view.toggle_xray", &ctx) {
+        state.xray_mode = !state.xray_mode;
+        state.raster_settings.xray_mode = state.xray_mode;
+        let mode = if state.xray_mode { "ON" } else { "OFF" };
+        state.set_status(&format!("X-Ray: {}", mode), 1.0);
     }
     if actions.triggered("view.cycle_shading", &ctx) {
         state.raster_settings.shading = match state.raster_settings.shading {

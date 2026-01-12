@@ -715,6 +715,9 @@ pub struct ModelerState {
     // Mirror editing settings
     pub mirror_settings: MirrorSettings,
 
+    /// X-ray mode: see and select through geometry (backface selection enabled)
+    pub xray_mode: bool,
+
     // Viewport mouse state
     pub viewport_last_mouse: (f32, f32),
     pub viewport_mouse_captured: bool,
@@ -959,6 +962,7 @@ impl ModelerState {
 
             snap_settings: SnapSettings::default(),
             mirror_settings: MirrorSettings::default(),
+            xray_mode: false,
 
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
