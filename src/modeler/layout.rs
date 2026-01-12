@@ -769,7 +769,17 @@ fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, i
 
     // === UNIFIED TEXTURE EDITOR (collapsible) ===
     // Combines Paint + UV modes with tab-based switching
-    let editor_expanded = draw_collapsible_header(ctx, rect.x, &mut y, rect.w, "Texture", state.paint_section_expanded, icon_font);
+    let is_focused = state.active_panel == super::state::ActivePanel::TextureEditor;
+    let (editor_expanded, header_clicked) = draw_collapsible_header(
+        ctx, rect.x, &mut y, rect.w, "Texture",
+        state.paint_section_expanded, is_focused, icon_font
+    );
+
+    // Set focus when clicking on the header
+    if header_clicked {
+        state.active_panel = super::state::ActivePanel::TextureEditor;
+    }
+
     if editor_expanded != state.paint_section_expanded {
         state.paint_section_expanded = editor_expanded;
         // Initialize editing texture when expanding
@@ -783,11 +793,17 @@ fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, i
         // Draw the unified texture editor with Paint/UV tabs
         let remaining_h = rect.bottom() - y - 4.0;
         let editor_rect = Rect::new(rect.x, y, rect.w, remaining_h);
+
+        // Set focus when clicking anywhere in the texture editor content
+        if ctx.mouse.inside(&editor_rect) && ctx.mouse.left_pressed {
+            state.active_panel = super::state::ActivePanel::TextureEditor;
+        }
+
         draw_paint_section(ctx, editor_rect, state, icon_font);
     }
 }
 
-/// Draw a collapsible section header, returns new expanded state
+/// Draw a collapsible section header, returns (new_expanded_state, was_clicked)
 fn draw_collapsible_header(
     ctx: &mut UiContext,
     x: f32,
@@ -795,8 +811,9 @@ fn draw_collapsible_header(
     width: f32,
     label: &str,
     expanded: bool,
+    focused: bool,
     icon_font: Option<&Font>,
-) -> bool {
+) -> (bool, bool) {
     let header_h = 24.0;
     let header_rect = Rect::new(x + 2.0, *y, width - 4.0, header_h);
     let hovered = ctx.mouse.inside(&header_rect);
@@ -809,6 +826,9 @@ fn draw_collapsible_header(
     };
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, bg);
 
+    // Text color - cyan when focused (matching World Editor)
+    let text_color = if focused { ACCENT_COLOR } else { TEXT_COLOR };
+
     // Expand/collapse icon
     let chevron = if expanded { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT };
     if let Some(font) = icon_font {
@@ -816,21 +836,19 @@ fn draw_collapsible_header(
             &chevron.to_string(),
             header_rect.x + 6.0,
             header_rect.y + 17.0,
-            TextParams { font: Some(font), font_size: 14, color: TEXT_COLOR, ..Default::default() },
+            TextParams { font: Some(font), font_size: 14, color: text_color, ..Default::default() },
         );
     }
 
     // Label
-    draw_text(label, header_rect.x + 24.0, header_rect.y + 16.0, FONT_SIZE_HEADER, TEXT_COLOR);
+    draw_text(label, header_rect.x + 24.0, header_rect.y + 16.0, FONT_SIZE_HEADER, text_color);
 
     *y += header_h + 2.0;
 
     // Handle click
-    if ctx.mouse.clicked(&header_rect) {
-        !expanded
-    } else {
-        expanded
-    }
+    let clicked = ctx.mouse.clicked(&header_rect);
+    let new_expanded = if clicked { !expanded } else { expanded };
+    (new_expanded, clicked)
 }
 
 /// Create a UserTexture for editing from the project's IndexedAtlas
@@ -2343,12 +2361,13 @@ fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
         state.viewport_v_split = ((ctx.mouse.y - rect.y) / rect.h).clamp(0.15, 0.85);
     }
 
-    // Update active viewport based on mouse hover (only if not on divider and not dragging)
+    // Update active viewport/panel on click (not hover, matching World Editor)
     let on_divider = h_hovered || v_hovered || state.dragging_h_divider || state.dragging_v_divider;
-    if !on_divider {
+    if !on_divider && ctx.mouse.left_pressed {
         for (id, vp_rect) in &viewports {
             if ctx.mouse.inside(vp_rect) {
                 state.active_viewport = *id;
+                state.active_panel = super::state::ActivePanel::Viewport;
                 break;
             }
         }
@@ -2378,7 +2397,9 @@ fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
 
 /// Draw a single viewport with its header bar (matching World Editor style)
 fn draw_single_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: &mut Framebuffer, viewport_id: ViewportId) {
-    let is_active = state.active_viewport == viewport_id;
+    // Viewport is active when both: panel focus is on viewports AND this specific viewport is selected
+    let is_active = state.active_panel == super::state::ActivePanel::Viewport
+        && state.active_viewport == viewport_id;
     let header_height = 20.0;
 
     // Header bar (matching World Editor panel style)

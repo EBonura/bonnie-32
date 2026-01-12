@@ -66,6 +66,14 @@ impl ViewportId {
     }
 }
 
+/// Which panel has keyboard focus (for routing shortcuts)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivePanel {
+    #[default]
+    Viewport,       // One of the 4 viewports (WASD camera, selection shortcuts)
+    TextureEditor,  // Texture/UV editor panel
+}
+
 /// Camera state for an orthographic viewport
 #[derive(Debug, Clone)]
 pub struct OrthoCamera {
@@ -656,7 +664,8 @@ pub struct ModelerState {
     pub orbit_elevation: f32,    // Vertical angle in radians (orbit mode)
 
     // PicoCAD-style 4-panel viewport system
-    pub active_viewport: ViewportId,   // Which viewport has focus
+    pub active_panel: ActivePanel,     // Which panel has keyboard focus
+    pub active_viewport: ViewportId,   // Which viewport has focus (within viewport panel)
     pub fullscreen_viewport: Option<ViewportId>,  // Space to toggle fullscreen
     pub ortho_top: OrthoCamera,        // Top view camera (XZ plane)
     pub ortho_front: OrthoCamera,      // Front view camera (XY plane)
@@ -914,6 +923,7 @@ impl ModelerState {
             orbit_elevation,
 
             // PicoCAD-style viewports
+            active_panel: ActivePanel::Viewport,
             active_viewport: ViewportId::Perspective,
             fullscreen_viewport: None,
             ortho_top: OrthoCamera::default(),
