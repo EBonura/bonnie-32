@@ -3441,7 +3441,7 @@ pub fn draw_import_dialog(
     let (dialog_w, dialog_h) = if import_state.atlas_mode && can_use_atlas {
         (820.0, 580.0)  // Wider for atlas view
     } else {
-        (560.0, 480.0)  // Compact for non-atlas
+        (620.0, 520.0)  // Room for source preview with selection
     };
     let dialog_x = (screen_width() - dialog_w) / 2.0;
     let dialog_y = (screen_height() - dialog_h) / 2.0;
@@ -3837,16 +3837,305 @@ pub fn draw_import_dialog(
 
     } else {
         // === NON-ATLAS MODE LAYOUT ===
-        let preview_size = 200.0;
-        let preview_x = left_margin;
-        let preview_y = content_y;
+        // Source image on left, quantized preview + settings on right
+
+        // Calculate source preview dimensions (scaled to fit in left panel)
+        let source_max_size = 280.0;
+        let source_aspect = import_state.source_width as f32 / import_state.source_height as f32;
+        let (source_view_w, source_view_h) = if source_aspect > 1.0 {
+            (source_max_size, source_max_size / source_aspect)
+        } else {
+            (source_max_size * source_aspect, source_max_size)
+        };
+        let source_x = left_margin;
+        let source_y = content_y;
+
+        // Draw source image background
+        draw_rectangle(source_x, source_y, source_view_w, source_view_h, Color::from_rgba(25, 25, 30, 255));
+
+        // Draw source image pixels (scaled)
+        let scale_x = source_view_w / import_state.source_width as f32;
+        let scale_y = source_view_h / import_state.source_height as f32;
+
+        // Draw pixels in batches for performance (sample every Nth pixel)
+        let sample_step = ((import_state.source_width / 256).max(1)).max((import_state.source_height / 256).max(1));
+        for sy in (0..import_state.source_height).step_by(sample_step) {
+            for sx in (0..import_state.source_width).step_by(sample_step) {
+                let idx = (sy * import_state.source_width + sx) * 4;
+                if idx + 3 < import_state.source_rgba.len() {
+                    let a = import_state.source_rgba[idx + 3];
+                    if a > 0 {
+                        let r = import_state.source_rgba[idx] as f32 / 255.0;
+                        let g = import_state.source_rgba[idx + 1] as f32 / 255.0;
+                        let b = import_state.source_rgba[idx + 2] as f32 / 255.0;
+                        let px = source_x + sx as f32 * scale_x;
+                        let py = source_y + sy as f32 * scale_y;
+                        let pw = scale_x * sample_step as f32;
+                        let ph = scale_y * sample_step as f32;
+                        draw_rectangle(px, py, pw, ph, Color::new(r, g, b, a as f32 / 255.0));
+                    }
+                }
+            }
+        }
+
+        // Update animation frame for marching ants
+        import_state.crop_anim_frame = import_state.crop_anim_frame.wrapping_add(1);
+
+        // Helper to detect which edge/corner mouse is near
+        let hit_test_crop_edge = |mx: f32, my: f32, sel_x: usize, sel_y: usize, sel_w: usize, sel_h: usize| -> Option<super::import::CropResizeEdge> {
+            use super::import::CropResizeEdge;
+            let threshold = 8.0;
+            let sel_screen_x = source_x + sel_x as f32 * scale_x;
+            let sel_screen_y = source_y + sel_y as f32 * scale_y;
+            let sel_screen_w = sel_w as f32 * scale_x;
+            let sel_screen_h = sel_h as f32 * scale_y;
+
+            let left = sel_screen_x;
+            let right = sel_screen_x + sel_screen_w;
+            let top = sel_screen_y;
+            let bottom = sel_screen_y + sel_screen_h;
+
+            let near_left = (mx - left).abs() < threshold;
+            let near_right = (mx - right).abs() < threshold;
+            let near_top = (my - top).abs() < threshold;
+            let near_bottom = (my - bottom).abs() < threshold;
+            let in_x_range = mx >= left - threshold && mx <= right + threshold;
+            let in_y_range = my >= top - threshold && my <= bottom + threshold;
+
+            // Corners first
+            if near_left && near_top { return Some(CropResizeEdge::TopLeft); }
+            if near_right && near_top { return Some(CropResizeEdge::TopRight); }
+            if near_left && near_bottom { return Some(CropResizeEdge::BottomLeft); }
+            if near_right && near_bottom { return Some(CropResizeEdge::BottomRight); }
+            // Edges
+            if near_top && in_x_range { return Some(CropResizeEdge::Top); }
+            if near_bottom && in_x_range { return Some(CropResizeEdge::Bottom); }
+            if near_left && in_y_range { return Some(CropResizeEdge::Left); }
+            if near_right && in_y_range { return Some(CropResizeEdge::Right); }
+            None
+        };
+
+        // Check for edge hover (for cursor feedback)
+        let hovered_edge = if let Some((sel_x, sel_y, sel_w, sel_h)) = import_state.crop_selection {
+            if import_state.crop_resize_edge.is_none() && !import_state.crop_dragging {
+                hit_test_crop_edge(ctx.mouse.x, ctx.mouse.y, sel_x, sel_y, sel_w, sel_h)
+            } else {
+                import_state.crop_resize_edge
+            }
+        } else {
+            None
+        };
+
+        // Draw selection with marching ants and handles
+        if let Some((sel_x, sel_y, sel_w, sel_h)) = import_state.crop_selection {
+            let sel_screen_x = source_x + sel_x as f32 * scale_x;
+            let sel_screen_y = source_y + sel_y as f32 * scale_y;
+            let sel_screen_w = sel_w as f32 * scale_x;
+            let sel_screen_h = sel_h as f32 * scale_y;
+
+            // Dim the area outside selection
+            let dim_color = Color::new(0.0, 0.0, 0.0, 0.5);
+            draw_rectangle(source_x, source_y, source_view_w, sel_screen_y - source_y, dim_color);
+            draw_rectangle(source_x, sel_screen_y + sel_screen_h, source_view_w, source_y + source_view_h - sel_screen_y - sel_screen_h, dim_color);
+            draw_rectangle(source_x, sel_screen_y, sel_screen_x - source_x, sel_screen_h, dim_color);
+            draw_rectangle(sel_screen_x + sel_screen_w, sel_screen_y, source_x + source_view_w - sel_screen_x - sel_screen_w, sel_screen_h, dim_color);
+
+            // Marching ants border
+            let dash_len = 4.0;
+            let offset = (import_state.crop_anim_frame / 12) as f32 * 2.0;
+            draw_marching_line(sel_screen_x, sel_screen_y, sel_screen_x + sel_screen_w, sel_screen_y, dash_len, offset);
+            draw_marching_line(sel_screen_x + sel_screen_w, sel_screen_y, sel_screen_x + sel_screen_w, sel_screen_y + sel_screen_h, dash_len, offset);
+            draw_marching_line(sel_screen_x + sel_screen_w, sel_screen_y + sel_screen_h, sel_screen_x, sel_screen_y + sel_screen_h, dash_len, offset);
+            draw_marching_line(sel_screen_x, sel_screen_y + sel_screen_h, sel_screen_x, sel_screen_y, dash_len, offset);
+
+            // Draw resize handles
+            let handle_size = 6.0;
+            let half = handle_size / 2.0;
+            use super::import::CropResizeEdge;
+            let handles = [
+                (sel_screen_x - half, sel_screen_y - half, CropResizeEdge::TopLeft),
+                (sel_screen_x + sel_screen_w / 2.0 - half, sel_screen_y - half, CropResizeEdge::Top),
+                (sel_screen_x + sel_screen_w - half, sel_screen_y - half, CropResizeEdge::TopRight),
+                (sel_screen_x + sel_screen_w - half, sel_screen_y + sel_screen_h / 2.0 - half, CropResizeEdge::Right),
+                (sel_screen_x + sel_screen_w - half, sel_screen_y + sel_screen_h - half, CropResizeEdge::BottomRight),
+                (sel_screen_x + sel_screen_w / 2.0 - half, sel_screen_y + sel_screen_h - half, CropResizeEdge::Bottom),
+                (sel_screen_x - half, sel_screen_y + sel_screen_h - half, CropResizeEdge::BottomLeft),
+                (sel_screen_x - half, sel_screen_y + sel_screen_h / 2.0 - half, CropResizeEdge::Left),
+            ];
+            for (hx, hy, edge) in handles {
+                let is_hovered = hovered_edge == Some(edge);
+                let fill = if is_hovered { Color::new(1.0, 0.8, 0.2, 1.0) } else { WHITE };
+                draw_rectangle(hx, hy, handle_size, handle_size, fill);
+                draw_rectangle_lines(hx, hy, handle_size, handle_size, 1.0, BLACK);
+            }
+        }
+
+        // Draw dragging selection rectangle (new selection being created)
+        if import_state.crop_dragging && import_state.crop_resize_edge.is_none() {
+            if let Some((start_x, start_y)) = import_state.crop_drag_start {
+                let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, import_state.source_width as f32) as usize;
+                let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, import_state.source_height as f32) as usize;
+
+                let (sel_left, sel_right) = if mx < start_x { (mx, start_x) } else { (start_x, mx) };
+                let (sel_top, sel_bottom) = if my < start_y { (my, start_y) } else { (start_y, my) };
+
+                let sel_screen_x = source_x + sel_left as f32 * scale_x;
+                let sel_screen_y = source_y + sel_top as f32 * scale_y;
+                let sel_screen_w = (sel_right - sel_left) as f32 * scale_x;
+                let sel_screen_h = (sel_bottom - sel_top) as f32 * scale_y;
+
+                draw_rectangle_lines(sel_screen_x, sel_screen_y, sel_screen_w, sel_screen_h, 2.0, Color::from_rgba(255, 200, 80, 200));
+            }
+        }
+
+        draw_rectangle_lines(source_x, source_y, source_view_w, source_view_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+
+        // Handle mouse input for selection and resize
+        let source_rect = Rect::new(source_x, source_y, source_view_w, source_view_h);
+
+        if ctx.mouse.left_pressed {
+            // Check if clicking on an edge/handle to resize
+            if let Some(edge) = hovered_edge {
+                import_state.crop_resize_edge = Some(edge);
+                import_state.crop_resize_original = import_state.crop_selection;
+                import_state.crop_drag_start = Some((
+                    ((ctx.mouse.x - source_x) / scale_x) as usize,
+                    ((ctx.mouse.y - source_y) / scale_y) as usize,
+                ));
+            } else if ctx.mouse.inside(&source_rect) {
+                // Start new selection
+                let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, (import_state.source_width - 1) as f32) as usize;
+                let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, (import_state.source_height - 1) as f32) as usize;
+                import_state.crop_dragging = true;
+                import_state.crop_drag_start = Some((mx, my));
+                import_state.crop_resize_edge = None;
+            }
+        }
+
+        // Handle resize dragging
+        if let Some(edge) = import_state.crop_resize_edge {
+            if ctx.mouse.left_down {
+                if let (Some((orig_x, orig_y, orig_w, orig_h)), Some((start_mx, start_my))) =
+                    (import_state.crop_resize_original, import_state.crop_drag_start)
+                {
+                    use super::import::CropResizeEdge;
+                    let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, import_state.source_width as f32) as i32;
+                    let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, import_state.source_height as f32) as i32;
+                    let dx = mx - start_mx as i32;
+                    let dy = my - start_my as i32;
+
+                    let (mut new_x, mut new_y, mut new_w, mut new_h) = (orig_x as i32, orig_y as i32, orig_w as i32, orig_h as i32);
+
+                    match edge {
+                        CropResizeEdge::Left | CropResizeEdge::TopLeft | CropResizeEdge::BottomLeft => {
+                            new_x = (orig_x as i32 + dx).max(0);
+                            new_w = (orig_w as i32 - dx).max(4);
+                        }
+                        CropResizeEdge::Right | CropResizeEdge::TopRight | CropResizeEdge::BottomRight => {
+                            new_w = (orig_w as i32 + dx).max(4);
+                        }
+                        _ => {}
+                    }
+                    match edge {
+                        CropResizeEdge::Top | CropResizeEdge::TopLeft | CropResizeEdge::TopRight => {
+                            new_y = (orig_y as i32 + dy).max(0);
+                            new_h = (orig_h as i32 - dy).max(4);
+                        }
+                        CropResizeEdge::Bottom | CropResizeEdge::BottomLeft | CropResizeEdge::BottomRight => {
+                            new_h = (orig_h as i32 + dy).max(4);
+                        }
+                        _ => {}
+                    }
+
+                    // Clamp to image bounds
+                    new_x = new_x.max(0);
+                    new_y = new_y.max(0);
+                    if new_x + new_w > import_state.source_width as i32 {
+                        new_w = import_state.source_width as i32 - new_x;
+                    }
+                    if new_y + new_h > import_state.source_height as i32 {
+                        new_h = import_state.source_height as i32 - new_y;
+                    }
+
+                    import_state.crop_selection = Some((new_x as usize, new_y as usize, new_w as usize, new_h as usize));
+                }
+            } else {
+                // Finished resize
+                import_state.crop_resize_edge = None;
+                import_state.crop_resize_original = None;
+                import_state.crop_drag_start = None;
+                import_state.preview_dirty = true;
+            }
+        }
+        // Handle new selection drag
+        else if import_state.crop_dragging && !ctx.mouse.left_down {
+            if let Some((start_x, start_y)) = import_state.crop_drag_start {
+                let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, import_state.source_width as f32) as usize;
+                let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, import_state.source_height as f32) as usize;
+
+                let (sel_left, sel_right) = if mx < start_x { (mx, start_x) } else { (start_x, mx) };
+                let (sel_top, sel_bottom) = if my < start_y { (my, start_y) } else { (start_y, my) };
+
+                let sel_w = sel_right.saturating_sub(sel_left);
+                let sel_h = sel_bottom.saturating_sub(sel_top);
+
+                if sel_w >= 4 && sel_h >= 4 {
+                    import_state.crop_selection = Some((sel_left, sel_top, sel_w, sel_h));
+                    import_state.preview_dirty = true;
+                } else if import_state.crop_selection.is_some() {
+                    import_state.crop_selection = None;
+                    import_state.preview_dirty = true;
+                }
+            }
+            import_state.crop_dragging = false;
+            import_state.crop_drag_start = None;
+        }
+
+        // Source info below
+        let info_y = source_y + source_view_h + 4.0;
+        let info_text = if let Some((sel_x, sel_y, sel_w, sel_h)) = import_state.crop_selection {
+            format!("{}x{} | Selection: {}x{} at ({},{})",
+                import_state.source_width, import_state.source_height, sel_w, sel_h, sel_x, sel_y)
+        } else {
+            format!("{}x{} | Drag to select region", import_state.source_width, import_state.source_height)
+        };
+        draw_text(&info_text, source_x, info_y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+
+        // Clear selection button (if selection exists)
+        if import_state.crop_selection.is_some() {
+            let clear_btn_w = 80.0;
+            let clear_btn_x = source_x + source_view_w - clear_btn_w;
+            let clear_btn_y = info_y;
+            let clear_rect = Rect::new(clear_btn_x, clear_btn_y, clear_btn_w, 18.0);
+            let clear_hovered = ctx.mouse.inside(&clear_rect);
+            draw_rectangle(clear_btn_x, clear_btn_y, clear_btn_w, 18.0,
+                if clear_hovered { Color::from_rgba(80, 55, 55, 255) } else { Color::from_rgba(55, 45, 45, 255) });
+            draw_rectangle_lines(clear_btn_x, clear_btn_y, clear_btn_w, 18.0, 1.0, Color::from_rgba(90, 70, 70, 255));
+            let clear_dims = measure_text("Clear", None, 9, 1.0);
+            draw_text("Clear", clear_btn_x + (clear_btn_w - clear_dims.width) / 2.0, clear_btn_y + 12.0, 9.0,
+                if clear_hovered { WHITE } else { Color::from_rgba(180, 160, 160, 255) });
+            if clear_hovered && ctx.mouse.clicked(&clear_rect) {
+                import_state.crop_selection = None;
+                import_state.preview_dirty = true;
+            }
+        }
+
+        // === RIGHT SIDE: Quantized preview + settings ===
+        let settings_x = source_x + source_max_size + 16.0;
+        let settings_w = dialog_w - source_max_size - 40.0;
+        let mut y = content_y;
+
+        // Quantized preview (128x128)
+        let preview_size = 128.0;
+        draw_text(&format!("Preview ({}x{})", target_w, target_w), settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 16.0;
 
         // Checkerboard background for preview
-        let check_sz = 12.0;
+        let check_sz = 8.0;
         for cy in 0..(preview_size / check_sz) as i32 {
             for cx in 0..(preview_size / check_sz) as i32 {
                 let c = if (cx + cy) % 2 == 0 { Color::from_rgba(50, 50, 55, 255) } else { Color::from_rgba(40, 40, 45, 255) };
-                draw_rectangle(preview_x + cx as f32 * check_sz, preview_y + cy as f32 * check_sz, check_sz, check_sz, c);
+                draw_rectangle(settings_x + cx as f32 * check_sz, y + cy as f32 * check_sz, check_sz, check_sz, c);
             }
         }
 
@@ -3861,22 +4150,13 @@ pub fn draw_import_dialog(
                         let r = rgba[idx] as f32 / 255.0;
                         let g = rgba[idx + 1] as f32 / 255.0;
                         let b = rgba[idx + 2] as f32 / 255.0;
-                        draw_rectangle(preview_x + px as f32 * pixel_size, preview_y + py as f32 * pixel_size, pixel_size, pixel_size, Color::new(r, g, b, 1.0));
+                        draw_rectangle(settings_x + px as f32 * pixel_size, y + py as f32 * pixel_size, pixel_size, pixel_size, Color::new(r, g, b, 1.0));
                     }
                 }
             }
         }
-        draw_rectangle_lines(preview_x, preview_y, preview_size, preview_size, 1.0, Color::from_rgba(70, 70, 80, 255));
-
-        // Source info below preview
-        let info_y = preview_y + preview_size + 4.0;
-        let info_text = format!("{}x{} → {}x{}", import_state.source_width, import_state.source_height, target_w, target_w);
-        draw_text(&info_text, preview_x, info_y + 10.0, 10.0, Color::from_rgba(140, 140, 140, 255));
-
-        // === RIGHT SIDE SETTINGS ===
-        let settings_x = preview_x + preview_size + 12.0;
-        let settings_w = dialog_w - preview_size - 36.0;
-        let mut y = content_y;
+        draw_rectangle_lines(settings_x, y, preview_size, preview_size, 1.0, Color::from_rgba(70, 70, 80, 255));
+        y += preview_size + section_gap;
 
         // Atlas toggle (if available)
         if can_use_atlas {

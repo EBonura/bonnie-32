@@ -91,6 +91,33 @@ pub struct TextureImportState {
     pub atlas_cell_size: usize,
     /// Selected cell in atlas (col, row)
     pub atlas_selected: (usize, usize),
+    // === Crop Selection Mode (non-atlas) ===
+    /// Crop selection rectangle (x, y, width, height) in source pixels
+    /// None = use whole image
+    pub crop_selection: Option<(usize, usize, usize, usize)>,
+    /// Whether user is currently dragging to make a new selection
+    pub crop_dragging: bool,
+    /// Start point of drag in source pixels
+    pub crop_drag_start: Option<(usize, usize)>,
+    /// Animation frame for marching ants
+    pub crop_anim_frame: u32,
+    /// Edge being resized (None = not resizing, creating new selection, or moving)
+    pub crop_resize_edge: Option<CropResizeEdge>,
+    /// Original selection when resize started (for calculating deltas)
+    pub crop_resize_original: Option<(usize, usize, usize, usize)>,
+}
+
+/// Edge/corner of crop selection being resized
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropResizeEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 impl Default for TextureImportState {
@@ -117,6 +144,13 @@ impl Default for TextureImportState {
             atlas_mode: false,
             atlas_cell_size: 64,
             atlas_selected: (0, 0),
+            // Crop selection
+            crop_selection: None,
+            crop_dragging: false,
+            crop_drag_start: None,
+            crop_anim_frame: 0,
+            crop_resize_edge: None,
+            crop_resize_original: None,
         }
     }
 }
@@ -236,6 +270,27 @@ pub fn atlas_dimensions(width: usize, height: usize, cell_size: usize) -> (usize
     (cols, rows)
 }
 
+/// Extract a rectangular selection from an image
+/// Returns RGBA data for the specified region
+pub fn extract_selection(
+    rgba: &[u8],
+    width: usize,
+    _height: usize,
+    sel_x: usize,
+    sel_y: usize,
+    sel_w: usize,
+    sel_h: usize,
+) -> Vec<u8> {
+    let mut result = Vec::with_capacity(sel_w * sel_h * 4);
+    for y in 0..sel_h {
+        let src_y = sel_y + y;
+        let src_start = (src_y * width + sel_x) * 4;
+        let src_end = src_start + sel_w * 4;
+        result.extend_from_slice(&rgba[src_start..src_end]);
+    }
+    result
+}
+
 /// Generate quantized preview from source image
 pub fn generate_preview(state: &mut TextureImportState) {
     if state.source_rgba.is_empty() {
@@ -246,6 +301,7 @@ pub fn generate_preview(state: &mut TextureImportState) {
     let target = target_w; // Square textures, so width == height
 
     // In atlas mode, extract the selected cell first
+    // In non-atlas mode with crop selection, extract that region
     let (source_rgba, source_w, source_h) = if state.atlas_mode {
         let (col, row) = state.atlas_selected;
         let cell_size = state.atlas_cell_size;
@@ -263,6 +319,18 @@ pub fn generate_preview(state: &mut TextureImportState) {
             // Cell out of bounds, use whole source
             (state.source_rgba.clone(), state.source_width, state.source_height)
         }
+    } else if let Some((sel_x, sel_y, sel_w, sel_h)) = state.crop_selection {
+        // Non-atlas mode with crop selection
+        let cropped = extract_selection(
+            &state.source_rgba,
+            state.source_width,
+            state.source_height,
+            sel_x,
+            sel_y,
+            sel_w,
+            sel_h,
+        );
+        (cropped, sel_w, sel_h)
     } else {
         (state.source_rgba.clone(), state.source_width, state.source_height)
     };
