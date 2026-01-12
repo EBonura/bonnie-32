@@ -240,8 +240,8 @@ pub fn create_modeler_actions() -> ActionRegistry {
     registry.register(
         Action::new("view.toggle_wireframe")
             .label("Toggle Wireframe")
-            .shortcut(Shortcut::shift(KeyCode::W))
-            .status_tip("Toggle wireframe overlay (Shift+W)")
+            .shortcut(Shortcut::shift(KeyCode::Z))
+            .status_tip("Toggle wireframe overlay (Shift+Z)")
             .category("View"),
     );
 

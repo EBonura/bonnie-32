@@ -24,6 +24,12 @@ const TEXT_COLOR: Color = Color::new(0.8, 0.8, 0.85, 1.0);
 const TEXT_DIM: Color = Color::new(0.4, 0.4, 0.45, 1.0);
 const ACCENT_COLOR: Color = Color::new(0.0, 0.75, 0.9, 1.0);
 
+/// Standard font sizes for consistent UI (matching World Editor)
+const FONT_SIZE_TITLE: f32 = 16.0;
+const FONT_SIZE_HEADER: f32 = 14.0;
+const FONT_SIZE_CONTENT: f32 = 12.0;
+const LINE_HEIGHT: f32 = 16.0;
+
 // PS1 polygon budget colors
 const POLY_GREEN: Color = Color::new(0.4, 0.9, 0.4, 1.0);   // < 300 faces - very safe
 const POLY_YELLOW: Color = Color::new(0.9, 0.9, 0.3, 1.0);  // 300-800 faces - moderate
@@ -541,7 +547,7 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 /// Draw a simple section label (non-collapsible)
 fn draw_section_label(x: f32, y: &mut f32, width: f32, label: &str) {
     draw_rectangle(x, *y, width, 18.0, Color::from_rgba(45, 45, 52, 255));
-    draw_text(label, x + 4.0, *y + 13.0, 13.0, TEXT_COLOR);
+    draw_text(label, x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
     *y += 20.0;
 }
 
@@ -611,7 +617,7 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         // Object name with face count
         let fc = obj.mesh.face_count();
         let name_color = poly_count_color(fc);
-        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, 13.0, name_color);
+        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, FONT_SIZE_HEADER, name_color);
 
         // Handle selection click (not on visibility toggle)
         let name_rect = Rect::new(rect.x + 20.0, y, rect.w - 20.0, line_height);
@@ -643,7 +649,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         super::state::ModelerSelection::Edges(e) => format!("{} edge(s)", e.len()),
         super::state::ModelerSelection::Faces(f) => format!("{} face(s)", f.len()),
     };
-    draw_text(&sel_text, x + 4.0, *y + 12.0, 13.0, TEXT_COLOR);
+    draw_text(&sel_text, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
     *y += line_height;
 
     // Current tool
@@ -653,7 +659,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         Some(ModelerToolId::Scale) => "Tool: Scale (S)",
         _ => "Tool: Select",
     };
-    draw_text(tool_label, x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
+    draw_text(tool_label, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
     *y += line_height;
 
     // Select mode
@@ -662,7 +668,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         super::state::SelectMode::Edge => "Mode: Edge (2)",
         super::state::SelectMode::Face => "Mode: Face (3)",
     };
-    draw_text(mode_label, x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
+    draw_text(mode_label, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
     *y += line_height;
 
     // Note: Face Properties (blend mode) is now in the right panel texture section
@@ -675,7 +681,7 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
 
     // Light count and add/remove buttons
     let light_count = state.raster_settings.lights.len();
-    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, 13.0, TEXT_COLOR);
+    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
 
     // Add button
     let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
@@ -710,14 +716,14 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
             crate::rasterizer::LightType::Point { .. } => "Pt",
             crate::rasterizer::LightType::Spot { .. } => "Sp",
         };
-        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, 13.0, TEXT_COLOR);
+        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_COLOR);
 
         if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
             toggle_idx = Some(i);
         }
 
         // Intensity
-        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, 13.0, TEXT_DIM);
+        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_DIM);
 
         *y += line_height;
     }
@@ -740,11 +746,11 @@ fn draw_shortcuts_section(x: f32, y: &mut f32, _width: f32, max_y: f32) {
     ];
 
     for (key, desc) in shortcuts {
-        if *y + 14.0 > max_y {
+        if *y + LINE_HEIGHT > max_y {
             break;
         }
-        draw_text(&format!("{}: {}", key, desc), x + 4.0, *y + 10.0, 13.0, TEXT_DIM);
-        *y += 14.0;
+        draw_text(&format!("{}: {}", key, desc), x + 4.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        *y += LINE_HEIGHT;
     }
 }
 
@@ -809,7 +815,7 @@ fn draw_collapsible_header(
     }
 
     // Label
-    draw_text(label, header_rect.x + 24.0, header_rect.y + 16.0, 13.0, TEXT_COLOR);
+    draw_text(label, header_rect.x + 24.0, header_rect.y + 16.0, FONT_SIZE_HEADER, TEXT_COLOR);
 
     *y += header_h + 2.0;
 
@@ -1893,7 +1899,7 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         .all(|f| f.blend_mode == current_blend);
 
     // Blend mode label
-    draw_text("Blend:", x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
+    draw_text("Blend:", x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
 
     // Blend mode buttons (inline row)
     let btn_modes = [
@@ -1977,8 +1983,8 @@ fn draw_clut_editor_panel(
     // ========================================================================
     // Section 1: CLUT Pool List with buttons
     // ========================================================================
-    draw_text("CLUT Pool", x + padding, cur_y + 10.0, 13.0, TEXT_DIM);
-    cur_y += 14.0;
+    draw_text("CLUT Pool", x + padding, cur_y + 10.0, FONT_SIZE_HEADER, TEXT_DIM);
+    cur_y += LINE_HEIGHT;
 
     // Buttons to add new CLUTs
     let btn_h = 18.0;
@@ -2068,7 +2074,7 @@ fn draw_clut_editor_panel(
             let badge_text = clut.depth.short_label();
             let badge_x = item_rect.x + item_rect.w - 24.0;
             draw_rectangle(badge_x, item_y + 2.0, 20.0, 12.0, Color::from_rgba(60, 60, 70, 255));
-            draw_text(badge_text, badge_x + 2.0, item_y + 11.0, 13.0, TEXT_DIM);
+            draw_text(badge_text, badge_x + 2.0, item_y + 11.0, FONT_SIZE_CONTENT, TEXT_DIM);
 
             // Handle click
             if hovered && ctx.mouse.left_pressed {
@@ -3629,19 +3635,69 @@ fn draw_timeline(_ctx: &mut UiContext, rect: Rect, _state: &mut ModelerState, _i
 fn draw_status_bar(rect: Rect, state: &ModelerState) {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
-    // Status message
-    if let Some(msg) = state.get_status() {
-        let center_x = rect.x + rect.w * 0.5 - (msg.len() as f32 * 4.0);
-        draw_text(msg, center_x, rect.y + 15.0, 14.0, Color::from_rgba(100, 255, 100, 255));
+    // Left side: Green temporary status message
+    let status_end_x = if let Some(msg) = state.get_status() {
+        let msg_dims = measure_text(msg, None, 14, 1.0);
+        draw_text(msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 14.0, Color::from_rgba(100, 255, 100, 255));
+        rect.x + 10.0 + msg_dims.width + 20.0
+    } else {
+        rect.x + 10.0
+    };
+
+    // Right side: Context-sensitive shortcuts
+    let mut shortcuts: Vec<&str> = Vec::new();
+
+    // Mode-specific shortcuts
+    match state.select_mode {
+        SelectMode::Vertex => {
+            shortcuts.push("[1] Vertex");
+            if !state.selection.is_empty() {
+                shortcuts.push("[Alt+M] Merge");
+            }
+        }
+        SelectMode::Edge => {
+            shortcuts.push("[2] Edge");
+            if !state.selection.is_empty() {
+                shortcuts.push("[Alt+L] Loop");
+            }
+        }
+        SelectMode::Face => {
+            shortcuts.push("[3] Face");
+            if !state.selection.is_empty() {
+                shortcuts.push("[E] Extrude");
+                shortcuts.push("[Alt+L] Loop");
+            }
+        }
     }
 
-    // PicoCAD-style hints (always visible on left)
-    let pico_hints = "V:View M:Render L:Shade Space:Fullscreen Tab:Add";
-    draw_text(pico_hints, rect.x + 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
+    // Transform shortcuts when selection exists
+    if !state.selection.is_empty() {
+        shortcuts.push("[G] Grab");
+        shortcuts.push("[R] Rotate");
+        shortcuts.push("[T] Scale");
+        shortcuts.push("[Del] Delete");
+    }
 
-    // Mesh editing hints (on right)
-    let hints = "X:Multi E:Extrude Del:Delete Ctrl+Z:Undo";
-    draw_text(hints, rect.right() - (hints.len() as f32 * 6.0) - 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
+    // View shortcuts (always available)
+    shortcuts.push("[Space] Fullscreen");
+
+    // Vertex linking state
+    if state.vertex_linking {
+        shortcuts.push("[X] Unlink");
+    } else {
+        shortcuts.push("[X] Link");
+    }
+
+    if !shortcuts.is_empty() {
+        let shortcuts_text = shortcuts.join("  ");
+        let text_dims = measure_text(&shortcuts_text, None, FONT_SIZE_HEADER as u16, 1.0);
+        let text_x = rect.right() - text_dims.width - 10.0;
+        let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+
+        if text_x > status_end_x {
+            draw_text(&shortcuts_text, text_x.floor(), text_y.floor(), FONT_SIZE_HEADER, Color::from_rgba(180, 180, 190, 255));
+        }
+    }
 }
 
 // ============================================================================
