@@ -1169,14 +1169,25 @@ pub fn draw_modeler_viewport_ext(
         handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
     }
 
-    // Draw box selection overlay if DragManager has active box select
-    if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
-        let (min_x, min_y, max_x, max_y) = tracker.bounds();
+    // Draw box selection overlay only for the viewport that owns it
+    if state.box_select_viewport == Some(viewport_id) {
+        if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
+            let (min_x, min_y, max_x, max_y) = tracker.bounds();
 
-        // Semi-transparent fill
-        draw_rectangle(min_x, min_y, max_x - min_x, max_y - min_y, Color::from_rgba(100, 150, 255, 50));
-        // Border
-        draw_rectangle_lines(min_x, min_y, max_x - min_x, max_y - min_y, 1.0, Color::from_rgba(100, 150, 255, 200));
+            // Clip box selection rectangle to viewport bounds
+            let clip_min_x = min_x.max(draw_x);
+            let clip_min_y = min_y.max(draw_y);
+            let clip_max_x = max_x.min(draw_x + draw_w);
+            let clip_max_y = max_y.min(draw_y + draw_h);
+
+            // Only draw if the clipped rectangle has positive area
+            if clip_max_x > clip_min_x && clip_max_y > clip_min_y {
+                // Semi-transparent fill
+                draw_rectangle(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, Color::from_rgba(100, 150, 255, 50));
+                // Border
+                draw_rectangle_lines(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, 1.0, Color::from_rgba(100, 150, 255, 200));
+            }
+        }
     }
 
     // Handle single-click selection using hover system (like world editor)

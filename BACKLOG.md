@@ -10,11 +10,6 @@ This document tracks planned features, known issues, and future improvements.
 
 - [ ] **Unified render pipeline**: Game and editor currently have separate render paths with duplicated code. Should create a shared scene renderer that both use, with hooks for editor-specific overlays (grid, selection, gizmos) and game-specific features (player, particles). This becomes critical as we add meshes, skeletal animation, particle systems, etc. Benefits: any optimization applies to both, WYSIWYG editing, single source of truth for rendering.
 
----
-
-### Rendering / PS1 Authenticity
-- [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
-- [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face
 
 ---
 
@@ -49,8 +44,6 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Environment/Objects switch**: Add a switch between environment and objects editing mode
 - [ ] **Smarter 2D diagonal display**: Only show diagonal lines in sectors when it matters (different textures or heights) for a cleaner 2D view
 - [ ] **Better fog defaults**: Default fog values should be color (5,5,5), start 8192, falloff 30k+, cull 9k. Sliders should work in sectors (1 sector = 1024)
-- [ ] **Wider right panel by default**: Default right panel width should be wider
-
 ---
 
 ### Music Tracker
@@ -58,12 +51,9 @@ This document tracks planned features, known issues, and future improvements.
 #### UI/UX
 - [ ] Per-note vs channel FX toggle
 - [ ] **Piano roll quick tool**: Add a piano roll that slides up from the bottom as a quick entry tool. Keep the pattern editor as the main detailed editing view.
-
-#### Data Preservation
 - [ ] **Track notes persistence**: If a track has notes and user reduces track count, notes should be preserved (track just hidden). Must also save hidden track data.
 
 #### Future
-- [ ] Custom instrument editor: Tab for building custom instruments beyond SF2 soundfonts
 - [ ] **Waveform visualizer**: Add a waveform visualizer somewhere in the UI for visual feedback during playback
 
 ---
@@ -73,8 +63,6 @@ This document tracks planned features, known issues, and future improvements.
 #### Canvas Operations
 - [ ] **Non-destructive resize**: Canvas resize should be non-destructive until user saves (different from track editor behavior)
 - [ ] **Color adjustments**: Add contrast/saturation/hue/brightness controls
-
-#### Future
 - [ ] **Multiple layers**: Full support for multiple layers
 - [ ] **Multiple frames**: Full support for animation frames
 
@@ -89,32 +77,14 @@ This document tracks planned features, known issues, and future improvements.
 ### Assets (Modeler)
 
 #### Known Issues
-- [ ] Drag-to-select box only works in 3D view (not in 2D view)
 - [ ] Selection box overflows from 2D view into 3D viewport when dragging near boundary
-- [ ] Scale and Rotate transform modes not implemented - need to add Move mode first with proper gizmos for each mode
-- [ ] Overview panel is still a stub
 - [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
-- [ ] **Default cube is transparent?**: New asset default cube appears transparent
-- [ ] **Edges hard to see**: When light colors match texture, edges become invisible. Consider always displaying semi-transparent edges (~50% opacity)
-- [ ] **Extrude barely visible**: Extrude should move the face further along normals so the extrusion is clearly visible
 - [ ] **Rotation mouse movement unintuitive**: Currently only responds to left/right movement. Should follow the rotation axis precisely
 
 #### UX Improvements
 - [ ] **Uniform scale from gizmo center**: Click center of gizmo to scale uniformly across all axes
 - [ ] **Configurable grid snap granularity**: Allow changing the Snap to Grid step size
-- [ ] **Wider right panel by default**: Default panel width should be wider
 - [ ] **Rotation pivot from selection**: Allow selecting an edge as rotation pivot (secondary selection mode) - similar to Blender's 3D cursor but simpler
-- [ ] **Extrude shortcut**: Consider Shift+E for extrude (departure from Blender but aligns with camera controls)
 
 #### Future
-- [ ] VRAM usage counter: Display usage with warning when exceeded
-- [x] **Loop selection**: Blender-style edge/face loop selection (Alt+L) - DONE
-- [x] **Add primitive creates new object**: Adding a primitive should create a new object, not add to current - DONE
-- [x] **Copy/paste/duplicate**: Implement copy, paste, and duplicate functionality - DONE
 - [ ] **Light support**: Asset editor should support lights. Lights in world editor become objects with only a light component (no geometry)
-
----
-
-### Web Build
-
-- [ ] **Texture upload**: Web build can download but not upload textures. Should support uploading multiple files at once
