@@ -59,9 +59,30 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] Per-note vs channel FX toggle
 - [ ] **Piano roll quick tool**: Add a piano roll that slides up from the bottom as a quick entry tool. Keep the pattern editor as the main detailed editing view.
 
+#### Data Preservation
+- [ ] **Track notes persistence**: If a track has notes and user reduces track count, notes should be preserved (track just hidden). Must also save hidden track data.
+
 #### Future
 - [ ] Custom instrument editor: Tab for building custom instruments beyond SF2 soundfonts
 - [ ] **Waveform visualizer**: Add a waveform visualizer somewhere in the UI for visual feedback during playback
+
+---
+
+### Paint Editor
+
+#### Canvas Operations
+- [ ] **Non-destructive resize**: Canvas resize should be non-destructive until user saves (different from track editor behavior)
+- [ ] **Color adjustments**: Add contrast/saturation/hue/brightness controls
+
+#### Future
+- [ ] **Multiple layers**: Full support for multiple layers
+- [ ] **Multiple frames**: Full support for animation frames
+
+---
+
+### Rendering / PS1 Authenticity
+
+- [ ] **Texture wobble effect**: Per-texture property for water/wobble distortion effect
 
 ---
 
