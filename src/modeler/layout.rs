@@ -309,6 +309,37 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         state.set_status(&format!("Vertex Linking: {}", mode), 1.5);
     }
 
+    // Mirror editing toggle
+    let mirror_label = format!("Mirror {} (edit one side, other auto-mirrors)", state.mirror_settings.axis.label());
+    if toolbar.icon_button_active(ctx, icon::COLUMNS_2, icon_font, &mirror_label, state.mirror_settings.enabled) {
+        state.mirror_settings.enabled = !state.mirror_settings.enabled;
+        let mode = if state.mirror_settings.enabled { "ON" } else { "OFF" };
+        state.set_status(&format!("Mirror {}: {}", state.mirror_settings.axis.label(), mode), 1.5);
+    }
+
+    // Apply Mirror button (only shown when mirror is enabled)
+    if state.mirror_settings.enabled {
+        if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Apply Mirror (bake + merge overlapping)") {
+            // Bake the virtual mirror into actual geometry
+            let axis = state.mirror_settings.axis;
+            let threshold = state.mirror_settings.threshold;
+            state.push_undo("Apply Mirror");
+            let mut merged_count = 0;
+            if let Some(mesh) = state.mesh_mut() {
+                mesh.apply_mirror(axis, threshold);
+                // Auto-merge overlapping vertices (especially center vertices)
+                merged_count = mesh.merge_by_distance(threshold);
+            }
+            state.mirror_settings.enabled = false;
+            if merged_count > 0 {
+                state.set_status(&format!("Mirror applied, {} vertices merged", merged_count), 2.5);
+            } else {
+                state.set_status("Mirror applied", 2.0);
+            }
+            state.dirty = true;
+        }
+    }
+
     toolbar.separator();
 
     // Camera mode toggle (Free / Orbit)
@@ -3912,6 +3943,11 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         select_all(state);
     }
 
+    // Loop select (Alt+L) - extends selection along edge/face loops
+    if actions.triggered("select.loop", &ctx) {
+        select_loop(state);
+    }
+
     // ========================================================================
     // Transform Actions (Modal - G/R/T)
     // These set the modal_transform mode; viewport.rs will start the actual drag
@@ -3988,6 +4024,53 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             }
         } else {
             state.set_status("Switch to Face mode (3) to extrude", 1.0);
+        }
+    }
+
+    // ========================================================================
+    // Mesh Cleanup Actions
+    // ========================================================================
+    if actions.triggered("mesh.merge_by_distance", &ctx) {
+        let threshold = state.snap_settings.grid_size * 0.1; // 10% of grid size
+        state.push_undo("Merge by Distance");
+        let merged = if let Some(mesh) = state.mesh_mut() {
+            mesh.merge_by_distance(threshold)
+        } else {
+            0
+        };
+        if merged > 0 {
+            state.dirty = true;
+            state.set_status(&format!("Merged {} vertices (threshold: {:.1})", merged, threshold), 2.0);
+        } else {
+            state.set_status("No overlapping vertices found", 1.5);
+        }
+    }
+
+    if actions.triggered("mesh.merge_to_center", &ctx) {
+        if let super::state::ModelerSelection::Vertices(vert_indices) = &state.selection {
+            if vert_indices.len() >= 2 {
+                let indices = vert_indices.clone();
+                state.push_undo("Merge to Center");
+                let result = if let Some(mesh) = state.mesh_mut() {
+                    mesh.merge_to_center(&indices)
+                } else {
+                    None
+                };
+                if let Some(kept_idx) = result {
+                    // Select the merged vertex
+                    state.selection = super::state::ModelerSelection::Vertices(vec![kept_idx]);
+                    // Clean up orphaned vertices
+                    if let Some(mesh) = state.mesh_mut() {
+                        mesh.compact_vertices();
+                    }
+                    state.dirty = true;
+                    state.set_status(&format!("Merged {} vertices to center", indices.len()), 1.5);
+                }
+            } else {
+                state.set_status("Select 2+ vertices to merge", 1.0);
+            }
+        } else {
+            state.set_status("Switch to Vertex mode (1) to merge", 1.0);
         }
     }
 
@@ -4279,6 +4362,106 @@ fn select_all(state: &mut ModelerState) {
             let count = all_faces.len();
             state.set_selection(super::state::ModelerSelection::Faces(all_faces));
             state.set_status(&format!("Selected {} faces", count), 1.0);
+        }
+    }
+}
+
+/// Select an edge or face loop based on current selection
+fn select_loop(state: &mut ModelerState) {
+    use std::collections::HashSet;
+
+    let mesh = state.mesh();
+    let selection = state.selection.clone();
+
+    match selection {
+        super::state::ModelerSelection::Vertices(verts) => {
+            // If exactly 2 vertices selected, treat as an edge and select edge loop
+            if verts.len() == 2 {
+                let v0 = verts[0];
+                let v1 = verts[1];
+
+                // Check if these form an edge (are adjacent in some face)
+                let is_edge = mesh.faces.iter().any(|face| {
+                    let fv = &face.vertices;
+                    let n = fv.len();
+                    for i in 0..n {
+                        let a = fv[i];
+                        let b = fv[(i + 1) % n];
+                        if (a == v0 && b == v1) || (a == v1 && b == v0) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+
+                if is_edge {
+                    let loop_edges = mesh.select_edge_loop(v0, v1);
+                    let loop_verts = mesh.vertices_from_edge_loop(&loop_edges);
+                    let count = loop_verts.len();
+                    state.set_selection(super::state::ModelerSelection::Vertices(loop_verts));
+                    state.set_status(&format!("Selected edge loop ({} vertices)", count), 1.5);
+                } else {
+                    state.set_status("Selected vertices don't form an edge", 1.5);
+                }
+            } else if verts.len() == 1 {
+                // Single vertex: try to find a loop through connected edges
+                // For now, select all vertices connected by edges to this one
+                let v = verts[0];
+                let mut connected: HashSet<usize> = HashSet::new();
+                connected.insert(v);
+
+                for face in &mesh.faces {
+                    if face.vertices.contains(&v) {
+                        for &fv in &face.vertices {
+                            connected.insert(fv);
+                        }
+                    }
+                }
+
+                let connected_verts: Vec<usize> = connected.into_iter().collect();
+                let count = connected_verts.len();
+                state.set_selection(super::state::ModelerSelection::Vertices(connected_verts));
+                state.set_status(&format!("Selected {} connected vertices", count), 1.5);
+            } else {
+                state.set_status("Select 2 adjacent vertices to select edge loop", 1.5);
+            }
+        }
+
+        super::state::ModelerSelection::Edges(edges) => {
+            if edges.len() == 1 {
+                let (v0, v1) = edges[0];
+                let loop_edges = mesh.select_edge_loop(v0, v1);
+                let count = loop_edges.len();
+                state.set_selection(super::state::ModelerSelection::Edges(loop_edges));
+                state.set_status(&format!("Selected edge loop ({} edges)", count), 1.5);
+            } else {
+                state.set_status("Select a single edge to select edge loop", 1.5);
+            }
+        }
+
+        super::state::ModelerSelection::Faces(faces) => {
+            if faces.len() == 1 {
+                let face_idx = faces[0];
+                let face = &mesh.faces[face_idx];
+
+                // For face loop, we need a direction. Use first edge of the face.
+                if face.vertices.len() >= 2 {
+                    let v0 = face.vertices[0];
+                    let v1 = face.vertices[1];
+                    let loop_faces = mesh.select_face_loop(face_idx, v0, v1);
+                    let count = loop_faces.len();
+                    state.set_selection(super::state::ModelerSelection::Faces(loop_faces));
+                    state.set_status(&format!("Selected face loop ({} faces)", count), 1.5);
+                } else {
+                    state.set_status("Face has no edges", 1.5);
+                }
+            } else {
+                state.set_status("Select a single face to select face loop", 1.5);
+            }
+        }
+
+        super::state::ModelerSelection::None | super::state::ModelerSelection::Mesh => {
+            state.set_status("No selection for loop select", 1.0);
         }
     }
 }

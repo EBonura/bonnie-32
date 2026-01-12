@@ -8,7 +8,7 @@ use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
     world_to_screen_with_ortho, draw_floor_grid, point_in_triangle_2d,
-    OrthoProjection, Camera,
+    OrthoProjection, Camera, draw_3d_line_clipped,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
 use super::drag::{DragUpdateResult, ActiveDrag};
@@ -132,6 +132,7 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
     }
 
     // Second pass: apply movements (mutable)
+    let mirror_settings = state.mirror_settings;
     if let Some(mesh) = state.mesh_mut() {
         let mut already_moved = std::collections::HashSet::new();
         for (idx, old_pos, new_pos) in &movements {
@@ -143,7 +144,9 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
                 for ci in coincident {
                     if !already_moved.contains(&ci) {
                         if let Some(vert) = mesh.vertices.get_mut(ci) {
-                            vert.pos = vert.pos + delta;
+                            let final_pos = vert.pos + delta;
+                            // Constrain center vertices to mirror plane
+                            vert.pos = mirror_settings.constrain_to_plane(final_pos);
                         }
                         already_moved.insert(ci);
                     }
@@ -152,7 +155,8 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
                 // Just move the single vertex
                 if !already_moved.contains(idx) {
                     if let Some(vert) = mesh.vertices.get_mut(*idx) {
-                        vert.pos = *new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(*new_pos);
                     }
                     already_moved.insert(*idx);
                 }
@@ -186,12 +190,14 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
 
     // Apply the updated positions
     let mut made_changes = false;
+    let mirror_settings = state.mirror_settings;
     if let Some(mesh) = state.mesh_mut() {
         match result {
             DragUpdateResult::Move { positions, .. } => {
                 for (vert_idx, new_pos) in positions {
                     if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(new_pos);
                     }
                 }
                 made_changes = true;
@@ -199,7 +205,8 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
             DragUpdateResult::Scale { positions, .. } => {
                 for (vert_idx, new_pos) in positions {
                     if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(new_pos);
                     }
                 }
                 made_changes = true;
@@ -207,7 +214,8 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
             DragUpdateResult::Rotate { positions, .. } => {
                 for (vert_idx, new_pos) in positions {
                     if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(new_pos);
                     }
                 }
                 made_changes = true;
@@ -686,9 +694,55 @@ pub fn draw_modeler_viewport_ext(
     }
 
     // Perspective camera controls (free or orbit mode) - skip for ortho views
-    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
-        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+    // Use get_keys_down() which returns all currently pressed keys
+    // This is more reliable on macOS where modifier key presses can cause
+    // is_key_down() to return stale state for other keys
+    let all_keys = get_keys_down(); // Returns HashSet<KeyCode>
+
+    let shift_held = all_keys.contains(&KeyCode::LeftShift) || all_keys.contains(&KeyCode::RightShift);
+    let ctrl_held = all_keys.contains(&KeyCode::LeftControl) || all_keys.contains(&KeyCode::RightControl)
+        || all_keys.contains(&KeyCode::LeftSuper) || all_keys.contains(&KeyCode::RightSuper);
+    let alt_held = all_keys.contains(&KeyCode::LeftAlt) || all_keys.contains(&KeyCode::RightAlt);
+    let any_modifier = shift_held || ctrl_held || alt_held;
+
+    // macOS workaround: When Cmd+key is released, macOS doesn't send key-up for the letter key.
+    // We track "trusted" state for each movement key:
+    // - When modifier is released, all keys become untrusted
+    // - Keys become trusted again when freshly pressed (is_key_pressed)
+    // - Keys become trusted when released (not in all_keys) - ready for next press
+    let modifier_just_released = state.modifier_was_held && !any_modifier;
+    state.modifier_was_held = any_modifier;
+
+    // Key indices: 0=W, 1=A, 2=S, 3=D, 4=Q, 5=E
+    let movement_keys = [KeyCode::W, KeyCode::A, KeyCode::S, KeyCode::D, KeyCode::Q, KeyCode::E];
+
+    // When modifier released, mark all movement keys as untrusted
+    if modifier_just_released {
+        state.trusted_movement_keys = [false; 6];
+    }
+
+    // Update trust status for each key
+    for (i, &key) in movement_keys.iter().enumerate() {
+        let key_in_all_keys = all_keys.contains(&key);
+
+        // If key is not in all_keys, it's been released - mark as trusted (ready for next press)
+        if !key_in_all_keys {
+            state.trusted_movement_keys[i] = true;
+        }
+
+        // If key was just pressed this frame, it's definitely trusted
+        if is_key_pressed(key) {
+            state.trusted_movement_keys[i] = true;
+        }
+    }
+
+    // Only consider a key "down" if it's both in all_keys AND trusted
+    let w_down = all_keys.contains(&KeyCode::W) && state.trusted_movement_keys[0];
+    let a_down = all_keys.contains(&KeyCode::A) && state.trusted_movement_keys[1];
+    let s_down = all_keys.contains(&KeyCode::S) && state.trusted_movement_keys[2];
+    let d_down = all_keys.contains(&KeyCode::D) && state.trusted_movement_keys[3];
+    let q_down = all_keys.contains(&KeyCode::Q) && state.trusted_movement_keys[4];
+    let e_down = all_keys.contains(&KeyCode::E) && state.trusted_movement_keys[5];
 
     if !is_ortho {
     match state.camera_mode {
@@ -709,28 +763,27 @@ pub fn draw_modeler_viewport_ext(
             }
 
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
-            // Hold Shift for faster movement
-            // Skip when Ctrl is held to avoid conflict with Ctrl+A select all
+            // Skip when ANY modifier is held to avoid conflicts with shortcuts
+            // Uses pre-extracted key states from get_keys_down() for consistency
             let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
-            let move_speed = if shift_held { 100.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !ctrl_held {
-                if is_key_down(KeyCode::W) {
-                    state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
+            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !any_modifier {
+                if w_down {
+                    state.camera.position = state.camera.position + state.camera.basis_z * base_speed;
                 }
-                if is_key_down(KeyCode::S) {
-                    state.camera.position = state.camera.position - state.camera.basis_z * move_speed;
+                if s_down {
+                    state.camera.position = state.camera.position - state.camera.basis_z * base_speed;
                 }
-                if is_key_down(KeyCode::A) {
-                    state.camera.position = state.camera.position - state.camera.basis_x * move_speed;
+                if a_down {
+                    state.camera.position = state.camera.position - state.camera.basis_x * base_speed;
                 }
-                if is_key_down(KeyCode::D) {
-                    state.camera.position = state.camera.position + state.camera.basis_x * move_speed;
+                if d_down {
+                    state.camera.position = state.camera.position + state.camera.basis_x * base_speed;
                 }
-                if is_key_down(KeyCode::Q) {
-                    state.camera.position = state.camera.position - state.camera.basis_y * move_speed;
+                if q_down {
+                    state.camera.position = state.camera.position - state.camera.basis_y * base_speed;
                 }
-                if is_key_down(KeyCode::E) {
-                    state.camera.position = state.camera.position + state.camera.basis_y * move_speed;
+                if e_down {
+                    state.camera.position = state.camera.position + state.camera.basis_y * base_speed;
                 }
             }
         }
@@ -885,6 +938,31 @@ pub fn draw_modeler_viewport_ext(
         draw_floor_grid(fb, &state.camera, 0.0, crate::world::SECTOR_SIZE, crate::world::SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
     }
 
+    // Draw mirror plane indicator when mirror mode is enabled
+    if state.mirror_settings.enabled {
+        let mirror_color = RasterColor::new(255, 100, 100); // Pinkish-red for mirror plane
+        let extent = crate::world::SECTOR_SIZE * 5.0; // Large enough to be visible
+
+        // Draw cross lines along the mirror plane
+        match state.mirror_settings.axis {
+            Axis::X => {
+                // X mirror: plane at X=0, draw vertical line in YZ plane
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, -extent, 0.0), Vec3::new(0.0, extent, 0.0), mirror_color);
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, 0.0, -extent), Vec3::new(0.0, 0.0, extent), mirror_color);
+            }
+            Axis::Y => {
+                // Y mirror: plane at Y=0, draw lines in XZ plane
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(-extent, 0.0, 0.0), Vec3::new(extent, 0.0, 0.0), mirror_color);
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, 0.0, -extent), Vec3::new(0.0, 0.0, extent), mirror_color);
+            }
+            Axis::Z => {
+                // Z mirror: plane at Z=0, draw lines in XY plane
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(-extent, 0.0, 0.0), Vec3::new(extent, 0.0, 0.0), mirror_color);
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, -extent, 0.0), Vec3::new(0.0, extent, 0.0), mirror_color);
+            }
+        }
+    }
+
     // Render all visible objects
     // Convert atlas to rasterizer texture (shared by all objects)
     // Use RGB555 or RGB888 based on settings
@@ -974,6 +1052,65 @@ pub fn draw_modeler_viewport_ext(
                         &state.camera,
                         &state.raster_settings,
                     );
+                }
+            }
+
+            // Render mirrored geometry if mirror mode is enabled
+            if state.mirror_settings.enabled {
+                // Create mirrored vertices
+                let mirrored_vertices: Vec<RasterVertex> = vertices.iter().map(|v| {
+                    RasterVertex {
+                        pos: state.mirror_settings.mirror_position(v.pos),
+                        normal: state.mirror_settings.mirror_normal(v.normal),
+                        uv: v.uv,
+                        // Slightly dim the mirrored side to indicate it's generated
+                        color: RasterColor::new(
+                            (base_color as f32 * 0.85) as u8,
+                            (base_color as f32 * 0.85) as u8,
+                            (base_color as f32 * 0.85) as u8,
+                        ),
+                        bone_index: None,
+                    }
+                }).collect();
+
+                // Create mirrored faces with reversed winding order
+                let mirrored_faces: Vec<RasterFace> = faces.iter().map(|f| {
+                    RasterFace {
+                        v0: f.v0,
+                        v1: f.v2,  // Swap v1 and v2 to reverse winding
+                        v2: f.v1,
+                        texture_id: f.texture_id,
+                        black_transparent: f.black_transparent,
+                        blend_mode: f.blend_mode,
+                    }
+                }).collect();
+
+                if use_rgb555 {
+                    if let Some(ref tex15) = atlas_texture_15 {
+                        let textures_15 = [tex15.clone()];
+                        render_mesh_15(
+                            fb,
+                            &mirrored_vertices,
+                            &mirrored_faces,
+                            &textures_15,
+                            Some(&blend_modes),
+                            &state.camera,
+                            &state.raster_settings,
+                            None,
+                        );
+                    }
+                } else {
+                    if let Some(ref tex) = atlas_texture {
+                        let textures = [tex.clone()];
+                        render_mesh(
+                            fb,
+                            &mirrored_vertices,
+                            &mirrored_faces,
+                            &textures,
+                            &state.camera,
+                            &state.raster_settings,
+                        );
+                    }
                 }
             }
         }
@@ -1755,6 +1892,10 @@ fn find_hovered_element(
         if !vertex_on_front_face[idx] {
             continue; // Skip vertices only on backfaces
         }
+        // Skip vertices on the non-editable side when mirror is enabled
+        if !state.mirror_settings.is_editable_side(vert.pos) {
+            continue;
+        }
         if let Some((sx, sy)) = world_to_screen_with_ortho(
             vert.pos,
             camera.position,
@@ -1788,6 +1929,10 @@ fn find_hovered_element(
                 }
 
                 if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                    // Skip edges with any vertex on non-editable side when mirror is enabled
+                    if !state.mirror_settings.is_editable_side(v0.pos) || !state.mirror_settings.is_editable_side(v1.pos) {
+                        continue;
+                    }
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
                         world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                         world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
@@ -1807,6 +1952,15 @@ fn find_hovered_element(
     // If no vertex or edge hovered, check faces using point-in-triangle (triangulate n-gons)
     if hovered_vertex.is_none() && hovered_edge.is_none() {
         for (idx, face) in mesh.faces.iter().enumerate() {
+            // Skip faces with any vertex on non-editable side when mirror is enabled
+            let face_on_editable_side = face.vertices.iter().all(|&vi| {
+                mesh.vertices.get(vi)
+                    .map(|v| state.mirror_settings.is_editable_side(v.pos))
+                    .unwrap_or(false)
+            });
+            if !face_on_editable_side {
+                continue;
+            }
             // Triangulate the n-gon face and check each triangle
             for [i0, i1, i2] in face.triangulate() {
                 if let (Some(v0), Some(v1), Some(v2)) = (
@@ -2210,6 +2364,7 @@ fn handle_move_gizmo(
                             .map(|(idx, start_pos)| (*idx, *start_pos + delta))
                             .collect();
 
+                        let mirror_settings = state.mirror_settings;
                         if let Some(mesh) = state.mesh_mut() {
                             for (idx, mut new_pos) in updates {
                                 if snap_enabled {
@@ -2217,6 +2372,8 @@ fn handle_move_gizmo(
                                     new_pos.y = (new_pos.y / snap_size).round() * snap_size;
                                     new_pos.z = (new_pos.z / snap_size).round() * snap_size;
                                 }
+                                // Constrain center vertices to mirror plane
+                                new_pos = mirror_settings.constrain_to_plane(new_pos);
                                 if let Some(vert) = mesh.vertices.get_mut(idx) {
                                     vert.pos = new_pos;
                                 }
@@ -2243,14 +2400,17 @@ fn handle_move_gizmo(
                     let snap_disabled = is_key_down(KeyCode::Z);
                     let snap_enabled = state.snap_settings.enabled && !snap_disabled;
                     let snap_settings = state.snap_settings.clone();
+                    let mirror_settings = state.mirror_settings;
                     if let Some(mesh) = state.mesh_mut() {
                         for (vert_idx, new_pos) in positions {
                             if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                                vert.pos = if snap_enabled {
+                                let snapped = if snap_enabled {
                                     snap_settings.snap_vec3(new_pos)
                                 } else {
                                     new_pos
                                 };
+                                // Constrain center vertices to mirror plane
+                                vert.pos = mirror_settings.constrain_to_plane(snapped);
                             }
                         }
                     }

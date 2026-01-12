@@ -174,6 +174,15 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .enabled_when(|ctx| !ctx.has_flag(flags::UV_EDITOR_FOCUSED)),
     );
 
+    registry.register(
+        Action::new("select.loop")
+            .label("Select Loop")
+            .shortcut(Shortcut::alt(KeyCode::L))
+            .status_tip("Select edge/face loop from selection (Alt+L)")
+            .category("Selection")
+            .enabled_when(|ctx| ctx.has_selection),
+    );
+
     // ========================================================================
     // Transform Actions (G/R/T - similar to Blender but T for scale since S is camera strafe)
     // ========================================================================
@@ -231,9 +240,29 @@ pub fn create_modeler_actions() -> ActionRegistry {
     registry.register(
         Action::new("view.toggle_wireframe")
             .label("Toggle Wireframe")
-            .shortcut(Shortcut::key(KeyCode::M))
-            .status_tip("Toggle wireframe overlay")
+            .shortcut(Shortcut::shift(KeyCode::W))
+            .status_tip("Toggle wireframe overlay (Shift+W)")
             .category("View"),
+    );
+
+    // ========================================================================
+    // Mesh Cleanup Actions
+    // ========================================================================
+    registry.register(
+        Action::new("mesh.merge_by_distance")
+            .label("Merge by Distance")
+            .shortcut(Shortcut::key(KeyCode::M))
+            .status_tip("Merge overlapping vertices (M)")
+            .category("Mesh"),
+    );
+
+    registry.register(
+        Action::new("mesh.merge_to_center")
+            .label("Merge to Center")
+            .shortcut(Shortcut::alt(KeyCode::M))
+            .status_tip("Merge selected vertices to center (Alt+M)")
+            .category("Mesh")
+            .enabled_when(|ctx| ctx.has_vertex_selection),
     );
 
     registry.register(

@@ -1451,6 +1451,531 @@ impl EditableMesh {
 
         (raster_vertices, raster_faces)
     }
+
+    /// Merge vertices that are within a distance threshold.
+    /// Returns the number of vertices that were merged.
+    ///
+    /// This is useful after mirror operations to weld center vertices,
+    /// or for general cleanup of coincident vertices.
+    pub fn merge_by_distance(&mut self, threshold: f32) -> usize {
+        use std::collections::{HashMap, HashSet};
+
+        let threshold_sq = threshold * threshold;
+        let n = self.vertices.len();
+
+        // Build groups of vertices that should be merged
+        // Using union-find style grouping
+        let mut parent: Vec<usize> = (0..n).collect();
+
+        fn find(parent: &mut [usize], i: usize) -> usize {
+            if parent[i] != i {
+                parent[i] = find(parent, parent[i]);
+            }
+            parent[i]
+        }
+
+        fn union(parent: &mut [usize], i: usize, j: usize) {
+            let pi = find(parent, i);
+            let pj = find(parent, j);
+            if pi != pj {
+                // Always merge to the lower index (keeps first vertex)
+                if pi < pj {
+                    parent[pj] = pi;
+                } else {
+                    parent[pi] = pj;
+                }
+            }
+        }
+
+        // Find all pairs within threshold
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let diff = self.vertices[i].pos - self.vertices[j].pos;
+                let dist_sq = diff.dot(diff);
+                if dist_sq <= threshold_sq {
+                    union(&mut parent, i, j);
+                }
+            }
+        }
+
+        // Flatten parent array
+        for i in 0..n {
+            find(&mut parent, i);
+        }
+
+        // Build mapping: old index -> new index
+        // Group vertices by their root
+        let mut root_to_new_idx: HashMap<usize, usize> = HashMap::new();
+        let mut old_to_new: Vec<usize> = vec![0; n];
+        let mut new_vertices: Vec<Vertex> = Vec::new();
+
+        for i in 0..n {
+            let root = parent[i];
+            if let Some(&new_idx) = root_to_new_idx.get(&root) {
+                old_to_new[i] = new_idx;
+            } else {
+                let new_idx = new_vertices.len();
+                root_to_new_idx.insert(root, new_idx);
+                old_to_new[i] = new_idx;
+                // Use the root vertex's data (first vertex in the group)
+                new_vertices.push(self.vertices[root].clone());
+            }
+        }
+
+        let merged_count = n - new_vertices.len();
+
+        if merged_count == 0 {
+            return 0;
+        }
+
+        // Update face vertex indices
+        for face in &mut self.faces {
+            for vi in &mut face.vertices {
+                *vi = old_to_new[*vi];
+            }
+        }
+
+        // Remove degenerate faces (faces with duplicate vertices after merging)
+        self.faces.retain(|face| {
+            let unique: HashSet<_> = face.vertices.iter().collect();
+            unique.len() >= 3 // Need at least 3 unique vertices
+        });
+
+        // Replace vertices
+        self.vertices = new_vertices;
+
+        merged_count
+    }
+
+    /// Merge selected vertices to their center point.
+    /// Returns the index of the merged vertex, or None if less than 2 vertices selected.
+    pub fn merge_to_center(&mut self, vertex_indices: &[usize]) -> Option<usize> {
+        use std::collections::HashSet;
+
+        if vertex_indices.len() < 2 {
+            return None;
+        }
+
+        // Calculate center position
+        let mut center = Vec3::ZERO;
+        let mut count = 0;
+        for &idx in vertex_indices {
+            if let Some(vert) = self.vertices.get(idx) {
+                center = center + vert.pos;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        center = center * (1.0 / count as f32);
+
+        // Keep the first vertex, move it to center
+        let keep_idx = vertex_indices[0];
+        if let Some(vert) = self.vertices.get_mut(keep_idx) {
+            vert.pos = center;
+        }
+
+        // Build set of vertices to remove
+        let remove_set: HashSet<usize> = vertex_indices[1..].iter().copied().collect();
+
+        // Remap face vertex references
+        for face in &mut self.faces {
+            for vi in &mut face.vertices {
+                if remove_set.contains(vi) {
+                    *vi = keep_idx;
+                }
+            }
+        }
+
+        // Remove degenerate faces
+        self.faces.retain(|face| {
+            let unique: HashSet<_> = face.vertices.iter().collect();
+            unique.len() >= 3
+        });
+
+        // Note: This leaves orphaned vertices. Call compact_vertices() if needed.
+        Some(keep_idx)
+    }
+
+    /// Remove unused vertices (vertices not referenced by any face).
+    /// Returns the number of vertices removed.
+    pub fn compact_vertices(&mut self) -> usize {
+        use std::collections::HashSet;
+
+        // Find all vertices referenced by faces
+        let used: HashSet<usize> = self.faces.iter()
+            .flat_map(|f| f.vertices.iter().copied())
+            .collect();
+
+        if used.len() == self.vertices.len() {
+            return 0; // All vertices are used
+        }
+
+        // Build mapping: old index -> new index
+        let mut old_to_new: Vec<Option<usize>> = vec![None; self.vertices.len()];
+        let mut new_vertices: Vec<Vertex> = Vec::new();
+
+        for (old_idx, vert) in self.vertices.iter().enumerate() {
+            if used.contains(&old_idx) {
+                old_to_new[old_idx] = Some(new_vertices.len());
+                new_vertices.push(vert.clone());
+            }
+        }
+
+        let removed = self.vertices.len() - new_vertices.len();
+
+        // Update face indices
+        for face in &mut self.faces {
+            for vi in &mut face.vertices {
+                if let Some(new_idx) = old_to_new[*vi] {
+                    *vi = new_idx;
+                }
+            }
+        }
+
+        self.vertices = new_vertices;
+        removed
+    }
+
+    /// Apply mirror: duplicate geometry from one side to the other.
+    /// This bakes the virtual mirror into actual geometry.
+    ///
+    /// - Vertices on the center plane (within threshold) are shared
+    /// - Vertices on the +X side are duplicated to -X (or appropriate axis)
+    /// - Mirrored faces have reversed winding order for correct normals
+    pub fn apply_mirror(&mut self, axis: super::state::Axis, threshold: f32) {
+        use std::collections::HashMap;
+        use super::state::Axis;
+
+        // Helper to mirror a position
+        let mirror_pos = |pos: Vec3| -> Vec3 {
+            match axis {
+                Axis::X => Vec3::new(-pos.x, pos.y, pos.z),
+                Axis::Y => Vec3::new(pos.x, -pos.y, pos.z),
+                Axis::Z => Vec3::new(pos.x, pos.y, -pos.z),
+            }
+        };
+
+        // Helper to mirror a normal
+        let mirror_normal = |n: Vec3| -> Vec3 {
+            match axis {
+                Axis::X => Vec3::new(-n.x, n.y, n.z),
+                Axis::Y => Vec3::new(n.x, -n.y, n.z),
+                Axis::Z => Vec3::new(n.x, n.y, -n.z),
+            }
+        };
+
+        // Helper to check if position is on the center plane
+        let is_on_plane = |pos: Vec3| -> bool {
+            match axis {
+                Axis::X => pos.x.abs() <= threshold,
+                Axis::Y => pos.y.abs() <= threshold,
+                Axis::Z => pos.z.abs() <= threshold,
+            }
+        };
+
+        // Helper to check if position is on the positive side
+        let is_positive_side = |pos: Vec3| -> bool {
+            match axis {
+                Axis::X => pos.x > threshold,
+                Axis::Y => pos.y > threshold,
+                Axis::Z => pos.z > threshold,
+            }
+        };
+
+        // Map: original vertex index -> mirrored vertex index
+        // For center vertices, maps to itself
+        let mut vertex_map: HashMap<usize, usize> = HashMap::new();
+        let mut new_vertices: Vec<Vertex> = Vec::new();
+
+        // Process each vertex
+        for (idx, vert) in self.vertices.iter().enumerate() {
+            if is_on_plane(vert.pos) {
+                // Center vertex - maps to itself, snap to plane
+                vertex_map.insert(idx, idx);
+                // Note: could also snap position to exact 0 on the axis here
+            } else if is_positive_side(vert.pos) {
+                // Positive side - create mirrored copy
+                let mirrored_vert = Vertex {
+                    pos: mirror_pos(vert.pos),
+                    uv: vert.uv, // Keep same UV
+                    normal: mirror_normal(vert.normal),
+                    color: vert.color,
+                    bone_index: vert.bone_index,
+                };
+                let new_idx = self.vertices.len() + new_vertices.len();
+                new_vertices.push(mirrored_vert);
+                vertex_map.insert(idx, new_idx);
+            }
+            // Negative side vertices are not processed (they'll be deleted or kept as-is)
+        }
+
+        // Add new mirrored vertices
+        self.vertices.extend(new_vertices);
+
+        // Create mirrored faces
+        let mut new_faces: Vec<EditFace> = Vec::new();
+        for face in &self.faces {
+            // Check if this face is on the positive side (all vertices on positive or center)
+            let all_positive_or_center = face.vertices.iter().all(|&vi| {
+                self.vertices.get(vi)
+                    .map(|v| is_positive_side(v.pos) || is_on_plane(v.pos))
+                    .unwrap_or(false)
+            });
+
+            if all_positive_or_center {
+                // Check if all vertices are just on center (no need to mirror)
+                let all_center = face.vertices.iter().all(|&vi| {
+                    self.vertices.get(vi)
+                        .map(|v| is_on_plane(v.pos))
+                        .unwrap_or(false)
+                });
+
+                if all_center {
+                    // Face is entirely on the center plane - skip mirroring
+                    continue;
+                }
+
+                // Create mirrored face with reversed winding
+                let mirrored_verts: Vec<usize> = face.vertices.iter()
+                    .filter_map(|&vi| vertex_map.get(&vi).copied())
+                    .rev() // Reverse winding order
+                    .collect();
+
+                if mirrored_verts.len() == face.vertices.len() {
+                    new_faces.push(EditFace {
+                        vertices: mirrored_verts,
+                        texture_id: face.texture_id,
+                        black_transparent: face.black_transparent,
+                        blend_mode: face.blend_mode,
+                    });
+                }
+            }
+        }
+
+        // Add mirrored faces
+        self.faces.extend(new_faces);
+    }
+
+    /// Get all faces that contain a given edge (pair of vertex indices).
+    /// Returns face indices.
+    fn faces_with_edge(&self, v0: usize, v1: usize) -> Vec<usize> {
+        self.faces.iter().enumerate()
+            .filter(|(_, face)| {
+                let verts = &face.vertices;
+                let n = verts.len();
+                for i in 0..n {
+                    let a = verts[i];
+                    let b = verts[(i + 1) % n];
+                    if (a == v0 && b == v1) || (a == v1 && b == v0) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Given an edge (v0, v1) and a quad face containing it, find the "opposite" edge.
+    /// Returns None if the face is not a quad or doesn't contain the edge.
+    fn opposite_edge_in_quad(&self, face_idx: usize, v0: usize, v1: usize) -> Option<(usize, usize)> {
+        let face = &self.faces[face_idx];
+        if face.vertices.len() != 4 {
+            return None; // Only works for quads
+        }
+
+        let verts = &face.vertices;
+        // Find the position of our edge
+        for i in 0..4 {
+            let a = verts[i];
+            let b = verts[(i + 1) % 4];
+            if (a == v0 && b == v1) || (a == v1 && b == v0) {
+                // Found the edge, opposite edge is 2 positions away
+                let c = verts[(i + 2) % 4];
+                let d = verts[(i + 3) % 4];
+                return Some((c, d));
+            }
+        }
+        None
+    }
+
+    /// Select an edge loop starting from an edge (v0, v1).
+    /// Returns all edges (vertex pairs) in the loop.
+    /// Edge loops follow through connected edges that form a continuous strip.
+    /// At each vertex, we continue to the edge "across" the quad (perpendicular traversal).
+    pub fn select_edge_loop(&self, v0: usize, v1: usize) -> Vec<(usize, usize)> {
+        let mut loop_edges = vec![(v0, v1)];
+        let mut visited_edges: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+        // Normalize edge representation for visited set
+        let normalize = |a: usize, b: usize| -> (usize, usize) {
+            if a < b { (a, b) } else { (b, a) }
+        };
+
+        visited_edges.insert(normalize(v0, v1));
+
+        // Extend in both directions from the starting edge
+        // Direction 0: extend from v1
+        // Direction 1: extend from v0
+        for (start_v, end_v) in [(v0, v1), (v1, v0)] {
+            let mut prev_v = start_v;
+            let mut curr_v = end_v;
+
+            loop {
+                // Find the next vertex by looking at quads containing curr_v
+                // We want a quad where prev_v-curr_v is an edge, and continue to the next edge
+                let mut next_v: Option<usize> = None;
+
+                for face in &self.faces {
+                    if face.vertices.len() != 4 {
+                        continue;
+                    }
+
+                    let verts = &face.vertices;
+                    // Check if this quad contains edge prev_v-curr_v
+                    let mut curr_pos: Option<usize> = None;
+                    for i in 0..4 {
+                        if verts[i] == curr_v {
+                            let next_i = (i + 1) % 4;
+                            let prev_i = (i + 3) % 4;
+                            if verts[next_i] == prev_v || verts[prev_i] == prev_v {
+                                curr_pos = Some(i);
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(pos) = curr_pos {
+                        // Found the quad. curr_v is at position `pos`.
+                        // The edge goes to prev_v which is either at pos+1 or pos-1.
+                        // We want to continue to the vertex OPPOSITE to prev_v in the quad.
+                        // In a quad [0,1,2,3], if curr_v is at pos 1 and prev_v is at pos 0,
+                        // then the "continuation" vertex is at pos 2 (curr_v's other neighbor).
+                        let neighbor1 = verts[(pos + 1) % 4];
+                        let neighbor2 = verts[(pos + 3) % 4];
+
+                        let next_candidate = if neighbor1 != prev_v {
+                            neighbor1
+                        } else {
+                            neighbor2
+                        };
+
+                        // Check if this edge is already visited
+                        let edge = normalize(curr_v, next_candidate);
+                        if !visited_edges.contains(&edge) {
+                            next_v = Some(next_candidate);
+                            break;
+                        }
+                    }
+                }
+
+                match next_v {
+                    Some(nv) => {
+                        let edge = (curr_v, nv);
+                        visited_edges.insert(normalize(curr_v, nv));
+                        loop_edges.push(edge);
+                        prev_v = curr_v;
+                        curr_v = nv;
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        loop_edges
+    }
+
+    /// Select a face loop starting from a face and an edge direction.
+    /// Face loops are strips of faces connected through opposite edges.
+    pub fn select_face_loop(&self, start_face: usize, edge_v0: usize, edge_v1: usize) -> Vec<usize> {
+        let mut loop_faces = vec![start_face];
+        let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        visited.insert(start_face);
+
+        eprintln!("[FACE LOOP] Starting face {}, edge ({}, {})", start_face, edge_v0, edge_v1);
+
+        // Get the opposite edge for the second direction
+        let opposite_start_edge = self.opposite_edge_in_quad(start_face, edge_v0, edge_v1);
+        eprintln!("[FACE LOOP] Opposite start edge: {:?}", opposite_start_edge);
+
+        // Traverse in both directions
+        // Direction 0: use the original edge direction
+        // Direction 1: use the opposite edge direction
+        for direction in 0..2 {
+            eprintln!("[FACE LOOP] === Direction {} ===", direction);
+
+            let mut current_face = start_face;
+            let mut current_edge = if direction == 0 {
+                (edge_v0, edge_v1)
+            } else {
+                match opposite_start_edge {
+                    Some(e) => e,
+                    None => {
+                        eprintln!("[FACE LOOP] No opposite edge for direction 1, skipping");
+                        continue;
+                    }
+                }
+            };
+
+            loop {
+                eprintln!("[FACE LOOP] Current face {}, edge ({}, {})", current_face, current_edge.0, current_edge.1);
+
+                // Find the opposite edge in the current face
+                let opposite = match self.opposite_edge_in_quad(current_face, current_edge.0, current_edge.1) {
+                    Some(e) => e,
+                    None => {
+                        eprintln!("[FACE LOOP] Face {} is not a quad or edge not found, stopping", current_face);
+                        break;
+                    }
+                };
+
+                eprintln!("[FACE LOOP] Opposite edge: ({}, {})", opposite.0, opposite.1);
+
+                // Find the face on the other side of this edge
+                let adjacent_faces = self.faces_with_edge(opposite.0, opposite.1);
+                eprintln!("[FACE LOOP] Adjacent faces to opposite edge: {:?}", adjacent_faces);
+
+                let next_face = adjacent_faces.iter()
+                    .find(|&&f| f != current_face && !visited.contains(&f));
+
+                match next_face {
+                    Some(&face_idx) => {
+                        eprintln!("[FACE LOOP] Found next face: {}", face_idx);
+                        visited.insert(face_idx);
+                        loop_faces.push(face_idx);
+                        current_face = face_idx;
+                        current_edge = opposite;
+                    }
+                    None => {
+                        eprintln!("[FACE LOOP] No unvisited adjacent face found, stopping");
+                        break;
+                    }
+                }
+            }
+        }
+
+        eprintln!("[FACE LOOP] Final result: {} faces", loop_faces.len());
+        loop_faces
+    }
+
+    /// Get vertices from edge loop (flattens edge pairs to unique vertex indices)
+    pub fn vertices_from_edge_loop(&self, edges: &[(usize, usize)]) -> Vec<usize> {
+        let mut vertices: Vec<usize> = Vec::new();
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for &(v0, v1) in edges {
+            if seen.insert(v0) {
+                vertices.push(v0);
+            }
+            if seen.insert(v1) {
+                vertices.push(v1);
+            }
+        }
+
+        vertices
+    }
 }
 
 impl Default for EditableMesh {

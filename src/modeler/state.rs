@@ -552,6 +552,84 @@ impl SnapSettings {
     }
 }
 
+/// Mirror editing settings
+/// When enabled, only one side of the mesh is editable; the other side is auto-generated.
+#[derive(Debug, Clone, Copy)]
+pub struct MirrorSettings {
+    pub enabled: bool,
+    pub axis: Axis,
+    /// Vertices within this distance of the mirror plane are considered "center" vertices
+    /// and will be constrained to the plane during editing
+    pub threshold: f32,
+}
+
+impl Default for MirrorSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            axis: Axis::X,
+            threshold: 1.0,  // 1 world unit
+        }
+    }
+}
+
+impl MirrorSettings {
+    /// Check if a position is on the editable side (positive side of the axis)
+    pub fn is_editable_side(&self, pos: Vec3) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        match self.axis {
+            Axis::X => pos.x >= -self.threshold,
+            Axis::Y => pos.y >= -self.threshold,
+            Axis::Z => pos.z >= -self.threshold,
+        }
+    }
+
+    /// Check if a position is on the mirror plane (center vertex)
+    pub fn is_on_plane(&self, pos: Vec3) -> bool {
+        match self.axis {
+            Axis::X => pos.x.abs() <= self.threshold,
+            Axis::Y => pos.y.abs() <= self.threshold,
+            Axis::Z => pos.z.abs() <= self.threshold,
+        }
+    }
+
+    /// Constrain a position to the mirror plane if it's a center vertex
+    pub fn constrain_to_plane(&self, pos: Vec3) -> Vec3 {
+        if !self.enabled {
+            return pos;
+        }
+        if self.is_on_plane(pos) {
+            match self.axis {
+                Axis::X => Vec3::new(0.0, pos.y, pos.z),
+                Axis::Y => Vec3::new(pos.x, 0.0, pos.z),
+                Axis::Z => Vec3::new(pos.x, pos.y, 0.0),
+            }
+        } else {
+            pos
+        }
+    }
+
+    /// Get the mirrored position across the axis
+    pub fn mirror_position(&self, pos: Vec3) -> Vec3 {
+        match self.axis {
+            Axis::X => Vec3::new(-pos.x, pos.y, pos.z),
+            Axis::Y => Vec3::new(pos.x, -pos.y, pos.z),
+            Axis::Z => Vec3::new(pos.x, pos.y, -pos.z),
+        }
+    }
+
+    /// Get the mirrored normal across the axis
+    pub fn mirror_normal(&self, normal: Vec3) -> Vec3 {
+        match self.axis {
+            Axis::X => Vec3::new(-normal.x, normal.y, normal.z),
+            Axis::Y => Vec3::new(normal.x, -normal.y, normal.z),
+            Axis::Z => Vec3::new(normal.x, normal.y, -normal.z),
+        }
+    }
+}
+
 /// Main modeler state
 pub struct ModelerState {
     // Edit mode
@@ -634,9 +712,18 @@ pub struct ModelerState {
     // Snap/quantization settings
     pub snap_settings: SnapSettings,
 
+    // Mirror editing settings
+    pub mirror_settings: MirrorSettings,
+
     // Viewport mouse state
     pub viewport_last_mouse: (f32, f32),
     pub viewport_mouse_captured: bool,
+    /// Track if modifier was held last frame (for macOS stuck key workaround)
+    /// When a modifier is released, we can't trust WASD state due to macOS not sending key-up events
+    pub modifier_was_held: bool,
+    /// Track which movement keys we trust (macOS workaround)
+    /// When modifier is released, keys become untrusted until freshly pressed
+    pub trusted_movement_keys: [bool; 6], // W, A, S, D, Q, E
     /// Which ortho viewport is currently panning (if any)
     pub ortho_pan_viewport: Option<ViewportId>,
     /// Last mouse position for ortho panning (separate from perspective view)
@@ -871,9 +958,12 @@ impl ModelerState {
             max_undo_levels: 50,
 
             snap_settings: SnapSettings::default(),
+            mirror_settings: MirrorSettings::default(),
 
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
+            modifier_was_held: false,
+            trusted_movement_keys: [true; 6], // All trusted initially
             ortho_pan_viewport: None,
             ortho_last_mouse: (0.0, 0.0),
 

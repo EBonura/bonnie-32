@@ -92,9 +92,10 @@ pub mod icon {
     // Level objects
     pub const MAP_PIN: char = '\u{e111}';         // Object placement (map-pin)
 
-    // UV editing
+    // UV editing / Mirror
     pub const FLIP_HORIZONTAL: char = '\u{e35d}'; // flip-horizontal
     pub const FLIP_VERTICAL: char = '\u{e35f}';   // flip-vertical
+    pub const COLUMNS_2: char = '\u{e085}';       // columns-2 (mirror editing)
     pub const ROTATE_CW: char = '\u{e149}';       // rotate-cw
     pub const REFRESH_CW: char = '\u{e145}';      // refresh-cw (reset)
     pub const RATIO: char = '\u{e4e8}';           // ratio (1:1 texel mapping)
