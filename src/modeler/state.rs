@@ -665,6 +665,8 @@ pub struct ModelerState {
     // Resizable panel splits (0.0-1.0 ratios)
     pub viewport_h_split: f32,         // Horizontal divider (left/right, default 0.5)
     pub viewport_v_split: f32,         // Vertical divider (top/bottom, default 0.5)
+    pub dragging_h_divider: bool,      // True while dragging horizontal divider
+    pub dragging_v_divider: bool,      // True while dragging vertical divider
 
     // Paint state
     pub paint_color: Color,
@@ -921,6 +923,8 @@ impl ModelerState {
             // Resizable panels (default 50/50 splits)
             viewport_h_split: 0.5,
             viewport_v_split: 0.5,
+            dragging_h_divider: false,
+            dragging_v_divider: false,
 
             paint_color: Color::WHITE,
             paint_blend_mode: BlendMode::Opaque,

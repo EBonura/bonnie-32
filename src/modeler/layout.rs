@@ -2285,8 +2285,8 @@ fn draw_clut_editor_panel(
 /// │             │             │
 /// └─────────────┴─────────────┘
 fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: &mut Framebuffer) {
-    let gap = 2.0; // Gap between panels
-    let divider_hit_size = 6.0; // Hit area for dragging dividers
+    let gap = 4.0; // Gap between panels (matches SplitPanel divider_size)
+    let divider_hit_size = 8.0; // Hit area for dragging dividers
 
     // Check for fullscreen mode (Space key toggles)
     if let Some(fullscreen_id) = state.fullscreen_viewport {
@@ -2312,20 +2312,39 @@ fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
         (ViewportId::Side, Rect::new(rect.x + left_w + gap, rect.y + top_h + gap, right_w, bottom_h)),
     ];
 
-    // Handle divider dragging
+    // Handle divider dragging with proper state tracking
     let h_divider_rect = Rect::new(rect.x + left_w - divider_hit_size/2.0, rect.y, gap + divider_hit_size, rect.h);
     let v_divider_rect = Rect::new(rect.x, rect.y + top_h - divider_hit_size/2.0, rect.w, gap + divider_hit_size);
 
-    // Check if dragging dividers
-    if ctx.mouse.left_down && ctx.mouse.inside(&h_divider_rect) {
+    let h_hovered = ctx.mouse.inside(&h_divider_rect);
+    let v_hovered = ctx.mouse.inside(&v_divider_rect);
+
+    // Start dragging on mouse press
+    if ctx.mouse.left_pressed {
+        if h_hovered {
+            state.dragging_h_divider = true;
+        }
+        if v_hovered {
+            state.dragging_v_divider = true;
+        }
+    }
+
+    // Stop dragging on mouse release
+    if !ctx.mouse.left_down {
+        state.dragging_h_divider = false;
+        state.dragging_v_divider = false;
+    }
+
+    // Update split positions while dragging (anywhere in viewport area)
+    if state.dragging_h_divider {
         state.viewport_h_split = ((ctx.mouse.x - rect.x) / rect.w).clamp(0.15, 0.85);
     }
-    if ctx.mouse.left_down && ctx.mouse.inside(&v_divider_rect) {
+    if state.dragging_v_divider {
         state.viewport_v_split = ((ctx.mouse.y - rect.y) / rect.h).clamp(0.15, 0.85);
     }
 
-    // Update active viewport based on mouse hover (only if not on divider)
-    let on_divider = ctx.mouse.inside(&h_divider_rect) || ctx.mouse.inside(&v_divider_rect);
+    // Update active viewport based on mouse hover (only if not on divider and not dragging)
+    let on_divider = h_hovered || v_hovered || state.dragging_h_divider || state.dragging_v_divider;
     if !on_divider {
         for (id, vp_rect) in &viewports {
             if ctx.mouse.inside(vp_rect) {
@@ -2339,43 +2358,60 @@ fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
     for (id, vp_rect) in viewports {
         draw_single_viewport(ctx, vp_rect, state, fb, id);
     }
+
+    // Draw dividers between viewports (matching SplitPanel style: 4px wide, darker color)
+    let divider_color = Color::from_rgba(60, 60, 60, 255);
+    let highlight_color = Color::from_rgba(100, 150, 255, 255); // Same as SplitPanel hover
+
+    // Calculate divider positions (center of gap)
+    let divider_y = rect.y + top_h;
+    let divider_x = rect.x + left_w;
+
+    // Horizontal divider (between top and bottom rows) - full gap height
+    let h_divider_color = if v_hovered || state.dragging_v_divider { highlight_color } else { divider_color };
+    draw_rectangle(rect.x, divider_y, rect.w, gap, h_divider_color);
+
+    // Vertical divider (between left and right columns) - full gap width
+    let v_divider_color = if h_hovered || state.dragging_h_divider { highlight_color } else { divider_color };
+    draw_rectangle(divider_x, rect.y, gap, rect.h, v_divider_color);
 }
 
-/// Draw a single viewport with its label and border
+/// Draw a single viewport with its header bar (matching World Editor style)
 fn draw_single_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: &mut Framebuffer, viewport_id: ViewportId) {
     let is_active = state.active_viewport == viewport_id;
+    let header_height = 20.0;
 
-    // Background
-    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(25, 25, 30, 255));
+    // Header bar (matching World Editor panel style)
+    let header_rect = Rect::new(rect.x, rect.y, rect.w, header_height);
+    let header_color = Color::from_rgba(50, 50, 60, 255);
+    draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, header_color);
 
-    // Border (highlighted if active)
-    let border_color = if is_active {
-        ACCENT_COLOR
-    } else {
-        Color::from_rgba(60, 60, 65, 255)
-    };
-    draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, border_color);
-
-    // Content area (inset for border)
-    let content = rect.pad(1.0);
-
-    // Draw the actual 3D content - unified for both perspective and ortho views
-    draw_modeler_viewport_ext(ctx, content, state, fb, viewport_id);
-
-    // Label in top-left corner
+    // Header text - cyan when active, white when inactive
     let label = viewport_id.label();
-    let label_bg = Rect::new(rect.x + 2.0, rect.y + 2.0, label.len() as f32 * 7.0 + 8.0, 16.0);
-    draw_rectangle(label_bg.x, label_bg.y, label_bg.w, label_bg.h, Color::from_rgba(0, 0, 0, 180));
-    draw_text(label, label_bg.x + 4.0, label_bg.y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    let text_color = if is_active { ACCENT_COLOR } else { WHITE };
+    draw_text(label, header_rect.x + 6.0, header_rect.y + 14.0, FONT_SIZE_HEADER, text_color);
 
-    // X-RAY label in top-right corner when enabled
+    // X-RAY label in header when enabled
     if state.xray_mode {
         let xray_label = "X-RAY";
         let xray_w = xray_label.len() as f32 * 7.0 + 8.0;
-        let xray_bg = Rect::new(rect.right() - xray_w - 2.0, rect.y + 2.0, xray_w, 16.0);
-        draw_rectangle(xray_bg.x, xray_bg.y, xray_bg.w, xray_bg.h, Color::from_rgba(180, 80, 80, 200));
-        draw_text(xray_label, xray_bg.x + 4.0, xray_bg.y + 12.0, FONT_SIZE_CONTENT, WHITE);
+        let xray_x = header_rect.right() - xray_w - 4.0;
+        draw_rectangle(xray_x, header_rect.y + 2.0, xray_w, header_height - 4.0, Color::from_rgba(180, 80, 80, 200));
+        draw_text(xray_label, xray_x + 4.0, header_rect.y + 14.0, FONT_SIZE_CONTENT, WHITE);
     }
+
+    // Content area below header
+    let content_rect = Rect::new(rect.x, rect.y + header_height, rect.w, rect.h - header_height);
+
+    // Background
+    draw_rectangle(content_rect.x, content_rect.y, content_rect.w, content_rect.h, Color::from_rgba(25, 25, 30, 255));
+
+    // Subtle border around entire viewport
+    let border_color = Color::from_rgba(60, 60, 65, 255);
+    draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, border_color);
+
+    // Draw the actual 3D content
+    draw_modeler_viewport_ext(ctx, content_rect, state, fb, viewport_id);
 }
 
 /// Calculate distance from point to line segment (for edge hover detection)
