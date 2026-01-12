@@ -22,6 +22,8 @@ pub mod flags {
     pub const PAINT_MODE: u32 = 1 << 7;
     /// UV editor has focus (mouse inside canvas, UV mode active)
     pub const UV_EDITOR_FOCUSED: u32 = 1 << 8;
+    /// Clipboard has content for paste
+    pub const HAS_CLIPBOARD: u32 = 1 << 9;
 }
 
 /// Create the complete action registry for the modeler
@@ -283,6 +285,36 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     // ========================================================================
+    // Copy/Paste/Duplicate Actions
+    // ========================================================================
+    registry.register(
+        Action::new("edit.copy")
+            .label("Copy")
+            .shortcut(Shortcut::ctrl(KeyCode::C))
+            .status_tip("Copy selection to clipboard (Ctrl+C)")
+            .category("Edit")
+            .enabled_when(|ctx| ctx.has_selection),
+    );
+
+    registry.register(
+        Action::new("edit.paste")
+            .label("Paste")
+            .shortcut(Shortcut::ctrl(KeyCode::V))
+            .status_tip("Paste clipboard as new object (Ctrl+V)")
+            .category("Edit")
+            .enabled_when(|ctx| ctx.has_flag(flags::HAS_CLIPBOARD)),
+    );
+
+    registry.register(
+        Action::new("edit.duplicate")
+            .label("Duplicate")
+            .shortcut(Shortcut::shift(KeyCode::D))
+            .status_tip("Duplicate selection as new object (Shift+D)")
+            .category("Edit")
+            .enabled_when(|ctx| ctx.has_selection),
+    );
+
+    // ========================================================================
     // UV/Texture Actions
     // ========================================================================
     registry.register(
@@ -511,12 +543,13 @@ pub fn build_context(
     is_dragging: bool,
     is_paint_mode: bool,
     uv_editor_focused: bool,
+    has_clipboard: bool,
 ) -> ActionContext {
     let mut ctx = ActionContext {
         can_undo,
         can_redo,
         has_selection,
-        has_clipboard: false, // Modeler doesn't use clipboard yet
+        has_clipboard,
         mode: "modeler",
         text_editing,
         has_face_selection,
@@ -542,6 +575,10 @@ pub fn build_context(
 
     if uv_editor_focused {
         ctx.flags |= flags::UV_EDITOR_FOCUSED;
+    }
+
+    if has_clipboard {
+        ctx.flags |= flags::HAS_CLIPBOARD;
     }
 
     ctx
@@ -602,14 +639,14 @@ mod tests {
 
         // Face mode should show as checked when in face mode
         let ctx = build_context(
-            false, false, false, false, false, "face", false, false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false
         );
         assert!(registry.is_checked("select.face_mode", &ctx));
         assert!(!registry.is_checked("select.vertex_mode", &ctx));
 
         // Texture mode toggle - use text_editing=true since that's what toggles the mode
         let ctx2 = build_context(
-            false, false, false, false, false, "face", true, false, false, false, false
+            false, false, false, false, false, "face", true, false, false, false, false, false
         );
         assert!(registry.is_checked("view.toggle_mode", &ctx2));
     }
@@ -620,12 +657,12 @@ mod tests {
 
         // Axis constraints should only be enabled when dragging
         let ctx_not_dragging = build_context(
-            false, false, true, false, false, "vertex", false, false, false, false, false
+            false, false, true, false, false, "vertex", false, false, false, false, false, false
         );
         assert!(!registry.is_enabled("axis.constrain_x", &ctx_not_dragging));
 
         let ctx_dragging = build_context(
-            false, false, true, false, false, "vertex", false, false, true, false, false
+            false, false, true, false, false, "vertex", false, false, true, false, false, false
         );
         assert!(registry.is_enabled("axis.constrain_x", &ctx_dragging));
         assert!(registry.is_enabled("axis.constrain_y", &ctx_dragging));
@@ -638,12 +675,12 @@ mod tests {
 
         // Brush actions should only be enabled in paint mode
         let ctx_not_paint = build_context(
-            false, false, false, false, false, "face", false, false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false
         );
         assert!(!registry.is_enabled("brush.square", &ctx_not_paint));
 
         let ctx_paint = build_context(
-            false, false, false, false, false, "face", false, false, false, true, false
+            false, false, false, false, false, "face", false, false, false, true, false, false
         );
         assert!(registry.is_enabled("brush.square", &ctx_paint));
         assert!(registry.is_enabled("brush.fill", &ctx_paint));
@@ -655,12 +692,12 @@ mod tests {
 
         // Select all should be disabled when UV editor is focused
         let ctx_no_uv = build_context(
-            false, false, false, false, false, "face", false, false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false
         );
         assert!(registry.is_enabled("select.all", &ctx_no_uv));
 
         let ctx_uv_focused = build_context(
-            false, false, false, false, false, "face", false, false, false, false, true
+            false, false, false, false, false, "face", false, false, false, false, true, false
         );
         assert!(!registry.is_enabled("select.all", &ctx_uv_focused));
     }

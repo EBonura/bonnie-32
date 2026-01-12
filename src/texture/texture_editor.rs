@@ -3086,9 +3086,10 @@ fn draw_uv_overlay(
     // Convert UV coords (0-1) to screen coords
     let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
         // U goes left-to-right, V goes top-to-bottom (inverted from typical UV)
+        // UV coords map to pixel corners (0=left/top edge, 1=right/bottom edge)
         let px = u * tex_width;
         let py = (1.0 - v) * tex_height;
-        (tex_x + (px + 0.5) * zoom, tex_y + (py + 0.5) * zoom)
+        (tex_x + px * zoom, tex_y + py * zoom)
     };
 
     // Draw selected faces
@@ -3159,7 +3160,7 @@ fn handle_uv_input(
     let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
         let px = u * tex_width;
         let py = (1.0 - v) * tex_height;
-        (tex_x + (px + 0.5) * zoom, tex_y + (py + 0.5) * zoom)
+        (tex_x + px * zoom, tex_y + py * zoom)
     };
 
     // Find nearest vertex to a screen position

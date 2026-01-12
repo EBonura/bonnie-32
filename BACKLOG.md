@@ -109,8 +109,8 @@ This document tracks planned features, known issues, and future improvements.
 #### Future
 - [ ] VRAM usage counter: Display usage with warning when exceeded
 - [x] **Loop selection**: Blender-style edge/face loop selection (Alt+L) - DONE
-- [ ] **Add primitive creates new object**: Adding a primitive should create a new object, not add to current
-- [ ] **Copy/paste/duplicate**: Implement copy, paste, and duplicate functionality
+- [x] **Add primitive creates new object**: Adding a primitive should create a new object, not add to current - DONE
+- [x] **Copy/paste/duplicate**: Implement copy, paste, and duplicate functionality - DONE
 - [ ] **Light support**: Asset editor should support lights. Lights in world editor become objects with only a light component (no geometry)
 
 ---

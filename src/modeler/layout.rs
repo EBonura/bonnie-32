@@ -13,7 +13,7 @@ use crate::texture::{
 };
 use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
-use super::mesh_editor::EditableMesh;
+use super::mesh_editor::{EditableMesh, MeshObject};
 use super::actions::{create_modeler_actions, build_context};
 use crate::rasterizer::{Vec3, Vec2 as RastVec2};
 
@@ -4033,6 +4033,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         is_dragging,
         is_paint_mode,
         uv_editor_focused,
+        state.clipboard.has_content(),
     );
 
     let mut action = ModelerAction::None;
@@ -4066,6 +4067,15 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     }
     if actions.triggered("edit.delete", &ctx) || actions.triggered("edit.delete_alt", &ctx) {
         delete_selection(state);
+    }
+    if actions.triggered("edit.copy", &ctx) {
+        copy_selection(state);
+    }
+    if actions.triggered("edit.paste", &ctx) {
+        paste_clipboard(state);
+    }
+    if actions.triggered("edit.duplicate", &ctx) {
+        duplicate_selection(state);
     }
 
     // ========================================================================
@@ -4776,6 +4786,115 @@ fn delete_selection(state: &mut ModelerState) {
     }
 }
 
+/// Copy current selection to clipboard
+fn copy_selection(state: &mut ModelerState) {
+    let selection = state.selection.clone();
+    let mesh = state.mesh().clone();
+
+    match selection {
+        super::state::ModelerSelection::Faces(face_indices) => {
+            if face_indices.is_empty() {
+                state.set_status("No faces selected to copy", 1.0);
+                return;
+            }
+            state.clipboard.copy_faces(&mesh, &face_indices);
+            state.set_status(&format!("Copied {} face(s)", face_indices.len()), 1.0);
+        }
+        super::state::ModelerSelection::Vertices(_) |
+        super::state::ModelerSelection::Edges(_) => {
+            // For vertices/edges, copy the entire mesh for now
+            // Could be improved to copy just the affected geometry
+            state.clipboard.copy_mesh(&mesh);
+            state.set_status("Copied mesh", 1.0);
+        }
+        _ => {
+            // No selection - copy entire mesh
+            state.clipboard.copy_mesh(&mesh);
+            state.set_status("Copied entire mesh", 1.0);
+        }
+    }
+}
+
+/// Paste clipboard contents as a new object
+fn paste_clipboard(state: &mut ModelerState) {
+    if !state.clipboard.has_content() {
+        state.set_status("Clipboard empty", 1.0);
+        return;
+    }
+
+    let clipboard_mesh = state.clipboard.mesh.clone().unwrap();
+    let clipboard_center = state.clipboard.center;
+
+    state.push_undo("Paste");
+
+    // Create new mesh offset to a point in front of the camera
+    let mut new_mesh = clipboard_mesh;
+    let camera_pos = state.camera.position;
+    let camera_forward = state.camera.basis_z;
+    let paste_target = camera_pos + camera_forward * 500.0; // 500 units in front
+    let offset = paste_target - clipboard_center;
+
+    for vert in &mut new_mesh.vertices {
+        vert.pos.x += offset.x;
+        vert.pos.y += offset.y;
+        vert.pos.z += offset.z;
+    }
+
+    let name = state.generate_unique_object_name("Pasted");
+    let obj = MeshObject::with_mesh(&name, new_mesh);
+    state.add_object(obj);
+    state.set_status("Pasted as new object", 1.0);
+}
+
+/// Duplicate selection (copy + paste in one operation)
+fn duplicate_selection(state: &mut ModelerState) {
+    let selection = state.selection.clone();
+    let mesh = state.mesh().clone();
+
+    match selection {
+        super::state::ModelerSelection::Faces(face_indices) => {
+            if face_indices.is_empty() {
+                state.set_status("No faces selected to duplicate", 1.0);
+                return;
+            }
+            state.push_undo("Duplicate");
+
+            // Copy faces to clipboard and paste immediately
+            state.clipboard.copy_faces(&mesh, &face_indices);
+            let clipboard_mesh = state.clipboard.mesh.clone().unwrap();
+
+            // Offset slightly so duplicate is visible
+            let mut new_mesh = clipboard_mesh;
+            for vert in &mut new_mesh.vertices {
+                vert.pos.x += 100.0;
+                vert.pos.z += 100.0;
+            }
+
+            let name = state.generate_unique_object_name("Duplicate");
+            let obj = MeshObject::with_mesh(&name, new_mesh);
+            state.add_object(obj);
+            state.set_status(&format!("Duplicated {} face(s)", face_indices.len()), 1.0);
+        }
+        _ => {
+            // Duplicate entire mesh
+            state.push_undo("Duplicate mesh");
+            state.clipboard.copy_mesh(&mesh);
+            let clipboard_mesh = state.clipboard.mesh.clone().unwrap();
+
+            let mut new_mesh = clipboard_mesh;
+            for vert in &mut new_mesh.vertices {
+                vert.pos.x += 100.0;
+                vert.pos.z += 100.0;
+            }
+
+            let name = state.generate_unique_object_name("Duplicate");
+            let obj = MeshObject::with_mesh(&name, new_mesh);
+            state.add_object(obj);
+            state.set_status("Duplicated mesh", 1.0);
+        }
+    }
+}
+
 /// Get all vertex indices affected by current selection
 fn get_selected_vertex_indices(state: &ModelerState) -> Vec<usize> {
     match &state.selection {
@@ -4940,29 +5059,47 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     if let Some(prim) = clicked_primitive {
         state.push_undo(&format!("Add {}", prim.label()));
         let size = 512.0; // Reasonable size for new primitives (half of default cube)
-        let new_mesh = prim.create(size);
-        if let Some(mesh) = state.mesh_mut() {
-            mesh.merge(&new_mesh, menu.world_pos);
+        let mut new_mesh = prim.create(size);
+
+        // Offset mesh vertices to the clicked world position
+        for vert in &mut new_mesh.vertices {
+            vert.pos.x += menu.world_pos.x;
+            vert.pos.y += menu.world_pos.y;
+            vert.pos.z += menu.world_pos.z;
         }
-        state.dirty = true;
-        state.set_status(&format!("Added {}", prim.label()), 1.0);
+
+        // Create new object with unique name
+        let base_name = prim.label().split_whitespace().next().unwrap_or("Object");
+        let name = state.generate_unique_object_name(base_name);
+        let obj = MeshObject::with_mesh(&name, new_mesh);
+        state.add_object(obj);
+        state.set_status(&format!("Added {} as new object", prim.label()), 1.0);
         state.context_menu = None;
     }
 
     if clone_clicked {
-        state.push_undo("Clone mesh");
-        // Clone entire mesh at offset
+        state.push_undo("Clone object");
+        // Clone entire object at offset as a new object
         let offset = Vec3::new(
             state.snap_settings.grid_size * 2.0,
             0.0,
             state.snap_settings.grid_size * 2.0,
         );
-        let clone = state.mesh().clone();
-        if let Some(mesh) = state.mesh_mut() {
-            mesh.merge(&clone, offset);
+        let mut clone = state.mesh().clone();
+        // Apply offset to cloned mesh
+        for vert in &mut clone.vertices {
+            vert.pos.x += offset.x;
+            vert.pos.y += offset.y;
+            vert.pos.z += offset.z;
         }
-        state.dirty = true;
-        state.set_status("Cloned mesh", 1.0);
+        // Generate unique name based on source object
+        let source_name = state.selected_object()
+            .map(|o| o.name.as_str())
+            .unwrap_or("Object");
+        let name = state.generate_unique_object_name(source_name);
+        let obj = MeshObject::with_mesh(&name, clone);
+        state.add_object(obj);
+        state.set_status("Cloned as new object", 1.0);
         state.context_menu = None;
     }
 

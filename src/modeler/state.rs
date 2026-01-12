@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15};
 use crate::texture::{TextureLibrary, TextureEditorState};
-use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, IndexedAtlas};
+use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, IndexedAtlas, EditFace};
 use super::model::Animation;
 use super::drag::DragManager;
 use super::tools::ModelerToolBox;
@@ -638,6 +638,112 @@ impl MirrorSettings {
     }
 }
 
+/// Clipboard for copy/paste operations
+/// Stores geometry that can be pasted as a new object
+#[derive(Clone, Debug, Default)]
+pub struct Clipboard {
+    /// Copied mesh geometry (centered at origin for easier placement)
+    pub mesh: Option<EditableMesh>,
+    /// Original center position (for relative paste)
+    pub center: Vec3,
+}
+
+impl Clipboard {
+    /// Copy selected faces from a mesh
+    pub fn copy_faces(&mut self, mesh: &EditableMesh, face_indices: &[usize]) {
+        use std::collections::{HashMap, HashSet};
+
+        if face_indices.is_empty() {
+            self.mesh = None;
+            return;
+        }
+
+        // Collect all vertices used by selected faces
+        let mut used_vertices: HashSet<usize> = HashSet::new();
+        for &fi in face_indices {
+            if let Some(face) = mesh.faces.get(fi) {
+                for &vi in &face.vertices {
+                    used_vertices.insert(vi);
+                }
+            }
+        }
+
+        // Build old->new vertex index mapping
+        let mut vertex_map: HashMap<usize, usize> = HashMap::new();
+        let mut new_vertices: Vec<crate::rasterizer::Vertex> = Vec::new();
+        let mut sorted_verts: Vec<usize> = used_vertices.into_iter().collect();
+        sorted_verts.sort();
+
+        for old_idx in sorted_verts {
+            if let Some(vert) = mesh.vertices.get(old_idx) {
+                vertex_map.insert(old_idx, new_vertices.len());
+                new_vertices.push(vert.clone());
+            }
+        }
+
+        // Copy faces with remapped indices
+        let mut new_faces: Vec<EditFace> = Vec::new();
+        for &fi in face_indices {
+            if let Some(face) = mesh.faces.get(fi) {
+                let new_verts: Vec<usize> = face.vertices.iter()
+                    .filter_map(|&vi| vertex_map.get(&vi).copied())
+                    .collect();
+                if new_verts.len() == face.vertices.len() {
+                    new_faces.push(EditFace {
+                        vertices: new_verts,
+                        texture_id: face.texture_id,
+                        black_transparent: face.black_transparent,
+                        blend_mode: face.blend_mode,
+                    });
+                }
+            }
+        }
+
+        // Calculate center for the copied geometry
+        let mut center = Vec3::ZERO;
+        if !new_vertices.is_empty() {
+            for v in &new_vertices {
+                center = center + v.pos;
+            }
+            center = center * (1.0 / new_vertices.len() as f32);
+        }
+
+        // Center the geometry at origin
+        for v in &mut new_vertices {
+            v.pos = v.pos - center;
+        }
+
+        self.center = center;
+        self.mesh = Some(EditableMesh::from_parts(new_vertices, new_faces));
+    }
+
+    /// Copy entire mesh (for whole object copy)
+    pub fn copy_mesh(&mut self, mesh: &EditableMesh) {
+        // Calculate center
+        let mut center = Vec3::ZERO;
+        if !mesh.vertices.is_empty() {
+            for v in &mesh.vertices {
+                center = center + v.pos;
+            }
+            center = center * (1.0 / mesh.vertices.len() as f32);
+        }
+
+        // Clone and center at origin
+        let mut clone = mesh.clone();
+        for v in &mut clone.vertices {
+            v.pos = v.pos - center;
+        }
+
+        self.center = center;
+        self.mesh = Some(clone);
+    }
+
+    /// Check if clipboard has content
+    pub fn has_content(&self) -> bool {
+        self.mesh.is_some()
+    }
+}
+
 /// Main modeler state
 pub struct ModelerState {
     // Edit mode
@@ -725,6 +831,9 @@ pub struct ModelerState {
 
     // Mirror editing settings
     pub mirror_settings: MirrorSettings,
+
+    /// Clipboard for copy/paste operations
+    pub clipboard: Clipboard,
 
     /// X-ray mode: see and select through geometry (backface selection enabled)
     pub xray_mode: bool,
@@ -976,6 +1085,7 @@ impl ModelerState {
 
             snap_settings: SnapSettings::default(),
             mirror_settings: MirrorSettings::default(),
+            clipboard: Clipboard::default(),
             xray_mode: false,
 
             viewport_last_mouse: (0.0, 0.0),
@@ -1221,6 +1331,27 @@ impl ModelerState {
         self.project.selected_object = Some(idx);
         self.dirty = true;
         idx
+    }
+
+    /// Generate a unique object name by appending a number if needed
+    pub fn generate_unique_object_name(&self, base_name: &str) -> String {
+        let existing_names: std::collections::HashSet<&str> = self.project.objects
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect();
+
+        if !existing_names.contains(base_name) {
+            return base_name.to_string();
+        }
+
+        // Find the next available number
+        for i in 1.. {
+            let candidate = format!("{}.{:03}", base_name, i);
+            if !existing_names.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        base_name.to_string() // Fallback (shouldn't reach here)
     }
 
     /// Create a new project (replaces current)
