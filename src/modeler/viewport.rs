@@ -703,15 +703,17 @@ pub fn draw_modeler_viewport_ext(
     let ctrl_held = all_keys.contains(&KeyCode::LeftControl) || all_keys.contains(&KeyCode::RightControl)
         || all_keys.contains(&KeyCode::LeftSuper) || all_keys.contains(&KeyCode::RightSuper);
     let alt_held = all_keys.contains(&KeyCode::LeftAlt) || all_keys.contains(&KeyCode::RightAlt);
-    let any_modifier = shift_held || ctrl_held || alt_held;
+    // Shift is allowed with WASD (for speed boost), only Ctrl/Alt block camera movement
+    let blocking_modifier = ctrl_held || alt_held;
 
     // macOS workaround: When Cmd+key is released, macOS doesn't send key-up for the letter key.
     // We track "trusted" state for each movement key:
-    // - When modifier is released, all keys become untrusted
+    // - When blocking modifier (Ctrl/Alt) is released, all keys become untrusted
     // - Keys become trusted again when freshly pressed (is_key_pressed)
     // - Keys become trusted when released (not in all_keys) - ready for next press
-    let modifier_just_released = state.modifier_was_held && !any_modifier;
-    state.modifier_was_held = any_modifier;
+    // Note: Shift doesn't cause stuck keys, so we don't include it here
+    let modifier_just_released = state.modifier_was_held && !blocking_modifier;
+    state.modifier_was_held = blocking_modifier;
 
     // Key indices: 0=W, 1=A, 2=S, 3=D, 4=Q, 5=E
     let movement_keys = [KeyCode::W, KeyCode::A, KeyCode::S, KeyCode::D, KeyCode::Q, KeyCode::E];
@@ -763,27 +765,28 @@ pub fn draw_modeler_viewport_ext(
             }
 
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
-            // Skip when ANY modifier is held to avoid conflicts with shortcuts
-            // Uses pre-extracted key states from get_keys_down() for consistency
+            // Skip when Ctrl/Alt is held to avoid conflicts with shortcuts
+            // Shift is allowed - it increases movement speed
             let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
-            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !any_modifier {
+            let speed = if shift_held { base_speed * 4.0 } else { base_speed };
+            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !blocking_modifier {
                 if w_down {
-                    state.camera.position = state.camera.position + state.camera.basis_z * base_speed;
+                    state.camera.position = state.camera.position + state.camera.basis_z * speed;
                 }
                 if s_down {
-                    state.camera.position = state.camera.position - state.camera.basis_z * base_speed;
+                    state.camera.position = state.camera.position - state.camera.basis_z * speed;
                 }
                 if a_down {
-                    state.camera.position = state.camera.position - state.camera.basis_x * base_speed;
+                    state.camera.position = state.camera.position - state.camera.basis_x * speed;
                 }
                 if d_down {
-                    state.camera.position = state.camera.position + state.camera.basis_x * base_speed;
+                    state.camera.position = state.camera.position + state.camera.basis_x * speed;
                 }
                 if q_down {
-                    state.camera.position = state.camera.position - state.camera.basis_y * base_speed;
+                    state.camera.position = state.camera.position - state.camera.basis_y * speed;
                 }
                 if e_down {
-                    state.camera.position = state.camera.position + state.camera.basis_y * base_speed;
+                    state.camera.position = state.camera.position + state.camera.basis_y * speed;
                 }
             }
         }
