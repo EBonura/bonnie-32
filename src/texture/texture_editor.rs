@@ -194,6 +194,67 @@ impl Selection {
 
         None
     }
+
+    /// Check if a screen position is near one of the 8 resize handles (corners + edge midpoints)
+    /// Returns the edge if within threshold of a handle, None otherwise
+    /// This is more specific than hit_test_edge - only matches the handle squares, not entire edges
+    pub fn hit_test_handle(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        tex_x: f32,
+        tex_y: f32,
+        zoom: f32,
+        handle_size: f32,
+    ) -> Option<ResizeEdge> {
+        let sel_x = tex_x + self.x as f32 * zoom;
+        let sel_y = tex_y + self.y as f32 * zoom;
+        let sel_w = self.width as f32 * zoom;
+        let sel_h = self.height as f32 * zoom;
+
+        let half = handle_size / 2.0;
+
+        // Define the 8 handle positions (same as draw_selection_handles)
+        let handles = [
+            (sel_x - half, sel_y - half, ResizeEdge::TopLeft),
+            (sel_x + sel_w / 2.0 - half, sel_y - half, ResizeEdge::Top),
+            (sel_x + sel_w - half, sel_y - half, ResizeEdge::TopRight),
+            (sel_x + sel_w - half, sel_y + sel_h / 2.0 - half, ResizeEdge::Right),
+            (sel_x + sel_w - half, sel_y + sel_h - half, ResizeEdge::BottomRight),
+            (sel_x + sel_w / 2.0 - half, sel_y + sel_h - half, ResizeEdge::Bottom),
+            (sel_x - half, sel_y + sel_h - half, ResizeEdge::BottomLeft),
+            (sel_x - half, sel_y + sel_h / 2.0 - half, ResizeEdge::Left),
+        ];
+
+        for (hx, hy, edge) in handles {
+            if screen_x >= hx && screen_x <= hx + handle_size &&
+               screen_y >= hy && screen_y <= hy + handle_size {
+                return Some(edge);
+            }
+        }
+
+        None
+    }
+
+    /// Check if a screen position is on the selection border (edge lines, not handles)
+    /// Returns true if on border but not on a handle
+    pub fn hit_test_border(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        tex_x: f32,
+        tex_y: f32,
+        zoom: f32,
+        threshold: f32,
+        handle_size: f32,
+    ) -> bool {
+        // First check if on any edge
+        if self.hit_test_edge(screen_x, screen_y, tex_x, tex_y, zoom, threshold).is_none() {
+            return false;
+        }
+        // Then check if NOT on a handle
+        self.hit_test_handle(screen_x, screen_y, tex_x, tex_y, zoom, handle_size).is_none()
+    }
 }
 
 /// Clipboard data for copy/paste
@@ -1761,7 +1822,21 @@ pub fn draw_texture_canvas(
         } else if let Some((px, py)) = screen_to_texture(ctx.mouse.x, ctx.mouse.y, &canvas_rect, texture, state) {
             // Handle Select tool
             if state.tool == DrawTool::Select {
-                // Check for edge hover (for resize cursor feedback)
+                // Handle size for hit testing (matches draw_selection_handles)
+                let handle_size = 6.0;
+
+                // Check for handle hover (for resize cursor feedback)
+                let hovered_handle = if let Some(ref selection) = state.selection {
+                    if selection.floating.is_none() && !state.creating_selection && state.resizing_edge.is_none() {
+                        selection.hit_test_handle(ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, handle_size)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Check for edge hover (for visual feedback, used by draw_selection_handles)
                 let hovered_edge = if let Some(ref selection) = state.selection {
                     if selection.floating.is_none() && !state.creating_selection && state.resizing_edge.is_none() {
                         selection.hit_test_edge(ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, 8.0)
@@ -1777,8 +1852,8 @@ pub fn draw_texture_canvas(
                     let cursor_x = tex_x + px as f32 * state.zoom;
                     let cursor_y = tex_y + py as f32 * state.zoom;
 
-                    // Only show crosshair if not hovering an edge
-                    if hovered_edge.is_none() && state.resizing_edge.is_none() {
+                    // Only show crosshair if not hovering a handle or edge
+                    if hovered_handle.is_none() && hovered_edge.is_none() && state.resizing_edge.is_none() {
                         draw_rectangle_lines(
                             cursor_x,
                             cursor_y,
@@ -1792,33 +1867,20 @@ pub fn draw_texture_canvas(
 
                 // Mouse pressed - start selection, move, or resize
                 if ctx.mouse.left_pressed {
-                    // First check if we're clicking on an edge/handle
-                    if let Some(edge) = hovered_edge {
-                        // Shift+click on edge = resize, otherwise move
-                        let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-                        if shift_held {
-                            // Shift+click edge = resize
-                            state.resizing_edge = Some(edge);
-                            state.selection_drag_start = Some((px, py));
-                            state.creating_selection = false;
-                        } else {
-                            // Click edge = move (lift and drag, like clicking inside)
-                            state.selection_drag_start = Some((px, py));
-                            state.creating_selection = false;
-
-                            // Store original position for cancel
-                            if let Some(ref selection) = state.selection {
-                                state.move_original_pos = Some((selection.x, selection.y));
-                            }
-
-                            // Lift pixels into floating selection if not already floating
-                            if state.selection.as_ref().map_or(false, |s| s.floating.is_none()) {
-                                lift_selection_to_floating(texture, state);
-                            }
-                        }
-                    } else if let Some(ref selection) = state.selection {
-                        if selection.contains(px, py) {
-                            // Click inside selection - start moving
+                    // First check if clicking on a handle → resize
+                    if let Some(handle) = hovered_handle {
+                        // Click on handle = resize
+                        state.resizing_edge = Some(handle);
+                        state.selection_drag_start = Some((px, py));
+                        state.creating_selection = false;
+                    }
+                    // Check if clicking on border (edge but not handle) or inside → move
+                    else if let Some(ref selection) = state.selection {
+                        let on_border = selection.hit_test_border(
+                            ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, 8.0, handle_size
+                        );
+                        if selection.contains(px, py) || on_border {
+                            // Click inside selection or on border - start moving
                             state.selection_drag_start = Some((px, py));
                             state.creating_selection = false;
 
@@ -1956,16 +2018,19 @@ pub fn draw_texture_canvas(
 
                     if state.tool.uses_brush_size() {
                         let size = state.brush_size as f32 * state.zoom;
-                        let half = ((state.brush_size as f32 - 1.0) / 2.0) * state.zoom;
+                        // Use integer division to match actual brush drawing (tex_draw_brush_square/circle)
+                        let half = ((state.brush_size as i32 - 1) / 2) as f32 * state.zoom;
                         let cursor_color = Color::new(1.0, 1.0, 1.0, 0.5);
 
                         // Show shape-appropriate cursor
                         if state.tool == DrawTool::Brush && state.brush_shape == BrushShape::Circle && state.brush_size > 1 {
-                            // Circle cursor
-                            let radius = size / 2.0;
+                            // Circle cursor - radius matches (size - 1) / 2 integer division
+                            let r = ((state.brush_size as i32 - 1) / 2) as f32 * state.zoom;
+                            // Center on the pixel, offset by half a pixel in screen space
                             let cx = cursor_x + state.zoom / 2.0;
                             let cy = cursor_y + state.zoom / 2.0;
-                            draw_circle_lines(cx, cy, radius, 1.0, cursor_color);
+                            // Add half zoom to radius to cover the full pixel extents
+                            draw_circle_lines(cx, cy, r + state.zoom / 2.0, 1.0, cursor_color);
                         } else {
                             // Square cursor (or single pixel)
                             draw_rectangle_lines(
