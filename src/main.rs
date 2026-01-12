@@ -193,6 +193,38 @@ async fn main() {
             }
         }
 
+        // Keyboard shortcuts for tab cycling: Cmd+] (next), Cmd+[ (previous)
+        let cmd = is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+        let bracket_left = is_key_pressed(KeyCode::LeftBracket);
+        let bracket_right = is_key_pressed(KeyCode::RightBracket);
+
+        if cmd && (bracket_left || bracket_right) {
+            let num_tabs = tabs.len();
+            let current = app.active_tool_index();
+            let next_index = if bracket_left {
+                // Previous tab (wrap around)
+                if current == 0 { num_tabs - 1 } else { current - 1 }
+            } else {
+                // Next tab (wrap around)
+                (current + 1) % num_tabs
+            };
+            if let Some(tool) = Tool::from_index(next_index) {
+                // Handle special cases for certain tabs
+                if tool == Tool::WorldEditor && world_editor_first_open {
+                    world_editor_first_open = false;
+                    app.world_editor.example_browser.open(discover_examples());
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        app.world_editor.example_browser.pending_load_list = true;
+                    }
+                }
+                if tool == Tool::Test {
+                    app.game.reset();
+                }
+                app.set_active_tool(tool);
+            }
+        }
+
         // Content area below tab bar
         let content_rect = Rect::new(0.0, tab_layout::BAR_HEIGHT, screen_w, screen_h - tab_layout::BAR_HEIGHT);
 
