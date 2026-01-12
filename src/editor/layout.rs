@@ -58,7 +58,7 @@ impl EditorLayout {
         // which are auto-generated starting from 1 via ctx.next_id()
         Self {
             main_split: SplitPanel::horizontal(1000).with_ratio(0.25).with_min_size(150.0),
-            right_split: SplitPanel::horizontal(1001).with_ratio(0.75).with_min_size(150.0),
+            right_split: SplitPanel::horizontal(1001).with_ratio(0.73).with_min_size(150.0),
             // Left sidebar: 4 panels with 3 splits
             // Skybox ~20%, 2D Grid ~35%, Room ~30%, Debug ~15%
             left_split_1: SplitPanel::vertical(1002).with_ratio(0.20).with_min_size(50.0),

@@ -487,6 +487,76 @@ impl Framebuffer {
         }
     }
 
+    /// Set a pixel with alpha blending (0 = transparent, 255 = opaque)
+    #[inline]
+    pub fn set_pixel_alpha(&mut self, x: usize, y: usize, color: Color, alpha: u8) {
+        if x < self.width && y < self.height {
+            let idx = (y * self.width + x) * 4;
+
+            // Read existing pixel
+            let back_r = self.pixels[idx];
+            let back_g = self.pixels[idx + 1];
+            let back_b = self.pixels[idx + 2];
+
+            // Alpha blend: result = front * alpha + back * (1 - alpha)
+            let a = alpha as u16;
+            let inv_a = 255 - a;
+            let r = ((color.r as u16 * a + back_r as u16 * inv_a) / 255) as u8;
+            let g = ((color.g as u16 * a + back_g as u16 * inv_a) / 255) as u8;
+            let b = ((color.b as u16 * a + back_b as u16 * inv_a) / 255) as u8;
+
+            self.pixels[idx] = r;
+            self.pixels[idx + 1] = g;
+            self.pixels[idx + 2] = b;
+            self.pixels[idx + 3] = 255;
+        }
+    }
+
+    /// Draw a filled circle with alpha blending
+    pub fn draw_circle_alpha(&mut self, cx: i32, cy: i32, radius: i32, color: Color, alpha: u8) {
+        let r_sq = radius * radius;
+        for y in (cy - radius).max(0)..=(cy + radius).min(self.height as i32 - 1) {
+            for x in (cx - radius).max(0)..=(cx + radius).min(self.width as i32 - 1) {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy <= r_sq {
+                    self.set_pixel_alpha(x as usize, y as usize, color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Draw a line with alpha blending
+    pub fn draw_line_alpha(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, alpha: u8) {
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut x = x0;
+        let mut y = y0;
+
+        loop {
+            if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                self.set_pixel_alpha(x as usize, y as usize, color, alpha);
+            }
+
+            if x == x1 && y == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
     /// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm
     pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
         self.draw_line_blended(x0, y0, x1, y1, color, BlendMode::Opaque);
@@ -569,6 +639,61 @@ impl Framebuffer {
                 };
                 if passes {
                     self.set_pixel(x as usize, y as usize, color);
+                }
+            }
+
+            if x == x1 && y == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+                step += 1.0;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+                if e2 < dy {
+                    step += 1.0;
+                }
+            }
+        }
+    }
+
+    /// Draw a line with depth testing and alpha blending
+    /// Ideal for semi-transparent wireframe overlays on geometry
+    /// Applies a small depth bias to prevent z-fighting with co-planar surfaces
+    pub fn draw_line_3d_alpha(&mut self, x0: i32, y0: i32, z0: f32, x1: i32, y1: i32, z1: f32, color: Color, alpha: u8) {
+        // Depth bias: multiply z by slightly less than 1 to push lines towards camera
+        // This prevents z-fighting with the geometry they overlay
+        const DEPTH_BIAS: f32 = 0.995;
+        let z0_biased = z0 * DEPTH_BIAS;
+        let z1_biased = z1 * DEPTH_BIAS;
+
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut x = x0;
+        let mut y = y0;
+
+        // Calculate total steps for interpolation
+        let total_steps = dx.max((-dy).max(1)) as f32;
+        let mut step = 0.0f32;
+
+        loop {
+            if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                // Interpolate depth along the line (using biased values)
+                let t = step / total_steps;
+                let z = z0_biased + t * (z1_biased - z0_biased);
+
+                // Depth test - line wins if at or in front of surface
+                let idx = y as usize * self.width + x as usize;
+                if z <= self.zbuffer[idx] {
+                    self.set_pixel_alpha(x as usize, y as usize, color, alpha);
                 }
             }
 

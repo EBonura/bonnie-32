@@ -7,7 +7,7 @@ use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
-    world_to_screen_with_ortho, draw_floor_grid, point_in_triangle_2d,
+    world_to_screen_with_ortho, world_to_screen_with_ortho_depth, draw_floor_grid, point_in_triangle_2d,
     OrthoProjection, Camera, draw_3d_line_clipped,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
@@ -1421,6 +1421,44 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
 
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
     let select_color = RasterColor::new(100, 180, 255);  // Blue for selection
+    let edge_overlay_color = RasterColor::new(80, 80, 80);  // Gray for edge overlay
+
+    // =========================================================================
+    // Draw all edges with semi-transparent overlay (always visible in solid mode)
+    // Skip if in pure wireframe mode (edges already shown via backface_wireframe)
+    // Uses depth testing so edges respect z-order
+    // =========================================================================
+    if !state.raster_settings.wireframe_overlay {
+        for face in &mesh.faces {
+            for (v0_idx, v1_idx) in face.edges() {
+                if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                    if let (Some((sx0, sy0, z0)), Some((sx1, sy1, z1))) = (
+                        world_to_screen_with_ortho_depth(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                        world_to_screen_with_ortho_depth(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    ) {
+                        fb.draw_line_3d_alpha(sx0 as i32, sy0 as i32, z0, sx1 as i32, sy1 as i32, z1, edge_overlay_color, 191);
+                    }
+                }
+            }
+        }
+
+        // Draw vertex dots with semi-transparent overlay
+        let vertex_overlay_color = RasterColor::new(40, 40, 50);
+        for vert in &mesh.vertices {
+            if let Some((sx, sy)) = world_to_screen_with_ortho(
+                vert.pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+                ortho,
+            ) {
+                fb.draw_circle_alpha(sx as i32, sy as i32, 3, vertex_overlay_color, 140);
+            }
+        }
+    }
 
     // =========================================================================
     // Draw hovered vertex (if any) - orange dot

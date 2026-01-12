@@ -78,7 +78,7 @@ impl ModelerLayout {
     pub fn new() -> Self {
         Self {
             main_split: SplitPanel::horizontal(100).with_ratio(0.18).with_min_size(150.0),
-            right_split: SplitPanel::horizontal(101).with_ratio(0.78).with_min_size(150.0),
+            right_split: SplitPanel::horizontal(101).with_ratio(0.73).with_min_size(150.0),
             timeline_height: 80.0,
             actions: create_modeler_actions(),
         }
@@ -2859,20 +2859,25 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     }
 
     if !mesh.vertices.is_empty() {
+        // Semi-transparent edge color for solid mode (always visible)
+        let edge_overlay_color = Color::from_rgba(80, 80, 80, 191); // 75% opacity gray
+
         // Draw wireframe edges (n-gon edges)
-        // In wireframe mode: draw all edges
-        // In solid mode: only draw hovered/selected faces
+        // Always draw all edges with semi-transparent overlay, then highlight hover/selected on top
         for (idx, face) in mesh.faces.iter().enumerate() {
             let is_hovered = state.hovered_face == Some(idx);
             let is_selected = matches!(&state.selection, super::state::ModelerSelection::Faces(f) if f.contains(&idx));
 
-            // In solid mode, skip unselected/unhovered faces
-            if !wireframe_mode && !is_hovered && !is_selected {
-                continue;
-            }
-
-            // Choose color based on hover/selection
-            let color = if is_hovered { hover_color } else if is_selected { select_color } else { wire_color };
+            // Choose color: hover/selected get bright colors, others get semi-transparent overlay
+            let color = if is_hovered {
+                hover_color
+            } else if is_selected {
+                select_color
+            } else if wireframe_mode {
+                wire_color
+            } else {
+                edge_overlay_color
+            };
             let thickness = if is_hovered || is_selected { 2.0 } else { 1.0 };
 
             // Draw all edges of n-gon
@@ -2905,23 +2910,26 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             }
         }
 
-        // Draw vertices
-        // In wireframe mode: draw all vertices
-        // In solid mode: only draw hovered/selected vertices
+        // Draw vertices - always show all vertices with appropriate colors
+        // Semi-transparent for solid mode, brighter for wireframe, highlighted for hover/select
+        let vertex_overlay_color = Color::from_rgba(60, 60, 70, 140); // Semi-transparent dark
         for (idx, vert) in mesh.vertices.iter().enumerate() {
             let is_hovered = state.hovered_vertex == Some(idx);
             let is_selected = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if v.contains(&idx));
-
-            // In solid mode, skip unselected/unhovered vertices
-            if !wireframe_mode && !is_hovered && !is_selected {
-                continue;
-            }
 
             let (x, y) = project_vertex(vert);
 
             // Only draw if in viewport
             if x >= rect.x && x <= rect.right() && y >= rect.y && y <= rect.bottom() {
-                let color = if is_hovered { hover_color } else if is_selected { select_color } else { vertex_color };
+                let color = if is_hovered {
+                    hover_color
+                } else if is_selected {
+                    select_color
+                } else if wireframe_mode {
+                    vertex_color
+                } else {
+                    vertex_overlay_color
+                };
                 let radius = if is_hovered { 5.0 } else if is_selected { 4.0 } else { 3.0 };
                 draw_circle(x, y, radius, color);
             }
