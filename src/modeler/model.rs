@@ -1,7 +1,7 @@
 //! Animation types for rigged models
 //!
 //! Note: The main model types (RiggedModel, RigBone, MeshPart) are in state.rs.
-//! TextureAtlas is in mesh_editor.rs.
+//! IndexedAtlas is in mesh_editor.rs.
 
 use serde::{Deserialize, Serialize};
 use crate::rasterizer::Vec3;

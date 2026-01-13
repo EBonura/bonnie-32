@@ -12,6 +12,7 @@ use crate::ui::{
 use super::state::{TrackerState, TrackerView};
 use super::psx_reverb::ReverbType;
 use super::actions::build_context;
+use crate::input::MidiMessage;
 use super::song_browser::{SongBrowserAction, next_available_song_name};
 
 // Layout constants
@@ -1058,7 +1059,16 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let black_key_w = 16.0;
     let black_key_h = 60.0;
 
-    draw_text(&format!("Piano - Octave {}", state.octave), piano_x, piano_y - 10.0, 16.0, TEXT_COLOR);
+    // Piano header with octave
+    draw_text(&format!("Piano - Octave {}", state.octave), piano_x, piano_y - 22.0, 14.0, TEXT_COLOR);
+
+    // MIDI status indicator
+    if state.midi.is_connected() {
+        let device_name = state.midi.device_name();
+        draw_text(&format!("MIDI: {}", device_name), piano_x, piano_y - 8.0, 11.0, Color::new(0.0, 0.8, 0.6, 1.0));
+    } else {
+        draw_text("MIDI: No device", piano_x, piano_y - 8.0, 11.0, TEXT_DIM);
+    }
 
     // Define all white keys we need to display (semitones 0-36, ~3 octaves: C to C)
     // semitone offset, note name
@@ -1084,10 +1094,10 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
         let midi_note = state.octave * 12 + *semitone;
         let is_hovered = ctx.mouse.inside(&key_rect);
-        let is_key_pressed = is_note_key_down(*semitone);
+        let is_key_pressed = is_note_key_down(*semitone) || state.midi.is_note_held(midi_note);
         let is_mouse_pressed = is_hovered && ctx.mouse.left_down;
 
-        // Background - cyan highlight when key pressed (keyboard or mouse), gray when hovered
+        // Background - cyan highlight when key pressed (keyboard, MIDI, or mouse), gray when hovered
         let bg = if is_key_pressed || is_mouse_pressed {
             Color::new(0.0, 0.75, 0.9, 1.0) // Cyan highlight
         } else if is_hovered {
@@ -1127,10 +1137,10 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
         let midi_note = state.octave * 12 + *semitone;
         let is_hovered = ctx.mouse.inside(&key_rect);
-        let is_key_pressed = is_note_key_down(*semitone);
+        let is_key_pressed = is_note_key_down(*semitone) || state.midi.is_note_held(midi_note);
         let is_mouse_pressed = is_hovered && ctx.mouse.left_down;
 
-        // Background - cyan highlight when key pressed (keyboard or mouse)
+        // Background - cyan highlight when key pressed (keyboard, MIDI, or mouse)
         let bg = if is_key_pressed || is_mouse_pressed {
             Color::new(0.0, 0.6, 0.75, 1.0) // Darker cyan for black keys
         } else if is_hovered {
@@ -1719,6 +1729,37 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         if is_key_pressed(KeyCode::Apostrophe) {
             state.enter_note_off();
             state.clear_selection();
+        }
+    }
+
+    // MIDI keyboard input
+    // Process all pending MIDI messages regardless of view/mode (for live preview)
+    for msg in state.midi.poll() {
+        match msg {
+            MidiMessage::NoteOn(note, velocity) => {
+                // Preview the note (always, for live playing)
+                let instrument = state.current_instrument();
+                state.audio.set_program(state.current_channel as i32, instrument as i32);
+                state.audio.note_on(state.current_channel as i32, note as i32, velocity as i32);
+
+                // Enter note into pattern only in edit mode + pattern view + note column
+                if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 0 {
+                    state.enter_note(note);
+                    state.clear_selection();
+                }
+            }
+            MidiMessage::NoteOff(note) => {
+                // Stop note preview
+                state.audio.note_off(state.current_channel as i32, note as i32);
+            }
+            MidiMessage::ControlChange(controller, value) => {
+                // Map common MIDI CCs to tracker controls
+                match controller {
+                    1 => state.set_preview_modulation(value), // Mod wheel
+                    7 => state.default_volume = value,        // Volume slider
+                    _ => {}
+                }
+            }
         }
     }
 

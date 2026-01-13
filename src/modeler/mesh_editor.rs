@@ -7,7 +7,7 @@
 //! - Reading: Auto-detects format by checking for valid RON start
 //! - Writing: Always uses brotli compression
 
-use crate::rasterizer::{Vec3, Vec2, Face as RasterFace, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
+use crate::rasterizer::{Vec3, Vec2, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
@@ -138,6 +138,8 @@ pub struct MeshObject {
     pub name: String,
     /// The geometry
     pub mesh: EditableMesh,
+    /// Per-object texture atlas (stores palette indices)
+    pub atlas: IndexedAtlas,
     /// Whether this object is visible in the viewport
     pub visible: bool,
     /// Whether this object is locked (can't be selected/edited)
@@ -151,6 +153,7 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh: EditableMesh::new(),
+            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
@@ -161,6 +164,18 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh,
+            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
+            visible: true,
+            locked: false,
+            color: None,
+        }
+    }
+
+    pub fn with_mesh_and_atlas(name: impl Into<String>, mesh: EditableMesh, atlas: IndexedAtlas) -> Self {
+        Self {
+            name: name.into(),
+            mesh,
+            atlas,
             visible: true,
             locked: false,
             color: None,
@@ -172,22 +187,15 @@ impl MeshObject {
     }
 }
 
-/// A complete PicoCAD-style project with multiple objects and texture atlas
+/// A complete PicoCAD-style project with multiple objects and indexed texture atlas
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeshProject {
     /// Project name
     pub name: String,
     /// All mesh objects in the project
     pub objects: Vec<MeshObject>,
-    /// The texture atlas (serialized as raw RGBA) - kept for backwards compat
-    pub atlas: TextureAtlas,
-
-    // ---- PS1 CLUT System ----
-
-    /// Optional indexed atlas (stores palette indices instead of colors)
-    /// When present, this is the authoritative texture data
-    #[serde(default)]
-    pub indexed_atlas: Option<IndexedAtlas>,
+    /// The indexed texture atlas (stores palette indices)
+    pub atlas: IndexedAtlas,
 
     /// Global CLUT pool (shared across all textures)
     #[serde(default)]
@@ -204,13 +212,20 @@ pub struct MeshProject {
 
 impl MeshProject {
     pub fn new(name: impl Into<String>) -> Self {
+        // Create pool first so we can link its first CLUT to the atlas
+        let clut_pool = ClutPool::default();
+        let first_clut_id = clut_pool.first_id().unwrap_or(ClutId::NONE);
+
+        // Create atlas with default CLUT linked to pool's first CLUT
+        let mut atlas = IndexedAtlas::new(128, 128, ClutDepth::Bpp4);
+        atlas.default_clut = first_clut_id;
+
         Self {
             name: name.into(),
             // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
-            objects: vec![MeshObject::cube("object", 1024.0)],
-            atlas: TextureAtlas::new(128, 128),
-            indexed_atlas: None,
-            clut_pool: ClutPool::default(),
+            objects: vec![MeshObject::cube("Cube.00", 1024.0)],
+            atlas,
+            clut_pool,
             preview_clut: None,
             selected_object: Some(0),
         }
@@ -241,6 +256,24 @@ impl MeshProject {
     /// Get total face count across all objects
     pub fn total_faces(&self) -> usize {
         self.objects.iter().map(|o| o.mesh.face_count()).sum()
+    }
+
+    /// Get the effective CLUT for the atlas (preview_clut > default_clut > first in pool)
+    pub fn effective_clut(&self) -> Option<&Clut> {
+        // Try preview override first
+        if let Some(preview_id) = self.preview_clut {
+            if let Some(clut) = self.clut_pool.get(preview_id) {
+                return Some(clut);
+            }
+        }
+        // Try atlas default
+        if self.atlas.default_clut.is_valid() {
+            if let Some(clut) = self.clut_pool.get(self.atlas.default_clut) {
+                return Some(clut);
+            }
+        }
+        // Fall back to first CLUT in pool
+        self.clut_pool.first_id().and_then(|id| self.clut_pool.get(id))
     }
 
     /// Save project to file (compressed RON format with brotli)
@@ -305,310 +338,6 @@ impl MeshProject {
 impl Default for MeshProject {
     fn default() -> Self {
         Self::new("Untitled")
-    }
-}
-
-// ============================================================================
-// Texture Atlas (PicoCAD-style 128x128 pixel texture)
-// ============================================================================
-
-/// A small texture atlas for low-poly models (like picoCAD's 128x120)
-#[derive(Clone, Debug)]
-pub struct TextureAtlas {
-    pub width: usize,
-    pub height: usize,
-    /// RGB pixel data + blend mode (stored as 4 bytes: R, G, B, blend_mode_u8)
-    pub pixels: Vec<u8>,
-}
-
-impl TextureAtlas {
-    pub fn new(width: usize, height: usize) -> Self {
-        // Initialize with grey (like Blender's default material)
-        let mut pixels = vec![0u8; width * height * 4];
-        for i in 0..(width * height) {
-            pixels[i * 4] = 128;     // R - grey
-            pixels[i * 4 + 1] = 128; // G - grey
-            pixels[i * 4 + 2] = 128; // B - grey
-            pixels[i * 4 + 3] = 0;   // BlendMode::Opaque
-        }
-        Self { width, height, pixels }
-    }
-
-    /// Convert BlendMode to u8 for storage
-    fn blend_to_u8(blend: crate::rasterizer::BlendMode) -> u8 {
-        match blend {
-            crate::rasterizer::BlendMode::Opaque => 0,
-            crate::rasterizer::BlendMode::Average => 1,
-            crate::rasterizer::BlendMode::Add => 2,
-            crate::rasterizer::BlendMode::Subtract => 3,
-            crate::rasterizer::BlendMode::AddQuarter => 4,
-            crate::rasterizer::BlendMode::Erase => 5,
-        }
-    }
-
-    /// Convert u8 to BlendMode
-    fn u8_to_blend(v: u8) -> crate::rasterizer::BlendMode {
-        match v {
-            0 => crate::rasterizer::BlendMode::Opaque,
-            1 => crate::rasterizer::BlendMode::Average,
-            2 => crate::rasterizer::BlendMode::Add,
-            3 => crate::rasterizer::BlendMode::Subtract,
-            4 => crate::rasterizer::BlendMode::AddQuarter,
-            _ => crate::rasterizer::BlendMode::Erase, // Default to transparent
-        }
-    }
-
-    /// Set a pixel color at (x, y)
-    pub fn set_pixel(&mut self, x: usize, y: usize, color: RasterColor) {
-        if x < self.width && y < self.height {
-            let idx = (y * self.width + x) * 4;
-            self.pixels[idx] = color.r;
-            self.pixels[idx + 1] = color.g;
-            self.pixels[idx + 2] = color.b;
-            self.pixels[idx + 3] = Self::blend_to_u8(color.blend);
-        }
-    }
-
-    /// Get pixel color at (x, y)
-    pub fn get_pixel(&self, x: usize, y: usize) -> RasterColor {
-        if x < self.width && y < self.height {
-            let idx = (y * self.width + x) * 4;
-            RasterColor::with_blend(
-                self.pixels[idx],
-                self.pixels[idx + 1],
-                self.pixels[idx + 2],
-                Self::u8_to_blend(self.pixels[idx + 3]),
-            )
-        } else {
-            RasterColor::TRANSPARENT
-        }
-    }
-
-    /// Set a pixel with blend mode
-    /// Note: This stores the color WITH the blend mode intact - blending happens at render time
-    pub fn set_pixel_blended(&mut self, x: usize, y: usize, color: RasterColor, mode: crate::rasterizer::BlendMode) {
-        if x >= self.width || y >= self.height { return; }
-        // Store the color with the specified blend mode (don't blend now, blend at render time)
-        let color_with_mode = RasterColor::with_blend(color.r, color.g, color.b, mode);
-        self.set_pixel(x, y, color_with_mode);
-    }
-
-    /// Fill a rectangle with a color
-    pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: RasterColor) {
-        for py in y..(y + h).min(self.height) {
-            for px in x..(x + w).min(self.width) {
-                self.set_pixel(px, py, color);
-            }
-        }
-    }
-
-    /// Draw a line (Bresenham's algorithm)
-    pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: RasterColor) {
-        let dx = (x1 - x0).abs();
-        let dy = -(y1 - y0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        let mut x = x0;
-        let mut y = y0;
-
-        loop {
-            if x >= 0 && y >= 0 {
-                self.set_pixel(x as usize, y as usize, color);
-            }
-            if x == x1 && y == y1 { break; }
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                x += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y += sy;
-            }
-        }
-    }
-
-    /// Clear to a solid color
-    pub fn clear(&mut self, color: RasterColor) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.set_pixel(x, y, color);
-            }
-        }
-    }
-
-    /// Flood fill starting from (x, y) with the given color
-    /// Uses a simple stack-based algorithm to avoid recursion depth issues
-    pub fn flood_fill(&mut self, x: usize, y: usize, fill_color: RasterColor) {
-        if x >= self.width || y >= self.height {
-            return;
-        }
-
-        let target_color = self.get_pixel(x, y);
-
-        // Don't fill if the target is already the fill color (same RGB and blend mode)
-        if target_color.r == fill_color.r
-            && target_color.g == fill_color.g
-            && target_color.b == fill_color.b
-            && target_color.blend == fill_color.blend {
-            return;
-        }
-
-        let mut stack = vec![(x, y)];
-
-        while let Some((cx, cy)) = stack.pop() {
-            if cx >= self.width || cy >= self.height {
-                continue;
-            }
-
-            let current = self.get_pixel(cx, cy);
-
-            // Check if this pixel matches the target color
-            if current.r != target_color.r
-                || current.g != target_color.g
-                || current.b != target_color.b
-                || current.blend != target_color.blend {
-                continue;
-            }
-
-            // Fill this pixel
-            self.set_pixel(cx, cy, fill_color);
-
-            // Add neighbors to stack
-            if cx > 0 { stack.push((cx - 1, cy)); }
-            if cx + 1 < self.width { stack.push((cx + 1, cy)); }
-            if cy > 0 { stack.push((cx, cy - 1)); }
-            if cy + 1 < self.height { stack.push((cx, cy + 1)); }
-        }
-    }
-
-    /// Convert to a rasterizer Texture for rendering
-    pub fn to_raster_texture(&self) -> crate::rasterizer::Texture {
-        let pixels: Vec<RasterColor> = (0..self.height)
-            .flat_map(|y| (0..self.width).map(move |x| self.get_pixel(x, y)))
-            .collect();
-
-        crate::rasterizer::Texture {
-            width: self.width,
-            height: self.height,
-            pixels,
-            name: String::from("atlas"),
-            blend_mode: crate::rasterizer::BlendMode::Opaque,
-        }
-    }
-
-    /// Convert to a Texture15 (RGB555) for PS1-authentic rendering
-    pub fn to_raster_texture_15(&self) -> Texture15 {
-        let pixels: Vec<Color15> = (0..self.height)
-            .flat_map(|y| {
-                (0..self.width).map(move |x| {
-                    let idx = (y * self.width + x) * 4;
-                    let r = self.pixels[idx];
-                    let g = self.pixels[idx + 1];
-                    let b = self.pixels[idx + 2];
-                    let blend_mode = Self::u8_to_blend(self.pixels[idx + 3]);
-
-                    // Map to Color15:
-                    // - BlendMode::Erase -> transparent (0x0000)
-                    // - Non-Opaque -> semi-transparent bit set
-                    if blend_mode == BlendMode::Erase {
-                        Color15::TRANSPARENT
-                    } else {
-                        let semi = blend_mode != BlendMode::Opaque;
-                        Color15::from_rgb888_semi(r, g, b, semi)
-                    }
-                })
-            })
-            .collect();
-
-        Texture15 {
-            width: self.width,
-            height: self.height,
-            pixels,
-            name: String::from("atlas"),
-            blend_mode: crate::rasterizer::BlendMode::Opaque,
-        }
-    }
-
-    /// Resize the atlas to new dimensions, preserving existing content where possible
-    /// Content at (x, y) is preserved if x < new_width and y < new_height
-    /// New areas are filled with grey (default color)
-    pub fn resize(&mut self, new_width: usize, new_height: usize) {
-        if new_width == self.width && new_height == self.height {
-            return;
-        }
-
-        let mut new_pixels = vec![0u8; new_width * new_height * 4];
-
-        // Initialize new pixels with grey default
-        for i in 0..(new_width * new_height) {
-            new_pixels[i * 4] = 128;     // R - grey
-            new_pixels[i * 4 + 1] = 128; // G - grey
-            new_pixels[i * 4 + 2] = 128; // B - grey
-            new_pixels[i * 4 + 3] = 0;   // BlendMode::Opaque
-        }
-
-        // Copy existing content that fits
-        let copy_w = self.width.min(new_width);
-        let copy_h = self.height.min(new_height);
-
-        for y in 0..copy_h {
-            for x in 0..copy_w {
-                let old_idx = (y * self.width + x) * 4;
-                let new_idx = (y * new_width + x) * 4;
-                new_pixels[new_idx] = self.pixels[old_idx];
-                new_pixels[new_idx + 1] = self.pixels[old_idx + 1];
-                new_pixels[new_idx + 2] = self.pixels[old_idx + 2];
-                new_pixels[new_idx + 3] = self.pixels[old_idx + 3];
-            }
-        }
-
-        self.width = new_width;
-        self.height = new_height;
-        self.pixels = new_pixels;
-    }
-}
-
-// Serialize TextureAtlas as base64-encoded PNG would be ideal, but for simplicity
-// we'll serialize as raw dimensions + pixel data
-impl Serialize for TextureAtlas {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("TextureAtlas", 3)?;
-        state.serialize_field("width", &self.width)?;
-        state.serialize_field("height", &self.height)?;
-        // Encode as base64 string for compactness
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        let encoded = STANDARD.encode(&self.pixels);
-        state.serialize_field("pixels", &encoded)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for TextureAtlas {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct AtlasData {
-            width: usize,
-            height: usize,
-            pixels: String,
-        }
-        let data = AtlasData::deserialize(deserializer)?;
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        let pixels = STANDARD.decode(&data.pixels)
-            .map_err(serde::de::Error::custom)?;
-        Ok(TextureAtlas {
-            width: data.width,
-            height: data.height,
-            pixels,
-        })
     }
 }
 
@@ -712,13 +441,13 @@ impl Default for ClutPool {
 }
 
 // ============================================================================
-// Indexed Atlas (parallel to TextureAtlas, stores palette indices)
+// Indexed Atlas (PS1-style palette-indexed texture)
 // ============================================================================
 
 /// Indexed texture atlas storing palette indices instead of colors
 ///
-/// Works alongside TextureAtlas - the RGBA atlas is kept for backwards
-/// compatibility and preview, while this stores the actual indexed data.
+/// PS1-authentic texture format where each pixel is a palette index (4-bit or 8-bit).
+/// Colors are resolved at render time using a CLUT (Color Look-Up Table).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedAtlas {
     pub width: usize,
@@ -793,6 +522,59 @@ impl IndexedAtlas {
     /// Total number of pixels
     pub fn pixel_count(&self) -> usize {
         self.width * self.height
+    }
+
+    /// Get pixel color using a CLUT (for preview rendering)
+    pub fn get_color(&self, x: usize, y: usize, clut: &Clut) -> Color15 {
+        let index = self.get_index(x, y);
+        clut.lookup(index)
+    }
+
+    /// Resize the atlas (resamples indices using nearest-neighbor)
+    pub fn resize(&mut self, new_width: usize, new_height: usize) {
+        if new_width == self.width && new_height == self.height {
+            return;
+        }
+        let mut new_indices = vec![0u8; new_width * new_height];
+        for y in 0..new_height {
+            for x in 0..new_width {
+                // Nearest-neighbor sampling from old atlas
+                let src_x = (x * self.width) / new_width;
+                let src_y = (y * self.height) / new_height;
+                let src_idx = src_y * self.width + src_x;
+                let dst_idx = y * new_width + x;
+                new_indices[dst_idx] = self.indices.get(src_idx).copied().unwrap_or(0);
+            }
+        }
+        self.width = new_width;
+        self.height = new_height;
+        self.indices = new_indices;
+    }
+
+    /// Convert to 24-bit raster Texture for rendering (non-indexed)
+    /// Uses the provided CLUT to look up colors
+    pub fn to_raster_texture(&self, clut: &Clut, name: &str) -> crate::rasterizer::Texture {
+        let mut pixels = Vec::with_capacity(self.width * self.height);
+        for &index in &self.indices {
+            let c15 = clut.lookup(index);
+            // Convert Color15 to RGB24 (5-bit to 8-bit)
+            let r = (c15.r5() << 3) | (c15.r5() >> 2);
+            let g = (c15.g5() << 3) | (c15.g5() >> 2);
+            let b = (c15.b5() << 3) | (c15.b5() >> 2);
+            let blend = if index == 0 {
+                crate::rasterizer::BlendMode::Erase // Index 0 = transparent
+            } else {
+                crate::rasterizer::BlendMode::Opaque
+            };
+            pixels.push(crate::rasterizer::Color::with_blend(r, g, b, blend));
+        }
+        crate::rasterizer::Texture {
+            width: self.width,
+            height: self.height,
+            pixels,
+            name: name.to_string(),
+            blend_mode: crate::rasterizer::BlendMode::Opaque,
+        }
     }
 }
 
@@ -1098,7 +880,7 @@ impl EditableMesh {
             Vertex::new(Vec3::new(-half, 0.0,  half), Vec2::new(0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Single quad face (CCW winding when viewed from above)
+        // Single quad face (CW winding for rasterizer)
         let faces = vec![EditFace::quad(0, 1, 2, 3)];
 
         Self { vertices, faces }
@@ -1123,12 +905,12 @@ impl EditableMesh {
             Vertex::new(Vec3::new( 0.0,  h,  half), Vec2::new(0.5, 0.0), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Faces (CCW winding when viewed from outside)
+        // Faces (CW winding for rasterizer, matches cube)
         let faces = vec![
             // Bottom and top triangles
-            EditFace::tri(0, 2, 1),   // Bottom (CCW from below)
-            EditFace::tri(3, 5, 4),   // Top (CCW from above)
-            // Side faces are quads (CCW from outside)
+            EditFace::tri(0, 1, 2),   // Bottom (CW from below)
+            EditFace::tri(3, 4, 5),   // Top (CW from above)
+            // Side faces are quads (CW from outside)
             EditFace::quad(0, 1, 4, 3), // Back face
             EditFace::quad(1, 2, 5, 4), // Right face
             EditFace::quad(2, 0, 3, 5), // Left face
@@ -1194,17 +976,17 @@ impl EditableMesh {
             vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(u, 0.0), normal));
         }
 
-        // Bottom cap face (single n-gon, CCW from below)
-        // Vertices go clockwise when viewed from above, so CCW from below
-        let bottom_cap_verts: Vec<usize> = (0..segments).map(|i| bottom_ring_start + i).collect();
+        // Bottom cap face (single n-gon, CW winding for rasterizer)
+        // Reversed order so normal points down (-Y)
+        let bottom_cap_verts: Vec<usize> = (0..segments).rev().map(|i| bottom_ring_start + i).collect();
         faces.push(EditFace::ngon(&bottom_cap_verts));
 
-        // Top cap face (single n-gon, CCW from above)
-        // Vertices go counter-clockwise when viewed from above
-        let top_cap_verts: Vec<usize> = (0..segments).rev().map(|i| top_ring_start + i).collect();
+        // Top cap face (single n-gon, CW winding for rasterizer)
+        // Normal order so normal points up (+Y)
+        let top_cap_verts: Vec<usize> = (0..segments).map(|i| top_ring_start + i).collect();
         faces.push(EditFace::ngon(&top_cap_verts));
 
-        // Side faces (quads, CCW from outside)
+        // Side faces (quads, CW winding for rasterizer)
         for i in 0..segments {
             let next = (i + 1) % segments;
             faces.push(EditFace::quad(
@@ -1235,15 +1017,15 @@ impl EditableMesh {
             Vertex::new(Vec3::new(0.0, height, 0.0), Vec2::new(0.5, 0.5), Vec3::new(0.0, 1.0, 0.0)),
         ];
 
-        // Faces (CCW winding when viewed from outside)
+        // Faces (CW winding for rasterizer, matches cube)
         let faces = vec![
-            // Base (quad, CCW from below)
-            EditFace::quad(0, 1, 2, 3),
-            // Side faces (triangles connecting to apex, CCW from outside)
-            EditFace::tri(0, 4, 1), // Front (-Z side)
-            EditFace::tri(1, 4, 2), // Right (+X side)
-            EditFace::tri(2, 4, 3), // Back (+Z side)
-            EditFace::tri(3, 4, 0), // Left (-X side)
+            // Base (quad, CW from below)
+            EditFace::quad(0, 3, 2, 1),
+            // Side faces (triangles connecting to apex, CW from outside)
+            EditFace::tri(0, 1, 4), // Front (-Z side)
+            EditFace::tri(1, 2, 4), // Right (+X side)
+            EditFace::tri(2, 3, 4), // Back (+Z side)
+            EditFace::tri(3, 0, 4), // Left (-X side)
         ];
 
         Self { vertices, faces }
@@ -1286,15 +1068,15 @@ impl EditableMesh {
             vertices.push(Vertex::new(Vec3::new(x, height, z), Vec2::new(0.5 + angle.cos() * 0.5, 0.5 + angle.sin() * 0.5), Vec3::new(0.0, 1.0, 0.0)));
         }
 
-        // Bottom cap face (single n-gon, CCW from below)
-        let bottom_cap_verts: Vec<usize> = (0..sides).map(|i| bottom_start + i).collect();
+        // Bottom cap face (single n-gon, CW winding for rasterizer)
+        let bottom_cap_verts: Vec<usize> = (0..sides).rev().map(|i| bottom_start + i).collect();
         faces.push(EditFace::ngon(&bottom_cap_verts));
 
-        // Top cap face (single n-gon, CCW from above)
-        let top_cap_verts: Vec<usize> = (0..sides).rev().map(|i| top_start + i).collect();
+        // Top cap face (single n-gon, CW winding for rasterizer)
+        let top_cap_verts: Vec<usize> = (0..sides).map(|i| top_start + i).collect();
         faces.push(EditFace::ngon(&top_cap_verts));
 
-        // Side faces (quads, CCW from outside)
+        // Side faces (quads, CW winding for rasterizer)
         for i in 0..sides {
             let next = (i + 1) % sides;
             faces.push(EditFace::quad(
@@ -1683,6 +1465,531 @@ impl EditableMesh {
         }
 
         (raster_vertices, raster_faces)
+    }
+
+    /// Merge vertices that are within a distance threshold.
+    /// Returns the number of vertices that were merged.
+    ///
+    /// This is useful after mirror operations to weld center vertices,
+    /// or for general cleanup of coincident vertices.
+    pub fn merge_by_distance(&mut self, threshold: f32) -> usize {
+        use std::collections::{HashMap, HashSet};
+
+        let threshold_sq = threshold * threshold;
+        let n = self.vertices.len();
+
+        // Build groups of vertices that should be merged
+        // Using union-find style grouping
+        let mut parent: Vec<usize> = (0..n).collect();
+
+        fn find(parent: &mut [usize], i: usize) -> usize {
+            if parent[i] != i {
+                parent[i] = find(parent, parent[i]);
+            }
+            parent[i]
+        }
+
+        fn union(parent: &mut [usize], i: usize, j: usize) {
+            let pi = find(parent, i);
+            let pj = find(parent, j);
+            if pi != pj {
+                // Always merge to the lower index (keeps first vertex)
+                if pi < pj {
+                    parent[pj] = pi;
+                } else {
+                    parent[pi] = pj;
+                }
+            }
+        }
+
+        // Find all pairs within threshold
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let diff = self.vertices[i].pos - self.vertices[j].pos;
+                let dist_sq = diff.dot(diff);
+                if dist_sq <= threshold_sq {
+                    union(&mut parent, i, j);
+                }
+            }
+        }
+
+        // Flatten parent array
+        for i in 0..n {
+            find(&mut parent, i);
+        }
+
+        // Build mapping: old index -> new index
+        // Group vertices by their root
+        let mut root_to_new_idx: HashMap<usize, usize> = HashMap::new();
+        let mut old_to_new: Vec<usize> = vec![0; n];
+        let mut new_vertices: Vec<Vertex> = Vec::new();
+
+        for i in 0..n {
+            let root = parent[i];
+            if let Some(&new_idx) = root_to_new_idx.get(&root) {
+                old_to_new[i] = new_idx;
+            } else {
+                let new_idx = new_vertices.len();
+                root_to_new_idx.insert(root, new_idx);
+                old_to_new[i] = new_idx;
+                // Use the root vertex's data (first vertex in the group)
+                new_vertices.push(self.vertices[root].clone());
+            }
+        }
+
+        let merged_count = n - new_vertices.len();
+
+        if merged_count == 0 {
+            return 0;
+        }
+
+        // Update face vertex indices
+        for face in &mut self.faces {
+            for vi in &mut face.vertices {
+                *vi = old_to_new[*vi];
+            }
+        }
+
+        // Remove degenerate faces (faces with duplicate vertices after merging)
+        self.faces.retain(|face| {
+            let unique: HashSet<_> = face.vertices.iter().collect();
+            unique.len() >= 3 // Need at least 3 unique vertices
+        });
+
+        // Replace vertices
+        self.vertices = new_vertices;
+
+        merged_count
+    }
+
+    /// Merge selected vertices to their center point.
+    /// Returns the index of the merged vertex, or None if less than 2 vertices selected.
+    pub fn merge_to_center(&mut self, vertex_indices: &[usize]) -> Option<usize> {
+        use std::collections::HashSet;
+
+        if vertex_indices.len() < 2 {
+            return None;
+        }
+
+        // Calculate center position
+        let mut center = Vec3::ZERO;
+        let mut count = 0;
+        for &idx in vertex_indices {
+            if let Some(vert) = self.vertices.get(idx) {
+                center = center + vert.pos;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        center = center * (1.0 / count as f32);
+
+        // Keep the first vertex, move it to center
+        let keep_idx = vertex_indices[0];
+        if let Some(vert) = self.vertices.get_mut(keep_idx) {
+            vert.pos = center;
+        }
+
+        // Build set of vertices to remove
+        let remove_set: HashSet<usize> = vertex_indices[1..].iter().copied().collect();
+
+        // Remap face vertex references
+        for face in &mut self.faces {
+            for vi in &mut face.vertices {
+                if remove_set.contains(vi) {
+                    *vi = keep_idx;
+                }
+            }
+        }
+
+        // Remove degenerate faces
+        self.faces.retain(|face| {
+            let unique: HashSet<_> = face.vertices.iter().collect();
+            unique.len() >= 3
+        });
+
+        // Note: This leaves orphaned vertices. Call compact_vertices() if needed.
+        Some(keep_idx)
+    }
+
+    /// Remove unused vertices (vertices not referenced by any face).
+    /// Returns the number of vertices removed.
+    pub fn compact_vertices(&mut self) -> usize {
+        use std::collections::HashSet;
+
+        // Find all vertices referenced by faces
+        let used: HashSet<usize> = self.faces.iter()
+            .flat_map(|f| f.vertices.iter().copied())
+            .collect();
+
+        if used.len() == self.vertices.len() {
+            return 0; // All vertices are used
+        }
+
+        // Build mapping: old index -> new index
+        let mut old_to_new: Vec<Option<usize>> = vec![None; self.vertices.len()];
+        let mut new_vertices: Vec<Vertex> = Vec::new();
+
+        for (old_idx, vert) in self.vertices.iter().enumerate() {
+            if used.contains(&old_idx) {
+                old_to_new[old_idx] = Some(new_vertices.len());
+                new_vertices.push(vert.clone());
+            }
+        }
+
+        let removed = self.vertices.len() - new_vertices.len();
+
+        // Update face indices
+        for face in &mut self.faces {
+            for vi in &mut face.vertices {
+                if let Some(new_idx) = old_to_new[*vi] {
+                    *vi = new_idx;
+                }
+            }
+        }
+
+        self.vertices = new_vertices;
+        removed
+    }
+
+    /// Apply mirror: duplicate geometry from one side to the other.
+    /// This bakes the virtual mirror into actual geometry.
+    ///
+    /// - Vertices on the center plane (within threshold) are shared
+    /// - Vertices on the +X side are duplicated to -X (or appropriate axis)
+    /// - Mirrored faces have reversed winding order for correct normals
+    pub fn apply_mirror(&mut self, axis: super::state::Axis, threshold: f32) {
+        use std::collections::HashMap;
+        use super::state::Axis;
+
+        // Helper to mirror a position
+        let mirror_pos = |pos: Vec3| -> Vec3 {
+            match axis {
+                Axis::X => Vec3::new(-pos.x, pos.y, pos.z),
+                Axis::Y => Vec3::new(pos.x, -pos.y, pos.z),
+                Axis::Z => Vec3::new(pos.x, pos.y, -pos.z),
+            }
+        };
+
+        // Helper to mirror a normal
+        let mirror_normal = |n: Vec3| -> Vec3 {
+            match axis {
+                Axis::X => Vec3::new(-n.x, n.y, n.z),
+                Axis::Y => Vec3::new(n.x, -n.y, n.z),
+                Axis::Z => Vec3::new(n.x, n.y, -n.z),
+            }
+        };
+
+        // Helper to check if position is on the center plane
+        let is_on_plane = |pos: Vec3| -> bool {
+            match axis {
+                Axis::X => pos.x.abs() <= threshold,
+                Axis::Y => pos.y.abs() <= threshold,
+                Axis::Z => pos.z.abs() <= threshold,
+            }
+        };
+
+        // Helper to check if position is on the positive side
+        let is_positive_side = |pos: Vec3| -> bool {
+            match axis {
+                Axis::X => pos.x > threshold,
+                Axis::Y => pos.y > threshold,
+                Axis::Z => pos.z > threshold,
+            }
+        };
+
+        // Map: original vertex index -> mirrored vertex index
+        // For center vertices, maps to itself
+        let mut vertex_map: HashMap<usize, usize> = HashMap::new();
+        let mut new_vertices: Vec<Vertex> = Vec::new();
+
+        // Process each vertex
+        for (idx, vert) in self.vertices.iter().enumerate() {
+            if is_on_plane(vert.pos) {
+                // Center vertex - maps to itself, snap to plane
+                vertex_map.insert(idx, idx);
+                // Note: could also snap position to exact 0 on the axis here
+            } else if is_positive_side(vert.pos) {
+                // Positive side - create mirrored copy
+                let mirrored_vert = Vertex {
+                    pos: mirror_pos(vert.pos),
+                    uv: vert.uv, // Keep same UV
+                    normal: mirror_normal(vert.normal),
+                    color: vert.color,
+                    bone_index: vert.bone_index,
+                };
+                let new_idx = self.vertices.len() + new_vertices.len();
+                new_vertices.push(mirrored_vert);
+                vertex_map.insert(idx, new_idx);
+            }
+            // Negative side vertices are not processed (they'll be deleted or kept as-is)
+        }
+
+        // Add new mirrored vertices
+        self.vertices.extend(new_vertices);
+
+        // Create mirrored faces
+        let mut new_faces: Vec<EditFace> = Vec::new();
+        for face in &self.faces {
+            // Check if this face is on the positive side (all vertices on positive or center)
+            let all_positive_or_center = face.vertices.iter().all(|&vi| {
+                self.vertices.get(vi)
+                    .map(|v| is_positive_side(v.pos) || is_on_plane(v.pos))
+                    .unwrap_or(false)
+            });
+
+            if all_positive_or_center {
+                // Check if all vertices are just on center (no need to mirror)
+                let all_center = face.vertices.iter().all(|&vi| {
+                    self.vertices.get(vi)
+                        .map(|v| is_on_plane(v.pos))
+                        .unwrap_or(false)
+                });
+
+                if all_center {
+                    // Face is entirely on the center plane - skip mirroring
+                    continue;
+                }
+
+                // Create mirrored face with reversed winding
+                let mirrored_verts: Vec<usize> = face.vertices.iter()
+                    .filter_map(|&vi| vertex_map.get(&vi).copied())
+                    .rev() // Reverse winding order
+                    .collect();
+
+                if mirrored_verts.len() == face.vertices.len() {
+                    new_faces.push(EditFace {
+                        vertices: mirrored_verts,
+                        texture_id: face.texture_id,
+                        black_transparent: face.black_transparent,
+                        blend_mode: face.blend_mode,
+                    });
+                }
+            }
+        }
+
+        // Add mirrored faces
+        self.faces.extend(new_faces);
+    }
+
+    /// Get all faces that contain a given edge (pair of vertex indices).
+    /// Returns face indices.
+    fn faces_with_edge(&self, v0: usize, v1: usize) -> Vec<usize> {
+        self.faces.iter().enumerate()
+            .filter(|(_, face)| {
+                let verts = &face.vertices;
+                let n = verts.len();
+                for i in 0..n {
+                    let a = verts[i];
+                    let b = verts[(i + 1) % n];
+                    if (a == v0 && b == v1) || (a == v1 && b == v0) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Given an edge (v0, v1) and a quad face containing it, find the "opposite" edge.
+    /// Returns None if the face is not a quad or doesn't contain the edge.
+    fn opposite_edge_in_quad(&self, face_idx: usize, v0: usize, v1: usize) -> Option<(usize, usize)> {
+        let face = &self.faces[face_idx];
+        if face.vertices.len() != 4 {
+            return None; // Only works for quads
+        }
+
+        let verts = &face.vertices;
+        // Find the position of our edge
+        for i in 0..4 {
+            let a = verts[i];
+            let b = verts[(i + 1) % 4];
+            if (a == v0 && b == v1) || (a == v1 && b == v0) {
+                // Found the edge, opposite edge is 2 positions away
+                let c = verts[(i + 2) % 4];
+                let d = verts[(i + 3) % 4];
+                return Some((c, d));
+            }
+        }
+        None
+    }
+
+    /// Select an edge loop starting from an edge (v0, v1).
+    /// Returns all edges (vertex pairs) in the loop.
+    /// Edge loops follow through connected edges that form a continuous strip.
+    /// At each vertex, we continue to the edge "across" the quad (perpendicular traversal).
+    pub fn select_edge_loop(&self, v0: usize, v1: usize) -> Vec<(usize, usize)> {
+        let mut loop_edges = vec![(v0, v1)];
+        let mut visited_edges: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+        // Normalize edge representation for visited set
+        let normalize = |a: usize, b: usize| -> (usize, usize) {
+            if a < b { (a, b) } else { (b, a) }
+        };
+
+        visited_edges.insert(normalize(v0, v1));
+
+        // Extend in both directions from the starting edge
+        // Direction 0: extend from v1
+        // Direction 1: extend from v0
+        for (start_v, end_v) in [(v0, v1), (v1, v0)] {
+            let mut prev_v = start_v;
+            let mut curr_v = end_v;
+
+            loop {
+                // Find the next vertex by looking at quads containing curr_v
+                // We want a quad where prev_v-curr_v is an edge, and continue to the next edge
+                let mut next_v: Option<usize> = None;
+
+                for face in &self.faces {
+                    if face.vertices.len() != 4 {
+                        continue;
+                    }
+
+                    let verts = &face.vertices;
+                    // Check if this quad contains edge prev_v-curr_v
+                    let mut curr_pos: Option<usize> = None;
+                    for i in 0..4 {
+                        if verts[i] == curr_v {
+                            let next_i = (i + 1) % 4;
+                            let prev_i = (i + 3) % 4;
+                            if verts[next_i] == prev_v || verts[prev_i] == prev_v {
+                                curr_pos = Some(i);
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(pos) = curr_pos {
+                        // Found the quad. curr_v is at position `pos`.
+                        // The edge goes to prev_v which is either at pos+1 or pos-1.
+                        // We want to continue to the vertex OPPOSITE to prev_v in the quad.
+                        // In a quad [0,1,2,3], if curr_v is at pos 1 and prev_v is at pos 0,
+                        // then the "continuation" vertex is at pos 2 (curr_v's other neighbor).
+                        let neighbor1 = verts[(pos + 1) % 4];
+                        let neighbor2 = verts[(pos + 3) % 4];
+
+                        let next_candidate = if neighbor1 != prev_v {
+                            neighbor1
+                        } else {
+                            neighbor2
+                        };
+
+                        // Check if this edge is already visited
+                        let edge = normalize(curr_v, next_candidate);
+                        if !visited_edges.contains(&edge) {
+                            next_v = Some(next_candidate);
+                            break;
+                        }
+                    }
+                }
+
+                match next_v {
+                    Some(nv) => {
+                        let edge = (curr_v, nv);
+                        visited_edges.insert(normalize(curr_v, nv));
+                        loop_edges.push(edge);
+                        prev_v = curr_v;
+                        curr_v = nv;
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        loop_edges
+    }
+
+    /// Select a face loop starting from a face and an edge direction.
+    /// Face loops are strips of faces connected through opposite edges.
+    pub fn select_face_loop(&self, start_face: usize, edge_v0: usize, edge_v1: usize) -> Vec<usize> {
+        let mut loop_faces = vec![start_face];
+        let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        visited.insert(start_face);
+
+        eprintln!("[FACE LOOP] Starting face {}, edge ({}, {})", start_face, edge_v0, edge_v1);
+
+        // Get the opposite edge for the second direction
+        let opposite_start_edge = self.opposite_edge_in_quad(start_face, edge_v0, edge_v1);
+        eprintln!("[FACE LOOP] Opposite start edge: {:?}", opposite_start_edge);
+
+        // Traverse in both directions
+        // Direction 0: use the original edge direction
+        // Direction 1: use the opposite edge direction
+        for direction in 0..2 {
+            eprintln!("[FACE LOOP] === Direction {} ===", direction);
+
+            let mut current_face = start_face;
+            let mut current_edge = if direction == 0 {
+                (edge_v0, edge_v1)
+            } else {
+                match opposite_start_edge {
+                    Some(e) => e,
+                    None => {
+                        eprintln!("[FACE LOOP] No opposite edge for direction 1, skipping");
+                        continue;
+                    }
+                }
+            };
+
+            loop {
+                eprintln!("[FACE LOOP] Current face {}, edge ({}, {})", current_face, current_edge.0, current_edge.1);
+
+                // Find the opposite edge in the current face
+                let opposite = match self.opposite_edge_in_quad(current_face, current_edge.0, current_edge.1) {
+                    Some(e) => e,
+                    None => {
+                        eprintln!("[FACE LOOP] Face {} is not a quad or edge not found, stopping", current_face);
+                        break;
+                    }
+                };
+
+                eprintln!("[FACE LOOP] Opposite edge: ({}, {})", opposite.0, opposite.1);
+
+                // Find the face on the other side of this edge
+                let adjacent_faces = self.faces_with_edge(opposite.0, opposite.1);
+                eprintln!("[FACE LOOP] Adjacent faces to opposite edge: {:?}", adjacent_faces);
+
+                let next_face = adjacent_faces.iter()
+                    .find(|&&f| f != current_face && !visited.contains(&f));
+
+                match next_face {
+                    Some(&face_idx) => {
+                        eprintln!("[FACE LOOP] Found next face: {}", face_idx);
+                        visited.insert(face_idx);
+                        loop_faces.push(face_idx);
+                        current_face = face_idx;
+                        current_edge = opposite;
+                    }
+                    None => {
+                        eprintln!("[FACE LOOP] No unvisited adjacent face found, stopping");
+                        break;
+                    }
+                }
+            }
+        }
+
+        eprintln!("[FACE LOOP] Final result: {} faces", loop_faces.len());
+        loop_faces
+    }
+
+    /// Get vertices from edge loop (flattens edge pairs to unique vertex indices)
+    pub fn vertices_from_edge_loop(&self, edges: &[(usize, usize)]) -> Vec<usize> {
+        let mut vertices: Vec<usize> = Vec::new();
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for &(v0, v1) in edges {
+            if seen.insert(v0) {
+                vertices.push(v0);
+            }
+            if seen.insert(v1) {
+                vertices.push(v1);
+            }
+        }
+
+        vertices
     }
 }
 

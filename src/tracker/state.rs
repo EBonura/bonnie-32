@@ -6,6 +6,7 @@ use super::psx_reverb::ReverbType;
 use super::actions::create_tracker_actions;
 use super::song_browser::SongBrowser;
 use crate::ui::{ActionRegistry, SplitPanel};
+use crate::input::MidiInput;
 use std::path::PathBuf;
 
 /// Tracker view mode
@@ -109,6 +110,9 @@ pub struct TrackerState {
 
     /// Split panel for pattern editor / instrument panel (horizontal split)
     pub pattern_split: SplitPanel,
+
+    /// MIDI keyboard input
+    pub midi: MidiInput,
 }
 
 /// Soundfont filename
@@ -218,6 +222,7 @@ impl TrackerState {
             preview_song: None,
             tap_times: Vec::new(),
             pattern_split: SplitPanel::horizontal(2000).with_ratio(0.6).with_min_size(200.0),
+            midi: MidiInput::new(),
         }
     }
 

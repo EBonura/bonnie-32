@@ -7,8 +7,8 @@ use crate::ui::{Rect, UiContext, Axis as UiAxis};
 use crate::rasterizer::{
     Framebuffer, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
-    world_to_screen, world_to_screen_with_ortho, draw_floor_grid, point_in_triangle_2d,
-    OrthoProjection, Camera,
+    world_to_screen_with_ortho, world_to_screen_with_ortho_depth, draw_floor_grid, point_in_triangle_2d,
+    OrthoProjection, Camera, draw_3d_line_clipped,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
 use super::drag::{DragUpdateResult, ActiveDrag};
@@ -132,6 +132,7 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
     }
 
     // Second pass: apply movements (mutable)
+    let mirror_settings = state.mirror_settings;
     if let Some(mesh) = state.mesh_mut() {
         let mut already_moved = std::collections::HashSet::new();
         for (idx, old_pos, new_pos) in &movements {
@@ -143,7 +144,9 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
                 for ci in coincident {
                     if !already_moved.contains(&ci) {
                         if let Some(vert) = mesh.vertices.get_mut(ci) {
-                            vert.pos = vert.pos + delta;
+                            let final_pos = vert.pos + delta;
+                            // Constrain center vertices to mirror plane
+                            vert.pos = mirror_settings.constrain_to_plane(final_pos);
                         }
                         already_moved.insert(ci);
                     }
@@ -152,7 +155,8 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
                 // Just move the single vertex
                 if !already_moved.contains(idx) {
                     if let Some(vert) = mesh.vertices.get_mut(*idx) {
-                        vert.pos = *new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(*new_pos);
                     }
                     already_moved.insert(*idx);
                 }
@@ -186,12 +190,14 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
 
     // Apply the updated positions
     let mut made_changes = false;
+    let mirror_settings = state.mirror_settings;
     if let Some(mesh) = state.mesh_mut() {
         match result {
             DragUpdateResult::Move { positions, .. } => {
                 for (vert_idx, new_pos) in positions {
                     if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(new_pos);
                     }
                 }
                 made_changes = true;
@@ -199,7 +205,8 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
             DragUpdateResult::Scale { positions, .. } => {
                 for (vert_idx, new_pos) in positions {
                     if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(new_pos);
                     }
                 }
                 made_changes = true;
@@ -207,7 +214,8 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
             DragUpdateResult::Rotate { positions, .. } => {
                 for (vert_idx, new_pos) in positions {
                     if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                        vert.pos = new_pos;
+                        // Constrain center vertices to mirror plane
+                        vert.pos = mirror_settings.constrain_to_plane(new_pos);
                     }
                 }
                 made_changes = true;
@@ -281,12 +289,6 @@ fn handle_drag_move(
     let is_free_moving = state.drag_manager.active.is_free_move();
     let is_ortho = viewport_id != ViewportId::Perspective;
 
-    // DEBUG: Log entry into this function
-    if ctx.mouse.left_pressed || ctx.mouse.left_down {
-        eprintln!("[DEBUG handle_drag_move] viewport={:?} is_ortho={} is_free_moving={} inside={} mouse={:?}",
-            viewport_id, is_ortho, is_free_moving, inside_viewport, mouse_pos);
-    }
-
     // Check if this viewport owns the ortho drag
     let owns_ortho_drag = state.ortho_drag_viewport == Some(viewport_id);
     // Skip if another ortho viewport owns this drag
@@ -295,10 +297,8 @@ fn handle_drag_move(
     }
 
     if is_free_moving {
-        eprintln!("[DEBUG] is_free_moving=true, owns_ortho_drag={} ortho_drag_viewport={:?}", owns_ortho_drag, state.ortho_drag_viewport);
         if ctx.mouse.left_down {
             if is_ortho && owns_ortho_drag {
-                eprintln!("[DEBUG] ORTHO DRAG UPDATE for {:?}", viewport_id);
                 // Ortho mode: use screen-to-world delta conversion
                 let drag_zoom = state.ortho_drag_zoom;
 
@@ -317,10 +317,6 @@ fn handle_drag_move(
                         ViewportId::Side => Vec3::new(0.0, world_dy, world_dx),   // ZY plane
                         ViewportId::Perspective => Vec3::ZERO,
                     };
-
-                    if dx.abs() > 0.1 || dy.abs() > 0.1 {
-                        eprintln!("[DEBUG ORTHO DRAG] screen_delta=({:.1}, {:.1}) zoom={} world_delta={:?}", dx, dy, drag_zoom, delta);
-                    }
 
                     // Apply delta to initial positions
                     if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
@@ -377,7 +373,6 @@ fn handle_drag_move(
             }
         } else {
             // End drag on mouse release
-            eprintln!("[DEBUG] DRAG END - mouse released, owns_ortho_drag={}", owns_ortho_drag);
             state.drag_manager.end();
             if owns_ortho_drag {
                 state.ortho_drag_viewport = None;
@@ -427,13 +422,9 @@ fn handle_drag_move(
                         .collect();
 
                     if !initial_positions.is_empty() {
-                        eprintln!("[DEBUG] STARTING DRAG: viewport={:?} initial_positions={} mouse={:?}",
-                            viewport_id, initial_positions.len(), mouse_pos);
-
                         // Calculate center
                         let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
                         let center = sum * (1.0 / initial_positions.len() as f32);
-                        eprintln!("[DEBUG] center={:?}", center);
 
                         // Save undo state before starting
                         state.push_undo("Drag move");
@@ -447,7 +438,6 @@ fn handle_drag_move(
                         if is_ortho {
                             state.ortho_drag_viewport = Some(viewport_id);
                             state.ortho_drag_zoom = state.get_ortho_camera(viewport_id).zoom;
-                            eprintln!("[DEBUG] Setting ortho_drag_viewport={:?} zoom={}", viewport_id, state.ortho_drag_zoom);
                         }
 
                         // Start free move drag (axis = None for screen-space movement)
@@ -462,8 +452,6 @@ fn handle_drag_move(
                         );
 
                         state.set_status("Drag to move (hold Shift for fine)", 3.0);
-                    } else {
-                        eprintln!("[DEBUG] NO initial_positions - nothing selected?");
                     }
 
                     state.free_drag_pending_start = None;
@@ -706,7 +694,57 @@ pub fn draw_modeler_viewport_ext(
     }
 
     // Perspective camera controls (free or orbit mode) - skip for ortho views
-    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    // Use get_keys_down() which returns all currently pressed keys
+    // This is more reliable on macOS where modifier key presses can cause
+    // is_key_down() to return stale state for other keys
+    let all_keys = get_keys_down(); // Returns HashSet<KeyCode>
+
+    let shift_held = all_keys.contains(&KeyCode::LeftShift) || all_keys.contains(&KeyCode::RightShift);
+    let ctrl_held = all_keys.contains(&KeyCode::LeftControl) || all_keys.contains(&KeyCode::RightControl)
+        || all_keys.contains(&KeyCode::LeftSuper) || all_keys.contains(&KeyCode::RightSuper);
+    let alt_held = all_keys.contains(&KeyCode::LeftAlt) || all_keys.contains(&KeyCode::RightAlt);
+    // Shift is allowed with WASD (for speed boost), only Ctrl/Alt block camera movement
+    let blocking_modifier = ctrl_held || alt_held;
+
+    // macOS workaround: When Cmd+key is released, macOS doesn't send key-up for the letter key.
+    // We track "trusted" state for each movement key:
+    // - When blocking modifier (Ctrl/Alt) is released, all keys become untrusted
+    // - Keys become trusted again when freshly pressed (is_key_pressed)
+    // - Keys become trusted when released (not in all_keys) - ready for next press
+    // Note: Shift doesn't cause stuck keys, so we don't include it here
+    let modifier_just_released = state.modifier_was_held && !blocking_modifier;
+    state.modifier_was_held = blocking_modifier;
+
+    // Key indices: 0=W, 1=A, 2=S, 3=D, 4=Q, 5=E
+    let movement_keys = [KeyCode::W, KeyCode::A, KeyCode::S, KeyCode::D, KeyCode::Q, KeyCode::E];
+
+    // When modifier released, mark all movement keys as untrusted
+    if modifier_just_released {
+        state.trusted_movement_keys = [false; 6];
+    }
+
+    // Update trust status for each key
+    for (i, &key) in movement_keys.iter().enumerate() {
+        let key_in_all_keys = all_keys.contains(&key);
+
+        // If key is not in all_keys, it's been released - mark as trusted (ready for next press)
+        if !key_in_all_keys {
+            state.trusted_movement_keys[i] = true;
+        }
+
+        // If key was just pressed this frame, it's definitely trusted
+        if is_key_pressed(key) {
+            state.trusted_movement_keys[i] = true;
+        }
+    }
+
+    // Only consider a key "down" if it's both in all_keys AND trusted
+    let w_down = all_keys.contains(&KeyCode::W) && state.trusted_movement_keys[0];
+    let a_down = all_keys.contains(&KeyCode::A) && state.trusted_movement_keys[1];
+    let s_down = all_keys.contains(&KeyCode::S) && state.trusted_movement_keys[2];
+    let d_down = all_keys.contains(&KeyCode::D) && state.trusted_movement_keys[3];
+    let q_down = all_keys.contains(&KeyCode::Q) && state.trusted_movement_keys[4];
+    let e_down = all_keys.contains(&KeyCode::E) && state.trusted_movement_keys[5];
 
     if !is_ortho {
     match state.camera_mode {
@@ -726,28 +764,29 @@ pub fn draw_modeler_viewport_ext(
                 state.viewport_mouse_captured = false;
             }
 
-            // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
-            // Hold Shift for faster movement
+            // Keyboard camera movement (WASD + Q/E) - only while right-click held (like Unity/Unreal)
+            // This prevents conflicts with editing shortcuts like E for extrude
+            // Shift increases movement speed
             let base_speed = 50.0; // Scaled for TRLE units (1024 per sector)
-            let move_speed = if shift_held { 100.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() {
-                if is_key_down(KeyCode::W) {
-                    state.camera.position = state.camera.position + state.camera.basis_z * move_speed;
+            let speed = if shift_held { base_speed * 4.0 } else { base_speed };
+            if ctx.mouse.right_down && (inside_viewport || state.viewport_mouse_captured) && !state.drag_manager.is_dragging() && !blocking_modifier {
+                if w_down {
+                    state.camera.position = state.camera.position + state.camera.basis_z * speed;
                 }
-                if is_key_down(KeyCode::S) {
-                    state.camera.position = state.camera.position - state.camera.basis_z * move_speed;
+                if s_down {
+                    state.camera.position = state.camera.position - state.camera.basis_z * speed;
                 }
-                if is_key_down(KeyCode::A) {
-                    state.camera.position = state.camera.position - state.camera.basis_x * move_speed;
+                if a_down {
+                    state.camera.position = state.camera.position - state.camera.basis_x * speed;
                 }
-                if is_key_down(KeyCode::D) {
-                    state.camera.position = state.camera.position + state.camera.basis_x * move_speed;
+                if d_down {
+                    state.camera.position = state.camera.position + state.camera.basis_x * speed;
                 }
-                if is_key_down(KeyCode::Q) {
-                    state.camera.position = state.camera.position - state.camera.basis_y * move_speed;
+                if q_down {
+                    state.camera.position = state.camera.position - state.camera.basis_y * speed;
                 }
-                if is_key_down(KeyCode::E) {
-                    state.camera.position = state.camera.position + state.camera.basis_y * move_speed;
+                if e_down {
+                    state.camera.position = state.camera.position + state.camera.basis_y * speed;
                 }
             }
         }
@@ -854,6 +893,7 @@ pub fn draw_modeler_viewport_ext(
                         None, // No axis constraint initially
                         indices,
                         initial_positions,
+                        mouse_pos, // Use mouse_pos as center for screen-space scaling
                     );
                 }
                 ModalTransform::Rotate => {
@@ -902,39 +942,74 @@ pub fn draw_modeler_viewport_ext(
         draw_floor_grid(fb, &state.camera, 0.0, crate::world::SECTOR_SIZE, crate::world::SECTOR_SIZE * 10.0, grid_color, x_axis_color, z_axis_color);
     }
 
+    // Draw mirror plane indicator when mirror mode is enabled
+    if state.mirror_settings.enabled {
+        let mirror_color = RasterColor::new(255, 100, 100); // Pinkish-red for mirror plane
+        let extent = crate::world::SECTOR_SIZE * 5.0; // Large enough to be visible
+
+        // Draw cross lines along the mirror plane
+        match state.mirror_settings.axis {
+            Axis::X => {
+                // X mirror: plane at X=0, draw vertical line in YZ plane
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, -extent, 0.0), Vec3::new(0.0, extent, 0.0), mirror_color);
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, 0.0, -extent), Vec3::new(0.0, 0.0, extent), mirror_color);
+            }
+            Axis::Y => {
+                // Y mirror: plane at Y=0, draw lines in XZ plane
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(-extent, 0.0, 0.0), Vec3::new(extent, 0.0, 0.0), mirror_color);
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, 0.0, -extent), Vec3::new(0.0, 0.0, extent), mirror_color);
+            }
+            Axis::Z => {
+                // Z mirror: plane at Z=0, draw lines in XY plane
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(-extent, 0.0, 0.0), Vec3::new(extent, 0.0, 0.0), mirror_color);
+                draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, -extent, 0.0), Vec3::new(0.0, extent, 0.0), mirror_color);
+            }
+        }
+    }
+
     // Render all visible objects
-    // Convert atlas to rasterizer texture (shared by all objects)
     // Use RGB555 or RGB888 based on settings
     let use_rgb555 = state.raster_settings.use_rgb555;
 
-    // Pre-convert atlas to appropriate format
-    // If we have an indexed atlas with a CLUT, use that for authentic PS1 rendering
-    let atlas_texture = state.project.atlas.to_raster_texture();
-    let atlas_texture_15 = if use_rgb555 {
-        // Check if we have indexed atlas + CLUT for authentic rendering
-        if let Some(ref indexed_atlas) = state.project.indexed_atlas {
-            // Determine which CLUT to use: preview override or default
-            let clut_id = state.project.preview_clut.unwrap_or(indexed_atlas.default_clut);
-            if let Some(clut) = state.project.clut_pool.get(clut_id) {
-                // Convert indexed atlas -> Texture15 using CLUT lookup
-                Some(indexed_atlas.to_texture15(clut, "indexed_atlas"))
-            } else {
-                // Fallback to regular atlas if CLUT not found
-                Some(state.project.atlas.to_raster_texture_15())
-            }
-        } else {
-            // No indexed atlas, use regular atlas
-            Some(state.project.atlas.to_raster_texture_15())
-        }
-    } else {
-        None
-    };
+    // Log once per render frame (use frame counter if available, or static counter)
+    static mut FRAME_COUNTER: u32 = 0;
+    let frame_num = unsafe { FRAME_COUNTER += 1; FRAME_COUNTER };
+
+    // Only log every 60 frames to reduce spam
+    let should_log = frame_num % 60 == 0;
+
+    // Fallback CLUT for objects with no assigned CLUT
+    let fallback_clut = state.project.clut_pool.first_id()
+        .and_then(|id| state.project.clut_pool.get(id));
 
     for (obj_idx, obj) in state.project.objects.iter().enumerate() {
         // Skip hidden objects
         if !obj.visible {
             continue;
         }
+
+        // Get this object's CLUT from the shared pool (per-object atlas.default_clut)
+        let obj_clut = if obj.atlas.default_clut.is_valid() {
+            state.project.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
+        } else {
+            fallback_clut
+        };
+
+        if should_log {
+            // Log first 8 indices to see if atlas data differs between objects
+            let indices_preview: Vec<u8> = obj.atlas.indices.iter().take(8).copied().collect();
+            eprintln!("[DEBUG render] obj[{}] '{}': atlas {}x{} depth={:?} clut={:?} indices[0..8]={:?}",
+                obj_idx, obj.name, obj.atlas.width, obj.atlas.height, obj.atlas.depth,
+                obj.atlas.default_clut, indices_preview);
+        }
+
+        // Convert this object's atlas to rasterizer texture using its own CLUT
+        let atlas_texture = obj_clut.map(|c| obj.atlas.to_raster_texture(c, &format!("atlas_{}", obj_idx)));
+        let atlas_texture_15 = if use_rgb555 {
+            obj_clut.map(|c| obj.atlas.to_texture15(c, &format!("atlas_{}", obj_idx)))
+        } else {
+            None
+        };
 
         // Use project mesh directly (mesh() accessor returns selected object's mesh)
         let mesh = &obj.mesh;
@@ -980,34 +1055,110 @@ pub fn draw_modeler_viewport_ext(
             if use_rgb555 {
                 // RGB555 rendering path
                 // Per-face blend modes + per-pixel STP bit (PS1-authentic)
-                let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
-                render_mesh_15(
-                    fb,
-                    &vertices,
-                    &faces,
-                    &textures_15,
-                    Some(&blend_modes),
-                    &state.camera,
-                    &state.raster_settings,
-                    None,
-                );
+                if let Some(ref tex15) = atlas_texture_15 {
+                    let textures_15 = [tex15.clone()];
+                    render_mesh_15(
+                        fb,
+                        &vertices,
+                        &faces,
+                        &textures_15,
+                        Some(&blend_modes),
+                        &state.camera,
+                        &state.raster_settings,
+                        None,
+                    );
+                }
             } else {
                 // RGB888 rendering path (original)
-                let textures = [atlas_texture.clone()];
-                render_mesh(
-                    fb,
-                    &vertices,
-                    &faces,
-                    &textures,
-                    &state.camera,
-                    &state.raster_settings,
-                );
+                if let Some(ref tex) = atlas_texture {
+                    let textures = [tex.clone()];
+                    render_mesh(
+                        fb,
+                        &vertices,
+                        &faces,
+                        &textures,
+                        &state.camera,
+                        &state.raster_settings,
+                    );
+                }
+            }
+
+            // Render mirrored geometry if mirror mode is enabled
+            if state.mirror_settings.enabled {
+                // Create mirrored vertices
+                let mirrored_vertices: Vec<RasterVertex> = vertices.iter().map(|v| {
+                    RasterVertex {
+                        pos: state.mirror_settings.mirror_position(v.pos),
+                        normal: state.mirror_settings.mirror_normal(v.normal),
+                        uv: v.uv,
+                        // Slightly dim the mirrored side to indicate it's generated
+                        color: RasterColor::new(
+                            (base_color as f32 * 0.85) as u8,
+                            (base_color as f32 * 0.85) as u8,
+                            (base_color as f32 * 0.85) as u8,
+                        ),
+                        bone_index: None,
+                    }
+                }).collect();
+
+                // Create mirrored faces with reversed winding order
+                let mirrored_faces: Vec<RasterFace> = faces.iter().map(|f| {
+                    RasterFace {
+                        v0: f.v0,
+                        v1: f.v2,  // Swap v1 and v2 to reverse winding
+                        v2: f.v1,
+                        texture_id: f.texture_id,
+                        black_transparent: f.black_transparent,
+                        blend_mode: f.blend_mode,
+                    }
+                }).collect();
+
+                if use_rgb555 {
+                    if let Some(ref tex15) = atlas_texture_15 {
+                        let textures_15 = [tex15.clone()];
+                        render_mesh_15(
+                            fb,
+                            &mirrored_vertices,
+                            &mirrored_faces,
+                            &textures_15,
+                            Some(&blend_modes),
+                            &state.camera,
+                            &state.raster_settings,
+                            None,
+                        );
+                    }
+                } else {
+                    if let Some(ref tex) = atlas_texture {
+                        let textures = [tex.clone()];
+                        render_mesh(
+                            fb,
+                            &mirrored_vertices,
+                            &mirrored_faces,
+                            &textures,
+                            &state.camera,
+                            &state.raster_settings,
+                        );
+                    }
+                }
             }
         }
     }
 
     // Draw selection overlays
     draw_mesh_selection_overlays(state, fb);
+
+    // Draw box selection preview (highlight elements that would be selected)
+    if state.box_select_viewport == Some(viewport_id) {
+        if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
+            let (min_x, min_y, max_x, max_y) = tracker.bounds();
+            // Convert screen coords to framebuffer coords
+            let fb_x0 = (min_x - draw_x) / draw_w * fb_width as f32;
+            let fb_y0 = (min_y - draw_y) / draw_h * fb_height as f32;
+            let fb_x1 = (max_x - draw_x) / draw_w * fb_width as f32;
+            let fb_y1 = (max_y - draw_y) / draw_h * fb_height as f32;
+            draw_box_selection_preview(state, fb, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id);
+        }
+    }
 
     // Blit framebuffer to screen
     let texture = Texture2D::from_rgba8(
@@ -1043,14 +1194,25 @@ pub fn draw_modeler_viewport_ext(
         handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
     }
 
-    // Draw box selection overlay if DragManager has active box select
-    if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
-        let (min_x, min_y, max_x, max_y) = tracker.bounds();
+    // Draw box selection overlay only for the viewport that owns it
+    if state.box_select_viewport == Some(viewport_id) {
+        if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
+            let (min_x, min_y, max_x, max_y) = tracker.bounds();
 
-        // Semi-transparent fill
-        draw_rectangle(min_x, min_y, max_x - min_x, max_y - min_y, Color::from_rgba(100, 150, 255, 50));
-        // Border
-        draw_rectangle_lines(min_x, min_y, max_x - min_x, max_y - min_y, 1.0, Color::from_rgba(100, 150, 255, 200));
+            // Clip box selection rectangle to viewport bounds
+            let clip_min_x = min_x.max(draw_x);
+            let clip_min_y = min_y.max(draw_y);
+            let clip_max_x = max_x.min(draw_x + draw_w);
+            let clip_max_y = max_y.min(draw_y + draw_h);
+
+            // Only draw if the clipped rectangle has positive area
+            if clip_max_x > clip_min_x && clip_max_y > clip_min_y {
+                // Semi-transparent fill
+                draw_rectangle(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, Color::from_rgba(100, 150, 255, 50));
+                // Border
+                draw_rectangle_lines(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, 1.0, Color::from_rgba(100, 150, 255, 200));
+            }
+        }
     }
 
     // Handle single-click selection using hover system (like world editor)
@@ -1092,12 +1254,6 @@ fn handle_box_selection(
     // Check if we're already in a box select drag
     let is_box_selecting = state.drag_manager.active.is_box_select();
 
-    // DEBUG: Log box selection activity
-    if ctx.mouse.left_pressed && inside_viewport {
-        eprintln!("[DEBUG BOX SELECT] viewport={:?} left_pressed inside_viewport pending={:?} is_dragging={}",
-            viewport_id, state.box_select_pending_start, state.drag_manager.is_dragging());
-    }
-
     // Only process active box select for the viewport that owns it
     if is_box_selecting && state.box_select_viewport == Some(viewport_id) {
         // Update the box select tracker with current mouse position
@@ -1121,8 +1277,6 @@ fn handle_box_selection(
                 let fb_x1 = (x1 - draw_x) / draw_w * fb_width as f32;
                 let fb_y1 = (y1 - draw_y) / draw_h * fb_height as f32;
 
-                eprintln!("[DEBUG BOX SELECT] Applying! screen=({:.0},{:.0})-({:.0},{:.0}) fb=({:.0},{:.0})-({:.0},{:.0}) viewport={:?}",
-                    x0, y0, x1, y1, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id);
                 apply_box_selection(state, fb_x0, fb_y0, fb_x1, fb_y1, fb_width, fb_height, viewport_id);
             }
 
@@ -1146,11 +1300,8 @@ fn handle_box_selection(
                 if ctx.mouse.left_down {
                     let dx = (mouse_pos.0 - start_pos.0).abs();
                     let dy = (mouse_pos.1 - start_pos.1).abs();
-                    eprintln!("[DEBUG BOX SELECT DRAG] viewport={:?} start={:?} current={:?} dx={:.1} dy={:.1}",
-                        viewport_id, start_pos, mouse_pos, dx, dy);
                     // Only become box select if moved at least 5 pixels
                     if dx > 5.0 || dy > 5.0 {
-                        eprintln!("[DEBUG BOX SELECT] Starting box select! dx={} dy={}", dx, dy);
                         state.drag_manager.start_box_select(start_pos);
                         // Update with current position
                         if let ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
@@ -1213,9 +1364,6 @@ fn apply_box_selection(
     };
 
     let mesh = state.mesh();
-
-    eprintln!("[DEBUG apply_box_selection] viewport={:?} is_ortho={} ortho={:?} mesh_verts={} select_mode={:?}",
-        viewport_id, is_ortho, ortho, mesh.vertices.len(), state.select_mode);
 
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
@@ -1309,6 +1457,44 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
 
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
     let select_color = RasterColor::new(100, 180, 255);  // Blue for selection
+    let edge_overlay_color = RasterColor::new(80, 80, 80);  // Gray for edge overlay
+
+    // =========================================================================
+    // Draw all edges with semi-transparent overlay (always visible in solid mode)
+    // Skip if in pure wireframe mode (edges already shown via backface_wireframe)
+    // Uses depth testing so edges respect z-order
+    // =========================================================================
+    if !state.raster_settings.wireframe_overlay {
+        for face in &mesh.faces {
+            for (v0_idx, v1_idx) in face.edges() {
+                if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                    if let (Some((sx0, sy0, z0)), Some((sx1, sy1, z1))) = (
+                        world_to_screen_with_ortho_depth(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                        world_to_screen_with_ortho_depth(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    ) {
+                        fb.draw_line_3d_alpha(sx0 as i32, sy0 as i32, z0, sx1 as i32, sy1 as i32, z1, edge_overlay_color, 191);
+                    }
+                }
+            }
+        }
+
+        // Draw vertex dots with semi-transparent overlay
+        let vertex_overlay_color = RasterColor::new(40, 40, 50);
+        for vert in &mesh.vertices {
+            if let Some((sx, sy)) = world_to_screen_with_ortho(
+                vert.pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb.width,
+                fb.height,
+                ortho,
+            ) {
+                fb.draw_circle_alpha(sx as i32, sy as i32, 3, vertex_overlay_color, 140);
+            }
+        }
+    }
 
     // =========================================================================
     // Draw hovered vertex (if any) - orange dot
@@ -1453,6 +1639,136 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
                         ortho,
                     ) {
                         fb.draw_circle(cx as i32, cy as i32, 4, select_color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Draw preview highlights for elements inside the box selection rectangle
+fn draw_box_selection_preview(
+    state: &ModelerState,
+    fb: &mut Framebuffer,
+    fb_x0: f32,
+    fb_y0: f32,
+    fb_x1: f32,
+    fb_y1: f32,
+    viewport_id: ViewportId,
+) {
+    let is_ortho = matches!(viewport_id, ViewportId::Top | ViewportId::Front | ViewportId::Side);
+
+    // Set up camera and projection for this viewport
+    let ortho_proj_temp;
+    let ortho = if is_ortho {
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        ortho_proj_temp = Some(OrthoProjection {
+            zoom: ortho_cam.zoom,
+            center_x: ortho_cam.center.x,
+            center_y: ortho_cam.center.y,
+        });
+        ortho_proj_temp.as_ref()
+    } else {
+        state.raster_settings.ortho_projection.as_ref()
+    };
+
+    let camera = if is_ortho {
+        match viewport_id {
+            ViewportId::Top => Camera::ortho_top(),
+            ViewportId::Front => Camera::ortho_front(),
+            ViewportId::Side => Camera::ortho_side(),
+            ViewportId::Perspective => state.camera.clone(),
+        }
+    } else {
+        state.camera.clone()
+    };
+
+    let mesh = state.mesh();
+    let preview_color = RasterColor::new(255, 220, 100); // Yellow/gold for preview
+
+    match state.select_mode {
+        SelectMode::Vertex => {
+            // Highlight vertices inside the box
+            for vert in &mesh.vertices {
+                if let Some((sx, sy)) = world_to_screen_with_ortho(
+                    vert.pos,
+                    camera.position,
+                    camera.basis_x,
+                    camera.basis_y,
+                    camera.basis_z,
+                    fb.width,
+                    fb.height,
+                    ortho,
+                ) {
+                    if sx >= fb_x0 && sx <= fb_x1 && sy >= fb_y0 && sy <= fb_y1 {
+                        // Draw highlighted vertex
+                        fb.draw_circle(sx as i32, sy as i32, 6, preview_color);
+                    }
+                }
+            }
+        }
+        SelectMode::Edge => {
+            // Highlight edges where both vertices are inside the box
+            let mut drawn_edges = std::collections::HashSet::new();
+            for face in &mesh.faces {
+                for (v0_idx, v1_idx) in face.edges() {
+                    let edge = (v0_idx.min(v1_idx), v0_idx.max(v1_idx));
+                    if drawn_edges.contains(&edge) {
+                        continue;
+                    }
+
+                    if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                        if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
+                            world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                        ) {
+                            // Check if midpoint is inside box
+                            let mid_x = (sx0 + sx1) / 2.0;
+                            let mid_y = (sy0 + sy1) / 2.0;
+                            if mid_x >= fb_x0 && mid_x <= fb_x1 && mid_y >= fb_y0 && mid_y <= fb_y1 {
+                                fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, preview_color);
+                                fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, preview_color);
+                                drawn_edges.insert(edge);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SelectMode::Face => {
+            // Highlight faces where center is inside the box
+            for face in &mesh.faces {
+                let verts: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi))
+                    .collect();
+                if !verts.is_empty() {
+                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                    if let Some((cx, cy)) = world_to_screen_with_ortho(
+                        center,
+                        camera.position,
+                        camera.basis_x,
+                        camera.basis_y,
+                        camera.basis_z,
+                        fb.width,
+                        fb.height,
+                        ortho,
+                    ) {
+                        if cx >= fb_x0 && cx <= fb_x1 && cy >= fb_y0 && cy <= fb_y1 {
+                            // Draw face outline in preview color
+                            let screen_positions: Vec<_> = verts.iter()
+                                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                                .collect();
+                            let n = screen_positions.len();
+                            if n >= 3 {
+                                for i in 0..n {
+                                    let (sx0, sy0) = screen_positions[i];
+                                    let (sx1, sy1) = screen_positions[(i + 1) % n];
+                                    fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, preview_color);
+                                }
+                                // Draw center dot
+                                fb.draw_circle(cx as i32, cy as i32, 4, preview_color);
+                            }
+                        }
                     }
                 }
             }
@@ -1648,10 +1964,14 @@ fn find_hovered_element(
         }
     }
 
-    // Check vertices first (highest priority) - only if on front-facing face
+    // Check vertices first (highest priority) - only if on front-facing face (unless X-ray mode)
     for (idx, vert) in mesh.vertices.iter().enumerate() {
-        if !vertex_on_front_face[idx] {
-            continue; // Skip vertices only on backfaces
+        if !state.xray_mode && !vertex_on_front_face[idx] {
+            continue; // Skip vertices only on backfaces (X-ray allows selecting through)
+        }
+        // Skip vertices on the non-editable side when mirror is enabled
+        if !state.mirror_settings.is_editable_side(vert.pos) {
+            continue;
         }
         if let Some((sx, sy)) = world_to_screen_with_ortho(
             vert.pos,
@@ -1680,12 +2000,16 @@ fn find_hovered_element(
                 // Normalize edge order for consistency
                 let edge = if v0_idx < v1_idx { (v0_idx, v1_idx) } else { (v1_idx, v0_idx) };
 
-                // Skip edges only on backfaces
-                if !edge_on_front_face.contains(&edge) {
+                // Skip edges only on backfaces (unless X-ray mode)
+                if !state.xray_mode && !edge_on_front_face.contains(&edge) {
                     continue;
                 }
 
                 if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                    // Skip edges with any vertex on non-editable side when mirror is enabled
+                    if !state.mirror_settings.is_editable_side(v0.pos) || !state.mirror_settings.is_editable_side(v1.pos) {
+                        continue;
+                    }
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
                         world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                         world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
@@ -1705,6 +2029,15 @@ fn find_hovered_element(
     // If no vertex or edge hovered, check faces using point-in-triangle (triangulate n-gons)
     if hovered_vertex.is_none() && hovered_edge.is_none() {
         for (idx, face) in mesh.faces.iter().enumerate() {
+            // Skip faces with any vertex on non-editable side when mirror is enabled
+            let face_on_editable_side = face.vertices.iter().all(|&vi| {
+                mesh.vertices.get(vi)
+                    .map(|v| state.mirror_settings.is_editable_side(v.pos))
+                    .unwrap_or(false)
+            });
+            if !face_on_editable_side {
+                continue;
+            }
             // Triangulate the n-gon face and check each triangle
             for [i0, i1, i2] in face.triangulate() {
                 if let (Some(v0), Some(v1), Some(v2)) = (
@@ -1720,8 +2053,8 @@ fn find_hovered_element(
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
-                        if signed_area <= 0.0 {
-                            continue; // Backface - skip
+                        if !state.xray_mode && signed_area <= 0.0 {
+                            continue; // Backface - skip (X-ray allows selecting through)
                         }
 
                         // Check if mouse is inside the triangle
@@ -2108,6 +2441,7 @@ fn handle_move_gizmo(
                             .map(|(idx, start_pos)| (*idx, *start_pos + delta))
                             .collect();
 
+                        let mirror_settings = state.mirror_settings;
                         if let Some(mesh) = state.mesh_mut() {
                             for (idx, mut new_pos) in updates {
                                 if snap_enabled {
@@ -2115,6 +2449,8 @@ fn handle_move_gizmo(
                                     new_pos.y = (new_pos.y / snap_size).round() * snap_size;
                                     new_pos.z = (new_pos.z / snap_size).round() * snap_size;
                                 }
+                                // Constrain center vertices to mirror plane
+                                new_pos = mirror_settings.constrain_to_plane(new_pos);
                                 if let Some(vert) = mesh.vertices.get_mut(idx) {
                                     vert.pos = new_pos;
                                 }
@@ -2141,14 +2477,17 @@ fn handle_move_gizmo(
                     let snap_disabled = is_key_down(KeyCode::Z);
                     let snap_enabled = state.snap_settings.enabled && !snap_disabled;
                     let snap_settings = state.snap_settings.clone();
+                    let mirror_settings = state.mirror_settings;
                     if let Some(mesh) = state.mesh_mut() {
                         for (vert_idx, new_pos) in positions {
                             if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
-                                vert.pos = if snap_enabled {
+                                let snapped = if snap_enabled {
                                     snap_settings.snap_vec3(new_pos)
                                 } else {
                                     new_pos
                                 };
+                                // Constrain center vertices to mirror plane
+                                vert.pos = mirror_settings.constrain_to_plane(snapped);
                             }
                         }
                     }
@@ -2309,13 +2648,9 @@ fn handle_scale_gizmo(
     // Handle ongoing drag with DragManager
     if is_dragging {
         if ctx.mouse.left_down {
-            let fb_mouse = (
-                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-            );
-
+            // Scale uses screen-space coordinates for distance-from-center calculation
             let result = state.drag_manager.update(
-                fb_mouse,
+                mouse_pos,  // screen-space (same as center_screen)
                 &state.camera,
                 fb_width,
                 fb_height,
@@ -2346,26 +2681,37 @@ fn handle_scale_gizmo(
         }
     }
 
-    // Detect hover on cube handles (only when not dragging)
+    // Detect hover on cube handles and center (only when not dragging)
     state.gizmo_hovered_axis = None;
+    let mut center_hovered = false;
     if !is_dragging && inside_viewport {
-        let cube_size = 6.0;
-        for (axis, end_screen, _) in &setup.axis_screen_ends {
-            let dx = mouse_pos.0 - end_screen.0;
-            let dy = mouse_pos.1 - end_screen.1;
-            if dx.abs() < cube_size && dy.abs() < cube_size {
-                state.gizmo_hovered_axis = Some(*axis);
-                break;
+        // Check center circle first (uniform scale)
+        let center_dx = mouse_pos.0 - setup.center_screen.0;
+        let center_dy = mouse_pos.1 - setup.center_screen.1;
+        let center_radius = 8.0; // Slightly larger than visual radius for easier clicking
+        if center_dx * center_dx + center_dy * center_dy < center_radius * center_radius {
+            center_hovered = true;
+            // Don't set gizmo_hovered_axis - None means uniform scale
+        } else {
+            // Check axis cube handles
+            let cube_size = 6.0;
+            for (axis, end_screen, _) in &setup.axis_screen_ends {
+                let dx = mouse_pos.0 - end_screen.0;
+                let dy = mouse_pos.1 - end_screen.1;
+                if dx.abs() < cube_size && dy.abs() < cube_size {
+                    state.gizmo_hovered_axis = Some(*axis);
+                    break;
+                }
             }
         }
     }
-    // Sync hover state to tool
-    state.tool_box.tools.scale.set_hovered_axis(state.gizmo_hovered_axis.map(to_ui_axis));
+    // Sync hover state to tool (None = uniform scale when center hovered)
+    let tool_axis = if center_hovered { None } else { state.gizmo_hovered_axis.map(to_ui_axis) };
+    state.tool_box.tools.scale.set_hovered_axis(tool_axis);
 
-    // Start drag on click
-    if ctx.mouse.left_pressed && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
-        let axis = state.gizmo_hovered_axis.unwrap();
-
+    // Start drag on click (axis handle OR center for uniform scale)
+    let can_start_drag = state.gizmo_hovered_axis.is_some() || center_hovered;
+    if ctx.mouse.left_pressed && inside_viewport && can_start_drag && !is_dragging {
         // Get vertex indices and initial positions
         let mesh = state.mesh();
         let mut indices = state.selection.get_affected_vertex_indices(mesh);
@@ -2377,23 +2723,22 @@ fn handle_scale_gizmo(
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
-        let fb_mouse = (
-            (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-            (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-        );
-
         // Save undo state BEFORE starting the gizmo drag
         state.push_undo("Gizmo Scale");
 
+        // Determine axis: None for uniform scale (center), Some(axis) for constrained
+        let ui_axis = state.gizmo_hovered_axis.map(to_ui_axis);
+
         // Start drag with DragManager and sync tool state
-        let ui_axis = to_ui_axis(axis);
-        state.tool_box.tools.scale.start_drag(Some(ui_axis));
+        // Scale uses screen-space coordinates for distance-from-center calculation
+        state.tool_box.tools.scale.start_drag(ui_axis);
         state.drag_manager.start_scale(
             setup.center,
-            fb_mouse,
-            Some(ui_axis),
+            mouse_pos,           // screen-space mouse position
+            ui_axis,
             indices,
             initial_positions,
+            setup.center_screen, // screen-space center for distance calculation
         );
     }
 
@@ -2418,9 +2763,17 @@ fn handle_scale_gizmo(
         );
     }
 
-    // Draw center circle
-    let center_color = if is_dragging { YELLOW } else { WHITE };
-    draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
+    // Draw center circle (uniform scale handle)
+    let uniform_dragging = is_dragging && state.drag_manager.current_axis().is_none();
+    let center_color = if uniform_dragging {
+        YELLOW
+    } else if center_hovered {
+        Color::from_rgba(255, 255, 255, 255) // Bright white when hovered
+    } else {
+        Color::from_rgba(200, 200, 200, 200) // Dimmer when not hovered
+    };
+    let center_size = if center_hovered || uniform_dragging { 6.0 } else { 4.0 };
+    draw_circle(setup.center_screen.0, setup.center_screen.1, center_size, center_color);
 }
 
 // ============================================================================

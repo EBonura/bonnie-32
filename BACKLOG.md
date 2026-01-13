@@ -10,11 +10,6 @@ This document tracks planned features, known issues, and future improvements.
 
 - [ ] **Unified render pipeline**: Game and editor currently have separate render paths with duplicated code. Should create a shared scene renderer that both use, with hooks for editor-specific overlays (grid, selection, gizmos) and game-specific features (player, particles). This becomes critical as we add meshes, skeletal animation, particle systems, etc. Benefits: any optimization applies to both, WYSIWYG editing, single source of truth for rendering.
 
----
-
-### Rendering / PS1 Authenticity
-- [ ] **15-bit texture palette conversion**: All imported textures should be quantized to 15-bit color (5 bits per channel). Should be toggleable like other PS1 effects. Consider keeping original textures and generating converted copies on-demand to balance memory usage vs. authenticity.
-- [ ] **Face transparency modes**: In properties panel, allow setting PS1 semi-transparency blend modes (Average, Add, Subtract, AddQuarter) per face
 
 ---
 
@@ -33,6 +28,8 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
 - [ ] **Camera floor limit**: Add a minimum camera height so users can't accidentally go below the floor level. Should be slightly below the camera's current position.
 - [ ] **Scroll wheel for camera dolly**: Use mouse scroll wheel for forward/backward camera movement (dolly) in addition to zoom.
+- [ ] **Object movement like cells**: Move objects by dragging on Z/X axis, with Shift for Y axis movement (same as cell movement)
+- [ ] **Larger light indicators**: Lights are hard to see and click - make them at least 3x bigger
 
 ---
 
@@ -44,7 +41,9 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Auto-select room vs room lock**: Automatically select the room the cursor is in, rather than requiring manual room locking.
 - [ ] **Color slider lock**: Add a lock toggle to color sliders to prevent accidental changes.
 - [ ] **Increase texture cache time**: Textures are being uwnloaded too quickly from cache. Increase the retention time to avoid reloading.
-
+- [ ] **Environment/Objects switch**: Add a switch between environment and objects editing mode
+- [ ] **Smarter 2D diagonal display**: Only show diagonal lines in sectors when it matters (different textures or heights) for a cleaner 2D view
+- [ ] **Better fog defaults**: Default fog values should be color (5,5,5), start 8192, falloff 30k+, cull 9k. Sliders should work in sectors (1 sector = 1024)
 ---
 
 ### Music Tracker
@@ -52,21 +51,40 @@ This document tracks planned features, known issues, and future improvements.
 #### UI/UX
 - [ ] Per-note vs channel FX toggle
 - [ ] **Piano roll quick tool**: Add a piano roll that slides up from the bottom as a quick entry tool. Keep the pattern editor as the main detailed editing view.
+- [ ] **Track notes persistence**: If a track has notes and user reduces track count, notes should be preserved (track just hidden). Must also save hidden track data.
 
 #### Future
-- [ ] Custom instrument editor: Tab for building custom instruments beyond SF2 soundfonts
 - [ ] **Waveform visualizer**: Add a waveform visualizer somewhere in the UI for visual feedback during playback
+
+---
+
+### Paint Editor
+
+#### Canvas Operations
+- [ ] **Non-destructive resize**: Canvas resize should be non-destructive until user saves (different from track editor behavior)
+- [ ] **Color adjustments**: Add contrast/saturation/hue/brightness controls
+- [ ] **Multiple layers**: Full support for multiple layers
+- [ ] **Multiple frames**: Full support for animation frames
+
+---
+
+### Rendering / PS1 Authenticity
+
+- [ ] **Texture wobble effect**: Per-texture property for water/wobble distortion effect
 
 ---
 
 ### Assets (Modeler)
 
 #### Known Issues
-- [ ] Drag-to-select box only works in 3D view (not in 2D view)
 - [ ] Selection box overflows from 2D view into 3D viewport when dragging near boundary
-- [ ] Scale and Rotate transform modes not implemented - need to add Move mode first with proper gizmos for each mode
-- [ ] Overview panel is still a stub
 - [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
+- [ ] **Rotation mouse movement unintuitive**: Currently only responds to left/right movement. Should follow the rotation axis precisely
+
+#### UX Improvements
+- [ ] **Uniform scale from gizmo center**: Click center of gizmo to scale uniformly across all axes
+- [ ] **Configurable grid snap granularity**: Allow changing the Snap to Grid step size
+- [ ] **Rotation pivot from selection**: Allow selecting an edge as rotation pivot (secondary selection mode) - similar to Blender's 3D cursor but simpler
 
 #### Future
-- [ ] VRAM usage counter: Display usage with warning when exceeded
+- [ ] **Light support**: Asset editor should support lights. Lights in world editor become objects with only a light component (no geometry)

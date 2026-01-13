@@ -53,6 +53,12 @@ impl InputState {
         self.gamepad.right_stick()
     }
 
+    /// Get left stick from gamepad only (no keyboard WASD)
+    /// Use this when keyboard input is handled separately with trusted keys
+    pub fn gamepad_left_stick(&self) -> Vec2 {
+        self.gamepad.left_stick()
+    }
+
     /// Check if action is currently held down
     pub fn action_down(&self, action: Action) -> bool {
         self.keyboard_down(action) || self.gamepad_down(action)

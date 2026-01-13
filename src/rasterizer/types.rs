@@ -1376,6 +1376,9 @@ pub struct RasterSettings {
     /// When enabled, uses 16.16 fixed-point arithmetic which causes the characteristic
     /// PS1 vertex jitter and texture wobble due to limited precision.
     pub use_fixed_point: bool,
+    /// X-ray mode: see through geometry (editor feature)
+    /// When enabled: disables backface culling, disables z-buffer, blends all pixels at 50%
+    pub xray_mode: bool,
 }
 
 /// Orthographic projection settings for ortho views
@@ -1428,6 +1431,7 @@ impl Default for RasterSettings {
             ortho_projection: None,  // Default: perspective projection
             use_rgb555: true,        // PS1 default: 15-bit color mode
             use_fixed_point: true,   // PS1 default: fixed-point math (jittery)
+            xray_mode: false,        // Default: x-ray off
         }
     }
 }

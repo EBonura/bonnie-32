@@ -7,7 +7,12 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, icon, draw_icon_centered};
 use crate::rasterizer::{Texture as RasterTexture, ClutDepth};
-use crate::texture::{UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel};
+use crate::texture::{
+    UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel,
+    draw_mode_tabs, TextureEditorMode, UvOverlayData, UvVertex, UvFace,
+    draw_import_dialog, ImportAction, load_png_to_import_state,
+};
+use crate::rasterizer::Vec2 as RastVec2;
 use super::EditorState;
 
 const THUMB_PADDING: f32 = 4.0;
@@ -21,30 +26,78 @@ pub fn draw_texture_palette(
     state: &mut EditorState,
     icon_font: Option<&Font>,
 ) {
+    // Set focus on click anywhere in this panel
+    if ctx.mouse.inside(&rect) && ctx.mouse.left_pressed {
+        state.active_panel = super::ActivePanel::TexturePalette;
+    }
+
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(25, 25, 30, 255));
 
+    // Draw panel title bar with focus color
+    let title_height = 20.0;
+    draw_rectangle(rect.x, rect.y, rect.w, title_height, Color::from_rgba(50, 50, 60, 255));
+    let title_color = if state.active_panel == super::ActivePanel::TexturePalette {
+        Color::from_rgba(80, 180, 255, 255) // Cyan when focused
+    } else {
+        WHITE
+    };
+    draw_text("Textures", rect.x + 5.0, rect.y + 14.0, 16.0, title_color);
+
+    // Adjust content rect to account for title
+    let content_rect = Rect::new(rect.x, rect.y + title_height, rect.w, rect.h - title_height);
+
     // If editing a texture, show the texture editor instead
     if state.editing_texture.is_some() {
-        draw_texture_editor_panel(ctx, rect, state, icon_font);
+        draw_texture_editor_panel(ctx, content_rect, state, icon_font);
         return;
     }
 
     // Mode toggle tabs (Source PNGs | User Textures)
-    let mode_rect = Rect::new(rect.x, rect.y, rect.w, MODE_TOGGLE_HEIGHT);
+    let mode_rect = Rect::new(content_rect.x, content_rect.y, content_rect.w, MODE_TOGGLE_HEIGHT);
     draw_mode_toggle(ctx, mode_rect, state);
 
     // Header area (folder selector for source PNGs, action buttons for user textures)
-    let header_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT, rect.w, HEADER_HEIGHT);
+    let header_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT, content_rect.w, HEADER_HEIGHT);
 
     if state.texture_palette_user_mode {
         draw_user_texture_header(ctx, header_rect, state, icon_font);
-        let content_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, rect.w, rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
-        draw_user_texture_grid(ctx, content_rect, state);
+        let grid_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, content_rect.w, content_rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
+        draw_user_texture_grid(ctx, grid_rect, state);
     } else {
         draw_folder_selector(ctx, header_rect, state, icon_font);
-        let content_rect = Rect::new(rect.x, rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, rect.w, rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
-        draw_source_texture_grid(ctx, content_rect, state);
+        let grid_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, content_rect.w, content_rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
+        draw_source_texture_grid(ctx, grid_rect, state);
+    }
+
+    // Draw import dialog (modal overlay) if active
+    if let Some(action) = draw_import_dialog(ctx, &mut state.texture_editor.import_state, icon_font) {
+        match action {
+            ImportAction::Confirm => {
+                // Create a new texture from the import state
+                let import = &state.texture_editor.import_state;
+                let name = state.user_textures.next_available_name();
+                let (size_w, _) = import.target_size.dimensions();
+                let texture = UserTexture::new_with_data(
+                    name.clone(),
+                    import.target_size,
+                    import.depth,
+                    import.preview_indices.clone(),
+                    import.preview_palette.clone(),
+                );
+                state.user_textures.add(texture);
+                // Save to disk immediately (native only)
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Err(e) = state.user_textures.save_texture(&name) {
+                    eprintln!("Failed to save imported texture: {}", e);
+                }
+                state.set_status(&format!("Imported '{}' ({}x{})", name, size_w, size_w), 2.0);
+                state.texture_editor.import_state.reset();
+            }
+            ImportAction::Cancel => {
+                // Just reset the import state (already done by the dialog)
+            }
+        }
     }
 }
 
@@ -611,9 +664,63 @@ fn draw_user_texture_header(
     let btn_h = rect.h - 8.0;
     let btn_w = 60.0;
     let btn_y = rect.y + 4.0;
+    let mut btn_x = rect.x + 4.0;
+
+    // "Import" button - square icon button at the start
+    let import_btn_w = btn_h;
+    let import_rect = Rect::new(btn_x, btn_y, import_btn_w, btn_h);
+    let import_hovered = ctx.mouse.inside(&import_rect);
+    let import_bg = if import_hovered {
+        Color::from_rgba(70, 70, 80, 255)
+    } else {
+        Color::from_rgba(55, 55, 65, 255)
+    };
+    draw_rectangle(import_rect.x, import_rect.y, import_rect.w, import_rect.h, import_bg);
+    draw_rectangle_lines(import_rect.x, import_rect.y, import_rect.w, import_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    let import_icon_color = if import_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) };
+    draw_icon_centered(icon_font, icon::FOLDER_OPEN, &import_rect, 14.0, import_icon_color);
+
+    // Tooltip on hover
+    if import_hovered {
+        let tooltip = "Import PNG";
+        let tip_dims = measure_text(tooltip, None, 12, 1.0);
+        let tip_x = import_rect.x + import_rect.w / 2.0 - tip_dims.width / 2.0;
+        let tip_y = import_rect.bottom() + 4.0;
+        draw_rectangle(tip_x - 4.0, tip_y - 2.0, tip_dims.width + 8.0, tip_dims.height + 6.0, Color::from_rgba(30, 30, 35, 240));
+        draw_text(tooltip, tip_x, tip_y + tip_dims.height, 12.0, WHITE);
+    }
+
+    // Import button opens file picker
+    if ctx.mouse.clicked(&import_rect) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
+                .pick_file()
+            {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        if let Err(e) = load_png_to_import_state(&bytes, &mut state.texture_editor.import_state) {
+                            state.set_status(&format!("Import failed: {}", e), 3.0);
+                        }
+                    }
+                    Err(e) => {
+                        state.set_status(&format!("Failed to read file: {}", e), 3.0);
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            state.set_status("Import not yet available in browser", 2.0);
+        }
+    }
+
+    btn_x += import_btn_w + 4.0;
 
     // "New" button
-    let new_rect = Rect::new(rect.x + 4.0, btn_y, btn_w, btn_h);
+    let new_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
     let new_hovered = ctx.mouse.inside(&new_rect);
     let new_bg = if new_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
     draw_rectangle(new_rect.x, new_rect.y, new_rect.w, new_rect.h, new_bg);
@@ -634,9 +741,11 @@ fn draw_user_texture_header(
         state.texture_editor.reset();
     }
 
+    btn_x += btn_w + 4.0;
+
     // "Edit" button - edits the selected texture
     let has_selection = state.selected_user_texture.is_some();
-    let edit_rect = Rect::new(rect.x + 8.0 + btn_w, btn_y, btn_w, btn_h);
+    let edit_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
     let edit_hovered = ctx.mouse.inside(&edit_rect);
     let edit_enabled = has_selection;
     let edit_bg = if !edit_enabled {
@@ -955,7 +1064,18 @@ fn draw_texture_editor_panel(
     draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + header_h / 2.0 + 4.0).floor(), 12.0, name_color);
 
     // Content area below header
-    let content_rect = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
+    let full_content_rect = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
+
+    // Draw mode tabs (Paint/UV)
+    let tabs_rect = Rect::new(full_content_rect.x, full_content_rect.y, full_content_rect.w, 24.0);
+    let content_rect = draw_mode_tabs(ctx, tabs_rect, &mut state.texture_editor);
+
+    // Build UV overlay data from selected face when in UV mode
+    let uv_data = if state.texture_editor.mode == TextureEditorMode::Uv {
+        build_uv_overlay_from_selection(state)
+    } else {
+        None
+    };
 
     // Get mutable texture reference - need to split borrows
     let tex = match state.user_textures.get_mut(&texture_name) {
@@ -981,10 +1101,23 @@ fn draw_texture_editor_panel(
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
     let palette_rect = Rect::new(content_rect.x, content_rect.y + canvas_h, content_rect.w, palette_panel_h);
 
+    // Store texture dimensions for UV operations
+    let tex_width = tex.width as f32;
+    let tex_height = tex.height as f32;
+
     // Draw panels
-    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor);
+    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor, uv_data.as_ref());
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
     draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
+
+    // Handle UV direct drag (applies changes to face when dragging UV vertices)
+    apply_uv_direct_drag_to_face(ctx, tex_width, tex_height, state);
+
+    // Handle UV modal transforms (G/T/R keys)
+    apply_uv_modal_transform_to_face(ctx, tex_width, tex_height, state);
+
+    // Handle UV operations (flip/rotate/reset buttons)
+    apply_uv_operation_to_face(tex_width, tex_height, state);
 
     // Handle undo save signals from texture editor (save BEFORE the action is applied)
     if state.texture_editor.undo_save_pending.take().is_some() {
@@ -1040,6 +1173,657 @@ fn draw_texture_editor_panel(
                         bonnie_trigger_download();
                     }
                     state.texture_editor.dirty = false;
+                }
+            }
+        }
+    }
+}
+
+/// Build UV overlay data from all selected faces in the world editor
+/// UVs are offset based on sector grid position so adjacent faces appear adjacent in UV space
+fn build_uv_overlay_from_selection(state: &EditorState) -> Option<UvOverlayData> {
+    // Collect all SectorFace selections (primary + multi-selection)
+    let mut face_selections: Vec<(usize, usize, usize, super::SectorFace)> = Vec::new();
+
+    // Add primary selection if it's a SectorFace
+    if let super::Selection::SectorFace { room, x, z, face } = &state.selection {
+        face_selections.push((*room, *x, *z, face.clone()));
+    }
+
+    // Add all multi-selected faces
+    for sel in &state.multi_selection {
+        if let super::Selection::SectorFace { room, x, z, face } = sel {
+            // Avoid duplicates
+            let key = (*room, *x, *z, face.clone());
+            if !face_selections.iter().any(|s| s.0 == key.0 && s.1 == key.1 && s.2 == key.2 && s.3 == key.3) {
+                face_selections.push(key);
+            }
+        }
+    }
+
+    if face_selections.is_empty() {
+        return None;
+    }
+
+    // Find minimum x,z to use as origin for UV offset calculation
+    // This way face at min position has UVs at 0,0 and others are offset
+    let min_x = face_selections.iter().map(|(_, x, _, _)| *x).min().unwrap_or(0);
+    let min_z = face_selections.iter().map(|(_, _, z, _)| *z).min().unwrap_or(0);
+
+    // Build combined UV overlay from all selected faces
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+
+    for (face_idx, (room, x, z, face)) in face_selections.iter().enumerate() {
+        let r = match state.level.rooms.get(*room) {
+            Some(r) => r,
+            None => continue,
+        };
+        let sector = match r.get_sector(*x, *z) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let face_uvs: Option<[crate::rasterizer::Vec2; 4]> = match face {
+            super::SectorFace::Floor => {
+                sector.floor.as_ref().and_then(|f| f.uv)
+            }
+            super::SectorFace::Ceiling => {
+                sector.ceiling.as_ref().and_then(|f| f.uv)
+            }
+            super::SectorFace::WallNorth(i) => {
+                sector.walls_north.get(*i).and_then(|w| w.uv)
+            }
+            super::SectorFace::WallEast(i) => {
+                sector.walls_east.get(*i).and_then(|w| w.uv)
+            }
+            super::SectorFace::WallSouth(i) => {
+                sector.walls_south.get(*i).and_then(|w| w.uv)
+            }
+            super::SectorFace::WallWest(i) => {
+                sector.walls_west.get(*i).and_then(|w| w.uv)
+            }
+            super::SectorFace::WallNwSe(i) => {
+                sector.walls_nwse.get(*i).and_then(|w| w.uv)
+            }
+            super::SectorFace::WallNeSw(i) => {
+                sector.walls_nesw.get(*i).and_then(|w| w.uv)
+            }
+        };
+
+        // Use default UVs if face has None (0-1 range)
+        let base_uvs = face_uvs.unwrap_or([
+            RastVec2::new(0.0, 0.0),
+            RastVec2::new(1.0, 0.0),
+            RastVec2::new(1.0, 1.0),
+            RastVec2::new(0.0, 1.0),
+        ]);
+
+        // Calculate UV offset based on sector position relative to minimum
+        // For horizontal faces (floor/ceiling), use sector x,z position
+        let (offset_u, offset_v) = match face {
+            super::SectorFace::Floor | super::SectorFace::Ceiling => {
+                let dx = (*x - min_x) as f32;
+                let dz = (*z - min_z) as f32;
+                (dx, dz)
+            }
+            // For walls, we could offset based on position but for now keep them at origin
+            // since wall alignment is more complex (depends on direction)
+            _ => (0.0, 0.0),
+        };
+
+        // Add 4 vertices for this face with offset applied
+        // vertex_index encodes both face index and corner: face_idx * 4 + corner
+        let base_idx = vertices.len();
+        for (corner, uv) in base_uvs.iter().enumerate() {
+            vertices.push(UvVertex {
+                uv: RastVec2::new(uv.x + offset_u, uv.y + offset_v),
+                vertex_index: face_idx * 4 + corner,
+            });
+        }
+
+        // Add face referencing these vertices
+        faces.push(UvFace {
+            vertex_indices: vec![base_idx, base_idx + 1, base_idx + 2, base_idx + 3],
+        });
+    }
+
+    if faces.is_empty() {
+        return None;
+    }
+
+    // All faces are selected
+    let selected_faces: Vec<usize> = (0..faces.len()).collect();
+
+    Some(UvOverlayData {
+        vertices,
+        faces,
+        selected_faces,
+    })
+}
+
+/// Apply UV direct drag to all selected faces
+fn apply_uv_direct_drag_to_face(
+    ctx: &UiContext,
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut EditorState,
+) {
+    if !state.texture_editor.uv_drag_active {
+        return;
+    }
+
+    // Collect all face selections (same as build_uv_overlay_from_selection)
+    let mut face_selections: Vec<(usize, usize, usize, super::SectorFace)> = Vec::new();
+    if let super::Selection::SectorFace { room, x, z, face } = &state.selection {
+        face_selections.push((*room, *x, *z, face.clone()));
+    }
+    for sel in &state.multi_selection {
+        if let super::Selection::SectorFace { room, x, z, face } = sel {
+            let key = (*room, *x, *z, face.clone());
+            if !face_selections.iter().any(|s| s.0 == key.0 && s.1 == key.1 && s.2 == key.2 && s.3 == key.3) {
+                face_selections.push(key);
+            }
+        }
+    }
+
+    if face_selections.is_empty() {
+        return;
+    }
+
+    // Calculate min x,z for offset (same as build_uv_overlay_from_selection)
+    let min_x = face_selections.iter().map(|(_, x, _, _)| *x).min().unwrap_or(0);
+    let min_z = face_selections.iter().map(|(_, _, z, _)| *z).min().unwrap_or(0);
+
+    // Calculate UV delta from drag
+    let zoom = state.texture_editor.zoom;
+    let (start_mx, start_my) = state.texture_editor.uv_drag_start;
+    let delta_screen_x = ctx.mouse.x - start_mx;
+    let delta_screen_y = ctx.mouse.y - start_my;
+    let delta_u = delta_screen_x / (tex_width * zoom);
+    let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
+
+    // Group dragged vertices by face index
+    // vertex_index encodes face_idx * 4 + corner
+    let mut face_changes: std::collections::HashMap<usize, Vec<(usize, RastVec2)>> = std::collections::HashMap::new();
+    for &(_, vi, original_uv) in &state.texture_editor.uv_drag_start_uvs {
+        let face_idx = vi / 4;
+        let corner = vi % 4;
+        face_changes.entry(face_idx).or_default().push((corner, original_uv));
+    }
+
+    // Apply changes to each affected face
+    for (face_idx, changes) in face_changes {
+        if face_idx >= face_selections.len() {
+            continue;
+        }
+        let (room, x, z, face) = &face_selections[face_idx];
+
+        // Calculate the offset that was applied to this face's UVs in the display
+        let (offset_u, offset_v) = match face {
+            super::SectorFace::Floor | super::SectorFace::Ceiling => {
+                let dx = (*x - min_x) as f32;
+                let dz = (*z - min_z) as f32;
+                (dx, dz)
+            }
+            _ => (0.0, 0.0),
+        };
+
+        // Get current face UVs
+        let current_uvs = if let Some(r) = state.level.rooms.get(*room) {
+            if let Some(sector) = r.get_sector(*x, *z) {
+                match face {
+                    super::SectorFace::Floor => sector.floor.as_ref().and_then(|f| f.uv),
+                    super::SectorFace::Ceiling => sector.ceiling.as_ref().and_then(|f| f.uv),
+                    super::SectorFace::WallNorth(i) => sector.walls_north.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallEast(i) => sector.walls_east.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallSouth(i) => sector.walls_south.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallWest(i) => sector.walls_west.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).and_then(|w| w.uv),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Start with current UVs or defaults
+        let mut new_uvs = current_uvs.unwrap_or([
+            RastVec2::new(0.0, 0.0),
+            RastVec2::new(1.0, 0.0),
+            RastVec2::new(1.0, 1.0),
+            RastVec2::new(0.0, 1.0),
+        ]);
+
+        // Apply delta to dragged corners with pixel snapping
+        // The original_uv includes the display offset, so we need to subtract it
+        for (corner, original_uv) in changes {
+            if corner < 4 {
+                // original_uv has offset applied, add delta, then subtract offset for storage
+                let new_u = original_uv.x + delta_u - offset_u;
+                let new_v = original_uv.y + delta_v - offset_v;
+                new_uvs[corner].x = (new_u * tex_width).round() / tex_width;
+                new_uvs[corner].y = (new_v * tex_height).round() / tex_height;
+            }
+        }
+
+        // Update the face's UV field
+        if let Some(r) = state.level.rooms.get_mut(*room) {
+            if let Some(sector) = r.get_sector_mut(*x, *z) {
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(f) = &mut sector.floor {
+                            f.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(f) = &mut sector.ceiling {
+                            f.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(w) = sector.walls_north.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(w) = sector.walls_east.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(w) = sector.walls_south.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(w) = sector.walls_west.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(w) = sector.walls_nwse.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(w) = sector.walls_nesw.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply UV operation (flip/rotate/reset) to all selected faces
+fn apply_uv_operation_to_face(
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut EditorState,
+) {
+    use crate::texture::UvOperation;
+
+    let operation = match state.texture_editor.uv_operation_pending.take() {
+        Some(op) => op,
+        None => return,
+    };
+
+    // Collect all face selections
+    let mut face_selections: Vec<(usize, usize, usize, super::SectorFace)> = Vec::new();
+    if let super::Selection::SectorFace { room, x, z, face } = &state.selection {
+        face_selections.push((*room, *x, *z, face.clone()));
+    }
+    for sel in &state.multi_selection {
+        if let super::Selection::SectorFace { room, x, z, face } = sel {
+            let key = (*room, *x, *z, face.clone());
+            if !face_selections.iter().any(|s| s.0 == key.0 && s.1 == key.1 && s.2 == key.2 && s.3 == key.3) {
+                face_selections.push(key);
+            }
+        }
+    }
+
+    if face_selections.is_empty() {
+        return;
+    }
+
+    let face_count = face_selections.len();
+
+    // Apply operation to each face
+    for (room, x, z, face) in face_selections {
+        // Get current face UVs
+        let current_uvs = if let Some(r) = state.level.rooms.get(room) {
+            if let Some(sector) = r.get_sector(x, z) {
+                match &face {
+                    super::SectorFace::Floor => sector.floor.as_ref().and_then(|f| f.uv),
+                    super::SectorFace::Ceiling => sector.ceiling.as_ref().and_then(|f| f.uv),
+                    super::SectorFace::WallNorth(i) => sector.walls_north.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallEast(i) => sector.walls_east.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallSouth(i) => sector.walls_south.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallWest(i) => sector.walls_west.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).and_then(|w| w.uv),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let uvs = current_uvs.unwrap_or([
+            RastVec2::new(0.0, 0.0),
+            RastVec2::new(1.0, 0.0),
+            RastVec2::new(1.0, 1.0),
+            RastVec2::new(0.0, 1.0),
+        ]);
+
+        // Calculate center for operations
+        let center_u = (uvs[0].x + uvs[1].x + uvs[2].x + uvs[3].x) / 4.0;
+        let center_v = (uvs[0].y + uvs[1].y + uvs[2].y + uvs[3].y) / 4.0;
+
+        let new_uvs: [RastVec2; 4] = match operation {
+            UvOperation::FlipHorizontal => {
+                [
+                    RastVec2::new(2.0 * center_u - uvs[0].x, uvs[0].y),
+                    RastVec2::new(2.0 * center_u - uvs[1].x, uvs[1].y),
+                    RastVec2::new(2.0 * center_u - uvs[2].x, uvs[2].y),
+                    RastVec2::new(2.0 * center_u - uvs[3].x, uvs[3].y),
+                ]
+            }
+            UvOperation::FlipVertical => {
+                [
+                    RastVec2::new(uvs[0].x, 2.0 * center_v - uvs[0].y),
+                    RastVec2::new(uvs[1].x, 2.0 * center_v - uvs[1].y),
+                    RastVec2::new(uvs[2].x, 2.0 * center_v - uvs[2].y),
+                    RastVec2::new(uvs[3].x, 2.0 * center_v - uvs[3].y),
+                ]
+            }
+            UvOperation::RotateCW => {
+                let mut result = [RastVec2::new(0.0, 0.0); 4];
+                for i in 0..4 {
+                    let dx = uvs[i].x - center_u;
+                    let dy = uvs[i].y - center_v;
+                    let new_u = center_u + dy;
+                    let new_v = center_v - dx;
+                    result[i].x = (new_u * tex_width).round() / tex_width;
+                    result[i].y = (new_v * tex_height).round() / tex_height;
+                }
+                result
+            }
+            UvOperation::ResetUVs => {
+                [
+                    RastVec2::new(0.0, 0.0),
+                    RastVec2::new(1.0, 0.0),
+                    RastVec2::new(1.0, 1.0),
+                    RastVec2::new(0.0, 1.0),
+                ]
+            }
+        };
+
+        // Update the face's UV field
+        if let Some(r) = state.level.rooms.get_mut(room) {
+            if let Some(sector) = r.get_sector_mut(x, z) {
+                match &face {
+                    super::SectorFace::Floor => {
+                        if let Some(f) = &mut sector.floor {
+                            f.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(f) = &mut sector.ceiling {
+                            f.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(w) = sector.walls_north.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(w) = sector.walls_east.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(w) = sector.walls_south.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(w) = sector.walls_west.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(w) = sector.walls_nwse.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(w) = sector.walls_nesw.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    state.texture_editor.set_status(&format!("{:?} applied to {} face(s)", operation, face_count));
+}
+
+/// Apply UV modal transforms (G/T/R) to all selected faces
+fn apply_uv_modal_transform_to_face(
+    ctx: &UiContext,
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut EditorState,
+) {
+    use crate::texture::UvModalTransform;
+
+    let transform = state.texture_editor.uv_modal_transform;
+    // Only apply transforms for active states (not None or ScalePending)
+    if transform == UvModalTransform::None || transform == UvModalTransform::ScalePending {
+        return;
+    }
+
+    // Collect all face selections
+    let mut face_selections: Vec<(usize, usize, usize, super::SectorFace)> = Vec::new();
+    if let super::Selection::SectorFace { room, x, z, face } = &state.selection {
+        face_selections.push((*room, *x, *z, face.clone()));
+    }
+    for sel in &state.multi_selection {
+        if let super::Selection::SectorFace { room, x, z, face } = sel {
+            let key = (*room, *x, *z, face.clone());
+            if !face_selections.iter().any(|s| s.0 == key.0 && s.1 == key.1 && s.2 == key.2 && s.3 == key.3) {
+                face_selections.push(key);
+            }
+        }
+    }
+
+    if face_selections.is_empty() {
+        return;
+    }
+
+    // Calculate min x,z for offset (same as build_uv_overlay_from_selection)
+    let min_x = face_selections.iter().map(|(_, x, _, _)| *x).min().unwrap_or(0);
+    let min_z = face_selections.iter().map(|(_, _, z, _)| *z).min().unwrap_or(0);
+
+    // Calculate transform parameters
+    let zoom = state.texture_editor.zoom;
+    let (start_mx, start_my) = state.texture_editor.uv_modal_start_mouse;
+
+    // Screen delta in UV space
+    let delta_screen_x = ctx.mouse.x - start_mx;
+    let delta_screen_y = ctx.mouse.y - start_my;
+    let delta_u = delta_screen_x / (tex_width * zoom);
+    let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
+
+    // Group dragged vertices by face index
+    // vertex_index encodes face_idx * 4 + corner
+    let mut face_changes: std::collections::HashMap<usize, Vec<(usize, RastVec2)>> = std::collections::HashMap::new();
+    for &(vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+        let face_idx = vi / 4;
+        let corner = vi % 4;
+        face_changes.entry(face_idx).or_default().push((corner, original_uv));
+    }
+
+    // Apply transform to each affected face
+    for (face_idx, changes) in face_changes {
+        if face_idx >= face_selections.len() {
+            continue;
+        }
+        let (room, x, z, face) = &face_selections[face_idx];
+
+        // Calculate the offset that was applied to this face's UVs in the display
+        let (offset_u, offset_v) = match face {
+            super::SectorFace::Floor | super::SectorFace::Ceiling => {
+                let dx = (*x - min_x) as f32;
+                let dz = (*z - min_z) as f32;
+                (dx, dz)
+            }
+            _ => (0.0, 0.0),
+        };
+
+        // Get current face UVs
+        let current_uvs = if let Some(r) = state.level.rooms.get(*room) {
+            if let Some(sector) = r.get_sector(*x, *z) {
+                match face {
+                    super::SectorFace::Floor => sector.floor.as_ref().and_then(|f| f.uv),
+                    super::SectorFace::Ceiling => sector.ceiling.as_ref().and_then(|f| f.uv),
+                    super::SectorFace::WallNorth(i) => sector.walls_north.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallEast(i) => sector.walls_east.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallSouth(i) => sector.walls_south.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallWest(i) => sector.walls_west.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallNwSe(i) => sector.walls_nwse.get(*i).and_then(|w| w.uv),
+                    super::SectorFace::WallNeSw(i) => sector.walls_nesw.get(*i).and_then(|w| w.uv),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Start with current UVs or defaults
+        let mut new_uvs = current_uvs.unwrap_or([
+            RastVec2::new(0.0, 0.0),
+            RastVec2::new(1.0, 0.0),
+            RastVec2::new(1.0, 1.0),
+            RastVec2::new(0.0, 1.0),
+        ]);
+
+        // Apply transform based on type
+        match transform {
+            UvModalTransform::Grab => {
+                // Move selected vertices by delta with pixel snapping
+                for (corner, original_uv) in changes {
+                    if corner < 4 {
+                        // original_uv has offset applied, add delta, then subtract offset for storage
+                        let new_u = original_uv.x + delta_u - offset_u;
+                        let new_v = original_uv.y + delta_v - offset_v;
+                        new_uvs[corner].x = (new_u * tex_width).round() / tex_width;
+                        new_uvs[corner].y = (new_v * tex_height).round() / tex_height;
+                    }
+                }
+            }
+            UvModalTransform::Scale => {
+                // Scale around center - snap center to pixel boundary for consistent results
+                let raw_center = state.texture_editor.uv_modal_center;
+                let center = RastVec2::new(
+                    (raw_center.x * tex_width).round() / tex_width,
+                    (raw_center.y * tex_height).round() / tex_height,
+                );
+                // Scale factor based on horizontal mouse movement
+                let scale = 1.0 + delta_screen_x * 0.01;
+                let scale = scale.max(0.01); // Prevent negative/zero scale
+
+                for (corner, original_uv) in changes {
+                    if corner < 4 {
+                        // Snap original UV to pixel boundary for consistent scaling
+                        let snapped_orig = RastVec2::new(
+                            (original_uv.x * tex_width).round() / tex_width,
+                            (original_uv.y * tex_height).round() / tex_height,
+                        );
+                        let offset_x = snapped_orig.x - center.x;
+                        let offset_y = snapped_orig.y - center.y;
+                        let scaled_u = center.x + offset_x * scale - offset_u;
+                        let scaled_v = center.y + offset_y * scale - offset_v;
+                        new_uvs[corner].x = (scaled_u * tex_width).round() / tex_width;
+                        new_uvs[corner].y = (scaled_v * tex_height).round() / tex_height;
+                    }
+                }
+            }
+            UvModalTransform::Rotate => {
+                // Rotate around center with pixel snapping
+                let center = state.texture_editor.uv_modal_center;
+                // Rotation angle based on horizontal mouse movement
+                let angle = delta_screen_x * 0.01; // Radians
+                let cos_a = angle.cos();
+                let sin_a = angle.sin();
+
+                for (corner, original_uv) in changes {
+                    if corner < 4 {
+                        let offset_x = original_uv.x - center.x;
+                        let offset_y = original_uv.y - center.y;
+                        let rotated_u = center.x + offset_x * cos_a - offset_y * sin_a - offset_u;
+                        let rotated_v = center.y + offset_x * sin_a + offset_y * cos_a - offset_v;
+                        new_uvs[corner].x = (rotated_u * tex_width).round() / tex_width;
+                        new_uvs[corner].y = (rotated_v * tex_height).round() / tex_height;
+                    }
+                }
+            }
+            UvModalTransform::None | UvModalTransform::ScalePending => {}
+        }
+
+        // Update the face's UV field
+        if let Some(r) = state.level.rooms.get_mut(*room) {
+            if let Some(sector) = r.get_sector_mut(*x, *z) {
+                match face {
+                    super::SectorFace::Floor => {
+                        if let Some(f) = &mut sector.floor {
+                            f.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::Ceiling => {
+                        if let Some(f) = &mut sector.ceiling {
+                            f.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNorth(i) => {
+                        if let Some(w) = sector.walls_north.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallEast(i) => {
+                        if let Some(w) = sector.walls_east.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallSouth(i) => {
+                        if let Some(w) = sector.walls_south.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallWest(i) => {
+                        if let Some(w) = sector.walls_west.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNwSe(i) => {
+                        if let Some(w) = sector.walls_nwse.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
+                    super::SectorFace::WallNeSw(i) => {
+                        if let Some(w) = sector.walls_nesw.get_mut(*i) {
+                            w.uv = Some(new_uvs);
+                        }
+                    }
                 }
             }
         }

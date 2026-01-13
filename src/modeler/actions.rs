@@ -14,16 +14,16 @@ pub mod flags {
     pub const VERTEX_MODE: u32 = 1 << 1;
     /// In edge selection mode
     pub const EDGE_MODE: u32 = 1 << 2;
-    /// In texture/UV editing mode
-    pub const TEXTURE_MODE: u32 = 1 << 3;
-    /// In build/geometry mode
-    pub const BUILD_MODE: u32 = 1 << 4;
     /// Has a mesh loaded
     pub const HAS_MESH: u32 = 1 << 5;
     /// Currently dragging/transforming
     pub const DRAGGING: u32 = 1 << 6;
-    /// In paint mode (within texture mode)
+    /// In paint mode
     pub const PAINT_MODE: u32 = 1 << 7;
+    /// UV editor has focus (mouse inside canvas, UV mode active)
+    pub const UV_EDITOR_FOCUSED: u32 = 1 << 8;
+    /// Clipboard has content for paste
+    pub const HAS_CLIPBOARD: u32 = 1 << 9;
 }
 
 /// Create the complete action registry for the modeler
@@ -172,7 +172,17 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .label("Select All")
             .shortcut(Shortcut::ctrl(KeyCode::A))
             .status_tip("Select all elements in current mode")
-            .category("Selection"),
+            .category("Selection")
+            .enabled_when(|ctx| !ctx.has_flag(flags::UV_EDITOR_FOCUSED)),
+    );
+
+    registry.register(
+        Action::new("select.loop")
+            .label("Select Loop")
+            .shortcut(Shortcut::alt(KeyCode::L))
+            .status_tip("Select edge/face loop from selection (Alt+L)")
+            .category("Selection")
+            .enabled_when(|ctx| ctx.has_selection),
     );
 
     // ========================================================================
@@ -222,15 +232,6 @@ pub fn create_modeler_actions() -> ActionRegistry {
     // View Actions
     // ========================================================================
     registry.register(
-        Action::new("view.toggle_mode")
-            .label("Toggle Build/Texture")
-            .shortcut(Shortcut::key(KeyCode::V))
-            .status_tip("Switch between Build and Texture editing modes")
-            .category("View")
-            .checked_when(|ctx| ctx.has_flag(flags::TEXTURE_MODE)),
-    );
-
-    registry.register(
         Action::new("view.toggle_fullscreen")
             .label("Toggle Fullscreen Viewport")
             .shortcut(Shortcut::key(KeyCode::Space))
@@ -241,9 +242,37 @@ pub fn create_modeler_actions() -> ActionRegistry {
     registry.register(
         Action::new("view.toggle_wireframe")
             .label("Toggle Wireframe")
-            .shortcut(Shortcut::key(KeyCode::M))
-            .status_tip("Toggle wireframe overlay")
+            .shortcut(Shortcut::shift(KeyCode::Z))
+            .status_tip("Toggle wireframe overlay (Shift+Z)")
             .category("View"),
+    );
+
+    registry.register(
+        Action::new("view.toggle_xray")
+            .label("Toggle X-Ray")
+            .shortcut(Shortcut::alt(KeyCode::Z))
+            .status_tip("See and select through geometry (Alt+Z)")
+            .category("View"),
+    );
+
+    // ========================================================================
+    // Mesh Cleanup Actions
+    // ========================================================================
+    registry.register(
+        Action::new("mesh.merge_by_distance")
+            .label("Merge by Distance")
+            .shortcut(Shortcut::key(KeyCode::M))
+            .status_tip("Merge overlapping vertices (M)")
+            .category("Mesh"),
+    );
+
+    registry.register(
+        Action::new("mesh.merge_to_center")
+            .label("Merge to Center")
+            .shortcut(Shortcut::alt(KeyCode::M))
+            .status_tip("Merge selected vertices to center (Alt+M)")
+            .category("Mesh")
+            .enabled_when(|ctx| ctx.has_vertex_selection),
     );
 
     registry.register(
@@ -256,6 +285,36 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     // ========================================================================
+    // Copy/Paste/Duplicate Actions
+    // ========================================================================
+    registry.register(
+        Action::new("edit.copy")
+            .label("Copy")
+            .shortcut(Shortcut::ctrl(KeyCode::C))
+            .status_tip("Copy selection to clipboard (Ctrl+C)")
+            .category("Edit")
+            .enabled_when(|ctx| ctx.has_selection),
+    );
+
+    registry.register(
+        Action::new("edit.paste")
+            .label("Paste")
+            .shortcut(Shortcut::ctrl(KeyCode::V))
+            .status_tip("Paste clipboard as new object (Ctrl+V)")
+            .category("Edit")
+            .enabled_when(|ctx| ctx.has_flag(flags::HAS_CLIPBOARD)),
+    );
+
+    registry.register(
+        Action::new("edit.duplicate")
+            .label("Duplicate")
+            .shortcut(Shortcut::shift(KeyCode::D))
+            .status_tip("Duplicate selection as new object (Shift+D)")
+            .category("Edit")
+            .enabled_when(|ctx| ctx.has_selection),
+    );
+
+    // ========================================================================
     // UV/Texture Actions
     // ========================================================================
     registry.register(
@@ -265,7 +324,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .icon(icon::FLIP_HORIZONTAL)
             .status_tip("Flip UVs horizontally")
             .category("UV")
-            .enabled_when(|ctx| ctx.has_face_selection && ctx.has_flag(flags::TEXTURE_MODE)),
+            .enabled_when(|ctx| ctx.has_face_selection),
     );
 
     registry.register(
@@ -275,7 +334,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .icon(icon::FLIP_VERTICAL)
             .status_tip("Flip UVs vertically")
             .category("UV")
-            .enabled_when(|ctx| ctx.has_face_selection && ctx.has_flag(flags::TEXTURE_MODE)),
+            .enabled_when(|ctx| ctx.has_face_selection),
     );
 
     registry.register(
@@ -284,7 +343,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .icon(icon::ROTATE_CW)
             .status_tip("Rotate UVs clockwise 90°")
             .category("UV")
-            .enabled_when(|ctx| ctx.has_face_selection && ctx.has_flag(flags::TEXTURE_MODE)),
+            .enabled_when(|ctx| ctx.has_face_selection),
     );
 
     registry.register(
@@ -359,16 +418,8 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     // ========================================================================
-    // Atlas/Paint Mode Actions
+    // Paint Mode Actions
     // ========================================================================
-    registry.register(
-        Action::new("atlas.toggle_mode")
-            .label("Toggle UV/Paint")
-            .status_tip("Toggle between UV editing and Paint mode")
-            .category("Atlas")
-            .enabled_when(|ctx| ctx.has_flag(flags::TEXTURE_MODE)),
-    );
-
     registry.register(
         Action::new("brush.square")
             .label("Square Brush")
@@ -383,6 +434,15 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .label("Fill Brush")
             .shortcut(Shortcut::key(KeyCode::F))
             .status_tip("Switch to fill brush")
+            .category("Paint")
+            .enabled_when(|ctx| ctx.has_flag(flags::PAINT_MODE)),
+    );
+
+    registry.register(
+        Action::new("brush.eyedropper")
+            .label("Eyedropper")
+            .shortcut(Shortcut::key(KeyCode::I))
+            .status_tip("Pick color from canvas")
             .category("Paint")
             .enabled_when(|ctx| ctx.has_flag(flags::PAINT_MODE)),
     );
@@ -486,18 +546,19 @@ pub fn build_context(
     has_selection: bool,
     has_face_selection: bool,
     has_vertex_selection: bool,
-    is_texture_mode: bool,
     select_mode: &str, // "vertex", "edge", or "face"
     text_editing: bool,
     is_dirty: bool,
     is_dragging: bool,
     is_paint_mode: bool,
+    uv_editor_focused: bool,
+    has_clipboard: bool,
 ) -> ActionContext {
     let mut ctx = ActionContext {
         can_undo,
         can_redo,
         has_selection,
-        has_clipboard: false, // Modeler doesn't use clipboard yet
+        has_clipboard,
         mode: "modeler",
         text_editing,
         has_face_selection,
@@ -505,13 +566,6 @@ pub fn build_context(
         is_dirty,
         flags: 0,
     };
-
-    // Set mode flags
-    if is_texture_mode {
-        ctx.flags |= flags::TEXTURE_MODE;
-    } else {
-        ctx.flags |= flags::BUILD_MODE;
-    }
 
     match select_mode {
         "vertex" => ctx.flags |= flags::VERTEX_MODE,
@@ -526,6 +580,14 @@ pub fn build_context(
 
     if is_paint_mode {
         ctx.flags |= flags::PAINT_MODE;
+    }
+
+    if uv_editor_focused {
+        ctx.flags |= flags::UV_EDITOR_FOCUSED;
+    }
+
+    if has_clipboard {
+        ctx.flags |= flags::HAS_CLIPBOARD;
     }
 
     ctx
@@ -586,14 +648,14 @@ mod tests {
 
         // Face mode should show as checked when in face mode
         let ctx = build_context(
-            false, false, false, false, false, false, "face", false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false
         );
         assert!(registry.is_checked("select.face_mode", &ctx));
         assert!(!registry.is_checked("select.vertex_mode", &ctx));
 
-        // Texture mode toggle
+        // Texture mode toggle - use text_editing=true since that's what toggles the mode
         let ctx2 = build_context(
-            false, false, false, false, false, true, "face", false, false, false, false
+            false, false, false, false, false, "face", true, false, false, false, false, false
         );
         assert!(registry.is_checked("view.toggle_mode", &ctx2));
     }
@@ -604,12 +666,12 @@ mod tests {
 
         // Axis constraints should only be enabled when dragging
         let ctx_not_dragging = build_context(
-            false, false, true, false, false, false, "vertex", false, false, false, false
+            false, false, true, false, false, "vertex", false, false, false, false, false, false
         );
         assert!(!registry.is_enabled("axis.constrain_x", &ctx_not_dragging));
 
         let ctx_dragging = build_context(
-            false, false, true, false, false, false, "vertex", false, false, true, false
+            false, false, true, false, false, "vertex", false, false, true, false, false, false
         );
         assert!(registry.is_enabled("axis.constrain_x", &ctx_dragging));
         assert!(registry.is_enabled("axis.constrain_y", &ctx_dragging));
@@ -622,14 +684,30 @@ mod tests {
 
         // Brush actions should only be enabled in paint mode
         let ctx_not_paint = build_context(
-            false, false, false, false, false, true, "face", false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false
         );
         assert!(!registry.is_enabled("brush.square", &ctx_not_paint));
 
         let ctx_paint = build_context(
-            false, false, false, false, false, true, "face", false, false, false, true
+            false, false, false, false, false, "face", false, false, false, true, false, false
         );
         assert!(registry.is_enabled("brush.square", &ctx_paint));
         assert!(registry.is_enabled("brush.fill", &ctx_paint));
+    }
+
+    #[test]
+    fn test_select_all_uv_editor_focused() {
+        let registry = create_modeler_actions();
+
+        // Select all should be disabled when UV editor is focused
+        let ctx_no_uv = build_context(
+            false, false, false, false, false, "face", false, false, false, false, false, false
+        );
+        assert!(registry.is_enabled("select.all", &ctx_no_uv));
+
+        let ctx_uv_focused = build_context(
+            false, false, false, false, false, "face", false, false, false, false, true, false
+        );
+        assert!(!registry.is_enabled("select.all", &ctx_uv_focused));
     }
 }

@@ -5,13 +5,18 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Too
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
-use super::state::{ModelerState, SelectMode, ViewportId, ViewMode, ContextMenu, ModalTransform, CameraMode};
-use crate::texture::{UserTexture, TextureSize, draw_texture_canvas, draw_tool_panel, draw_palette_panel};
+use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode};
+use crate::texture::{
+    UserTexture, TextureSize,
+    draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
+    TextureEditorMode, UvOverlayData, UvVertex, UvFace,
+    load_png_to_import_state, draw_import_dialog, ImportAction,
+};
 use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
-use super::mesh_editor::EditableMesh;
+use super::mesh_editor::{EditableMesh, MeshObject};
 use super::actions::{create_modeler_actions, build_context};
-use crate::rasterizer::Vec3;
+use crate::rasterizer::{Vec3, Vec2 as RastVec2};
 
 // Colors (matching tracker/editor style)
 const BG_COLOR: Color = Color::new(0.11, 0.11, 0.13, 1.0);
@@ -19,6 +24,12 @@ const HEADER_COLOR: Color = Color::new(0.15, 0.15, 0.18, 1.0);
 const TEXT_COLOR: Color = Color::new(0.8, 0.8, 0.85, 1.0);
 const TEXT_DIM: Color = Color::new(0.4, 0.4, 0.45, 1.0);
 const ACCENT_COLOR: Color = Color::new(0.0, 0.75, 0.9, 1.0);
+
+/// Standard font sizes for consistent UI (matching World Editor)
+const FONT_SIZE_TITLE: f32 = 16.0;
+const FONT_SIZE_HEADER: f32 = 14.0;
+const FONT_SIZE_CONTENT: f32 = 12.0;
+const LINE_HEIGHT: f32 = 16.0;
 
 // PS1 polygon budget colors
 const POLY_GREEN: Color = Color::new(0.4, 0.9, 0.4, 1.0);   // < 300 faces - very safe
@@ -67,7 +78,7 @@ impl ModelerLayout {
     pub fn new() -> Self {
         Self {
             main_split: SplitPanel::horizontal(100).with_ratio(0.18).with_min_size(150.0),
-            right_split: SplitPanel::horizontal(101).with_ratio(0.78).with_min_size(150.0),
+            right_split: SplitPanel::horizontal(101).with_ratio(0.73).with_min_size(150.0),
             timeline_height: 80.0,
             actions: create_modeler_actions(),
         }
@@ -141,6 +152,9 @@ pub fn draw_modeler(
 
     // Draw context menu (on top of everything)
     draw_context_menu(ctx, state);
+
+    // Draw rename/delete dialogs (modal, on top of everything)
+    draw_object_dialogs(ctx, state, icon_font);
 
     action
 }
@@ -244,10 +258,16 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.raster_settings.stretch_to_fill { "Stretch" } else { "4:3" };
         state.set_status(&format!("Aspect Ratio: {}", mode), 1.5);
     }
-    if toolbar.icon_button_active(ctx, icon::LAYERS, icon_font, "Wireframe Mode", state.raster_settings.wireframe_overlay) {
+    if toolbar.icon_button_active(ctx, icon::LAYERS, icon_font, "Wireframe Mode (Shift+Z)", state.raster_settings.wireframe_overlay) {
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "Wireframe" } else { "Solid" };
         state.set_status(&format!("Render: {}", mode), 1.5);
+    }
+    if toolbar.icon_button_active(ctx, icon::BLEND, icon_font, "X-Ray Mode (Alt+Z)", state.xray_mode) {
+        state.xray_mode = !state.xray_mode;
+        state.raster_settings.xray_mode = state.xray_mode;
+        let mode = if state.xray_mode { "ON" } else { "OFF" };
+        state.set_status(&format!("X-Ray: {}", mode), 1.5);
     }
     // Backface culling toggle (cycles through 3 states like world editor)
     // State 0: Both sides visible (backface_cull=false)
@@ -303,6 +323,37 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         state.vertex_linking = !state.vertex_linking;
         let mode = if state.vertex_linking { "ON" } else { "OFF" };
         state.set_status(&format!("Vertex Linking: {}", mode), 1.5);
+    }
+
+    // Mirror editing toggle
+    let mirror_label = format!("Mirror {} (edit one side, other auto-mirrors)", state.mirror_settings.axis.label());
+    if toolbar.icon_button_active(ctx, icon::COLUMNS_2, icon_font, &mirror_label, state.mirror_settings.enabled) {
+        state.mirror_settings.enabled = !state.mirror_settings.enabled;
+        let mode = if state.mirror_settings.enabled { "ON" } else { "OFF" };
+        state.set_status(&format!("Mirror {}: {}", state.mirror_settings.axis.label(), mode), 1.5);
+    }
+
+    // Apply Mirror button (only shown when mirror is enabled)
+    if state.mirror_settings.enabled {
+        if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Apply Mirror (bake + merge overlapping)") {
+            // Bake the virtual mirror into actual geometry
+            let axis = state.mirror_settings.axis;
+            let threshold = state.mirror_settings.threshold;
+            state.push_undo("Apply Mirror");
+            let mut merged_count = 0;
+            if let Some(mesh) = state.mesh_mut() {
+                mesh.apply_mirror(axis, threshold);
+                // Auto-merge overlapping vertices (especially center vertices)
+                merged_count = mesh.merge_by_distance(threshold);
+            }
+            state.mirror_settings.enabled = false;
+            if merged_count > 0 {
+                state.set_status(&format!("Mirror applied, {} vertices merged", merged_count), 2.5);
+            } else {
+                state.set_status("Mirror applied", 2.0);
+            }
+            state.dirty = true;
+        }
     }
 
     toolbar.separator();
@@ -503,11 +554,13 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 // Left Panel (Overview + Selection + Lights + Shortcuts)
 // ============================================================================
 
-/// Draw a simple section label (non-collapsible)
+/// Draw a simple section label (non-collapsible, matches World Editor panel header style)
 fn draw_section_label(x: f32, y: &mut f32, width: f32, label: &str) {
-    draw_rectangle(x, *y, width, 18.0, Color::from_rgba(45, 45, 52, 255));
-    draw_text(label, x + 4.0, *y + 13.0, 13.0, TEXT_COLOR);
-    *y += 20.0;
+    let header_h = 20.0;
+    draw_rectangle(x, *y, width, header_h, Color::from_rgba(50, 50, 60, 255));
+    draw_text(label, x + 4.0, *y + 14.0, 16.0, WHITE);
+    draw_rectangle_lines(x, *y, width, header_h, 1.0, Color::from_rgba(80, 80, 80, 255));
+    *y += header_h;
 }
 
 fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
@@ -530,11 +583,6 @@ fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, ic
     // === LIGHTS SECTION ===
     draw_section_label(x, &mut y, width, "Lights");
     draw_lights_section(ctx, x, &mut y, width, state, icon_font);
-    y += 4.0;
-
-    // === SHORTCUTS SECTION ===
-    draw_section_label(x, &mut y, width, "Shortcuts");
-    draw_shortcuts_section(x, &mut y, width, rect.bottom());
 }
 
 /// Draw overview content (object list with visibility toggles)
@@ -545,6 +593,8 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     // Collect click actions first (to avoid borrow issues)
     let mut select_idx: Option<usize> = None;
     let mut toggle_vis_idx: Option<usize> = None;
+    let mut rename_idx: Option<usize> = None;
+    let mut delete_idx: Option<usize> = None;
 
     let obj_count = state.project.objects.len();
     for idx in 0..obj_count {
@@ -555,11 +605,12 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         let obj = &state.project.objects[idx];
         let is_selected = state.project.selected_object == Some(idx);
         let item_rect = Rect::new(rect.x, y, rect.w, line_height);
+        let is_hovered = ctx.mouse.inside(&item_rect);
 
         // Selection highlight
         if is_selected {
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
-        } else if ctx.mouse.inside(&item_rect) {
+        } else if is_hovered {
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
         }
 
@@ -573,14 +624,40 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             toggle_vis_idx = Some(idx);
         }
 
-        // Object name with face count
+        // Rename and delete icons (show when selected or hovered)
+        let show_icons = is_selected || is_hovered;
+        let icon_size = 14.0;
+        let delete_rect = Rect::new(rect.right() - icon_size - 4.0, y + 2.0, icon_size, icon_size);
+        let rename_rect = Rect::new(delete_rect.x - icon_size - 4.0, y + 2.0, icon_size, icon_size);
+
+        if show_icons {
+            // Rename icon (pencil)
+            let rename_hover = ctx.mouse.inside(&rename_rect);
+            let rename_color = if rename_hover { ACCENT_COLOR } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::PENCIL, &rename_rect, 11.0, rename_color);
+            if rename_hover && ctx.mouse.left_pressed {
+                rename_idx = Some(idx);
+            }
+
+            // Delete icon (trash)
+            let delete_hover = ctx.mouse.inside(&delete_rect);
+            let delete_color = if delete_hover { Color::from_rgba(255, 100, 100, 255) } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::TRASH, &delete_rect, 11.0, delete_color);
+            if delete_hover && ctx.mouse.left_pressed {
+                delete_idx = Some(idx);
+            }
+        }
+
+        // Object name with face count (account for icon space)
         let fc = obj.mesh.face_count();
         let name_color = poly_count_color(fc);
-        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, 13.0, name_color);
+        let name_width = if show_icons { rect.w - 60.0 } else { rect.w - 22.0 };
+        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, FONT_SIZE_HEADER, name_color);
 
-        // Handle selection click (not on visibility toggle)
-        let name_rect = Rect::new(rect.x + 20.0, y, rect.w - 20.0, line_height);
-        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed && toggle_vis_idx.is_none() {
+        // Handle selection click (not on visibility toggle or icons)
+        let name_rect = Rect::new(rect.x + 20.0, y, name_width, line_height);
+        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed
+            && toggle_vis_idx.is_none() && rename_idx.is_none() && delete_idx.is_none() {
             select_idx = Some(idx);
         }
 
@@ -590,9 +667,20 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     // Apply actions after the loop
     if let Some(idx) = toggle_vis_idx {
         state.project.objects[idx].visible = !state.project.objects[idx].visible;
+    } else if let Some(idx) = rename_idx {
+        // Open rename dialog with current name
+        let name = state.project.objects[idx].name.clone();
+        state.rename_dialog = Some((idx, name));
+    } else if let Some(idx) = delete_idx {
+        // Open delete confirmation dialog
+        state.delete_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
+        // Clear editing state when switching objects to prevent texture bleeding
+        if state.project.selected_object != Some(idx) {
+            state.editing_indexed_atlas = false;
+            state.editing_texture = None;
+        }
         state.project.selected_object = Some(idx);
-        // Project is single source of truth - mesh() reads from it directly
     }
 }
 
@@ -608,7 +696,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         super::state::ModelerSelection::Edges(e) => format!("{} edge(s)", e.len()),
         super::state::ModelerSelection::Faces(f) => format!("{} face(s)", f.len()),
     };
-    draw_text(&sel_text, x + 4.0, *y + 12.0, 13.0, TEXT_COLOR);
+    draw_text(&sel_text, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
     *y += line_height;
 
     // Current tool
@@ -618,7 +706,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         Some(ModelerToolId::Scale) => "Tool: Scale (S)",
         _ => "Tool: Select",
     };
-    draw_text(tool_label, x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
+    draw_text(tool_label, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
     *y += line_height;
 
     // Select mode
@@ -627,7 +715,7 @@ fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         super::state::SelectMode::Edge => "Mode: Edge (2)",
         super::state::SelectMode::Face => "Mode: Face (3)",
     };
-    draw_text(mode_label, x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
+    draw_text(mode_label, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
     *y += line_height;
 
     // Note: Face Properties (blend mode) is now in the right panel texture section
@@ -640,7 +728,7 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
 
     // Light count and add/remove buttons
     let light_count = state.raster_settings.lights.len();
-    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, 13.0, TEXT_COLOR);
+    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
 
     // Add button
     let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
@@ -675,14 +763,14 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
             crate::rasterizer::LightType::Point { .. } => "Pt",
             crate::rasterizer::LightType::Spot { .. } => "Sp",
         };
-        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, 13.0, TEXT_COLOR);
+        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_COLOR);
 
         if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
             toggle_idx = Some(i);
         }
 
         // Intensity
-        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, 13.0, TEXT_DIM);
+        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_DIM);
 
         *y += line_height;
     }
@@ -692,109 +780,51 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
     }
 }
 
-/// Draw shortcuts reference section
-fn draw_shortcuts_section(x: f32, y: &mut f32, _width: f32, max_y: f32) {
-    let shortcuts = [
-        ("G/R/S", "Move/Rotate/Scale"),
-        ("E", "Extrude face"),
-        ("X/Del", "Delete"),
-        ("1/2/3", "Vert/Edge/Face"),
-        ("V", "Toggle Build/UV"),
-        ("Space", "Fullscreen viewport"),
-        ("Ctrl+Z/Y", "Undo/Redo"),
-    ];
-
-    for (key, desc) in shortcuts {
-        if *y + 14.0 > max_y {
-            break;
-        }
-        draw_text(&format!("{}: {}", key, desc), x + 4.0, *y + 10.0, 13.0, TEXT_DIM);
-        *y += 14.0;
-    }
-}
-
 // ============================================================================
 // Right Panel (Atlas + UV Tools + Paint Tools + CLUT)
 // ============================================================================
 
 fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     let mut y = rect.y + 4.0;
-    let padding = 4.0;
 
-    // === UV SECTION (collapsible) ===
-    let uv_expanded = draw_collapsible_header(ctx, rect.x, &mut y, rect.w, "UV", state.uv_section_expanded, icon_font);
-    if uv_expanded != state.uv_section_expanded {
-        state.uv_section_expanded = uv_expanded;
+    // === UNIFIED TEXTURE EDITOR (collapsible) ===
+    // Combines Paint + UV modes with tab-based switching
+    let is_focused = state.active_panel == super::state::ActivePanel::TextureEditor;
+    let (editor_expanded, header_clicked) = draw_collapsible_header(
+        ctx, rect.x, &mut y, rect.w, "Texture",
+        state.paint_section_expanded, is_focused, icon_font
+    );
+
+    // Set focus when clicking on the header
+    if header_clicked {
+        state.active_panel = super::state::ActivePanel::TextureEditor;
     }
 
-    if state.uv_section_expanded {
-        // Calculate atlas area for UV section
-        let atlas = &state.project.atlas;
-        let atlas_w = atlas.width as f32;
-        let atlas_h = atlas.height as f32;
-        let available_w = rect.w - padding * 2.0;
-
-        // Atlas preview takes up to 40% of remaining height when both sections open
-        let max_atlas_h = if state.paint_section_expanded {
-            (rect.bottom() - y) * 0.35
-        } else {
-            (rect.bottom() - y) * 0.5
-        };
-        let atlas_scale = (available_w / atlas_w).min(max_atlas_h / atlas_h);
-        let atlas_screen_w = atlas_w * atlas_scale;
-        let atlas_screen_h = atlas_h * atlas_scale;
-
-        let atlas_x = rect.x + (rect.w - atlas_screen_w) * 0.5;
-        let atlas_y = y;
-
-        // Draw atlas preview with UV overlay
-        draw_atlas_preview(ctx, atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, atlas_scale, state);
-
-        y = atlas_y + atlas_screen_h + 8.0;
-
-        // Atlas size selector
-        draw_atlas_size_selector(ctx, rect.x, &mut y, rect.w, state);
-        y += 4.0;
-
-        // UV Tools
-        draw_uv_tools_content(ctx, rect.x, &mut y, rect.w, state, icon_font);
-        y += 4.0;
-
-        // Face Properties (when faces selected)
-        if let super::state::ModelerSelection::Faces(face_indices) = &state.selection {
-            if !face_indices.is_empty() {
-                draw_section_label(rect.x, &mut y, rect.w, "Face Properties");
-                draw_face_properties(ctx, rect.x, &mut y, rect.w, state, icon_font);
-            }
-        }
-
-        // Handle UV interactions
-        let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
-        handle_uv_interaction(ctx, atlas_rect, atlas_scale, state);
-
-        y += 8.0;
-    }
-
-    // === PAINT SECTION (collapsible) ===
-    let paint_expanded = draw_collapsible_header(ctx, rect.x, &mut y, rect.w, "Paint", state.paint_section_expanded, icon_font);
-    if paint_expanded != state.paint_section_expanded {
-        state.paint_section_expanded = paint_expanded;
-        // Initialize editing texture when expanding paint section
-        if paint_expanded && state.editing_texture.is_none() {
+    if editor_expanded != state.paint_section_expanded {
+        state.paint_section_expanded = editor_expanded;
+        // Initialize editing texture when expanding
+        if editor_expanded && state.editing_texture.is_none() {
             state.editing_texture = Some(create_editing_texture(state));
             state.texture_editor.reset();
         }
     }
 
     if state.paint_section_expanded {
-        // Draw the unified texture editor
+        // Draw the unified texture editor with Paint/UV tabs
         let remaining_h = rect.bottom() - y - 4.0;
-        let paint_rect = Rect::new(rect.x, y, rect.w, remaining_h);
-        draw_paint_section(ctx, paint_rect, state, icon_font);
+        let editor_rect = Rect::new(rect.x, y, rect.w, remaining_h);
+
+        // Set focus when clicking anywhere in the texture editor content
+        if ctx.mouse.inside(&editor_rect) && ctx.mouse.left_pressed {
+            state.active_panel = super::state::ActivePanel::TextureEditor;
+        }
+
+        draw_paint_section(ctx, editor_rect, state, icon_font);
     }
 }
 
-/// Draw a collapsible section header, returns new expanded state
+/// Draw a collapsible section header, returns (new_expanded_state, was_clicked)
+/// Matches World Editor style: 20px header, 16pt font, triangle indicators
 fn draw_collapsible_header(
     ctx: &mut UiContext,
     x: f32,
@@ -802,68 +832,79 @@ fn draw_collapsible_header(
     width: f32,
     label: &str,
     expanded: bool,
-    icon_font: Option<&Font>,
-) -> bool {
-    let header_h = 24.0;
-    let header_rect = Rect::new(x + 2.0, *y, width - 4.0, header_h);
+    focused: bool,
+    _icon_font: Option<&Font>,
+) -> (bool, bool) {
+    let header_h = 20.0;  // Match World Editor
+    let header_rect = Rect::new(x, *y, width, header_h);
     let hovered = ctx.mouse.inside(&header_rect);
 
-    // Background
+    // Background (matching World Editor colors)
     let bg = if hovered {
-        Color::from_rgba(55, 55, 62, 255)
+        Color::from_rgba(60, 60, 70, 255)
     } else {
-        Color::from_rgba(45, 45, 52, 255)
+        Color::from_rgba(50, 50, 60, 255)
     };
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, bg);
 
-    // Expand/collapse icon
-    let chevron = if expanded { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT };
-    if let Some(font) = icon_font {
-        draw_text_ex(
-            &chevron.to_string(),
-            header_rect.x + 6.0,
-            header_rect.y + 17.0,
-            TextParams { font: Some(font), font_size: 14, color: TEXT_COLOR, ..Default::default() },
+    // Text/indicator color - cyan when focused
+    let text_color = if focused { ACCENT_COLOR } else { WHITE };
+    let indicator_color = if focused { ACCENT_COLOR } else { Color::from_rgba(180, 180, 180, 255) };
+
+    // Triangle indicator (matching World Editor style)
+    let indicator_x = x + 6.0;
+    let indicator_y = *y + 10.0;
+    let indicator_size = 5.0;
+
+    if expanded {
+        // Down-pointing triangle (expanded)
+        draw_triangle(
+            macroquad::math::Vec2::new(indicator_x - 2.0, indicator_y - 3.0),
+            macroquad::math::Vec2::new(indicator_x + indicator_size + 2.0, indicator_y - 3.0),
+            macroquad::math::Vec2::new(indicator_x + indicator_size / 2.0, indicator_y + 4.0),
+            indicator_color,
+        );
+    } else {
+        // Right-pointing triangle (collapsed)
+        draw_triangle(
+            macroquad::math::Vec2::new(indicator_x, indicator_y - indicator_size),
+            macroquad::math::Vec2::new(indicator_x, indicator_y + indicator_size),
+            macroquad::math::Vec2::new(indicator_x + indicator_size, indicator_y),
+            indicator_color,
         );
     }
 
-    // Label
-    draw_text(label, header_rect.x + 24.0, header_rect.y + 16.0, 13.0, TEXT_COLOR);
+    // Label (font size 16 to match World Editor)
+    draw_text(label, x + 16.0, *y + 14.0, 16.0, text_color);
 
-    *y += header_h + 2.0;
+    // Border (matching World Editor)
+    draw_rectangle_lines(header_rect.x, header_rect.y, header_rect.w, header_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
+
+    *y += header_h;
 
     // Handle click
-    if ctx.mouse.clicked(&header_rect) {
-        !expanded
-    } else {
-        expanded
-    }
+    let clicked = hovered && ctx.mouse.left_pressed;
+    let new_expanded = if clicked { !expanded } else { expanded };
+    (new_expanded, clicked)
 }
 
-/// Create a UserTexture for editing from the project's IndexedAtlas or create a new one
+/// Create a UserTexture for editing from the selected object's IndexedAtlas
 fn create_editing_texture(state: &ModelerState) -> UserTexture {
-    if let Some(indexed) = &state.project.indexed_atlas {
-        // Convert IndexedAtlas to UserTexture
-        let clut = state.project.clut_pool.get(indexed.default_clut)
-            .or_else(|| state.project.clut_pool.iter().next())
-            .cloned()
-            .unwrap_or_else(|| Clut::new_4bit("default".to_string()));
+    let indexed = state.atlas();
+    // Get CLUT for palette colors
+    let clut = state.project.clut_pool.get(indexed.default_clut)
+        .or_else(|| state.project.clut_pool.iter().next())
+        .cloned()
+        .unwrap_or_else(|| Clut::new_4bit("default".to_string()));
 
-        UserTexture {
-            name: "atlas".to_string(),
-            width: indexed.width,
-            height: indexed.height,
-            depth: indexed.depth,
-            indices: indexed.indices.clone(),
-            palette: clut.colors.clone(),
-            blend_mode: crate::rasterizer::BlendMode::Opaque,
-        }
-    } else {
-        // Create new indexed texture from atlas dimensions
-        let atlas = &state.project.atlas;
-        let size = TextureSize::from_dimensions(atlas.width, atlas.height)
-            .unwrap_or(TextureSize::Size64x64); // Default to 64x64 if atlas size doesn't match standard sizes
-        UserTexture::new("atlas", size, ClutDepth::Bpp4)
+    UserTexture {
+        name: "atlas".to_string(),
+        width: indexed.width,
+        height: indexed.height,
+        depth: indexed.depth,
+        indices: indexed.indices.clone(),
+        palette: clut.colors.clone(),
+        blend_mode: crate::rasterizer::BlendMode::Opaque,
     }
 }
 
@@ -931,18 +972,102 @@ fn draw_paint_section(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState,
         // Show the texture browser with New/Edit buttons
         draw_paint_texture_browser(ctx, rect, state, icon_font);
     }
+
+    // Draw import dialog (modal overlay) if active
+    if let Some(action) = draw_import_dialog(ctx, &mut state.texture_editor.import_state, icon_font) {
+        match action {
+            ImportAction::Confirm => {
+                // Create a new texture from the import state
+                let import = &state.texture_editor.import_state;
+                let name = state.user_textures.next_available_name();
+                let (size_w, _) = import.target_size.dimensions();
+                let texture = UserTexture::new_with_data(
+                    name.clone(),
+                    import.target_size,
+                    import.depth,
+                    import.preview_indices.clone(),
+                    import.preview_palette.clone(),
+                );
+                state.user_textures.add(texture);
+                // Save to disk immediately (native only)
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Err(e) = state.user_textures.save_texture(&name) {
+                    eprintln!("Failed to save imported texture: {}", e);
+                }
+                state.set_status(&format!("Imported '{}' ({}x{})", name, size_w, size_w), 2.0);
+                state.texture_editor.import_state.reset();
+            }
+            ImportAction::Cancel => {
+                // Just reset the import state (already done by the dialog)
+            }
+        }
+    }
 }
 
-/// Draw the texture browser header with New/Edit buttons (matches World Editor)
+/// Draw the texture browser header with Import/New/Edit buttons (matches World Editor)
 fn draw_paint_header(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     draw_rectangle(rect.x.floor(), rect.y.floor(), rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
     let btn_h = rect.h - 8.0;
     let btn_w = 60.0;
     let btn_y = rect.y + 4.0;
+    let mut btn_x = rect.x + 4.0;
+
+    // "Import" button - square icon button at the start
+    let import_btn_w = btn_h;
+    let import_rect = Rect::new(btn_x, btn_y, import_btn_w, btn_h);
+    let import_hovered = ctx.mouse.inside(&import_rect);
+    let import_bg = if import_hovered {
+        Color::from_rgba(70, 70, 80, 255)
+    } else {
+        Color::from_rgba(55, 55, 65, 255)
+    };
+    draw_rectangle(import_rect.x, import_rect.y, import_rect.w, import_rect.h, import_bg);
+    draw_rectangle_lines(import_rect.x, import_rect.y, import_rect.w, import_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    let import_icon_color = if import_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) };
+    draw_icon_centered(icon_font, icon::FOLDER_OPEN, &import_rect, 14.0, import_icon_color);
+
+    // Tooltip on hover
+    if import_hovered {
+        let tooltip = "Import PNG";
+        let tip_dims = measure_text(tooltip, None, 12, 1.0);
+        let tip_x = import_rect.x + import_rect.w / 2.0 - tip_dims.width / 2.0;
+        let tip_y = import_rect.bottom() + 4.0;
+        draw_rectangle(tip_x - 4.0, tip_y - 2.0, tip_dims.width + 8.0, tip_dims.height + 6.0, Color::from_rgba(30, 30, 35, 240));
+        draw_text(tooltip, tip_x, tip_y + tip_dims.height, 12.0, WHITE);
+    }
+
+    // Import button opens file picker
+    if ctx.mouse.clicked(&import_rect) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
+                .pick_file()
+            {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        if let Err(e) = load_png_to_import_state(&bytes, &mut state.texture_editor.import_state) {
+                            state.set_status(&format!("Import failed: {}", e), 3.0);
+                        }
+                    }
+                    Err(e) => {
+                        state.set_status(&format!("Failed to read file: {}", e), 3.0);
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            state.set_status("Import not yet available in browser", 2.0);
+        }
+    }
+
+    btn_x += import_btn_w + 4.0;
 
     // "New" button
-    let new_rect = Rect::new(rect.x + 4.0, btn_y, btn_w, btn_h);
+    let new_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
     let new_hovered = ctx.mouse.inside(&new_rect);
     let new_bg = if new_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
     draw_rectangle(new_rect.x, new_rect.y, new_rect.w, new_rect.h, new_bg);
@@ -963,9 +1088,11 @@ fn draw_paint_header(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, 
         state.texture_editor.reset();
     }
 
+    btn_x += btn_w + 4.0;
+
     // "Edit" button - edits the selected texture
     let has_selection = state.selected_user_texture.is_some();
-    let edit_rect = Rect::new(rect.x + 8.0 + btn_w, btn_y, btn_w, btn_h);
+    let edit_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
     let edit_hovered = ctx.mouse.inside(&edit_rect);
     let edit_enabled = has_selection;
     let edit_bg = if !edit_enabled {
@@ -1180,9 +1307,43 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
         get_internal_gl().quad_gl.scissor(None);
     }
 
-    // Handle single-click to select
+    // Handle single-click to select and assign texture to selected object
     if let Some(name) = clicked_texture {
-        state.selected_user_texture = Some(name);
+        state.selected_user_texture = Some(name.clone());
+
+        eprintln!("[DEBUG texture_click] Selected texture '{}', selected_object={:?}", name, state.project.selected_object);
+
+        // Clone texture data to avoid borrow issues
+        let tex_data = state.user_textures.get(&name).cloned();
+        if let Some(tex) = tex_data {
+            eprintln!("[DEBUG texture_click] Applying texture to atlas...");
+
+            // Create a new CLUT for this object with the texture's palette
+            // This ensures each object has its own CLUT, not shared with other objects
+            let obj_name = state.selected_object()
+                .map(|o| o.name.clone())
+                .unwrap_or_else(|| "object".to_string());
+            let clut_name = format!("{}_clut", obj_name);
+
+            let mut new_clut = Clut::new_4bit(&clut_name);
+            new_clut.colors = tex.palette.clone();
+            new_clut.depth = tex.depth;
+            let new_clut_id = state.project.clut_pool.add_clut(new_clut);
+
+            eprintln!("[DEBUG texture_click] Created new CLUT '{}' with id {:?}", clut_name, new_clut_id);
+
+            // Update the selected object's atlas
+            let atlas = state.atlas_mut();
+            atlas.width = tex.width;
+            atlas.height = tex.height;
+            atlas.depth = tex.depth;
+            atlas.indices = tex.indices.clone();
+            atlas.default_clut = new_clut_id;
+
+            // Update the editing texture to match
+            state.editing_texture = Some(tex);
+            state.dirty = true;
+        }
     }
 
     // Handle double-click to edit (also sets selection)
@@ -1217,13 +1378,24 @@ fn user_texture_to_mq_texture(texture: &UserTexture) -> Texture2D {
 
 /// Draw the texture editor panel (when editing a texture)
 fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
-    let tex = match &mut state.editing_texture {
-        Some(t) => t,
-        None => {
-            state.editing_indexed_atlas = false;
-            return;
-        }
+    // Early return if no texture being edited
+    if state.editing_texture.is_none() {
+        state.editing_indexed_atlas = false;
+        return;
+    }
+
+    // Build UV overlay data BEFORE getting mutable borrow of tex (avoids borrow conflict)
+    let uv_data = if state.texture_editor.mode == TextureEditorMode::Uv {
+        build_uv_overlay_data(state)
+    } else {
+        None
     };
+
+    // Now get mutable reference to the texture
+    let tex = state.editing_texture.as_mut().unwrap();
+    // Extract dimensions for later use (to avoid borrow conflicts)
+    let tex_width_f = tex.width as f32;
+    let tex_height_f = tex.height as f32;
 
     // Header with texture name and buttons (match main toolbar sizing: 36px height, 32px buttons, 16px icons)
     let header_h = 36.0;
@@ -1232,7 +1404,9 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let header_rect = Rect::new(rect.x, rect.y, rect.w, header_h);
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, Color::from_rgba(45, 45, 55, 255));
 
-    // Back button (arrow-big-left) - closes editor
+    let is_dirty = state.texture_editor.dirty;
+
+    // Back button (arrow-big-left) - far right
     let back_rect = Rect::new(rect.right() - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
     let back_hovered = ctx.mouse.inside(&back_rect);
     if back_hovered {
@@ -1241,40 +1415,56 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     draw_icon_centered(icon_font, icon::ARROW_BIG_LEFT, &back_rect, icon_size, if back_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
 
     if ctx.mouse.clicked(&back_rect) {
-        // TODO: Sync texture back to atlas if needed
         state.editing_texture = None;
         state.editing_indexed_atlas = false;
         return;
     }
 
-    // Save button
-    let save_rect = Rect::new(back_rect.x - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
-    let save_hovered = ctx.mouse.inside(&save_rect);
-    if save_hovered {
-        draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, Color::from_rgba(60, 80, 60, 255));
-    }
-    draw_icon_centered(icon_font, icon::SAVE, &save_rect, icon_size, if save_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
-
     // Get texture name for save and display (clone before we use tex mutably)
     let tex_name = tex.name.clone();
 
-    if ctx.mouse.clicked(&save_rect) {
-        // Save to user textures library
-        if let Err(e) = state.user_textures.save_texture(&tex_name) {
-            eprintln!("Failed to save texture: {}", e);
+    // Save/Download button - only visible when dirty
+    let mut save_clicked = false;
+    if is_dirty {
+        let save_rect = Rect::new(back_rect.x - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
+        let save_hovered = ctx.mouse.inside(&save_rect);
+
+        // Highlight button to draw attention
+        let save_bg = if save_hovered {
+            Color::from_rgba(80, 100, 80, 255)
+        } else {
+            Color::from_rgba(60, 80, 60, 255)
+        };
+        draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, save_bg);
+
+        // Use SAVE icon on desktop, DOWNLOAD icon on WASM
+        #[cfg(not(target_arch = "wasm32"))]
+        let save_icon = icon::SAVE;
+        #[cfg(target_arch = "wasm32")]
+        let save_icon = icon::DOWNLOAD;
+
+        draw_icon_centered(icon_font, save_icon, &save_rect, icon_size, if save_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+        if ctx.mouse.clicked(&save_rect) {
+            save_clicked = true;
         }
     }
 
-    // Texture name (vertically centered in header)
-    let name_text = format!("Editing: {}", tex_name);
-    draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + header_h / 2.0 + 4.0).floor(), 12.0, WHITE);
+    // Texture name with dirty indicator (vertically centered in header)
+    let dirty_indicator = if is_dirty { " ●" } else { "" };
+    let name_text = format!("Editing: {}{}", tex_name, dirty_indicator);
+    let name_color = if is_dirty { Color::from_rgba(255, 200, 100, 255) } else { WHITE };
+    draw_text(&name_text, (header_rect.x + 8.0).floor(), (header_rect.y + header_h / 2.0 + 4.0).floor(), 12.0, name_color);
 
     // Content area below header
-    let content_rect = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
+    let content_rect_full = Rect::new(rect.x, rect.y + header_h, rect.w, rect.h - header_h);
+
+    // Draw mode tabs (Paint / UV) at the top
+    let content_rect = draw_mode_tabs(ctx, content_rect_full, &mut state.texture_editor);
 
     // Layout: Canvas (square, capped size) + Tool panel (right), Palette panel (below, gets remaining space)
     // This matches the World Editor's texture_palette.rs layout exactly
-    let tool_panel_w = 36.0;  // Vertical toolbar (32px buttons + padding)
+    let tool_panel_w = 66.0;  // 2-column layout: 2 * 28px buttons + 2px gap + 4px padding each side
     let canvas_w = content_rect.w - tool_panel_w;
     // Tool panel needs ~280px height (6 tools + undo/redo/zoom/grid + size/shape options)
     // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190
@@ -1289,9 +1479,18 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let palette_rect = Rect::new(content_rect.x, content_rect.y + canvas_h, content_rect.w, palette_panel_h);
 
     // Draw panels using the shared texture editor components
-    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor);
+    draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor, uv_data.as_ref());
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
     draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
+
+    // Handle UV modal transforms (G/S/R) - apply to actual mesh vertices
+    apply_uv_modal_transform(ctx, &canvas_rect, tex_width_f, tex_height_f, state);
+
+    // Handle direct UV dragging (with pixel snapping)
+    apply_uv_direct_drag(ctx, &canvas_rect, tex_width_f, tex_height_f, state);
+
+    // Handle UV operations (flip/rotate/reset buttons)
+    apply_uv_operation(tex_width_f, tex_height_f, state);
 
     // Handle undo save signals from texture editor (save BEFORE the action is applied)
     if state.texture_editor.undo_save_pending.take().is_some() {
@@ -1307,6 +1506,361 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.texture_editor.redo_requested = false;
         state.redo();
     }
+
+    // Sync editing_texture back to selected object's atlas (only when actively editing)
+    // This prevents overwriting other objects' atlases when switching selection
+    if state.editing_indexed_atlas {
+        let editing_tex_data = state.editing_texture.clone();
+        if let Some(editing_tex) = editing_tex_data {
+            // Sync to selected object's atlas for mesh preview
+            let atlas = state.atlas_mut();
+            atlas.width = editing_tex.width;
+            atlas.height = editing_tex.height;
+            atlas.depth = editing_tex.depth;
+            atlas.indices = editing_tex.indices.clone();
+            let default_clut_id = atlas.default_clut;
+            // Update the default CLUT with the texture's palette
+            if let Some(clut) = state.project.clut_pool.get_mut(default_clut_id) {
+                clut.colors = editing_tex.palette.clone();
+                clut.depth = editing_tex.depth;
+            }
+        }
+    }
+
+    // Handle save button click
+    if save_clicked {
+        // Sync editing_texture to user_textures library before saving
+        if let Some(ref editing_tex) = state.editing_texture {
+            if let Some(lib_tex) = state.user_textures.get_mut(&tex_name) {
+                lib_tex.indices = editing_tex.indices.clone();
+                lib_tex.palette = editing_tex.palette.clone();
+                lib_tex.depth = editing_tex.depth;
+                lib_tex.width = editing_tex.width;
+                lib_tex.height = editing_tex.height;
+            }
+        }
+        // Now save to disk
+        if let Err(e) = state.user_textures.save_texture(&tex_name) {
+            eprintln!("Failed to save texture: {}", e);
+        } else {
+            // Clear dirty flag on successful save
+            state.texture_editor.dirty = false;
+        }
+        state.dirty = true;
+    }
+}
+
+/// Apply UV modal transforms (G/S/R) to actual mesh vertices
+fn apply_uv_modal_transform(
+    ctx: &UiContext,
+    canvas_rect: &Rect,
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut ModelerState,
+) {
+    use crate::texture::UvModalTransform;
+
+    let transform = state.texture_editor.uv_modal_transform;
+    // Only apply transforms for active states (not None or ScalePending)
+    if transform == UvModalTransform::None || transform == UvModalTransform::ScalePending {
+        return;
+    }
+
+    // Get the mesh to modify
+    let obj = match state.project.selected_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Calculate transform parameters
+    let zoom = state.texture_editor.zoom;
+    let pan_x = state.texture_editor.pan_x;
+    let pan_y = state.texture_editor.pan_y;
+    let (start_mx, start_my) = state.texture_editor.uv_modal_start_mouse;
+
+    // Calculate texture position on screen
+    let canvas_cx = canvas_rect.x + canvas_rect.w / 2.0;
+    let canvas_cy = canvas_rect.y + canvas_rect.h / 2.0;
+    let tex_x = canvas_cx - tex_width * zoom / 2.0 + pan_x;
+    let tex_y = canvas_cy - tex_height * zoom / 2.0 + pan_y;
+
+    // Screen delta in UV space
+    let delta_screen_x = ctx.mouse.x - start_mx;
+    let delta_screen_y = ctx.mouse.y - start_my;
+    let delta_u = delta_screen_x / (tex_width * zoom);
+    let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
+
+    match transform {
+        UvModalTransform::Grab => {
+            // Move selected vertices by delta with pixel snapping
+            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    let new_u = original_uv.x + delta_u;
+                    let new_v = original_uv.y + delta_v;
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+            state.dirty = true;
+        }
+        UvModalTransform::Scale => {
+            // Scale around center - snap center to pixel boundary for consistent results
+            let raw_center = state.texture_editor.uv_modal_center;
+            let center = RastVec2::new(
+                (raw_center.x * tex_width).round() / tex_width,
+                (raw_center.y * tex_height).round() / tex_height,
+            );
+            // Scale factor based on horizontal mouse movement
+            let scale = 1.0 + delta_screen_x * 0.01;
+            let scale = scale.max(0.01); // Prevent negative/zero scale
+
+            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    // Snap original UV to pixel boundary for consistent scaling
+                    let snapped_orig = RastVec2::new(
+                        (original_uv.x * tex_width).round() / tex_width,
+                        (original_uv.y * tex_height).round() / tex_height,
+                    );
+                    let offset_x = snapped_orig.x - center.x;
+                    let offset_y = snapped_orig.y - center.y;
+                    let new_u = center.x + offset_x * scale;
+                    let new_v = center.y + offset_y * scale;
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+            state.dirty = true;
+        }
+        UvModalTransform::Rotate => {
+            // Rotate around center with pixel snapping
+            let center = state.texture_editor.uv_modal_center;
+            // Rotation angle based on horizontal mouse movement
+            let angle = delta_screen_x * 0.01; // Radians
+            let cos_a = angle.cos();
+            let sin_a = angle.sin();
+
+            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    let offset_x = original_uv.x - center.x;
+                    let offset_y = original_uv.y - center.y;
+                    let new_u = center.x + offset_x * cos_a - offset_y * sin_a;
+                    let new_v = center.y + offset_x * sin_a + offset_y * cos_a;
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+            state.dirty = true;
+        }
+        UvModalTransform::None | UvModalTransform::ScalePending => {}
+    }
+}
+
+/// Apply direct UV drag with pixel snapping
+fn apply_uv_direct_drag(
+    ctx: &UiContext,
+    _canvas_rect: &Rect,
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut ModelerState,
+) {
+    if !state.texture_editor.uv_drag_active {
+        return;
+    }
+
+    // Get the mesh to modify
+    let obj = match state.project.selected_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Calculate transform parameters
+    let zoom = state.texture_editor.zoom;
+    let (start_mx, start_my) = state.texture_editor.uv_drag_start;
+
+    // Screen delta in UV space
+    let delta_screen_x = ctx.mouse.x - start_mx;
+    let delta_screen_y = ctx.mouse.y - start_my;
+    let delta_u = delta_screen_x / (tex_width * zoom);
+    let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
+
+    // Move selected vertices by delta with pixel snapping
+    for &(_, vi, original_uv) in &state.texture_editor.uv_drag_start_uvs {
+        if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+            // Calculate new UV
+            let new_u = original_uv.x + delta_u;
+            let new_v = original_uv.y + delta_v;
+
+            // Snap to pixel boundaries
+            // UV coords are 0-1, pixels are 0 to tex_width-1
+            // Snap u to n/tex_width and v to m/tex_height
+            let snapped_u = (new_u * tex_width).round() / tex_width;
+            let snapped_v = (new_v * tex_height).round() / tex_height;
+
+            v.uv.x = snapped_u;
+            v.uv.y = snapped_v;
+        }
+    }
+    state.dirty = true;
+}
+
+/// Apply a UV operation (flip/rotate/reset) to selected vertices
+fn apply_uv_operation(
+    tex_width: f32,
+    tex_height: f32,
+    state: &mut ModelerState,
+) {
+    use crate::texture::UvOperation;
+
+    let operation = match state.texture_editor.uv_operation_pending.take() {
+        Some(op) => op,
+        None => return,
+    };
+
+    // Get the mesh to modify
+    let obj = match state.project.selected_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Get selected vertex indices
+    let selected_vertices = state.texture_editor.uv_selection.clone();
+    if selected_vertices.is_empty() {
+        state.texture_editor.set_status("No vertices selected");
+        return;
+    }
+
+    // Calculate center of selection (for flip/rotate operations)
+    let mut center_u = 0.0f32;
+    let mut center_v = 0.0f32;
+    let mut count = 0;
+    for &vi in &selected_vertices {
+        if let Some(v) = obj.mesh.vertices.get(vi) {
+            center_u += v.uv.x;
+            center_v += v.uv.y;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        center_u /= count as f32;
+        center_v /= count as f32;
+    }
+
+    match operation {
+        UvOperation::FlipHorizontal => {
+            // Flip UVs horizontally around center
+            for &vi in &selected_vertices {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let offset = v.uv.x - center_u;
+                    let new_u = center_u - offset;
+                    // Snap to pixels
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                }
+            }
+        }
+        UvOperation::FlipVertical => {
+            // Flip UVs vertically around center
+            for &vi in &selected_vertices {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let offset = v.uv.y - center_v;
+                    let new_v = center_v - offset;
+                    // Snap to pixels
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+        }
+        UvOperation::RotateCW => {
+            // Rotate UVs 90 degrees clockwise around center
+            for &vi in &selected_vertices {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let offset_u = v.uv.x - center_u;
+                    let offset_v = v.uv.y - center_v;
+                    // 90 deg CW rotation: (x, y) -> (y, -x)
+                    let new_u = center_u + offset_v;
+                    let new_v = center_v - offset_u;
+                    // Snap to pixels
+                    v.uv.x = (new_u * tex_width).round() / tex_width;
+                    v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+        }
+        UvOperation::ResetUVs => {
+            // Reset UVs to default positions (0-1 range covering texture)
+            // For a typical face, distribute vertices evenly
+            // Simple approach: reset to corners of unit square based on vertex order
+            let defaults = [
+                (0.0, 0.0),  // bottom-left
+                (1.0, 0.0),  // bottom-right
+                (1.0, 1.0),  // top-right
+                (0.0, 1.0),  // top-left
+            ];
+            for (i, &vi) in selected_vertices.iter().enumerate() {
+                if let Some(v) = obj.mesh.vertices.get_mut(vi) {
+                    let (u, vv) = defaults[i % defaults.len()];
+                    v.uv.x = u;
+                    v.uv.y = vv;
+                }
+            }
+        }
+    }
+
+    state.dirty = true;
+}
+
+/// Build UV overlay data from currently selected faces
+fn build_uv_overlay_data(state: &ModelerState) -> Option<UvOverlayData> {
+    let obj = state.project.selected()?;
+
+    // Get selected face indices
+    let selected_faces = match &state.selection {
+        super::state::ModelerSelection::Faces(indices) => indices.clone(),
+        _ => return None, // No faces selected
+    };
+
+    if selected_faces.is_empty() {
+        return None;
+    }
+
+    // Collect all unique vertices from selected faces
+    let mut vertex_map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+
+    for &fi in &selected_faces {
+        if let Some(face) = obj.mesh.faces.get(fi) {
+            let mut face_vertex_indices = Vec::new();
+
+            for &vi in &face.vertices {
+                let uv_idx = if let Some(&existing_idx) = vertex_map.get(&vi) {
+                    existing_idx
+                } else {
+                    let new_idx = vertices.len();
+                    if let Some(v) = obj.mesh.vertices.get(vi) {
+                        vertices.push(UvVertex {
+                            uv: v.uv,
+                            vertex_index: vi,
+                        });
+                    }
+                    vertex_map.insert(vi, new_idx);
+                    new_idx
+                };
+                face_vertex_indices.push(uv_idx);
+            }
+
+            faces.push(UvFace {
+                vertex_indices: face_vertex_indices,
+            });
+        }
+    }
+
+    let num_faces = faces.len();
+    Some(UvOverlayData {
+        vertices,
+        faces,
+        selected_faces: (0..num_faces).collect(), // All faces in our list are "selected"
+    })
 }
 
 /// Handle UV-specific interactions (separate from paint)
@@ -1332,9 +1886,12 @@ fn draw_atlas_preview(
     scale: f32,
     state: &ModelerState,
 ) {
-    let atlas = &state.project.atlas;
+    let atlas = state.atlas();
     let atlas_width = atlas.width;
     let atlas_height = atlas.height;
+
+    // Get CLUT for rendering atlas preview
+    let clut = state.project.effective_clut();
 
     // Draw checkerboard background
     let checker_size = 8.0;
@@ -1357,28 +1914,28 @@ fn draw_atlas_preview(
         }
     }
 
-    // Draw texture pixels
+    // Draw texture pixels (indexed - use CLUT to get colors)
     let pixels_per_block = (1.0 / scale).max(1.0) as usize;
-    for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
-        for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
-            let pixel = state.project.atlas.get_pixel(bx, by);
-            if pixel.is_transparent() {
-                continue;
-            }
-            let px = atlas_x + bx as f32 * scale;
-            let py = atlas_y + by as f32 * scale;
-            let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
-            let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
-            if pw > 0.0 && ph > 0.0 {
-                let alpha = match pixel.blend {
-                    crate::rasterizer::BlendMode::Opaque => 255,
-                    crate::rasterizer::BlendMode::Average => 128,
-                    crate::rasterizer::BlendMode::Add => 200,
-                    crate::rasterizer::BlendMode::Subtract => 200,
-                    crate::rasterizer::BlendMode::AddQuarter => 64,
-                    crate::rasterizer::BlendMode::Erase => 0,
-                };
-                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, alpha));
+    if let Some(clut) = clut {
+        for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
+            for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
+                let index = atlas.get_index(bx, by);
+                // Index 0 = transparent (PS1 convention)
+                if index == 0 {
+                    continue;
+                }
+                let c15 = clut.lookup(index);
+                let px = atlas_x + bx as f32 * scale;
+                let py = atlas_y + by as f32 * scale;
+                let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
+                let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
+                if pw > 0.0 && ph > 0.0 {
+                    // Convert Color15 (5-bit per channel) to 8-bit
+                    let r = (c15.r5() << 3) | (c15.r5() >> 2);
+                    let g = (c15.g5() << 3) | (c15.g5() >> 2);
+                    let b = (c15.b5() << 3) | (c15.b5() >> 2);
+                    draw_rectangle(px, py, pw, ph, Color::from_rgba(r, g, b, 255));
+                }
             }
         }
     }
@@ -1421,11 +1978,11 @@ fn draw_atlas_preview(
                         );
                     }
 
-                    // Draw vertices (only when UV section is expanded)
-                    if state.uv_section_expanded {
+                    // Draw vertices (only in UV mode)
+                    if state.texture_editor.mode == TextureEditorMode::Uv {
                         for (i, &vi) in face.vertices.iter().enumerate() {
                             if let Some((sx, sy)) = screen_uvs.get(i) {
-                                let is_selected = state.uv_selection.contains(&vi);
+                                let is_selected = state.texture_editor.uv_selection.contains(&vi);
                                 let color = if is_selected { selected_vertex_color } else { vertex_color };
                                 let size = if is_selected { 8.0 } else { 6.0 };
                                 draw_rectangle(sx - size * 0.5, sy - size * 0.5, size, size, color);
@@ -1446,11 +2003,12 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
 
     draw_text("Size:", x + 4.0, *y + 12.0, 12.0, TEXT_DIM);
 
+    let atlas_width = state.atlas().width;
     let mut btn_x = x + 32.0;
     for (size, label) in sizes {
         let btn_w = label.len() as f32 * 7.0 + 6.0;
         let btn_rect = Rect::new(btn_x, *y, btn_w, btn_h);
-        let is_current = state.project.atlas.width == size;
+        let is_current = atlas_width == size;
         let hovered = ctx.mouse.inside(&btn_rect);
 
         let bg = if is_current {
@@ -1467,7 +2025,7 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
 
         if hovered && ctx.mouse.left_pressed && !is_current {
             state.push_undo_with_atlas("Resize Atlas");
-            state.project.atlas.resize(size, size);
+            state.atlas_mut().resize(size, size);
             state.dirty = true;
         }
 
@@ -1475,117 +2033,6 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
     }
 
     *y += btn_h + 4.0;
-}
-
-// NOTE: draw_mode_toggle removed - replaced by collapsible sections in draw_right_panel
-
-/// Draw UV tools content (without mode toggle - that's now at top)
-fn draw_uv_tools_content(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
-    let btn_size = 20.0;
-    let btn_spacing = 2.0;
-
-    // Transform buttons
-    let has_selection = !state.uv_selection.is_empty();
-    let buttons: &[(char, &str, &str)] = &[
-        (icon::FLIP_HORIZONTAL, "Flip H", "uv_flip_h"),
-        (icon::FLIP_VERTICAL, "Flip V", "uv_flip_v"),
-        (icon::ROTATE_CW, "Rotate CW", "uv_rot_cw"),
-        (icon::REFRESH_CW, "Reset UVs", "uv_reset"),
-    ];
-
-    let mut btn_x = x + 4.0;
-    for (icon_char, tooltip, action) in buttons {
-        let btn_rect = Rect::new(btn_x, *y, btn_size, btn_size);
-        let hovered = ctx.mouse.inside(&btn_rect);
-
-        let bg = if !has_selection {
-            Color::from_rgba(40, 40, 45, 255)
-        } else if hovered {
-            Color::from_rgba(80, 80, 90, 255)
-        } else {
-            Color::from_rgba(55, 55, 60, 255)
-        };
-        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
-
-        let icon_color = if has_selection { TEXT_COLOR } else { Color::from_rgba(80, 80, 85, 255) };
-        draw_icon_centered(icon_font, *icon_char, &btn_rect, 12.0, icon_color);
-
-        if has_selection && hovered && is_mouse_button_pressed(MouseButton::Left) {
-            match *action {
-                "uv_flip_h" => flip_selected_uvs(state, true, false),
-                "uv_flip_v" => flip_selected_uvs(state, false, true),
-                "uv_rot_cw" => rotate_selected_uvs(state, true),
-                "uv_reset" => reset_selected_uvs(state),
-                _ => {}
-            }
-        }
-
-        if hovered {
-            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
-        }
-
-        btn_x += btn_size + btn_spacing;
-    }
-
-    *y += btn_size + 4.0;
-}
-
-/// Draw paint tools content (without mode toggle - that's now at top)
-fn draw_paint_tools_content(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
-    let btn_size = 20.0;
-
-    // Brush type buttons
-    let brush_rect = Rect::new(x + 4.0, *y, btn_size, btn_size);
-    let brush_selected = state.brush_type == super::state::BrushType::Square;
-    if icon_button_active(ctx, brush_rect, icon::BRUSH, icon_font, "Brush (B)", brush_selected) {
-        state.brush_type = super::state::BrushType::Square;
-    }
-
-    let fill_rect = Rect::new(brush_rect.x + btn_size + 2.0, *y, btn_size, btn_size);
-    let fill_selected = state.brush_type == super::state::BrushType::Fill;
-    if icon_button_active(ctx, fill_rect, icon::PAINT_BUCKET, icon_font, "Fill (F)", fill_selected) {
-        state.brush_type = super::state::BrushType::Fill;
-    }
-
-    // Brush size slider (for square brush)
-    if state.brush_type == super::state::BrushType::Square {
-        let slider_x = fill_rect.x + btn_size + 8.0;
-        let slider_w = width - (slider_x - x) - 30.0;
-        let slider_h = 12.0;
-        let slider_y = *y + (btn_size - slider_h) / 2.0;
-
-        let track_rect = Rect::new(slider_x, slider_y, slider_w.max(40.0), slider_h);
-        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, Color::from_rgba(40, 40, 45, 255));
-
-        let min_size = 1.0;
-        let max_size = 16.0;
-        let fill_ratio = (state.brush_size - min_size) / (max_size - min_size);
-        let fill_width = fill_ratio * track_rect.w;
-        draw_rectangle(track_rect.x, track_rect.y, fill_width, slider_h, ACCENT_COLOR);
-
-        draw_text(&format!("{}", state.brush_size as i32), slider_x + track_rect.w + 4.0, *y + 14.0, 12.0, TEXT_DIM);
-
-        // Handle slider interaction
-        if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && !state.brush_size_slider_active {
-            state.brush_size_slider_active = true;
-        }
-        if state.brush_size_slider_active {
-            if ctx.mouse.left_down {
-                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
-                state.brush_size = (min_size + (rel_x / track_rect.w) * (max_size - min_size)).round().clamp(min_size, max_size);
-            } else {
-                state.brush_size_slider_active = false;
-            }
-        }
-    }
-
-    *y += btn_size + 4.0;
-
-    // CLUT Editor section (only in Paint mode)
-    draw_section_label(x, y, width, "CLUT");
-    let clut_height = 200.0; // Fixed height for CLUT editor
-    draw_clut_editor_panel(ctx, x, *y, width, clut_height, state, icon_font);
-    *y += clut_height + 4.0;
 }
 
 /// Draw face properties section (blend mode for selected faces)
@@ -1615,7 +2062,7 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
         .all(|f| f.blend_mode == current_blend);
 
     // Blend mode label
-    draw_text("Blend:", x + 4.0, *y + 12.0, 13.0, TEXT_DIM);
+    draw_text("Blend:", x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
 
     // Blend mode buttons (inline row)
     let btn_modes = [
@@ -1681,16 +2128,6 @@ fn draw_face_properties(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, s
     }
 }
 
-// NOTE: draw_uv_tools_section removed - replaced by draw_uv_tools_content in UV collapsible section
-
-// NOTE: draw_paint_tools_section removed - replaced by draw_paint_section using unified texture editor
-
-// NOTE: handle_atlas_interaction removed - replaced by unified texture editor in Paint section
-
-// NOTE: draw_texture_uv_panel removed - replaced by collapsible UV and Paint sections in draw_right_panel
-// The UV section displays atlas preview with UV overlay and UV tools
-// The Paint section uses the unified texture editor from src/texture/texture_editor.rs
-
 
 /// Draw the CLUT (Color Look-Up Table) editor panel
 /// Shows: CLUT pool list, palette grid (4x4 or 16x16), color editor (RGB555 sliders)
@@ -1709,8 +2146,8 @@ fn draw_clut_editor_panel(
     // ========================================================================
     // Section 1: CLUT Pool List with buttons
     // ========================================================================
-    draw_text("CLUT Pool", x + padding, cur_y + 10.0, 13.0, TEXT_DIM);
-    cur_y += 14.0;
+    draw_text("CLUT Pool", x + padding, cur_y + 10.0, FONT_SIZE_HEADER, TEXT_DIM);
+    cur_y += LINE_HEIGHT;
 
     // Buttons to add new CLUTs
     let btn_h = 18.0;
@@ -1800,7 +2237,7 @@ fn draw_clut_editor_panel(
             let badge_text = clut.depth.short_label();
             let badge_x = item_rect.x + item_rect.w - 24.0;
             draw_rectangle(badge_x, item_y + 2.0, 20.0, 12.0, Color::from_rgba(60, 60, 70, 255));
-            draw_text(badge_text, badge_x + 2.0, item_y + 11.0, 13.0, TEXT_DIM);
+            draw_text(badge_text, badge_x + 2.0, item_y + 11.0, FONT_SIZE_CONTENT, TEXT_DIM);
 
             // Handle click
             if hovered && ctx.mouse.left_pressed {
@@ -1996,131 +2433,6 @@ fn draw_clut_editor_panel(
     }
 }
 
-/// DEPRECATED: Draw the UV Editor panel with the texture atlas and face UVs
-/// Kept for reference, replaced by draw_texture_uv_panel
-#[allow(dead_code)]
-fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
-    let atlas = &state.project.atlas;
-    let atlas_w = atlas.width as f32;
-    let atlas_h = atlas.height as f32;
-
-    // Calculate scale to fit atlas in panel
-    let padding = 10.0;
-    let available_w = rect.w - padding * 2.0;
-    let available_h = rect.h - padding * 2.0 - 16.0; // Reserve space for header
-    let scale = (available_w / atlas_w).min(available_h / atlas_h);
-
-    let atlas_screen_w = atlas_w * scale;
-    let atlas_screen_h = atlas_h * scale;
-    let atlas_x = rect.x + (rect.w - atlas_screen_w) * 0.5;
-    let atlas_y = rect.y + padding + 16.0;
-
-    // Draw checkerboard background behind atlas (for transparency)
-    let checker_size = 8.0;
-    let check_cols = (atlas_screen_w / checker_size).ceil() as usize;
-    let check_rows = (atlas_screen_h / checker_size).ceil() as usize;
-    for cy in 0..check_rows {
-        for cx in 0..check_cols {
-            let color = if (cx + cy) % 2 == 0 {
-                Color::from_rgba(40, 40, 45, 255)
-            } else {
-                Color::from_rgba(55, 55, 60, 255)
-            };
-            let px = atlas_x + cx as f32 * checker_size;
-            let py = atlas_y + cy as f32 * checker_size;
-            let pw = checker_size.min(atlas_x + atlas_screen_w - px);
-            let ph = checker_size.min(atlas_y + atlas_screen_h - py);
-            if pw > 0.0 && ph > 0.0 {
-                draw_rectangle(px, py, pw, ph, color);
-            }
-        }
-    }
-
-    // Draw the actual texture atlas pixels (skip transparent to show checkerboard)
-    // For performance, we draw in blocks instead of pixel-by-pixel
-    let block_size = (scale * 4.0).max(1.0); // Larger blocks for zoomed-out view
-    let pixels_per_block = (block_size / scale).max(1.0) as usize;
-
-    for by in (0..atlas.height).step_by(pixels_per_block) {
-        for bx in (0..atlas.width).step_by(pixels_per_block) {
-            // Sample the pixel (or average a block for downsampled view)
-            let pixel = atlas.get_pixel(bx, by);
-            // Skip transparent pixels so checkerboard shows through
-            if pixel.is_transparent() {
-                continue;
-            }
-            let px = atlas_x + bx as f32 * scale;
-            let py = atlas_y + by as f32 * scale;
-            let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px);
-            let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py);
-            if pw > 0.0 && ph > 0.0 {
-                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, 255));
-            }
-        }
-    }
-
-    // Draw atlas border
-    draw_rectangle_lines(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, 1.0, Color::from_rgba(100, 100, 105, 255));
-
-    // Draw UVs of the selected object's faces
-    if let Some(obj) = state.project.selected() {
-        let face_color = Color::from_rgba(100, 200, 255, 180);
-        let selected_color = Color::from_rgba(255, 200, 100, 255);
-
-        // Convert UVs to screen coordinates (snapped to pixel centers)
-        let uv_to_screen = |uv: crate::rasterizer::Vec2| {
-            let px = (uv.x * atlas_w).floor();
-            let py = ((1.0 - uv.y) * atlas_h).floor();
-            let sx = atlas_x + (px + 0.5) * scale;
-            let sy = atlas_y + (py + 0.5) * scale;
-            (sx, sy)
-        };
-
-        for (fi, face) in obj.mesh.faces.iter().enumerate() {
-            let is_selected = matches!(&state.selection, super::state::ModelerSelection::Faces(faces) if faces.contains(&fi));
-
-            // Collect screen UVs for all vertices of n-gon
-            let screen_uvs: Vec<_> = face.vertices.iter()
-                .filter_map(|&vi| obj.mesh.vertices.get(vi))
-                .map(|v| uv_to_screen(v.uv))
-                .collect();
-
-            // Draw edges of the UV face (n-gon)
-            let color = if is_selected { selected_color } else { face_color };
-            let n = screen_uvs.len();
-            for i in 0..n {
-                let j = (i + 1) % n;
-                draw_line(
-                    screen_uvs[i].0, screen_uvs[i].1,
-                    screen_uvs[j].0, screen_uvs[j].1,
-                    if is_selected { 2.0 } else { 1.0 },
-                    color,
-                );
-            }
-
-            // Draw UV vertices
-            for (sx, sy) in &screen_uvs {
-                let dot_size = if is_selected { 4.0 } else { 2.0 };
-                draw_rectangle(sx - dot_size * 0.5, sy - dot_size * 0.5, dot_size, dot_size, color);
-            }
-        }
-    }
-
-    // Header showing atlas dimensions
-    draw_text(
-        &format!("Atlas: {}x{}", atlas.width, atlas.height),
-        rect.x + 4.0,
-        rect.y + 12.0,
-        12.0,
-        TEXT_DIM,
-    );
-
-    // Mode indicator
-    let mode_text = if state.view_mode == ViewMode::Texture { "EDIT MODE" } else { "VIEW ONLY" };
-    let mode_color = if state.view_mode == ViewMode::Texture { ACCENT_COLOR } else { TEXT_DIM };
-    draw_text(mode_text, rect.x + rect.w - 70.0, rect.y + 12.0, 13.0, mode_color);
-}
-
 /// Draw PicoCAD-style 4-panel viewport layout with resizable splits
 /// ┌─────────────┬─────────────┐
 /// │   3D View   │   Top (XZ)  │
@@ -2130,8 +2442,8 @@ fn draw_uv_editor(_ctx: &mut UiContext, rect: Rect, state: &ModelerState) {
 /// │             │             │
 /// └─────────────┴─────────────┘
 fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: &mut Framebuffer) {
-    let gap = 2.0; // Gap between panels
-    let divider_hit_size = 6.0; // Hit area for dragging dividers
+    let gap = 4.0; // Gap between panels (matches SplitPanel divider_size)
+    let divider_hit_size = 8.0; // Hit area for dragging dividers
 
     // Check for fullscreen mode (Space key toggles)
     if let Some(fullscreen_id) = state.fullscreen_viewport {
@@ -2157,24 +2469,44 @@ fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
         (ViewportId::Side, Rect::new(rect.x + left_w + gap, rect.y + top_h + gap, right_w, bottom_h)),
     ];
 
-    // Handle divider dragging
+    // Handle divider dragging with proper state tracking
     let h_divider_rect = Rect::new(rect.x + left_w - divider_hit_size/2.0, rect.y, gap + divider_hit_size, rect.h);
     let v_divider_rect = Rect::new(rect.x, rect.y + top_h - divider_hit_size/2.0, rect.w, gap + divider_hit_size);
 
-    // Check if dragging dividers
-    if ctx.mouse.left_down && ctx.mouse.inside(&h_divider_rect) {
+    let h_hovered = ctx.mouse.inside(&h_divider_rect);
+    let v_hovered = ctx.mouse.inside(&v_divider_rect);
+
+    // Start dragging on mouse press
+    if ctx.mouse.left_pressed {
+        if h_hovered {
+            state.dragging_h_divider = true;
+        }
+        if v_hovered {
+            state.dragging_v_divider = true;
+        }
+    }
+
+    // Stop dragging on mouse release
+    if !ctx.mouse.left_down {
+        state.dragging_h_divider = false;
+        state.dragging_v_divider = false;
+    }
+
+    // Update split positions while dragging (anywhere in viewport area)
+    if state.dragging_h_divider {
         state.viewport_h_split = ((ctx.mouse.x - rect.x) / rect.w).clamp(0.15, 0.85);
     }
-    if ctx.mouse.left_down && ctx.mouse.inside(&v_divider_rect) {
+    if state.dragging_v_divider {
         state.viewport_v_split = ((ctx.mouse.y - rect.y) / rect.h).clamp(0.15, 0.85);
     }
 
-    // Update active viewport based on mouse hover (only if not on divider)
-    let on_divider = ctx.mouse.inside(&h_divider_rect) || ctx.mouse.inside(&v_divider_rect);
-    if !on_divider {
+    // Update active viewport/panel on click (not hover, matching World Editor)
+    let on_divider = h_hovered || v_hovered || state.dragging_h_divider || state.dragging_v_divider;
+    if !on_divider && ctx.mouse.left_pressed {
         for (id, vp_rect) in &viewports {
             if ctx.mouse.inside(vp_rect) {
                 state.active_viewport = *id;
+                state.active_panel = super::state::ActivePanel::Viewport;
                 break;
             }
         }
@@ -2184,42 +2516,62 @@ fn draw_4panel_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerStat
     for (id, vp_rect) in viewports {
         draw_single_viewport(ctx, vp_rect, state, fb, id);
     }
+
+    // Draw dividers between viewports (matching SplitPanel style: 4px wide, darker color)
+    let divider_color = Color::from_rgba(60, 60, 60, 255);
+    let highlight_color = Color::from_rgba(100, 150, 255, 255); // Same as SplitPanel hover
+
+    // Calculate divider positions (center of gap)
+    let divider_y = rect.y + top_h;
+    let divider_x = rect.x + left_w;
+
+    // Horizontal divider (between top and bottom rows) - full gap height
+    let h_divider_color = if v_hovered || state.dragging_v_divider { highlight_color } else { divider_color };
+    draw_rectangle(rect.x, divider_y, rect.w, gap, h_divider_color);
+
+    // Vertical divider (between left and right columns) - full gap width
+    let v_divider_color = if h_hovered || state.dragging_h_divider { highlight_color } else { divider_color };
+    draw_rectangle(divider_x, rect.y, gap, rect.h, v_divider_color);
 }
 
-/// Draw a single viewport with its label and border
+/// Draw a single viewport with its header bar (matching World Editor style)
 fn draw_single_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: &mut Framebuffer, viewport_id: ViewportId) {
-    let is_active = state.active_viewport == viewport_id;
+    // Viewport is active when both: panel focus is on viewports AND this specific viewport is selected
+    let is_active = state.active_panel == super::state::ActivePanel::Viewport
+        && state.active_viewport == viewport_id;
+    let header_height = 20.0;
+
+    // Header bar (matching World Editor panel style)
+    let header_rect = Rect::new(rect.x, rect.y, rect.w, header_height);
+    let header_color = Color::from_rgba(50, 50, 60, 255);
+    draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, header_color);
+
+    // Header text - cyan when active, white when inactive (font size 16 to match World Editor)
+    let label = viewport_id.label();
+    let text_color = if is_active { ACCENT_COLOR } else { WHITE };
+    draw_text(label, header_rect.x + 6.0, header_rect.y + 14.0, 16.0, text_color);
+
+    // X-RAY label in header when enabled
+    if state.xray_mode {
+        let xray_label = "X-RAY";
+        let xray_w = xray_label.len() as f32 * 7.0 + 8.0;
+        let xray_x = header_rect.right() - xray_w - 4.0;
+        draw_rectangle(xray_x, header_rect.y + 2.0, xray_w, header_height - 4.0, Color::from_rgba(180, 80, 80, 200));
+        draw_text(xray_label, xray_x + 4.0, header_rect.y + 14.0, FONT_SIZE_CONTENT, WHITE);
+    }
+
+    // Content area below header
+    let content_rect = Rect::new(rect.x, rect.y + header_height, rect.w, rect.h - header_height);
 
     // Background
-    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(25, 25, 30, 255));
+    draw_rectangle(content_rect.x, content_rect.y, content_rect.w, content_rect.h, Color::from_rgba(25, 25, 30, 255));
 
-    // Border (highlighted if active)
-    let border_color = if is_active {
-        ACCENT_COLOR
-    } else {
-        Color::from_rgba(60, 60, 65, 255)
-    };
+    // Subtle border around entire viewport
+    let border_color = Color::from_rgba(60, 60, 65, 255);
     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, border_color);
 
-    // Content area (inset for border)
-    let content = rect.pad(1.0);
-
-    // Draw the actual 3D content - unified for both perspective and ortho views
-    draw_modeler_viewport_ext(ctx, content, state, fb, viewport_id);
-
-    // Label in top-left corner
-    let label = viewport_id.label();
-    let label_bg = Rect::new(rect.x + 2.0, rect.y + 2.0, label.len() as f32 * 7.0 + 8.0, 16.0);
-    draw_rectangle(label_bg.x, label_bg.y, label_bg.w, label_bg.h, Color::from_rgba(0, 0, 0, 180));
-    draw_text(label, label_bg.x + 4.0, label_bg.y + 12.0, 12.0, TEXT_COLOR);
-
-    // Show view mode indicator if in texture mode
-    if state.view_mode == ViewMode::Texture {
-        let mode_label = "UV";
-        let mode_bg = Rect::new(rect.right() - 28.0, rect.y + 2.0, 24.0, 16.0);
-        draw_rectangle(mode_bg.x, mode_bg.y, mode_bg.w, mode_bg.h, Color::from_rgba(100, 50, 150, 200));
-        draw_text(mode_label, mode_bg.x + 4.0, mode_bg.y + 12.0, 12.0, TEXT_COLOR);
-    }
+    // Draw the actual 3D content
+    draw_modeler_viewport_ext(ctx, content_rect, state, fb, viewport_id);
 }
 
 /// Calculate distance from point to line segment (for edge hover detection)
@@ -2426,21 +2778,35 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         ortho_settings.backface_cull = false; // Show all faces in ortho views
         ortho_settings.backface_wireframe = false;
 
-        // Convert atlas to texture (shared by all objects)
         let use_rgb555 = state.raster_settings.use_rgb555;
-        let atlas_texture = state.project.atlas.to_raster_texture();
-        let atlas_texture_15 = if use_rgb555 {
-            Some(state.project.atlas.to_raster_texture_15())
-        } else {
-            None
-        };
 
-        // Render all visible objects
+        // Fallback CLUT for objects with no assigned CLUT
+        let default_clut = Clut::new_4bit("default");
+        let fallback_clut = state.project.clut_pool.first_id()
+            .and_then(|id| state.project.clut_pool.get(id))
+            .unwrap_or(&default_clut);
+
+        // Render all visible objects (each with its own texture atlas and CLUT)
         for (obj_idx, obj) in state.project.objects.iter().enumerate() {
             // Skip hidden objects
             if !obj.visible {
                 continue;
             }
+
+            // Get this object's CLUT from the shared pool (per-object atlas.default_clut)
+            let obj_clut = if obj.atlas.default_clut.is_valid() {
+                state.project.clut_pool.get(obj.atlas.default_clut).unwrap_or(fallback_clut)
+            } else {
+                fallback_clut
+            };
+
+            // Convert this object's atlas to rasterizer texture using its own CLUT
+            let atlas_texture = obj.atlas.to_raster_texture(obj_clut, &format!("atlas_{}", obj_idx));
+            let atlas_texture_15 = if use_rgb555 {
+                Some(obj.atlas.to_texture15(obj_clut, &format!("atlas_{}", obj_idx)))
+            } else {
+                None
+            };
 
             // Use project mesh directly (mesh() accessor returns selected object's mesh)
             let obj_mesh = &obj.mesh;
@@ -2485,17 +2851,19 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
                 if use_rgb555 {
                     // RGB555 rendering path
-                    let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
-                    render_mesh_15(
-                        fb,
-                        &vertices,
-                        &faces,
-                        &textures_15,
-                        Some(&blend_modes),
-                        &ortho_camera,
-                        &ortho_settings,
-                        None,
-                    );
+                    if let Some(ref tex15) = atlas_texture_15 {
+                        let textures_15 = [tex15.clone()];
+                        render_mesh_15(
+                            fb,
+                            &vertices,
+                            &faces,
+                            &textures_15,
+                            Some(&blend_modes),
+                            &ortho_camera,
+                            &ortho_settings,
+                            None,
+                        );
+                    }
                 } else {
                     // RGB888 rendering path (original)
                     let textures = [atlas_texture.clone()];
@@ -2535,20 +2903,25 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     }
 
     if !mesh.vertices.is_empty() {
+        // Semi-transparent edge color for solid mode (always visible)
+        let edge_overlay_color = Color::from_rgba(80, 80, 80, 191); // 75% opacity gray
+
         // Draw wireframe edges (n-gon edges)
-        // In wireframe mode: draw all edges
-        // In solid mode: only draw hovered/selected faces
+        // Always draw all edges with semi-transparent overlay, then highlight hover/selected on top
         for (idx, face) in mesh.faces.iter().enumerate() {
             let is_hovered = state.hovered_face == Some(idx);
             let is_selected = matches!(&state.selection, super::state::ModelerSelection::Faces(f) if f.contains(&idx));
 
-            // In solid mode, skip unselected/unhovered faces
-            if !wireframe_mode && !is_hovered && !is_selected {
-                continue;
-            }
-
-            // Choose color based on hover/selection
-            let color = if is_hovered { hover_color } else if is_selected { select_color } else { wire_color };
+            // Choose color: hover/selected get bright colors, others get semi-transparent overlay
+            let color = if is_hovered {
+                hover_color
+            } else if is_selected {
+                select_color
+            } else if wireframe_mode {
+                wire_color
+            } else {
+                edge_overlay_color
+            };
             let thickness = if is_hovered || is_selected { 2.0 } else { 1.0 };
 
             // Draw all edges of n-gon
@@ -2581,23 +2954,26 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             }
         }
 
-        // Draw vertices
-        // In wireframe mode: draw all vertices
-        // In solid mode: only draw hovered/selected vertices
+        // Draw vertices - always show all vertices with appropriate colors
+        // Semi-transparent for solid mode, brighter for wireframe, highlighted for hover/select
+        let vertex_overlay_color = Color::from_rgba(60, 60, 70, 140); // Semi-transparent dark
         for (idx, vert) in mesh.vertices.iter().enumerate() {
             let is_hovered = state.hovered_vertex == Some(idx);
             let is_selected = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if v.contains(&idx));
-
-            // In solid mode, skip unselected/unhovered vertices
-            if !wireframe_mode && !is_hovered && !is_selected {
-                continue;
-            }
 
             let (x, y) = project_vertex(vert);
 
             // Only draw if in viewport
             if x >= rect.x && x <= rect.right() && y >= rect.y && y <= rect.bottom() {
-                let color = if is_hovered { hover_color } else if is_selected { select_color } else { vertex_color };
+                let color = if is_hovered {
+                    hover_color
+                } else if is_selected {
+                    select_color
+                } else if wireframe_mode {
+                    vertex_color
+                } else {
+                    vertex_overlay_color
+                };
                 let radius = if is_hovered { 5.0 } else if is_selected { 4.0 } else { 3.0 };
                 draw_circle(x, y, radius, color);
             }
@@ -3189,8 +3565,9 @@ fn draw_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: 
 #[allow(dead_code)]
 fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     // Cache atlas dimensions to avoid borrow issues
-    let atlas_width = state.project.atlas.width;
-    let atlas_height = state.project.atlas.height;
+    let atlas = state.atlas();
+    let atlas_width = atlas.width;
+    let atlas_height = atlas.height;
     let atlas_w = atlas_width as f32;
     let atlas_h = atlas_height as f32;
 
@@ -3211,15 +3588,20 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
 
     // Draw the actual texture atlas
     let pixels_per_block = (1.0 / scale).max(1.0) as usize;
-    for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
-        for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
-            let pixel = state.project.atlas.get_pixel(bx, by);
-            let px = atlas_x + bx as f32 * scale;
-            let py = atlas_y + by as f32 * scale;
-            let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
-            let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
-            if pw > 0.0 && ph > 0.0 {
-                draw_rectangle(px, py, pw, ph, Color::from_rgba(pixel.r, pixel.g, pixel.b, 255));
+    if let Some(clut) = state.project.effective_clut() {
+        for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
+            for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
+                let pixel = state.project.atlas.get_color(bx, by, clut);
+                let px = atlas_x + bx as f32 * scale;
+                let py = atlas_y + by as f32 * scale;
+                let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
+                let ph = (pixels_per_block as f32 * scale).min(atlas_y + atlas_screen_h - py).max(scale);
+                if pw > 0.0 && ph > 0.0 {
+                    let r = (pixel.r5() << 3) | (pixel.r5() >> 2);
+                    let g = (pixel.g5() << 3) | (pixel.g5() >> 2);
+                    let b = (pixel.b5() << 3) | (pixel.b5() >> 2);
+                    draw_rectangle(px, py, pw, ph, Color::from_rgba(r, g, b, 255));
+                }
             }
         }
     }
@@ -3227,11 +3609,11 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     // Draw atlas border
     draw_rectangle_lines(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h, 1.0, Color::from_rgba(100, 100, 105, 255));
 
-    // Handle painting in texture mode
+    // Handle painting when paint section is expanded
     let (mx, my) = (ctx.mouse.x, ctx.mouse.y);
     let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_screen_w, atlas_screen_h);
 
-    if state.view_mode == super::state::ViewMode::Texture && atlas_rect.contains(mx, my) {
+    if state.paint_section_expanded && atlas_rect.contains(mx, my) {
         // Convert mouse position to atlas pixel coordinates
         let px = ((mx - atlas_x) / scale) as usize;
         let py = ((my - atlas_y) / scale) as usize;
@@ -3243,18 +3625,18 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
         let cursor_w = brush_size * scale;
         draw_rectangle_lines(cursor_x, cursor_y, cursor_w, cursor_w, 1.0, Color::from_rgba(255, 255, 255, 200));
 
-        // Paint on click/drag
+        // Paint on click/drag (indexed painting with palette index)
         if ctx.mouse.left_down {
             // Save undo at stroke start
             if !state.paint_stroke_active {
                 state.push_undo_with_atlas("Paint");
                 state.paint_stroke_active = true;
             }
-            let color = state.paint_color;
+            let index = state.active_palette_index;
             let brush = brush_size as usize;
             for dy in 0..brush {
                 for dx in 0..brush {
-                    state.project.atlas.set_pixel(px + dx, py + dy, color);
+                    state.project.atlas.set_index(px + dx, py + dy, index);
                 }
             }
             state.dirty = true;
@@ -3302,18 +3684,15 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
         let swatch_color = Color::from_rgba(*r, *g, *b, 255);
         draw_rectangle(sx, sy, swatch_size - 2.0, swatch_size - 2.0, swatch_color);
 
-        // Highlight current color
-        let is_current = state.paint_color.r == *r
-            && state.paint_color.g == *g
-            && state.paint_color.b == *b;
-        if is_current {
+        // Highlight current palette index
+        if i as u8 == state.active_palette_index {
             draw_rectangle_lines(sx - 1.0, sy - 1.0, swatch_size, swatch_size, 2.0, WHITE);
         }
 
-        // Handle click to select color
+        // Handle click to select palette index
         let swatch_rect = Rect::new(sx, sy, swatch_size - 2.0, swatch_size - 2.0);
         if ctx.mouse.left_pressed && swatch_rect.contains(mx, my) {
-            state.paint_color = crate::rasterizer::Color::new(*r, *g, *b);
+            state.active_palette_index = i as u8;
         }
     }
 
@@ -3487,19 +3866,69 @@ fn draw_timeline(_ctx: &mut UiContext, rect: Rect, _state: &mut ModelerState, _i
 fn draw_status_bar(rect: Rect, state: &ModelerState) {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
-    // Status message
-    if let Some(msg) = state.get_status() {
-        let center_x = rect.x + rect.w * 0.5 - (msg.len() as f32 * 4.0);
-        draw_text(msg, center_x, rect.y + 15.0, 14.0, Color::from_rgba(100, 255, 100, 255));
+    // Left side: Green temporary status message
+    let status_end_x = if let Some(msg) = state.get_status() {
+        let msg_dims = measure_text(msg, None, 14, 1.0);
+        draw_text(msg, (rect.x + 10.0).floor(), (rect.y + 15.0).floor(), 14.0, Color::from_rgba(100, 255, 100, 255));
+        rect.x + 10.0 + msg_dims.width + 20.0
+    } else {
+        rect.x + 10.0
+    };
+
+    // Right side: Context-sensitive shortcuts
+    let mut shortcuts: Vec<&str> = Vec::new();
+
+    // Mode-specific shortcuts
+    match state.select_mode {
+        SelectMode::Vertex => {
+            shortcuts.push("[1] Vertex");
+            if !state.selection.is_empty() {
+                shortcuts.push("[Alt+M] Merge");
+            }
+        }
+        SelectMode::Edge => {
+            shortcuts.push("[2] Edge");
+            if !state.selection.is_empty() {
+                shortcuts.push("[Alt+L] Loop");
+            }
+        }
+        SelectMode::Face => {
+            shortcuts.push("[3] Face");
+            if !state.selection.is_empty() {
+                shortcuts.push("[E] Extrude");
+                shortcuts.push("[Alt+L] Loop");
+            }
+        }
     }
 
-    // PicoCAD-style hints (always visible on left)
-    let pico_hints = "V:View M:Render L:Shade Space:Fullscreen Tab:Add";
-    draw_text(pico_hints, rect.x + 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
+    // Transform shortcuts when selection exists
+    if !state.selection.is_empty() {
+        shortcuts.push("[G] Grab");
+        shortcuts.push("[R] Rotate");
+        shortcuts.push("[T] Scale");
+        shortcuts.push("[Del] Delete");
+    }
 
-    // Mesh editing hints (on right)
-    let hints = "X:Multi E:Extrude Del:Delete Ctrl+Z:Undo";
-    draw_text(hints, rect.right() - (hints.len() as f32 * 6.0) - 8.0, rect.y + 15.0, 12.0, TEXT_DIM);
+    // View shortcuts (always available)
+    shortcuts.push("[Space] Fullscreen");
+
+    // Vertex linking state
+    if state.vertex_linking {
+        shortcuts.push("[X] Unlink");
+    } else {
+        shortcuts.push("[X] Link");
+    }
+
+    if !shortcuts.is_empty() {
+        let shortcuts_text = shortcuts.join("  ");
+        let text_dims = measure_text(&shortcuts_text, None, FONT_SIZE_HEADER as u16, 1.0);
+        let text_x = rect.right() - text_dims.width - 10.0;
+        let text_y = rect.y + (rect.h + text_dims.height) / 2.0 - 2.0;
+
+        if text_x > status_end_x {
+            draw_text(&shortcuts_text, text_x.floor(), text_y.floor(), FONT_SIZE_HEADER, Color::from_rgba(180, 180, 190, 255));
+        }
+    }
 }
 
 // ============================================================================
@@ -3566,7 +3995,7 @@ fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
         None => return,
     };
 
-    let atlas_size = state.project.atlas.width as f32;
+    let atlas_size = state.atlas().width as f32;
 
     state.push_undo(if flip_h { "Flip UV Horizontal" } else { "Flip UV Vertical" });
 
@@ -3605,7 +4034,7 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
         None => return,
     };
 
-    let atlas_size = state.project.atlas.width as f32;
+    let atlas_size = state.atlas().width as f32;
 
     state.push_undo("Rotate UV 90°");
 
@@ -3645,7 +4074,7 @@ fn reset_selected_uvs(state: &mut ModelerState) {
             return;
         }
 
-        let atlas_size = state.project.atlas.width as f32;
+        let atlas_size = state.atlas().width as f32;
 
         state.push_undo("Reset UVs");
 
@@ -3726,9 +4155,11 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         SelectMode::Edge => "edge",
         SelectMode::Face => "face",
     };
-    let is_texture_mode = state.view_mode == ViewMode::Texture;
     let is_dragging = state.drag_manager.is_dragging() || state.modal_transform != ModalTransform::None;
-    let is_paint_mode = is_texture_mode && state.paint_section_expanded;
+    let is_paint_mode = state.paint_section_expanded;
+    // UV editor is focused when paint section is open and in UV mode
+    let uv_editor_focused = state.paint_section_expanded
+        && state.texture_editor.mode == crate::texture::TextureEditorMode::Uv;
 
     let ctx = build_context(
         state.can_undo(),
@@ -3736,12 +4167,13 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         has_selection,
         has_face_selection,
         has_vertex_selection,
-        is_texture_mode,
         select_mode_str,
         false, // text_editing - would need to track this
         state.dirty,
         is_dragging,
         is_paint_mode,
+        uv_editor_focused,
+        state.clipboard.has_content(),
     );
 
     let mut action = ModelerAction::None;
@@ -3776,6 +4208,15 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     if actions.triggered("edit.delete", &ctx) || actions.triggered("edit.delete_alt", &ctx) {
         delete_selection(state);
     }
+    if actions.triggered("edit.copy", &ctx) {
+        copy_selection(state);
+    }
+    if actions.triggered("edit.paste", &ctx) {
+        paste_clipboard(state);
+    }
+    if actions.triggered("edit.duplicate", &ctx) {
+        duplicate_selection(state);
+    }
 
     // ========================================================================
     // Selection Mode Actions
@@ -3797,6 +4238,11 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     }
     if actions.triggered("select.all", &ctx) {
         select_all(state);
+    }
+
+    // Loop select (Alt+L) - extends selection along edge/face loops
+    if actions.triggered("select.loop", &ctx) {
+        select_loop(state);
     }
 
     // ========================================================================
@@ -3861,7 +4307,8 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             if !face_indices.is_empty() {
                 let indices = face_indices.clone();
                 state.push_undo("Extrude");
-                let extrude_amount = state.snap_settings.grid_size;
+                // Use 2x grid size for clearly visible extrusion
+                let extrude_amount = state.snap_settings.grid_size * 2.0;
                 let new_faces = if let Some(mesh) = state.mesh_mut() {
                     mesh.extrude_faces(&indices, extrude_amount)
                 } else {
@@ -3879,11 +4326,55 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     }
 
     // ========================================================================
+    // Mesh Cleanup Actions
+    // ========================================================================
+    if actions.triggered("mesh.merge_by_distance", &ctx) {
+        let threshold = state.snap_settings.grid_size * 0.1; // 10% of grid size
+        state.push_undo("Merge by Distance");
+        let merged = if let Some(mesh) = state.mesh_mut() {
+            mesh.merge_by_distance(threshold)
+        } else {
+            0
+        };
+        if merged > 0 {
+            state.dirty = true;
+            state.set_status(&format!("Merged {} vertices (threshold: {:.1})", merged, threshold), 2.0);
+        } else {
+            state.set_status("No overlapping vertices found", 1.5);
+        }
+    }
+
+    if actions.triggered("mesh.merge_to_center", &ctx) {
+        if let super::state::ModelerSelection::Vertices(vert_indices) = &state.selection {
+            if vert_indices.len() >= 2 {
+                let indices = vert_indices.clone();
+                state.push_undo("Merge to Center");
+                let result = if let Some(mesh) = state.mesh_mut() {
+                    mesh.merge_to_center(&indices)
+                } else {
+                    None
+                };
+                if let Some(kept_idx) = result {
+                    // Select the merged vertex
+                    state.selection = super::state::ModelerSelection::Vertices(vec![kept_idx]);
+                    // Clean up orphaned vertices
+                    if let Some(mesh) = state.mesh_mut() {
+                        mesh.compact_vertices();
+                    }
+                    state.dirty = true;
+                    state.set_status(&format!("Merged {} vertices to center", indices.len()), 1.5);
+                }
+            } else {
+                state.set_status("Select 2+ vertices to merge", 1.0);
+            }
+        } else {
+            state.set_status("Switch to Vertex mode (1) to merge", 1.0);
+        }
+    }
+
+    // ========================================================================
     // View Actions
     // ========================================================================
-    if actions.triggered("view.toggle_mode", &ctx) {
-        state.toggle_view_mode();
-    }
     if actions.triggered("view.toggle_fullscreen", &ctx) {
         state.toggle_fullscreen_viewport();
     }
@@ -3891,6 +4382,12 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         state.raster_settings.wireframe_overlay = !state.raster_settings.wireframe_overlay;
         let mode = if state.raster_settings.wireframe_overlay { "Wireframe" } else { "Solid" };
         state.set_status(&format!("Render: {}", mode), 1.0);
+    }
+    if actions.triggered("view.toggle_xray", &ctx) {
+        state.xray_mode = !state.xray_mode;
+        state.raster_settings.xray_mode = state.xray_mode;
+        let mode = if state.xray_mode { "ON" } else { "OFF" };
+        state.set_status(&format!("X-Ray: {}", mode), 1.0);
     }
     if actions.triggered("view.cycle_shading", &ctx) {
         state.raster_settings.shading = match state.raster_settings.shading {
@@ -3927,23 +4424,19 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     // Atlas/Paint Mode Actions (toggle between UV and Paint section focus)
     // ========================================================================
     if actions.triggered("atlas.toggle_mode", &ctx) {
-        // Toggle focus between UV and Paint sections
-        if state.paint_section_expanded && !state.uv_section_expanded {
-            // Paint is primary, switch to UV
-            state.uv_section_expanded = true;
-            state.paint_section_expanded = false;
-            state.set_status("UV section", 1.0);
+        // Toggle between UV and Paint modes
+        if state.texture_editor.mode == TextureEditorMode::Paint {
+            state.texture_editor.mode = TextureEditorMode::Uv;
+            state.set_status("UV mode", 1.0);
         } else {
-            // UV is primary or both/neither, switch to Paint
-            state.uv_section_expanded = false;
-            state.paint_section_expanded = true;
-            state.uv_selection.clear();
+            state.texture_editor.mode = TextureEditorMode::Paint;
+            state.texture_editor.uv_selection.clear();
             // Initialize editing texture when switching to paint
             if state.editing_texture.is_none() {
                 state.editing_texture = Some(create_editing_texture(state));
                 state.texture_editor.reset();
             }
-            state.set_status("Paint section", 1.0);
+            state.set_status("Paint mode", 1.0);
         }
     }
     if actions.triggered("brush.square", &ctx) {
@@ -4177,6 +4670,106 @@ fn select_all(state: &mut ModelerState) {
     }
 }
 
+/// Select an edge or face loop based on current selection
+fn select_loop(state: &mut ModelerState) {
+    use std::collections::HashSet;
+
+    let mesh = state.mesh();
+    let selection = state.selection.clone();
+
+    match selection {
+        super::state::ModelerSelection::Vertices(verts) => {
+            // If exactly 2 vertices selected, treat as an edge and select edge loop
+            if verts.len() == 2 {
+                let v0 = verts[0];
+                let v1 = verts[1];
+
+                // Check if these form an edge (are adjacent in some face)
+                let is_edge = mesh.faces.iter().any(|face| {
+                    let fv = &face.vertices;
+                    let n = fv.len();
+                    for i in 0..n {
+                        let a = fv[i];
+                        let b = fv[(i + 1) % n];
+                        if (a == v0 && b == v1) || (a == v1 && b == v0) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+
+                if is_edge {
+                    let loop_edges = mesh.select_edge_loop(v0, v1);
+                    let loop_verts = mesh.vertices_from_edge_loop(&loop_edges);
+                    let count = loop_verts.len();
+                    state.set_selection(super::state::ModelerSelection::Vertices(loop_verts));
+                    state.set_status(&format!("Selected edge loop ({} vertices)", count), 1.5);
+                } else {
+                    state.set_status("Selected vertices don't form an edge", 1.5);
+                }
+            } else if verts.len() == 1 {
+                // Single vertex: try to find a loop through connected edges
+                // For now, select all vertices connected by edges to this one
+                let v = verts[0];
+                let mut connected: HashSet<usize> = HashSet::new();
+                connected.insert(v);
+
+                for face in &mesh.faces {
+                    if face.vertices.contains(&v) {
+                        for &fv in &face.vertices {
+                            connected.insert(fv);
+                        }
+                    }
+                }
+
+                let connected_verts: Vec<usize> = connected.into_iter().collect();
+                let count = connected_verts.len();
+                state.set_selection(super::state::ModelerSelection::Vertices(connected_verts));
+                state.set_status(&format!("Selected {} connected vertices", count), 1.5);
+            } else {
+                state.set_status("Select 2 adjacent vertices to select edge loop", 1.5);
+            }
+        }
+
+        super::state::ModelerSelection::Edges(edges) => {
+            if edges.len() == 1 {
+                let (v0, v1) = edges[0];
+                let loop_edges = mesh.select_edge_loop(v0, v1);
+                let count = loop_edges.len();
+                state.set_selection(super::state::ModelerSelection::Edges(loop_edges));
+                state.set_status(&format!("Selected edge loop ({} edges)", count), 1.5);
+            } else {
+                state.set_status("Select a single edge to select edge loop", 1.5);
+            }
+        }
+
+        super::state::ModelerSelection::Faces(faces) => {
+            if faces.len() == 1 {
+                let face_idx = faces[0];
+                let face = &mesh.faces[face_idx];
+
+                // For face loop, we need a direction. Use first edge of the face.
+                if face.vertices.len() >= 2 {
+                    let v0 = face.vertices[0];
+                    let v1 = face.vertices[1];
+                    let loop_faces = mesh.select_face_loop(face_idx, v0, v1);
+                    let count = loop_faces.len();
+                    state.set_selection(super::state::ModelerSelection::Faces(loop_faces));
+                    state.set_status(&format!("Selected face loop ({} faces)", count), 1.5);
+                } else {
+                    state.set_status("Face has no edges", 1.5);
+                }
+            } else {
+                state.set_status("Select a single face to select face loop", 1.5);
+            }
+        }
+
+        super::state::ModelerSelection::None | super::state::ModelerSelection::Mesh => {
+            state.set_status("No selection for loop select", 1.0);
+        }
+    }
+}
+
 /// Delete the current selection (faces, edges, or vertices)
 fn delete_selection(state: &mut ModelerState) {
     // Clone selection to avoid borrow issues
@@ -4330,6 +4923,141 @@ fn delete_selection(state: &mut ModelerState) {
         _ => {
             state.set_status("Nothing selected to delete", 1.0);
             return;
+        }
+    }
+
+    // Check if mesh is now empty and remove the object if so
+    if let Some(idx) = state.project.selected_object {
+        let is_empty = state.project.objects.get(idx)
+            .map(|o| o.mesh.faces.is_empty())
+            .unwrap_or(false);
+
+        if is_empty {
+            let name = state.project.objects.get(idx)
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+
+            state.project.objects.remove(idx);
+
+            // Update selected_object to point to a valid object
+            if state.project.objects.is_empty() {
+                state.project.selected_object = None;
+            } else if idx >= state.project.objects.len() {
+                // Select the last object if we removed the last one
+                state.project.selected_object = Some(state.project.objects.len() - 1);
+            }
+            // If idx is still valid, keep it (now points to the next object)
+
+            state.set_status(&format!("Deleted object '{}'", name), 1.5);
+        }
+    }
+}
+
+/// Copy current selection to clipboard
+fn copy_selection(state: &mut ModelerState) {
+    let selection = state.selection.clone();
+    let mesh = state.mesh().clone();
+
+    match selection {
+        super::state::ModelerSelection::Faces(face_indices) => {
+            if face_indices.is_empty() {
+                state.set_status("No faces selected to copy", 1.0);
+                return;
+            }
+            state.clipboard.copy_faces(&mesh, &face_indices);
+            state.set_status(&format!("Copied {} face(s)", face_indices.len()), 1.0);
+        }
+        super::state::ModelerSelection::Vertices(_) |
+        super::state::ModelerSelection::Edges(_) => {
+            // For vertices/edges, copy the entire mesh for now
+            // Could be improved to copy just the affected geometry
+            state.clipboard.copy_mesh(&mesh);
+            state.set_status("Copied mesh", 1.0);
+        }
+        _ => {
+            // No selection - copy entire mesh
+            state.clipboard.copy_mesh(&mesh);
+            state.set_status("Copied entire mesh", 1.0);
+        }
+    }
+}
+
+/// Paste clipboard contents as a new object
+fn paste_clipboard(state: &mut ModelerState) {
+    if !state.clipboard.has_content() {
+        state.set_status("Clipboard empty", 1.0);
+        return;
+    }
+
+    let clipboard_mesh = state.clipboard.mesh.clone().unwrap();
+    let clipboard_center = state.clipboard.center;
+
+    state.push_undo("Paste");
+
+    // Create new mesh offset to a point in front of the camera
+    let mut new_mesh = clipboard_mesh;
+    let camera_pos = state.camera.position;
+    let camera_forward = state.camera.basis_z;
+    let paste_target = camera_pos + camera_forward * 500.0; // 500 units in front
+    let offset = paste_target - clipboard_center;
+
+    for vert in &mut new_mesh.vertices {
+        vert.pos.x += offset.x;
+        vert.pos.y += offset.y;
+        vert.pos.z += offset.z;
+    }
+
+    let name = state.generate_unique_object_name("Pasted");
+    let obj = MeshObject::with_mesh(&name, new_mesh);
+    state.add_object(obj);
+    state.set_status("Pasted as new object", 1.0);
+}
+
+/// Duplicate selection (copy + paste in one operation)
+fn duplicate_selection(state: &mut ModelerState) {
+    let selection = state.selection.clone();
+    let mesh = state.mesh().clone();
+
+    match selection {
+        super::state::ModelerSelection::Faces(face_indices) => {
+            if face_indices.is_empty() {
+                state.set_status("No faces selected to duplicate", 1.0);
+                return;
+            }
+            state.push_undo("Duplicate");
+
+            // Copy faces to clipboard and paste immediately
+            state.clipboard.copy_faces(&mesh, &face_indices);
+            let clipboard_mesh = state.clipboard.mesh.clone().unwrap();
+
+            // Offset slightly so duplicate is visible
+            let mut new_mesh = clipboard_mesh;
+            for vert in &mut new_mesh.vertices {
+                vert.pos.x += 100.0;
+                vert.pos.z += 100.0;
+            }
+
+            let name = state.generate_unique_object_name("Duplicate");
+            let obj = MeshObject::with_mesh(&name, new_mesh);
+            state.add_object(obj);
+            state.set_status(&format!("Duplicated {} face(s)", face_indices.len()), 1.0);
+        }
+        _ => {
+            // Duplicate entire mesh
+            state.push_undo("Duplicate mesh");
+            state.clipboard.copy_mesh(&mesh);
+            let clipboard_mesh = state.clipboard.mesh.clone().unwrap();
+
+            let mut new_mesh = clipboard_mesh;
+            for vert in &mut new_mesh.vertices {
+                vert.pos.x += 100.0;
+                vert.pos.z += 100.0;
+            }
+
+            let name = state.generate_unique_object_name("Duplicate");
+            let obj = MeshObject::with_mesh(&name, new_mesh);
+            state.add_object(obj);
+            state.set_status("Duplicated mesh", 1.0);
         }
     }
 }
@@ -4498,29 +5226,47 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     if let Some(prim) = clicked_primitive {
         state.push_undo(&format!("Add {}", prim.label()));
         let size = 512.0; // Reasonable size for new primitives (half of default cube)
-        let new_mesh = prim.create(size);
-        if let Some(mesh) = state.mesh_mut() {
-            mesh.merge(&new_mesh, menu.world_pos);
+        let mut new_mesh = prim.create(size);
+
+        // Offset mesh vertices to the clicked world position
+        for vert in &mut new_mesh.vertices {
+            vert.pos.x += menu.world_pos.x;
+            vert.pos.y += menu.world_pos.y;
+            vert.pos.z += menu.world_pos.z;
         }
-        state.dirty = true;
-        state.set_status(&format!("Added {}", prim.label()), 1.0);
+
+        // Create new object with unique name
+        let base_name = prim.label().split_whitespace().next().unwrap_or("Object");
+        let name = state.generate_unique_object_name(base_name);
+        let obj = MeshObject::with_mesh(&name, new_mesh);
+        state.add_object(obj);
+        state.set_status(&format!("Added {} as new object", prim.label()), 1.0);
         state.context_menu = None;
     }
 
     if clone_clicked {
-        state.push_undo("Clone mesh");
-        // Clone entire mesh at offset
+        state.push_undo("Clone object");
+        // Clone entire object at offset as a new object
         let offset = Vec3::new(
             state.snap_settings.grid_size * 2.0,
             0.0,
             state.snap_settings.grid_size * 2.0,
         );
-        let clone = state.mesh().clone();
-        if let Some(mesh) = state.mesh_mut() {
-            mesh.merge(&clone, offset);
+        let mut clone = state.mesh().clone();
+        // Apply offset to cloned mesh
+        for vert in &mut clone.vertices {
+            vert.pos.x += offset.x;
+            vert.pos.y += offset.y;
+            vert.pos.z += offset.z;
         }
-        state.dirty = true;
-        state.set_status("Cloned mesh", 1.0);
+        // Generate unique name based on source object
+        let source_name = state.selected_object()
+            .map(|o| o.name.as_str())
+            .unwrap_or("Object");
+        let name = state.generate_unique_object_name(source_name);
+        let obj = MeshObject::with_mesh(&name, clone);
+        state.add_object(obj);
+        state.set_status("Cloned as new object", 1.0);
         state.context_menu = None;
     }
 
@@ -4538,6 +5284,167 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     // Close if clicked outside menu
     if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
         state.context_menu = None;
+    }
+}
+
+/// Draw rename and delete dialogs for objects
+fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font: Option<&Font>) {
+    // Handle rename dialog
+    if let Some((idx, ref current_name)) = state.rename_dialog.clone() {
+        let dialog_w = 280.0;
+        let dialog_h = 120.0;
+        let dialog_x = (screen_width() - dialog_w) / 2.0;
+        let dialog_y = (screen_height() - dialog_h) / 2.0;
+        let dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+        // Background
+        draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(80, 80, 90, 255));
+
+        // Title
+        draw_text("Rename Object", dialog_x + 12.0, dialog_y + 22.0, 16.0, WHITE);
+
+        // Text input field
+        let input_rect = Rect::new(dialog_x + 12.0, dialog_y + 40.0, dialog_w - 24.0, 28.0);
+        draw_rectangle(input_rect.x, input_rect.y, input_rect.w, input_rect.h, Color::from_rgba(30, 30, 35, 255));
+        draw_rectangle_lines(input_rect.x, input_rect.y, input_rect.w, input_rect.h, 1.0, ACCENT_COLOR);
+        draw_text(&current_name, input_rect.x + 8.0, input_rect.y + 19.0, 14.0, TEXT_COLOR);
+
+        // Handle text input
+        let mut new_name = current_name.clone();
+        // Check for character input
+        if let Some(ch) = get_char_pressed() {
+            if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.' || ch == ' ' {
+                new_name.push(ch);
+            }
+        }
+        // Handle backspace
+        if is_key_pressed(KeyCode::Backspace) && !new_name.is_empty() {
+            new_name.pop();
+        }
+        // Update the dialog state with new name
+        if new_name != *current_name {
+            state.rename_dialog = Some((idx, new_name));
+        }
+
+        // Buttons
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = dialog_y + dialog_h - btn_h - 12.0;
+
+        // Cancel button
+        let cancel_rect = Rect::new(dialog_x + dialog_w - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, TEXT_COLOR);
+
+        // Confirm button
+        let confirm_rect = Rect::new(dialog_x + dialog_w - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let confirm_hover = ctx.mouse.inside(&confirm_rect);
+        draw_rectangle(confirm_rect.x, confirm_rect.y, confirm_rect.w, confirm_rect.h,
+            if confirm_hover { Color::from_rgba(60, 100, 140, 255) } else { ACCENT_COLOR });
+        draw_text("Rename", confirm_rect.x + 14.0, confirm_rect.y + 18.0, 14.0, WHITE);
+
+        // Handle button clicks (use clicked() for buttons, not left_pressed)
+        if ctx.mouse.clicked(&cancel_rect) {
+            state.rename_dialog = None;
+        } else if ctx.mouse.clicked(&confirm_rect) {
+            if let Some((idx, name)) = &state.rename_dialog {
+                if !name.is_empty() && *idx < state.project.objects.len() {
+                    state.project.objects[*idx].name = name.clone();
+                    state.set_status(&format!("Renamed to '{}'", name), 1.0);
+                }
+            }
+            state.rename_dialog = None;
+        }
+
+        // Handle Enter/Escape keys
+        if is_key_pressed(KeyCode::Escape) {
+            state.rename_dialog = None;
+        } else if is_key_pressed(KeyCode::Enter) {
+            if let Some((idx, name)) = &state.rename_dialog {
+                if !name.is_empty() && *idx < state.project.objects.len() {
+                    state.project.objects[*idx].name = name.clone();
+                    state.set_status(&format!("Renamed to '{}'", name), 1.0);
+                }
+            }
+            state.rename_dialog = None;
+        }
+    }
+
+    // Handle delete confirmation dialog
+    if let Some(idx) = state.delete_dialog {
+        let obj_name = state.project.objects.get(idx)
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
+
+        let dialog_w = 300.0;
+        let dialog_h = 120.0;
+        let dialog_x = (screen_width() - dialog_w) / 2.0;
+        let dialog_y = (screen_height() - dialog_h) / 2.0;
+        let dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+        // Background
+        draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(100, 60, 60, 255));
+
+        // Warning icon and title
+        let icon_rect = Rect::new(dialog_x + 12.0, dialog_y + 12.0, 20.0, 20.0);
+        draw_icon_centered(icon_font, icon::TRASH, &icon_rect, 16.0, Color::from_rgba(255, 100, 100, 255));
+        draw_text("Delete Object?", dialog_x + 36.0, dialog_y + 26.0, 16.0, WHITE);
+
+        // Message
+        draw_text(&format!("Delete '{}'?", obj_name), dialog_x + 12.0, dialog_y + 55.0, 14.0, TEXT_COLOR);
+        draw_text("This cannot be undone.", dialog_x + 12.0, dialog_y + 72.0, 12.0, TEXT_DIM);
+
+        // Buttons
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = dialog_y + dialog_h - btn_h - 12.0;
+
+        // Cancel button
+        let cancel_rect = Rect::new(dialog_x + dialog_w - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, TEXT_COLOR);
+
+        // Delete button (red)
+        let delete_rect = Rect::new(dialog_x + dialog_w - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let delete_hover = ctx.mouse.inside(&delete_rect);
+        draw_rectangle(delete_rect.x, delete_rect.y, delete_rect.w, delete_rect.h,
+            if delete_hover { Color::from_rgba(180, 60, 60, 255) } else { Color::from_rgba(140, 50, 50, 255) });
+        draw_text("Delete", delete_rect.x + 18.0, delete_rect.y + 18.0, 14.0, WHITE);
+
+        // Handle button clicks (use clicked() for buttons, not left_pressed)
+        if ctx.mouse.clicked(&cancel_rect) {
+            state.delete_dialog = None;
+        } else if ctx.mouse.clicked(&delete_rect) {
+            // Delete the object
+            if idx < state.project.objects.len() {
+                state.project.objects.remove(idx);
+                // Update selected_object
+                if state.project.objects.is_empty() {
+                    state.project.selected_object = None;
+                } else if let Some(sel) = state.project.selected_object {
+                    if sel >= state.project.objects.len() {
+                        state.project.selected_object = Some(state.project.objects.len() - 1);
+                    } else if sel > idx {
+                        state.project.selected_object = Some(sel - 1);
+                    }
+                }
+                state.selection.clear();
+                state.dirty = true;
+                state.set_status(&format!("Deleted '{}'", obj_name), 1.0);
+            }
+            state.delete_dialog = None;
+        }
+
+        // Handle Escape key
+        if is_key_pressed(KeyCode::Escape) {
+            state.delete_dialog = None;
+        }
     }
 }
 

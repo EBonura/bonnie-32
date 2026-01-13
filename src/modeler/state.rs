@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15};
-use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
-use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, TextureAtlas};
+use crate::texture::{TextureLibrary, TextureEditorState};
+use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, IndexedAtlas, EditFace};
 use super::model::Animation;
 use super::drag::DragManager;
 use super::tools::ModelerToolBox;
@@ -66,6 +66,14 @@ impl ViewportId {
     }
 }
 
+/// Which panel has keyboard focus (for routing shortcuts)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivePanel {
+    #[default]
+    Viewport,       // One of the 4 viewports (WASD camera, selection shortcuts)
+    TextureEditor,  // Texture/UV editor panel
+}
+
 /// Camera state for an orthographic viewport
 #[derive(Debug, Clone)]
 pub struct OrthoCamera {
@@ -81,32 +89,6 @@ impl Default for OrthoCamera {
             // Scale: 1024 units = 1 meter
             zoom: 0.1, // Zoomed out more for larger scale
             center: Vec2::new(0.0, 1024.0), // Centered at 1 meter height
-        }
-    }
-}
-
-/// Build mode vs Texture mode (V key to toggle, like PicoCAD)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ViewMode {
-    /// Edit geometry (vertices, faces, extrude)
-    #[default]
-    Build,
-    /// Edit UVs and textures
-    Texture,
-}
-
-impl ViewMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ViewMode::Build => "Build",
-            ViewMode::Texture => "Texture",
-        }
-    }
-
-    pub fn toggle(&self) -> Self {
-        match self {
-            ViewMode::Build => ViewMode::Texture,
-            ViewMode::Texture => ViewMode::Build,
         }
     }
 }
@@ -476,8 +458,8 @@ pub enum BrushType {
     Fill,
 }
 
-// Note: AtlasEditMode removed - replaced with collapsible sections
-// (uv_section_expanded, paint_section_expanded in ModelerState)
+// Note: AtlasEditMode removed - replaced with collapsible paint section
+// and tab-based mode switching in TextureEditorState
 
 /// Axis constraint for transforms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,7 +531,7 @@ impl Default for SnapSettings {
     fn default() -> Self {
         Self {
             enabled: true,  // Enabled by default
-            grid_size: 5.0,  // 5 unit grid by default
+            grid_size: 128.0,  // 128 units = 1/8 of SECTOR_SIZE (1024)
         }
     }
 }
@@ -575,6 +557,190 @@ impl SnapSettings {
         } else {
             v
         }
+    }
+}
+
+/// Mirror editing settings
+/// When enabled, only one side of the mesh is editable; the other side is auto-generated.
+#[derive(Debug, Clone, Copy)]
+pub struct MirrorSettings {
+    pub enabled: bool,
+    pub axis: Axis,
+    /// Vertices within this distance of the mirror plane are considered "center" vertices
+    /// and will be constrained to the plane during editing
+    pub threshold: f32,
+}
+
+impl Default for MirrorSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            axis: Axis::X,
+            threshold: 1.0,  // 1 world unit
+        }
+    }
+}
+
+impl MirrorSettings {
+    /// Check if a position is on the editable side (positive side of the axis)
+    pub fn is_editable_side(&self, pos: Vec3) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        match self.axis {
+            Axis::X => pos.x >= -self.threshold,
+            Axis::Y => pos.y >= -self.threshold,
+            Axis::Z => pos.z >= -self.threshold,
+        }
+    }
+
+    /// Check if a position is on the mirror plane (center vertex)
+    pub fn is_on_plane(&self, pos: Vec3) -> bool {
+        match self.axis {
+            Axis::X => pos.x.abs() <= self.threshold,
+            Axis::Y => pos.y.abs() <= self.threshold,
+            Axis::Z => pos.z.abs() <= self.threshold,
+        }
+    }
+
+    /// Constrain a position to the mirror plane if it's a center vertex
+    pub fn constrain_to_plane(&self, pos: Vec3) -> Vec3 {
+        if !self.enabled {
+            return pos;
+        }
+        if self.is_on_plane(pos) {
+            match self.axis {
+                Axis::X => Vec3::new(0.0, pos.y, pos.z),
+                Axis::Y => Vec3::new(pos.x, 0.0, pos.z),
+                Axis::Z => Vec3::new(pos.x, pos.y, 0.0),
+            }
+        } else {
+            pos
+        }
+    }
+
+    /// Get the mirrored position across the axis
+    pub fn mirror_position(&self, pos: Vec3) -> Vec3 {
+        match self.axis {
+            Axis::X => Vec3::new(-pos.x, pos.y, pos.z),
+            Axis::Y => Vec3::new(pos.x, -pos.y, pos.z),
+            Axis::Z => Vec3::new(pos.x, pos.y, -pos.z),
+        }
+    }
+
+    /// Get the mirrored normal across the axis
+    pub fn mirror_normal(&self, normal: Vec3) -> Vec3 {
+        match self.axis {
+            Axis::X => Vec3::new(-normal.x, normal.y, normal.z),
+            Axis::Y => Vec3::new(normal.x, -normal.y, normal.z),
+            Axis::Z => Vec3::new(normal.x, normal.y, -normal.z),
+        }
+    }
+}
+
+/// Clipboard for copy/paste operations
+/// Stores geometry that can be pasted as a new object
+#[derive(Clone, Debug, Default)]
+pub struct Clipboard {
+    /// Copied mesh geometry (centered at origin for easier placement)
+    pub mesh: Option<EditableMesh>,
+    /// Original center position (for relative paste)
+    pub center: Vec3,
+}
+
+impl Clipboard {
+    /// Copy selected faces from a mesh
+    pub fn copy_faces(&mut self, mesh: &EditableMesh, face_indices: &[usize]) {
+        use std::collections::{HashMap, HashSet};
+
+        if face_indices.is_empty() {
+            self.mesh = None;
+            return;
+        }
+
+        // Collect all vertices used by selected faces
+        let mut used_vertices: HashSet<usize> = HashSet::new();
+        for &fi in face_indices {
+            if let Some(face) = mesh.faces.get(fi) {
+                for &vi in &face.vertices {
+                    used_vertices.insert(vi);
+                }
+            }
+        }
+
+        // Build old->new vertex index mapping
+        let mut vertex_map: HashMap<usize, usize> = HashMap::new();
+        let mut new_vertices: Vec<crate::rasterizer::Vertex> = Vec::new();
+        let mut sorted_verts: Vec<usize> = used_vertices.into_iter().collect();
+        sorted_verts.sort();
+
+        for old_idx in sorted_verts {
+            if let Some(vert) = mesh.vertices.get(old_idx) {
+                vertex_map.insert(old_idx, new_vertices.len());
+                new_vertices.push(vert.clone());
+            }
+        }
+
+        // Copy faces with remapped indices
+        let mut new_faces: Vec<EditFace> = Vec::new();
+        for &fi in face_indices {
+            if let Some(face) = mesh.faces.get(fi) {
+                let new_verts: Vec<usize> = face.vertices.iter()
+                    .filter_map(|&vi| vertex_map.get(&vi).copied())
+                    .collect();
+                if new_verts.len() == face.vertices.len() {
+                    new_faces.push(EditFace {
+                        vertices: new_verts,
+                        texture_id: face.texture_id,
+                        black_transparent: face.black_transparent,
+                        blend_mode: face.blend_mode,
+                    });
+                }
+            }
+        }
+
+        // Calculate center for the copied geometry
+        let mut center = Vec3::ZERO;
+        if !new_vertices.is_empty() {
+            for v in &new_vertices {
+                center = center + v.pos;
+            }
+            center = center * (1.0 / new_vertices.len() as f32);
+        }
+
+        // Center the geometry at origin
+        for v in &mut new_vertices {
+            v.pos = v.pos - center;
+        }
+
+        self.center = center;
+        self.mesh = Some(EditableMesh::from_parts(new_vertices, new_faces));
+    }
+
+    /// Copy entire mesh (for whole object copy)
+    pub fn copy_mesh(&mut self, mesh: &EditableMesh) {
+        // Calculate center
+        let mut center = Vec3::ZERO;
+        if !mesh.vertices.is_empty() {
+            for v in &mesh.vertices {
+                center = center + v.pos;
+            }
+            center = center * (1.0 / mesh.vertices.len() as f32);
+        }
+
+        // Clone and center at origin
+        let mut clone = mesh.clone();
+        for v in &mut clone.vertices {
+            v.pos = v.pos - center;
+        }
+
+        self.center = center;
+        self.mesh = Some(clone);
+    }
+
+    /// Check if clipboard has content
+    pub fn has_content(&self) -> bool {
+        self.mesh.is_some()
     }
 }
 
@@ -604,8 +770,8 @@ pub struct ModelerState {
     pub orbit_elevation: f32,    // Vertical angle in radians (orbit mode)
 
     // PicoCAD-style 4-panel viewport system
-    pub view_mode: ViewMode,           // Build vs Texture (V to toggle)
-    pub active_viewport: ViewportId,   // Which viewport has focus
+    pub active_panel: ActivePanel,     // Which panel has keyboard focus
+    pub active_viewport: ViewportId,   // Which viewport has focus (within viewport panel)
     pub fullscreen_viewport: Option<ViewportId>,  // Space to toggle fullscreen
     pub ortho_top: OrthoCamera,        // Top view camera (XZ plane)
     pub ortho_front: OrthoCamera,      // Front view camera (XY plane)
@@ -614,19 +780,8 @@ pub struct ModelerState {
     // Resizable panel splits (0.0-1.0 ratios)
     pub viewport_h_split: f32,         // Horizontal divider (left/right, default 0.5)
     pub viewport_v_split: f32,         // Vertical divider (top/bottom, default 0.5)
-
-    // UV Editor state
-    pub uv_zoom: f32,
-    pub uv_offset: Vec2,
-    pub uv_selection: Vec<usize>,
-    pub uv_drag_active: bool,
-    pub uv_drag_start: (f32, f32),
-    pub uv_drag_start_uvs: Vec<(usize, usize, Vec2)>, // (object_idx, vertex_idx, original_uv)
-    pub uv_box_select_start: Option<(f32, f32)>, // Start of box selection in screen coords
-    pub uv_modal_transform: UvModalTransform, // G/S/R modal transforms for UV
-    pub uv_modal_start_mouse: (f32, f32), // Mouse position when modal started
-    pub uv_modal_start_uvs: Vec<(usize, crate::rasterizer::Vec2)>, // (vertex_idx, original_uv)
-    pub uv_modal_center: crate::rasterizer::Vec2, // Center of UV selection for rotation/scale
+    pub dragging_h_divider: bool,      // True while dragging horizontal divider
+    pub dragging_v_divider: bool,      // True while dragging vertical divider
 
     // Paint state
     pub paint_color: Color,
@@ -638,8 +793,7 @@ pub struct ModelerState {
     pub brush_size_slider_active: bool, // True while dragging brush size slider
     pub paint_stroke_active: bool, // True while painting (for undo grouping)
 
-    // Collapsible panel sections (replaces AtlasEditMode)
-    pub uv_section_expanded: bool,    // UV editing section
+    // Collapsible panel sections
     pub paint_section_expanded: bool, // Paint/texture editor section
     pub paint_texture_scroll: f32,    // Scroll position in paint texture browser
 
@@ -675,9 +829,24 @@ pub struct ModelerState {
     // Snap/quantization settings
     pub snap_settings: SnapSettings,
 
+    // Mirror editing settings
+    pub mirror_settings: MirrorSettings,
+
+    /// Clipboard for copy/paste operations
+    pub clipboard: Clipboard,
+
+    /// X-ray mode: see and select through geometry (backface selection enabled)
+    pub xray_mode: bool,
+
     // Viewport mouse state
     pub viewport_last_mouse: (f32, f32),
     pub viewport_mouse_captured: bool,
+    /// Track if modifier was held last frame (for macOS stuck key workaround)
+    /// When a modifier is released, we can't trust WASD state due to macOS not sending key-up events
+    pub modifier_was_held: bool,
+    /// Track which movement keys we trust (macOS workaround)
+    /// When modifier is released, keys become untrusted until freshly pressed
+    pub trusted_movement_keys: [bool; 6], // W, A, S, D, Q, E
     /// Which ortho viewport is currently panning (if any)
     pub ortho_pan_viewport: Option<ViewportId>,
     /// Last mouse position for ortho panning (separate from perspective view)
@@ -745,6 +914,12 @@ pub struct ModelerState {
 
     // Thumbnail size for paint texture grid (32, 48, 64, 96)
     pub paint_thumb_size: f32,
+
+    // Object rename dialog state (object index, current text input)
+    pub rename_dialog: Option<(usize, String)>,
+
+    // Object delete confirmation dialog (object index)
+    pub delete_dialog: Option<usize>,
 }
 
 /// Context menu for right-click actions
@@ -772,7 +947,7 @@ pub enum UndoEvent {
     Mesh {
         object_index: Option<usize>,
         mesh: EditableMesh,
-        atlas: Option<TextureAtlas>,
+        atlas: Option<IndexedAtlas>,
         description: String,
     },
     /// Selection change only
@@ -801,8 +976,59 @@ impl ModelerState {
         camera.rotation_y = 0.8;  // Looking toward origin
         camera.update_basis();
 
+        // Load user textures first so we can apply one to the default cube
+        let user_textures = {
+            let mut lib = TextureLibrary::new();
+            if let Err(e) = lib.discover() {
+                eprintln!("Failed to discover user textures: {}", e);
+            }
+            lib
+        };
+
         // Project is the single source of truth for mesh data
-        let project = MeshProject::default();
+        let mut project = MeshProject::default();
+
+        // Apply first user texture to the default cube and project atlas template
+        let (editing_texture, selected_user_texture) = if let Some((name, tex)) = user_textures.iter().next() {
+            // Copy user texture to project atlas (template for new objects)
+            project.atlas.width = tex.width;
+            project.atlas.height = tex.height;
+            project.atlas.depth = tex.depth;
+            project.atlas.indices = tex.indices.clone();
+            // Update the default CLUT with the texture's palette
+            if let Some(clut) = project.clut_pool.get_mut(project.atlas.default_clut) {
+                clut.colors = tex.palette.clone();
+                clut.depth = tex.depth;
+            }
+            // Also copy to the first object's atlas
+            if let Some(obj) = project.objects.get_mut(0) {
+                obj.atlas.width = tex.width;
+                obj.atlas.height = tex.height;
+                obj.atlas.depth = tex.depth;
+                obj.atlas.indices = tex.indices.clone();
+                obj.atlas.default_clut = project.atlas.default_clut;
+            }
+            (Some(tex.clone()), Some(name.to_string()))
+        } else {
+            // No user textures - create a grey checkerboard fallback
+            let grey_light = 8;  // Light grey index
+            let grey_dark = 7;   // Dark grey index
+            let size = project.atlas.width.min(project.atlas.height);
+            let check_size = size / 8; // 8x8 checker pattern
+            for y in 0..project.atlas.height {
+                for x in 0..project.atlas.width {
+                    let cx = x / check_size.max(1);
+                    let cy = y / check_size.max(1);
+                    let idx = if (cx + cy) % 2 == 0 { grey_light } else { grey_dark };
+                    project.atlas.indices[y * project.atlas.width + x] = idx;
+                }
+            }
+            // Also set the first object's atlas
+            if let Some(obj) = project.objects.get_mut(0) {
+                obj.atlas = project.atlas.clone();
+            }
+            (None, None)
+        };
 
         Self {
             interaction_mode: InteractionMode::Edit,
@@ -824,7 +1050,7 @@ impl ModelerState {
             orbit_elevation,
 
             // PicoCAD-style viewports
-            view_mode: ViewMode::Build,
+            active_panel: ActivePanel::Viewport,
             active_viewport: ViewportId::Perspective,
             fullscreen_viewport: None,
             ortho_top: OrthoCamera::default(),
@@ -834,18 +1060,8 @@ impl ModelerState {
             // Resizable panels (default 50/50 splits)
             viewport_h_split: 0.5,
             viewport_v_split: 0.5,
-
-            uv_zoom: 1.0,
-            uv_offset: Vec2::default(),
-            uv_selection: Vec::new(),
-            uv_drag_active: false,
-            uv_drag_start: (0.0, 0.0),
-            uv_drag_start_uvs: Vec::new(),
-            uv_box_select_start: None,
-            uv_modal_transform: UvModalTransform::None,
-            uv_modal_start_mouse: (0.0, 0.0),
-            uv_modal_start_uvs: Vec::new(),
-            uv_modal_center: Vec2::default(),
+            dragging_h_divider: false,
+            dragging_v_divider: false,
 
             paint_color: Color::WHITE,
             paint_blend_mode: BlendMode::Opaque,
@@ -856,9 +1072,8 @@ impl ModelerState {
             brush_size_slider_active: false,
             paint_stroke_active: false,
 
-            // Collapsible sections (both can be open)
-            uv_section_expanded: true,
-            paint_section_expanded: false,
+            // Collapsible sections
+            paint_section_expanded: true,
             paint_texture_scroll: 0.0,
 
             // CLUT editing defaults
@@ -887,9 +1102,14 @@ impl ModelerState {
             max_undo_levels: 50,
 
             snap_settings: SnapSettings::default(),
+            mirror_settings: MirrorSettings::default(),
+            clipboard: Clipboard::default(),
+            xray_mode: false,
 
             viewport_last_mouse: (0.0, 0.0),
             viewport_mouse_captured: false,
+            modifier_was_held: false,
+            trusted_movement_keys: [true; 6], // All trusted initially
             ortho_pan_viewport: None,
             ortho_last_mouse: (0.0, 0.0),
 
@@ -919,18 +1139,15 @@ impl ModelerState {
             tool_box: ModelerToolBox::new(),
 
             texture_editor: TextureEditorState::new(),
-            user_textures: {
-                let mut lib = TextureLibrary::new();
-                if let Err(e) = lib.discover() {
-                    eprintln!("Failed to discover user textures: {}", e);
-                }
-                lib
-            },
+            user_textures,
 
             editing_indexed_atlas: false,
-            editing_texture: None,
-            selected_user_texture: None,
+            editing_texture,
+            selected_user_texture,
             paint_thumb_size: 64.0,  // Default thumbnail size
+
+            rename_dialog: None,
+            delete_dialog: None,
         }
     }
 
@@ -975,12 +1192,6 @@ impl ModelerState {
     // ========================================================================
     // PicoCAD-style viewport helpers
     // ========================================================================
-
-    /// Toggle between Build and Texture view mode (V key)
-    pub fn toggle_view_mode(&mut self) {
-        self.view_mode = self.view_mode.toggle();
-        self.set_status(&format!("{} Mode", self.view_mode.label()), 1.0);
-    }
 
     /// Toggle fullscreen for the active viewport (Space key)
     pub fn toggle_fullscreen_viewport(&mut self) {
@@ -1094,14 +1305,38 @@ impl ModelerState {
     // PicoCAD-style Project Helpers
     // ========================================================================
 
-    /// Get the texture atlas
-    pub fn atlas(&self) -> &TextureAtlas {
+    /// Get the indexed texture atlas for the selected object
+    /// Falls back to project atlas if no object is selected
+    pub fn atlas(&self) -> &IndexedAtlas {
+        if let Some(idx) = self.project.selected_object {
+            if let Some(obj) = self.project.objects.get(idx) {
+                return &obj.atlas;
+            }
+        }
         &self.project.atlas
     }
 
-    /// Get mutable texture atlas
-    pub fn atlas_mut(&mut self) -> &mut TextureAtlas {
+    /// Get mutable indexed texture atlas for the selected object
+    /// Falls back to project atlas if no object is selected
+    pub fn atlas_mut(&mut self) -> &mut IndexedAtlas {
+        if let Some(idx) = self.project.selected_object {
+            if let Some(obj) = self.project.objects.get_mut(idx) {
+                eprintln!("[DEBUG atlas_mut] Returning atlas for object {} ('{}')", idx, obj.name);
+                return &mut obj.atlas;
+            }
+        }
+        eprintln!("[DEBUG atlas_mut] Returning PROJECT atlas (no object selected)");
         &mut self.project.atlas
+    }
+
+    /// Get the indexed texture atlas for a specific object
+    pub fn object_atlas(&self, idx: usize) -> Option<&IndexedAtlas> {
+        self.project.objects.get(idx).map(|o| &o.atlas)
+    }
+
+    /// Get mutable indexed texture atlas for a specific object
+    pub fn object_atlas_mut(&mut self, idx: usize) -> Option<&mut IndexedAtlas> {
+        self.project.objects.get_mut(idx).map(|o| &mut o.atlas)
     }
 
     /// Get all visible mesh objects
@@ -1141,6 +1376,24 @@ impl ModelerState {
         self.project.selected_object = Some(idx);
         self.dirty = true;
         idx
+    }
+
+    /// Generate a unique object name with 2-digit suffix (e.g., "Cube.00", "Cube.01")
+    pub fn generate_unique_object_name(&self, base_name: &str) -> String {
+        let existing_names: std::collections::HashSet<&str> = self.project.objects
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect();
+
+        // Always use 2-digit suffix, starting from .00
+        for i in 0..100 {
+            let candidate = format!("{}.{:02}", base_name, i);
+            if !existing_names.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        // Fallback for 100+ objects (unlikely)
+        format!("{}.{}", base_name, self.project.objects.len())
     }
 
     /// Create a new project (replaces current)

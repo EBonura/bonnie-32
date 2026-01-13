@@ -176,12 +176,14 @@ impl DragManager {
         axis: Option<Axis>,
         vertex_indices: Vec<usize>,
         initial_positions: Vec<(usize, Vec3)>,
+        center_screen: (f32, f32),
     ) {
         let tracker = ScaleTracker::new(axis, center, vertex_indices, initial_positions);
         let config = tracker.create_config(center);
 
         self.active = ActiveDrag::Scale(tracker);
-        self.state = Some(DragState::new(center, Vec3::ZERO, initial_mouse));
+        // Use new_rotation constructor to get center_screen support for distance-based scaling
+        self.state = Some(DragState::new_rotation(center, 0.0, initial_mouse, center_screen));
         self.config = Some(config);
     }
 
@@ -264,9 +266,29 @@ impl DragManager {
             }
 
             ActiveDrag::Scale(tracker) => {
-                // Scale uses screen-space delta for now
-                let delta = state.mouse_delta();
-                let scale_factor = 1.0 + delta.0 * 0.01; // Horizontal drag = scale
+                // Scale uses signed projection along the initial click direction
+                // Drag in the direction you clicked = scale up
+                // Drag in the opposite direction = scale down
+                let initial_dx = state.initial_mouse.0 - state.center_screen.0;
+                let initial_dy = state.initial_mouse.1 - state.center_screen.1;
+                let initial_dist = (initial_dx * initial_dx + initial_dy * initial_dy).sqrt();
+
+                // Mouse movement from initial click position
+                let move_dx = state.current_mouse.0 - state.initial_mouse.0;
+                let move_dy = state.current_mouse.1 - state.initial_mouse.1;
+
+                // Project movement onto the initial direction (signed)
+                let signed_dist = if initial_dist > 0.1 {
+                    // Dot product with normalized initial direction
+                    (move_dx * initial_dx + move_dy * initial_dy) / initial_dist
+                } else {
+                    // Clicked very close to center, use horizontal movement
+                    move_dx
+                };
+
+                // Linear: each 200 pixels of movement = 100% scale change
+                let scale_factor = (1.0 + signed_dist * 0.005).max(0.01);
+
                 let new_positions = tracker.compute_new_positions(scale_factor);
                 DragUpdateResult::Scale {
                     status: DragStatus::Continue,
@@ -343,8 +365,21 @@ impl DragManager {
             }
             ActiveDrag::Scale(tracker) => {
                 let state = self.state.as_ref()?;
-                let delta = state.mouse_delta();
-                let factor = 1.0 + delta.0 * 0.01;
+                // Use same signed projection calculation as update
+                let initial_dx = state.initial_mouse.0 - state.center_screen.0;
+                let initial_dy = state.initial_mouse.1 - state.center_screen.1;
+                let initial_dist = (initial_dx * initial_dx + initial_dy * initial_dy).sqrt();
+
+                let move_dx = state.current_mouse.0 - state.initial_mouse.0;
+                let move_dy = state.current_mouse.1 - state.initial_mouse.1;
+
+                let signed_dist = if initial_dist > 0.1 {
+                    (move_dx * initial_dx + move_dy * initial_dy) / initial_dist
+                } else {
+                    move_dx
+                };
+
+                let factor = (1.0 + signed_dist * 0.005).max(0.01);
                 Some(DragEndResult::Scale {
                     factor,
                     final_positions: tracker.compute_new_positions(factor),

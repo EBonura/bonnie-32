@@ -280,6 +280,11 @@ pub fn draw_viewport_3d(
     let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let inside_viewport = ctx.mouse.inside(&rect);
 
+    // Set focus to viewport on click
+    if inside_viewport && ctx.mouse.left_pressed {
+        state.active_panel = super::state::ActivePanel::Viewport3D;
+    }
+
     // Pre-calculate viewport scaling (used multiple times)
     let fb_width = fb.width;
     let fb_height = fb.height;
@@ -5252,6 +5257,7 @@ pub fn draw_viewport_3d(
     if crate::ui::icon_button(ctx, btn_rect, crate::ui::icon::SQUARE_SQUARE, icon_font, "Center 3D camera on current room") {
         state.center_3d_on_current_room();
     }
+
 }
 
 /// Delete a single face from a sector, returns true if something was deleted
@@ -5825,10 +5831,12 @@ fn handle_camera_input(
     input: &InputState,
 ) -> bool {
     let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
     let delta = get_frame_time();
 
-    // Gamepad input
-    let left_stick = input.left_stick();
+    // Gamepad input (use gamepad_left_stick to avoid macOS stuck key issue from Cmd+A)
+    let left_stick = input.gamepad_left_stick();
     let right_stick = input.right_stick();
     let has_gamepad_input = left_stick.length() > 0.0 || right_stick.length() > 0.0
         || input.action_down(Action::FlyUp) || input.action_down(Action::FlyDown);
@@ -5859,28 +5867,75 @@ fn handle_camera_input(
 
             // Keyboard camera movement (WASD + Q/E) - only when viewport focused and not dragging
             // Hold Shift for faster movement
+            // Skip when Ctrl is held to avoid conflict with Ctrl+A select all
+            // WASD requires viewport focused (not just mouse position)
             let base_speed = 100.0; // Scaled for TRLE units (1024 per sector)
             let move_speed = if shift_held { base_speed * 4.0 } else { base_speed };
-            if (inside_viewport || state.viewport_mouse_captured || has_gamepad_input) && state.dragging_sector_vertices.is_empty() {
-                if is_key_down(KeyCode::W) {
+            let viewport_focused = state.active_panel == super::state::ActivePanel::Viewport3D;
+
+            // macOS workaround: When Cmd+key is released, macOS doesn't send key-up for the letter key.
+            // We track "trusted" state for each movement key:
+            // - When blocking modifier (Ctrl/Alt) is released, all keys become untrusted
+            // - Keys become trusted again when freshly pressed (is_key_pressed)
+            // - Keys become trusted when released (not in all_keys) - ready for next press
+            let alt_held = is_key_down(KeyCode::LeftAlt) || is_key_down(KeyCode::RightAlt);
+            let blocking_modifier = ctrl_held || alt_held;
+
+            let modifier_just_released = state.modifier_was_held && !blocking_modifier;
+            state.modifier_was_held = blocking_modifier;
+
+            let all_keys = get_keys_down();
+            let movement_keys = [KeyCode::W, KeyCode::A, KeyCode::S, KeyCode::D, KeyCode::Q, KeyCode::E];
+
+            // When modifier released, mark all movement keys as untrusted
+            if modifier_just_released {
+                state.trusted_movement_keys = [false; 6];
+            }
+
+            // Update trust status for each key
+            for (i, &key) in movement_keys.iter().enumerate() {
+                let key_in_all_keys = all_keys.contains(&key);
+                // If key is not in all_keys, it's been released - mark as trusted
+                if !key_in_all_keys {
+                    state.trusted_movement_keys[i] = true;
+                }
+                // If key was just pressed this frame, it's definitely trusted
+                if is_key_pressed(key) {
+                    state.trusted_movement_keys[i] = true;
+                }
+            }
+
+            // Only consider a key "down" if it's both in all_keys AND trusted
+            let w_down = all_keys.contains(&KeyCode::W) && state.trusted_movement_keys[0];
+            let a_down = all_keys.contains(&KeyCode::A) && state.trusted_movement_keys[1];
+            let s_down = all_keys.contains(&KeyCode::S) && state.trusted_movement_keys[2];
+            let d_down = all_keys.contains(&KeyCode::D) && state.trusted_movement_keys[3];
+            let q_down = all_keys.contains(&KeyCode::Q) && state.trusted_movement_keys[4];
+            let e_down = all_keys.contains(&KeyCode::E) && state.trusted_movement_keys[5];
+
+            if viewport_focused && state.dragging_sector_vertices.is_empty() && !ctrl_held {
+                if w_down {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_z * move_speed;
                 }
-                if is_key_down(KeyCode::S) {
+                if s_down {
                     state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_z * move_speed;
                 }
-                if is_key_down(KeyCode::A) {
+                if a_down {
                     state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_x * move_speed;
                 }
-                if is_key_down(KeyCode::D) {
+                if d_down {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_x * move_speed;
                 }
-                if is_key_down(KeyCode::Q) {
+                if q_down {
                     state.camera_3d.position = state.camera_3d.position - state.camera_3d.basis_y * move_speed;
                 }
-                if is_key_down(KeyCode::E) {
+                if e_down {
                     state.camera_3d.position = state.camera_3d.position + state.camera_3d.basis_y * move_speed;
                 }
+            }
 
+            // Gamepad movement (gamepad-only, keyboard WASD handled separately above)
+            if viewport_focused && has_gamepad_input && state.dragging_sector_vertices.is_empty() {
                 // Gamepad left stick: move forward/back, strafe left/right
                 let gamepad_speed = 1500.0 * delta; // Frame-rate independent
                 if left_stick.length() > 0.1 {

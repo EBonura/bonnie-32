@@ -413,6 +413,30 @@ impl Framebuffer {
         }
     }
 
+    /// Set pixel with X-ray mode: 50% alpha blend, no depth test
+    /// Always blends incoming color at 50% with existing pixel
+    #[inline]
+    pub fn set_pixel_xray_15(&mut self, x: usize, y: usize, color: Color15) {
+        if x < self.width && y < self.height {
+            let idx = (y * self.width + x) * 4;
+
+            // Read existing pixel
+            let back_r = self.pixels[idx];
+            let back_g = self.pixels[idx + 1];
+            let back_b = self.pixels[idx + 2];
+
+            // 50% blend: (front + back) / 2
+            let r = ((color.r8() as u16 + back_r as u16) / 2) as u8;
+            let g = ((color.g8() as u16 + back_g as u16) / 2) as u8;
+            let b = ((color.b8() as u16 + back_b as u16) / 2) as u8;
+
+            self.pixels[idx] = r;
+            self.pixels[idx + 1] = g;
+            self.pixels[idx + 2] = b;
+            self.pixels[idx + 3] = 255;
+        }
+    }
+
     /// Set pixel with depth test and PS1-authentic blending using Color15
     #[inline]
     pub fn set_pixel_with_depth_blended_15(
@@ -459,6 +483,76 @@ impl Framebuffer {
                 if dx * dx + dy * dy <= r_sq {
                     self.set_pixel(x as usize, y as usize, color);
                 }
+            }
+        }
+    }
+
+    /// Set a pixel with alpha blending (0 = transparent, 255 = opaque)
+    #[inline]
+    pub fn set_pixel_alpha(&mut self, x: usize, y: usize, color: Color, alpha: u8) {
+        if x < self.width && y < self.height {
+            let idx = (y * self.width + x) * 4;
+
+            // Read existing pixel
+            let back_r = self.pixels[idx];
+            let back_g = self.pixels[idx + 1];
+            let back_b = self.pixels[idx + 2];
+
+            // Alpha blend: result = front * alpha + back * (1 - alpha)
+            let a = alpha as u16;
+            let inv_a = 255 - a;
+            let r = ((color.r as u16 * a + back_r as u16 * inv_a) / 255) as u8;
+            let g = ((color.g as u16 * a + back_g as u16 * inv_a) / 255) as u8;
+            let b = ((color.b as u16 * a + back_b as u16 * inv_a) / 255) as u8;
+
+            self.pixels[idx] = r;
+            self.pixels[idx + 1] = g;
+            self.pixels[idx + 2] = b;
+            self.pixels[idx + 3] = 255;
+        }
+    }
+
+    /// Draw a filled circle with alpha blending
+    pub fn draw_circle_alpha(&mut self, cx: i32, cy: i32, radius: i32, color: Color, alpha: u8) {
+        let r_sq = radius * radius;
+        for y in (cy - radius).max(0)..=(cy + radius).min(self.height as i32 - 1) {
+            for x in (cx - radius).max(0)..=(cx + radius).min(self.width as i32 - 1) {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy <= r_sq {
+                    self.set_pixel_alpha(x as usize, y as usize, color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Draw a line with alpha blending
+    pub fn draw_line_alpha(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, alpha: u8) {
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut x = x0;
+        let mut y = y0;
+
+        loop {
+            if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                self.set_pixel_alpha(x as usize, y as usize, color, alpha);
+            }
+
+            if x == x1 && y == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
             }
         }
     }
@@ -568,6 +662,61 @@ impl Framebuffer {
         }
     }
 
+    /// Draw a line with depth testing and alpha blending
+    /// Ideal for semi-transparent wireframe overlays on geometry
+    /// Applies a small depth bias to prevent z-fighting with co-planar surfaces
+    pub fn draw_line_3d_alpha(&mut self, x0: i32, y0: i32, z0: f32, x1: i32, y1: i32, z1: f32, color: Color, alpha: u8) {
+        // Depth bias: multiply z by slightly less than 1 to push lines towards camera
+        // This prevents z-fighting with the geometry they overlay
+        const DEPTH_BIAS: f32 = 0.995;
+        let z0_biased = z0 * DEPTH_BIAS;
+        let z1_biased = z1 * DEPTH_BIAS;
+
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut x = x0;
+        let mut y = y0;
+
+        // Calculate total steps for interpolation
+        let total_steps = dx.max((-dy).max(1)) as f32;
+        let mut step = 0.0f32;
+
+        loop {
+            if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                // Interpolate depth along the line (using biased values)
+                let t = step / total_steps;
+                let z = z0_biased + t * (z1_biased - z0_biased);
+
+                // Depth test - line wins if at or in front of surface
+                let idx = y as usize * self.width + x as usize;
+                if z <= self.zbuffer[idx] {
+                    self.set_pixel_alpha(x as usize, y as usize, color, alpha);
+                }
+            }
+
+            if x == x1 && y == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+                step += 1.0;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+                if e2 < dy {
+                    step += 1.0;
+                }
+            }
+        }
+    }
+
     /// Draw a thick line as a filled quad
     pub fn draw_thick_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, thickness: i32, color: Color) {
         if thickness <= 1 {
@@ -595,31 +744,40 @@ impl Framebuffer {
             (x1 as f32 + px, y1 as f32 + py),
         ];
 
-        // Find bounding box
+        // Find bounding box and clamp to screen bounds
         let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min) as i32;
         let max_x = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max) as i32;
         let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min) as i32;
         let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max) as i32;
 
+        // Clamp to screen bounds to avoid iterating over off-screen pixels
+        let min_x = min_x.max(0);
+        let max_x = max_x.min(self.width as i32 - 1);
+        let min_y = min_y.max(0);
+        let max_y = max_y.min(self.height as i32 - 1);
+
+        // Early exit if completely off-screen
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
+
         // Rasterize quad using scanline - test each pixel in bounding box
         for py in min_y..=max_y {
             for px in min_x..=max_x {
-                if px >= 0 && px < self.width as i32 && py >= 0 && py < self.height as i32 {
-                    // Point-in-quad test using cross products (convex quad)
-                    let p = (px as f32 + 0.5, py as f32 + 0.5);
-                    let mut inside = true;
-                    for i in 0..4 {
-                        let a = corners[i];
-                        let b = corners[(i + 1) % 4];
-                        let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
-                        if cross < 0.0 {
-                            inside = false;
-                            break;
-                        }
+                // Point-in-quad test using cross products (convex quad)
+                let p = (px as f32 + 0.5, py as f32 + 0.5);
+                let mut inside = true;
+                for i in 0..4 {
+                    let a = corners[i];
+                    let b = corners[(i + 1) % 4];
+                    let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+                    if cross < 0.0 {
+                        inside = false;
+                        break;
                     }
-                    if inside {
-                        self.set_pixel(px as usize, py as usize, color);
-                    }
+                }
+                if inside {
+                    self.set_pixel(px as usize, py as usize, color);
                 }
             }
         }
@@ -1083,8 +1241,8 @@ fn rasterize_triangle(
                 // Interpolate depth
                 let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
 
-                // Z-buffer test
-                if settings.use_zbuffer {
+                // Z-buffer test (skip in xray mode - render all faces regardless of depth)
+                if settings.use_zbuffer && !settings.xray_mode {
                     let idx = y * fb.width + x;
                     if z >= fb.zbuffer[idx] {
                         w0 += a0_step;
@@ -1286,8 +1444,8 @@ fn rasterize_triangle_15(
                 // Interpolate depth
                 let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
 
-                // Z-buffer test
-                if settings.use_zbuffer {
+                // Z-buffer test (skip in xray mode - render all faces regardless of depth)
+                if settings.use_zbuffer && !settings.xray_mode {
                     let idx = y * fb.width + x;
                     if z >= fb.zbuffer[idx] {
                         w0 += a0_step;
@@ -1398,18 +1556,23 @@ fn rasterize_triangle_15(
                 let semi = color.is_semi_transparent() || is_all_black;
                 let color = Color15::new_semi(r5, g5, b5, semi);
 
-                // Write pixel with PS1-authentic semi-transparency handling
-                // If pixel's semi-transparency bit is set, use texture's blend_mode
-                let idx = y * fb.width + x;
-                if z < fb.zbuffer[idx] {
-                    // Only update z-buffer if not skipping (opaque pass updates, transparent pass doesn't)
-                    if !skip_z_write {
-                        fb.zbuffer[idx] = z;
-                    }
-                    if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
-                        fb.set_pixel_blended_15(x, y, color, blend_mode);
-                    } else {
-                        fb.set_pixel_15(x, y, color);
+                // Write pixel
+                if settings.xray_mode {
+                    // X-ray mode: always blend at 50% alpha, no z-buffer update
+                    fb.set_pixel_xray_15(x, y, color);
+                } else {
+                    // Normal mode: PS1-authentic semi-transparency handling
+                    let idx = y * fb.width + x;
+                    if z < fb.zbuffer[idx] {
+                        // Only update z-buffer if not skipping (opaque pass updates, transparent pass doesn't)
+                        if !skip_z_write {
+                            fb.zbuffer[idx] = z;
+                        }
+                        if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+                            fb.set_pixel_blended_15(x, y, color, blend_mode);
+                        } else {
+                            fb.set_pixel_15(x, y, color);
+                        }
                     }
                 }
             }
@@ -1523,8 +1686,8 @@ fn rasterize_triangle_indexed(
                 // Interpolate depth
                 let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
 
-                // Z-buffer test
-                if settings.use_zbuffer {
+                // Z-buffer test (skip in xray mode - render all faces regardless of depth)
+                if settings.use_zbuffer && !settings.xray_mode {
                     let idx = y * fb.width + x;
                     if z >= fb.zbuffer[idx] {
                         w0 += a0_step;
@@ -1632,13 +1795,19 @@ fn rasterize_triangle_indexed(
                 let color = Color15::new_semi(r5, g5, b5, semi);
 
                 // Write pixel
-                let idx = y * fb.width + x;
-                if z < fb.zbuffer[idx] {
-                    fb.zbuffer[idx] = z;
-                    if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
-                        fb.set_pixel_blended_15(x, y, color, face_blend_mode);
-                    } else {
-                        fb.set_pixel_15(x, y, color);
+                if settings.xray_mode {
+                    // X-ray mode: always blend at 50% alpha, no z-buffer update
+                    fb.set_pixel_xray_15(x, y, color);
+                } else {
+                    // Normal mode
+                    let idx = y * fb.width + x;
+                    if z < fb.zbuffer[idx] {
+                        fb.zbuffer[idx] = z;
+                        if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
+                            fb.set_pixel_blended_15(x, y, color, face_blend_mode);
+                        } else {
+                            fb.set_pixel_15(x, y, color);
+                        }
                     }
                 }
             }
@@ -1758,11 +1927,13 @@ pub fn render_mesh(
             .unwrap_or(false);
 
         if is_backface {
-            // Back-face: collect for wireframe rendering
-            backface_wireframes.push((v1, v2, v3));
+            // Back-face: collect for wireframe rendering (skip in xray mode)
+            if !settings.xray_mode {
+                backface_wireframes.push((v1, v2, v3));
+            }
 
-            // If backface culling is disabled, also render as solid
-            if !settings.backface_cull {
+            // If backface culling is disabled or xray mode, also render as solid
+            if !settings.backface_cull || settings.xray_mode {
                 surfaces.push(Surface {
                     v1,
                     v2,
@@ -2119,9 +2290,13 @@ pub fn render_mesh_15(
         fog_total_time += get_time() - fog_start_time;
 
         if is_backface {
-            backface_wireframes.push((v1, v2, v3));
+            // Back-face: collect for wireframe rendering (skip in xray mode)
+            if !settings.xray_mode {
+                backface_wireframes.push((v1, v2, v3));
+            }
 
-            if !settings.backface_cull {
+            // If backface culling is disabled or xray mode, also render as solid
+            if !settings.backface_cull || settings.xray_mode {
                 surfaces.push(Surface {
                     v1,
                     v2,

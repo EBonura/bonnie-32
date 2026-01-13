@@ -12,6 +12,7 @@
 mod actions;
 mod controller_type;
 mod gamepad;
+mod midi;
 mod state;
 mod debug;
 
@@ -19,5 +20,6 @@ pub use actions::*;
 pub use controller_type::{ControllerType, ButtonLabels};
 // ButtonPosition is available in controller_type module if needed for advanced use
 pub use gamepad::{Gamepad, button};
+pub use midi::{MidiInput, MidiMessage};
 pub use state::*;
 pub use debug::draw_controller_debug;

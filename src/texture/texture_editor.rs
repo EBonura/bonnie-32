@@ -3,13 +3,52 @@
 //! Provides a reusable UI component for editing indexed textures with:
 //! - Canvas with zoom/pan
 //! - Drawing tools (pencil, brush, fill, shapes)
+//! - UV editing with vertex manipulation
 //! - Palette editing with RGB555 sliders
 //! - Undo/redo support
 
 use macroquad::prelude::*;
-use crate::rasterizer::{BlendMode, ClutDepth, Color15};
+use crate::rasterizer::{BlendMode, ClutDepth, Color15, Vec2 as RastVec2};
 use crate::ui::{Rect, UiContext, icon};
 use super::user_texture::UserTexture;
+
+/// Editor mode - Paint or UV editing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureEditorMode {
+    /// Texture painting mode (default)
+    #[default]
+    Paint,
+    /// UV coordinate editing mode
+    Uv,
+}
+
+/// Modal transform for UV editing (G/T/R keys)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UvModalTransform {
+    #[default]
+    None,
+    /// G key - move UV selection
+    Grab,
+    /// T key pressed - waiting for user to click and drag to scale
+    ScalePending,
+    /// T key - actively scaling UV selection (after click)
+    Scale,
+    /// R key - rotate UV selection
+    Rotate,
+}
+
+/// Pending UV operation requested by button click
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UvOperation {
+    /// Flip UVs horizontally around center
+    FlipHorizontal,
+    /// Flip UVs vertically around center
+    FlipVertical,
+    /// Rotate UVs 90 degrees clockwise
+    RotateCW,
+    /// Reset UVs to default positions
+    ResetUVs,
+}
 
 // UI constants
 const TEXT_COLOR: Color = Color::new(0.85, 0.85, 0.85, 1.0);
@@ -23,6 +62,8 @@ const PANEL_BG: Color = Color::new(0.18, 0.18, 0.20, 1.0);
 pub enum DrawTool {
     /// Selection tool for copy/paste/move
     Select,
+    /// Magic selection by color (click to select all pixels with similar palette index)
+    SelectByColor,
     /// Brush with configurable size (size 1 = pencil)
     #[default]
     Brush,
@@ -34,6 +75,8 @@ pub enum DrawTool {
     Rectangle,
     /// Ellipse (outline or filled based on fill_shapes toggle)
     Ellipse,
+    /// Eyedropper - pick color from canvas
+    Eyedropper,
 }
 
 /// Brush shape for the brush tool
@@ -58,6 +101,10 @@ pub struct Selection {
     /// Floating pixel data (lifted from canvas when moving)
     /// None = selection outline only, Some = floating pixels
     pub floating: Option<Vec<u8>>,
+    /// Optional mask for irregular selections (e.g., magic wand select by color)
+    /// None = rectangular selection (all pixels in bounding box)
+    /// Some = only pixels where mask[idx] == true are selected
+    pub mask: Option<Vec<bool>>,
 }
 
 impl Selection {
@@ -71,15 +118,81 @@ impl Selection {
             width: (max_x - min_x + 1) as usize,
             height: (max_y - min_y + 1) as usize,
             floating: None,
+            mask: None,
         }
     }
 
-    /// Check if a point is inside the selection
+    /// Create a selection from a mask (for irregular selections like magic wand)
+    /// The mask covers the entire texture, returns None if no pixels are selected
+    pub fn from_mask(mask: &[bool], tex_width: usize, tex_height: usize) -> Option<Self> {
+        // Find bounding box of selected pixels
+        let mut min_x = tex_width;
+        let mut min_y = tex_height;
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+
+        for y in 0..tex_height {
+            for x in 0..tex_width {
+                if mask[y * tex_width + x] {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+
+        if min_x > max_x || min_y > max_y {
+            return None; // No pixels selected
+        }
+
+        // Create a mask relative to the bounding box
+        let sel_width = max_x - min_x + 1;
+        let sel_height = max_y - min_y + 1;
+        let mut sel_mask = vec![false; sel_width * sel_height];
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                if mask[y * tex_width + x] {
+                    let local_x = x - min_x;
+                    let local_y = y - min_y;
+                    sel_mask[local_y * sel_width + local_x] = true;
+                }
+            }
+        }
+
+        Some(Self {
+            x: min_x as i32,
+            y: min_y as i32,
+            width: sel_width,
+            height: sel_height,
+            floating: None,
+            mask: Some(sel_mask),
+        })
+    }
+
+    /// Check if a point is inside the selection (considers mask if present)
     pub fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x
-            && px < self.x + self.width as i32
-            && py >= self.y
-            && py < self.y + self.height as i32
+        // First check bounding box
+        if px < self.x || px >= self.x + self.width as i32
+            || py < self.y || py >= self.y + self.height as i32
+        {
+            return false;
+        }
+
+        // If there's a mask, check it
+        if let Some(ref mask) = self.mask {
+            let local_x = (px - self.x) as usize;
+            let local_y = (py - self.y) as usize;
+            mask[local_y * self.width + local_x]
+        } else {
+            true
+        }
+    }
+
+    /// Check if this is a rectangular selection (no mask)
+    pub fn is_rectangular(&self) -> bool {
+        self.mask.is_none()
     }
 
     /// Get pixel index within the selection (for floating data)
@@ -153,6 +266,67 @@ impl Selection {
 
         None
     }
+
+    /// Check if a screen position is near one of the 8 resize handles (corners + edge midpoints)
+    /// Returns the edge if within threshold of a handle, None otherwise
+    /// This is more specific than hit_test_edge - only matches the handle squares, not entire edges
+    pub fn hit_test_handle(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        tex_x: f32,
+        tex_y: f32,
+        zoom: f32,
+        handle_size: f32,
+    ) -> Option<ResizeEdge> {
+        let sel_x = tex_x + self.x as f32 * zoom;
+        let sel_y = tex_y + self.y as f32 * zoom;
+        let sel_w = self.width as f32 * zoom;
+        let sel_h = self.height as f32 * zoom;
+
+        let half = handle_size / 2.0;
+
+        // Define the 8 handle positions (same as draw_selection_handles)
+        let handles = [
+            (sel_x - half, sel_y - half, ResizeEdge::TopLeft),
+            (sel_x + sel_w / 2.0 - half, sel_y - half, ResizeEdge::Top),
+            (sel_x + sel_w - half, sel_y - half, ResizeEdge::TopRight),
+            (sel_x + sel_w - half, sel_y + sel_h / 2.0 - half, ResizeEdge::Right),
+            (sel_x + sel_w - half, sel_y + sel_h - half, ResizeEdge::BottomRight),
+            (sel_x + sel_w / 2.0 - half, sel_y + sel_h - half, ResizeEdge::Bottom),
+            (sel_x - half, sel_y + sel_h - half, ResizeEdge::BottomLeft),
+            (sel_x - half, sel_y + sel_h / 2.0 - half, ResizeEdge::Left),
+        ];
+
+        for (hx, hy, edge) in handles {
+            if screen_x >= hx && screen_x <= hx + handle_size &&
+               screen_y >= hy && screen_y <= hy + handle_size {
+                return Some(edge);
+            }
+        }
+
+        None
+    }
+
+    /// Check if a screen position is on the selection border (edge lines, not handles)
+    /// Returns true if on border but not on a handle
+    pub fn hit_test_border(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        tex_x: f32,
+        tex_y: f32,
+        zoom: f32,
+        threshold: f32,
+        handle_size: f32,
+    ) -> bool {
+        // First check if on any edge
+        if self.hit_test_edge(screen_x, screen_y, tex_x, tex_y, zoom, threshold).is_none() {
+            return false;
+        }
+        // Then check if NOT on a handle
+        self.hit_test_handle(screen_x, screen_y, tex_x, tex_y, zoom, handle_size).is_none()
+    }
 }
 
 /// Clipboard data for copy/paste
@@ -171,11 +345,13 @@ impl DrawTool {
     pub fn icon(&self) -> char {
         match self {
             DrawTool::Select => icon::POINTER,         // selection tool
+            DrawTool::SelectByColor => icon::WAND,     // magic wand select by color
             DrawTool::Brush => icon::PENCIL,           // pencil icon (size 1 = pixel, size 2+ = brush)
             DrawTool::Fill => icon::PAINT_BUCKET,
             DrawTool::Line => icon::PENCIL_LINE,       // pencil-line icon
             DrawTool::Rectangle => icon::RECTANGLE_HORIZONTAL,
             DrawTool::Ellipse => icon::CIRCLE,
+            DrawTool::Eyedropper => icon::PIPETTE,
         }
     }
 
@@ -183,11 +359,13 @@ impl DrawTool {
     pub fn tooltip(&self) -> &'static str {
         match self {
             DrawTool::Select => "Select (S)",
+            DrawTool::SelectByColor => "Select by Color (W)",
             DrawTool::Brush => "Brush (B)",
             DrawTool::Fill => "Fill (F)",
             DrawTool::Line => "Line (L)",
             DrawTool::Rectangle => "Rectangle (R)",
             DrawTool::Ellipse => "Ellipse (O)",
+            DrawTool::Eyedropper => "Eyedropper (I)",
         }
     }
 
@@ -213,6 +391,33 @@ pub struct TextureUndoEntry {
     pub palette: Vec<Color15>,
 }
 
+/// UV vertex data for overlay rendering
+#[derive(Debug, Clone, Copy)]
+pub struct UvVertex {
+    /// UV coordinate (0.0-1.0 range)
+    pub uv: RastVec2,
+    /// Global vertex index (for selection tracking)
+    pub vertex_index: usize,
+}
+
+/// Face data for UV overlay
+#[derive(Debug, Clone)]
+pub struct UvFace {
+    /// Indices into the UvVertex array
+    pub vertex_indices: Vec<usize>,
+}
+
+/// UV overlay data passed to the texture canvas for rendering
+#[derive(Debug, Clone)]
+pub struct UvOverlayData {
+    /// All UV vertices
+    pub vertices: Vec<UvVertex>,
+    /// Faces referencing vertices
+    pub faces: Vec<UvFace>,
+    /// Which faces are selected (indices into faces array)
+    pub selected_faces: Vec<usize>,
+}
+
 /// State for the texture editor
 #[derive(Debug)]
 pub struct TextureEditorState {
@@ -222,10 +427,8 @@ pub struct TextureEditorState {
     pub brush_size: u8,
     /// Brush shape (square or circle)
     pub brush_shape: BrushShape,
-    /// Currently selected palette index for drawing
+    /// Currently selected palette index (for drawing and editing)
     pub selected_index: u8,
-    /// Currently selected palette entry for editing
-    pub editing_index: usize,
     /// Zoom level (1.0 = 1:1, 2.0 = 2x, etc.)
     pub zoom: f32,
     /// Pan offset in canvas space
@@ -261,8 +464,14 @@ pub struct TextureEditorState {
     pub redo_requested: bool,
     /// Fill shapes (Rectangle/Ellipse) instead of outline
     pub fill_shapes: bool,
+    /// Color tolerance for SelectByColor tool (0 = exact match, higher = more indices selected)
+    pub color_tolerance: u8,
+    /// Whether SelectByColor selects only contiguous pixels (true) or all matching pixels (false)
+    pub contiguous_select: bool,
     /// Show pixel grid overlay
     pub show_grid: bool,
+    /// Show tiling preview (8 copies around center for seamless texture editing)
+    pub show_tiling: bool,
     /// Current selection (None = no selection)
     pub selection: Option<Selection>,
     /// Clipboard for copy/paste
@@ -292,6 +501,34 @@ pub struct TextureEditorState {
     pub palette_gen_hue_shift: f32,
     /// Which palette generator color is being edited (0-2), None if not editing
     pub palette_gen_editing: Option<usize>,
+
+    // === UV Editing State ===
+    /// Current editor mode (Paint or UV)
+    pub mode: TextureEditorMode,
+    /// Selected UV vertex indices (indices into the vertices array)
+    pub uv_selection: Vec<usize>,
+    /// Is currently dragging UV vertices
+    pub uv_drag_active: bool,
+    /// Drag start position in screen coords
+    pub uv_drag_start: (f32, f32),
+    /// Original UV positions when drag started: (object_idx, vertex_idx, original_uv)
+    pub uv_drag_start_uvs: Vec<(usize, usize, RastVec2)>,
+    /// Start of box selection in screen coords
+    pub uv_box_select_start: Option<(f32, f32)>,
+    /// Current modal transform mode (G/S/R)
+    pub uv_modal_transform: UvModalTransform,
+    /// Mouse position when modal transform started
+    pub uv_modal_start_mouse: (f32, f32),
+    /// Original UV positions when modal transform started: (vertex_idx, original_uv)
+    pub uv_modal_start_uvs: Vec<(usize, RastVec2)>,
+    /// Center of UV selection for rotation/scale operations
+    pub uv_modal_center: RastVec2,
+    /// Pending UV operation (flip/rotate/reset) requested by button
+    pub uv_operation_pending: Option<UvOperation>,
+
+    // === Import State ===
+    /// State for the texture import dialog
+    pub import_state: super::import::TextureImportState,
 }
 
 /// Edge or corner being resized
@@ -314,7 +551,6 @@ impl Default for TextureEditorState {
             brush_size: 3,
             brush_shape: BrushShape::Square,
             selected_index: 1, // Default to first non-transparent color
-            editing_index: 1,
             zoom: 4.0, // Start at 4x zoom
             pan_x: 0.0,
             pan_y: 0.0,
@@ -333,7 +569,10 @@ impl Default for TextureEditorState {
             undo_requested: false,
             redo_requested: false,
             fill_shapes: false,
+            color_tolerance: 0,       // Exact match by default
+            contiguous_select: true,  // Contiguous selection by default
             show_grid: true, // Grid on by default
+            show_tiling: false, // Tiling preview off by default
             selection: None,
             clipboard: None,
             selection_drag_start: None,
@@ -349,6 +588,20 @@ impl Default for TextureEditorState {
             palette_gen_brightness: 0.7,
             palette_gen_hue_shift: 10.0,
             palette_gen_editing: None,
+            // UV editing state
+            mode: TextureEditorMode::Paint,
+            uv_selection: Vec::new(),
+            uv_drag_active: false,
+            uv_drag_start: (0.0, 0.0),
+            uv_drag_start_uvs: Vec::new(),
+            uv_box_select_start: None,
+            uv_modal_transform: UvModalTransform::None,
+            uv_modal_start_mouse: (0.0, 0.0),
+            uv_modal_start_uvs: Vec::new(),
+            uv_modal_center: RastVec2::new(0.0, 0.0),
+            uv_operation_pending: None,
+            // Import state
+            import_state: super::import::TextureImportState::default(),
         }
     }
 }
@@ -375,7 +628,6 @@ impl TextureEditorState {
         self.brush_size = 3;
         self.brush_shape = BrushShape::Square;
         self.selected_index = 1;
-        self.editing_index = 1;
         self.zoom = 4.0;
         self.pan_x = 0.0;
         self.pan_y = 0.0;
@@ -388,10 +640,19 @@ impl TextureEditorState {
         self.brush_slider_active = false;
         self.panning = false;
         self.dirty = false;
+        self.color_tolerance = 0;
+        self.contiguous_select = true;
         self.selection = None;
         self.selection_drag_start = None;
         self.creating_selection = false;
         self.palette_gen_editing = None;
+        // UV state reset
+        self.mode = TextureEditorMode::Paint;
+        self.uv_selection.clear();
+        self.uv_drag_active = false;
+        self.uv_box_select_start = None;
+        self.uv_modal_transform = UvModalTransform::None;
+        self.uv_modal_start_uvs.clear();
         // Note: clipboard and palette_gen_colors are NOT reset - allow reuse across textures
     }
 
@@ -624,6 +885,87 @@ fn flood_fill(texture: &mut UserTexture, start_x: i32, start_y: i32, fill_index:
     }
 }
 
+/// Select pixels by color index with optional tolerance and contiguity
+/// Returns a mask of selected pixels (true = selected)
+fn select_by_color(
+    texture: &UserTexture,
+    start_x: i32,
+    start_y: i32,
+    tolerance: u8,
+    contiguous: bool,
+) -> Vec<bool> {
+    let mut mask = vec![false; texture.width * texture.height];
+
+    if start_x < 0 || start_y < 0 {
+        return mask;
+    }
+    let x = start_x as usize;
+    let y = start_y as usize;
+    if x >= texture.width || y >= texture.height {
+        return mask;
+    }
+
+    let target_index = texture.get_index(x, y);
+
+    // Helper to check if an index matches with tolerance
+    let matches = |idx: u8| -> bool {
+        if tolerance == 0 {
+            idx == target_index
+        } else {
+            // Calculate difference handling u8 overflow
+            let diff = if idx > target_index {
+                idx - target_index
+            } else {
+                target_index - idx
+            };
+            diff <= tolerance
+        }
+    };
+
+    if contiguous {
+        // Flood fill algorithm for contiguous selection
+        let mut stack = vec![(x, y)];
+        while let Some((cx, cy)) = stack.pop() {
+            if cx >= texture.width || cy >= texture.height {
+                continue;
+            }
+            let idx = cy * texture.width + cx;
+            if mask[idx] {
+                continue; // Already visited
+            }
+            if !matches(texture.get_index(cx, cy)) {
+                continue;
+            }
+
+            mask[idx] = true;
+
+            if cx > 0 {
+                stack.push((cx - 1, cy));
+            }
+            if cx + 1 < texture.width {
+                stack.push((cx + 1, cy));
+            }
+            if cy > 0 {
+                stack.push((cx, cy - 1));
+            }
+            if cy + 1 < texture.height {
+                stack.push((cx, cy + 1));
+            }
+        }
+    } else {
+        // Non-contiguous: select all pixels that match
+        for py in 0..texture.height {
+            for px in 0..texture.width {
+                if matches(texture.get_index(px, py)) {
+                    mask[py * texture.width + px] = true;
+                }
+            }
+        }
+    }
+
+    mask
+}
+
 /// Draw a rectangle outline on texture
 fn tex_draw_rect_outline(texture: &mut UserTexture, x0: i32, y0: i32, x1: i32, y1: i32, index: u8) {
     let (min_x, max_x) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
@@ -816,20 +1158,77 @@ fn draw_ellipse_filled_preview(tex_x: f32, tex_y: f32, x0: i32, y0: i32, x1: i32
 
 /// Draw marching ants selection border
 fn draw_selection_marching_ants(selection: &Selection, tex_x: f32, tex_y: f32, zoom: f32, frame: u32) {
-    let x = tex_x + selection.x as f32 * zoom;
-    let y = tex_y + selection.y as f32 * zoom;
-    let w = selection.width as f32 * zoom;
-    let h = selection.height as f32 * zoom;
+    if let Some(ref mask) = selection.mask {
+        // Masked selection: draw ants around each border pixel
+        draw_masked_marching_ants(selection, mask, tex_x, tex_y, zoom, frame);
+    } else {
+        // Rectangular selection: draw ants around bounding box
+        let x = tex_x + selection.x as f32 * zoom;
+        let y = tex_y + selection.y as f32 * zoom;
+        let w = selection.width as f32 * zoom;
+        let h = selection.height as f32 * zoom;
 
-    // Marching ants effect: alternate black and white dashes that move over time
+        // Marching ants effect: alternate black and white dashes that move over time
+        let dash_len = 4.0;
+        let offset = (frame / 12) as f32 * 2.0; // Slow animation speed (divide by 12 for ~5 FPS)
+
+        // Draw dashed lines for all four edges
+        draw_marching_line(x, y, x + w, y, dash_len, offset);           // Top
+        draw_marching_line(x + w, y, x + w, y + h, dash_len, offset);   // Right
+        draw_marching_line(x + w, y + h, x, y + h, dash_len, offset);   // Bottom
+        draw_marching_line(x, y + h, x, y, dash_len, offset);           // Left
+    }
+}
+
+/// Draw marching ants around pixels in a masked selection
+fn draw_masked_marching_ants(
+    selection: &Selection,
+    mask: &[bool],
+    tex_x: f32,
+    tex_y: f32,
+    zoom: f32,
+    frame: u32,
+) {
     let dash_len = 4.0;
-    let offset = (frame / 12) as f32 * 2.0; // Slow animation speed (divide by 12 for ~5 FPS)
+    let offset = (frame / 12) as f32 * 2.0;
 
-    // Draw dashed lines for all four edges
-    draw_marching_line(x, y, x + w, y, dash_len, offset);           // Top
-    draw_marching_line(x + w, y, x + w, y + h, dash_len, offset);   // Right
-    draw_marching_line(x + w, y + h, x, y + h, dash_len, offset);   // Bottom
-    draw_marching_line(x, y + h, x, y, dash_len, offset);           // Left
+    // For each pixel in the mask, check if it's on a border
+    for ly in 0..selection.height {
+        for lx in 0..selection.width {
+            let idx = ly * selection.width + lx;
+            if !mask[idx] {
+                continue;
+            }
+
+            // This pixel is selected - check its 4 neighbors
+            let px = tex_x + (selection.x + lx as i32) as f32 * zoom;
+            let py = tex_y + (selection.y + ly as i32) as f32 * zoom;
+
+            // Check top neighbor
+            let top_empty = ly == 0 || !mask[(ly - 1) * selection.width + lx];
+            if top_empty {
+                draw_marching_line(px, py, px + zoom, py, dash_len, offset);
+            }
+
+            // Check bottom neighbor
+            let bottom_empty = ly + 1 >= selection.height || !mask[(ly + 1) * selection.width + lx];
+            if bottom_empty {
+                draw_marching_line(px, py + zoom, px + zoom, py + zoom, dash_len, offset);
+            }
+
+            // Check left neighbor
+            let left_empty = lx == 0 || !mask[ly * selection.width + lx - 1];
+            if left_empty {
+                draw_marching_line(px, py, px, py + zoom, dash_len, offset);
+            }
+
+            // Check right neighbor
+            let right_empty = lx + 1 >= selection.width || !mask[ly * selection.width + lx + 1];
+            if right_empty {
+                draw_marching_line(px + zoom, py, px + zoom, py + zoom, dash_len, offset);
+            }
+        }
+    }
 }
 
 /// Draw a single marching ants line segment
@@ -924,6 +1323,14 @@ fn make_clipboard_from_selection(texture: &UserTexture, selection: &Selection) -
     } else {
         for y in 0..selection.height {
             for x in 0..selection.width {
+                // Check mask if present (for irregular selections)
+                if let Some(ref mask) = selection.mask {
+                    if !mask[y * selection.width + x] {
+                        indices.push(0); // Transparent for non-selected pixels
+                        continue;
+                    }
+                }
+
                 let tx = selection.x + x as i32;
                 let ty = selection.y + y as i32;
                 if tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
@@ -946,6 +1353,13 @@ fn make_clipboard_from_selection(texture: &UserTexture, selection: &Selection) -
 fn clear_selection_area(texture: &mut UserTexture, selection: &Selection) {
     for y in 0..selection.height {
         for x in 0..selection.width {
+            // Check mask if present (for irregular selections)
+            if let Some(ref mask) = selection.mask {
+                if !mask[y * selection.width + x] {
+                    continue; // Not selected
+                }
+            }
+
             let tx = selection.x + x as i32;
             let ty = selection.y + y as i32;
             if tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
@@ -1013,6 +1427,76 @@ fn commit_floating_selection(texture: &mut UserTexture, state: &mut TextureEdito
     }
     // Clear the selection
     state.selection = None;
+}
+
+/// Draw the mode tabs (Paint / UV) at the top of the editor
+/// Returns the remaining rect below the tabs for content
+pub fn draw_mode_tabs(
+    ctx: &mut UiContext,
+    rect: Rect,
+    state: &mut TextureEditorState,
+) -> Rect {
+    const TAB_HEIGHT: f32 = 26.0;
+    const TAB_BG: Color = Color::new(0.14, 0.14, 0.16, 1.0);
+    const TAB_ACTIVE: Color = Color::new(0.22, 0.22, 0.25, 1.0);
+    const TAB_HOVER: Color = Color::new(0.18, 0.18, 0.20, 1.0);
+
+    // Draw tab bar background
+    let tab_bar_rect = Rect::new(rect.x, rect.y, rect.w, TAB_HEIGHT);
+    draw_rectangle(tab_bar_rect.x, tab_bar_rect.y, tab_bar_rect.w, tab_bar_rect.h, TAB_BG);
+
+    // Two tabs: Paint and UV
+    let tab_width = rect.w / 2.0;
+    let tabs = [
+        (TextureEditorMode::Paint, "Paint"),
+        (TextureEditorMode::Uv, "UV"),
+    ];
+
+    for (i, (mode, label)) in tabs.iter().enumerate() {
+        let tab_x = rect.x + i as f32 * tab_width;
+        let tab_rect = Rect::new(tab_x, rect.y, tab_width, TAB_HEIGHT);
+        let is_active = state.mode == *mode;
+        let hovered = ctx.mouse.inside(&tab_rect);
+
+        // Tab background
+        let bg = if is_active {
+            TAB_ACTIVE
+        } else if hovered {
+            TAB_HOVER
+        } else {
+            TAB_BG
+        };
+        draw_rectangle(tab_rect.x, tab_rect.y, tab_rect.w, tab_rect.h, bg);
+
+        // Active indicator (bottom line)
+        if is_active {
+            draw_rectangle(tab_rect.x, tab_rect.y + TAB_HEIGHT - 2.0, tab_rect.w, 2.0, ACCENT_COLOR);
+        }
+
+        // Tab label
+        let text_color = if is_active { TEXT_COLOR } else { TEXT_DIM };
+        let text_size = 14.0;
+        let text_dims = measure_text(label, None, text_size as u16, 1.0);
+        let text_x = tab_rect.x + (tab_rect.w - text_dims.width) / 2.0;
+        let text_y = tab_rect.y + (TAB_HEIGHT + text_dims.height) / 2.0 - 2.0;
+        draw_text(label, text_x, text_y, text_size, text_color);
+
+        // Handle click
+        if hovered && ctx.mouse.left_pressed {
+            state.mode = *mode;
+            // Clear UV selection when switching modes to avoid stale state
+            if *mode == TextureEditorMode::Paint {
+                state.uv_selection.clear();
+                state.uv_modal_transform = UvModalTransform::None;
+            }
+        }
+    }
+
+    // Separator line
+    draw_line(rect.x, rect.y + TAB_HEIGHT, rect.x + rect.w, rect.y + TAB_HEIGHT, 1.0, Color::new(0.25, 0.25, 0.28, 1.0));
+
+    // Return content rect below tabs
+    Rect::new(rect.x, rect.y + TAB_HEIGHT, rect.w, rect.h - TAB_HEIGHT)
 }
 
 /// Convert screen position to texture pixel coordinates
@@ -1178,13 +1662,30 @@ pub fn generate_palette_from_keys(
     palette
 }
 
-/// Draw the texture canvas
+/// Draw the texture canvas with optional UV overlay
+///
+/// When `uv_data` is Some and state.mode is Uv, draws UV wireframe overlay on top of texture.
+/// The texture is always drawn as background (useful for seeing UV placement).
 pub fn draw_texture_canvas(
     ctx: &mut UiContext,
     canvas_rect: Rect,
     texture: &mut UserTexture,
     state: &mut TextureEditorState,
+    uv_data: Option<&UvOverlayData>,
 ) {
+    // Tool keyboard shortcuts (only in Paint mode)
+    if state.mode == TextureEditorMode::Paint && ctx.mouse.inside(&canvas_rect) {
+        use macroquad::prelude::{is_key_pressed, KeyCode};
+        if is_key_pressed(KeyCode::S) { state.tool = DrawTool::Select; }
+        if is_key_pressed(KeyCode::W) { state.tool = DrawTool::SelectByColor; }
+        if is_key_pressed(KeyCode::B) { state.tool = DrawTool::Brush; }
+        if is_key_pressed(KeyCode::F) { state.tool = DrawTool::Fill; }
+        if is_key_pressed(KeyCode::I) { state.tool = DrawTool::Eyedropper; }
+        if is_key_pressed(KeyCode::L) { state.tool = DrawTool::Line; }
+        if is_key_pressed(KeyCode::R) { state.tool = DrawTool::Rectangle; }
+        if is_key_pressed(KeyCode::O) { state.tool = DrawTool::Ellipse; }
+    }
+
     // Update selection animation frame
     state.selection_anim_frame = state.selection_anim_frame.wrapping_add(1);
 
@@ -1213,22 +1714,28 @@ pub fn draw_texture_canvas(
 
     // Draw checkerboard background for transparency
     // The checkerboard moves smoothly with the texture by anchoring to tex_x/tex_y
+    // When tiling preview is on, extend to 3x3 tile area
     let check_size = (state.zoom * 2.0).max(4.0);
-    let clip_x = tex_x.max(canvas_rect.x);
-    let clip_y = tex_y.max(canvas_rect.y);
-    let end_x = (tex_x + tex_screen_w).min(canvas_rect.x + canvas_rect.w);
-    let end_y = (tex_y + tex_screen_h).min(canvas_rect.y + canvas_rect.h);
+    let (checker_x, checker_y, checker_w, checker_h) = if state.show_tiling {
+        (tex_x - tex_screen_w, tex_y - tex_screen_h, tex_screen_w * 3.0, tex_screen_h * 3.0)
+    } else {
+        (tex_x, tex_y, tex_screen_w, tex_screen_h)
+    };
+    let clip_x = checker_x.max(canvas_rect.x);
+    let clip_y = checker_y.max(canvas_rect.y);
+    let end_x = (checker_x + checker_w).min(canvas_rect.x + canvas_rect.w);
+    let end_y = (checker_y + checker_h).min(canvas_rect.y + canvas_rect.h);
 
     // Calculate the first row/col indices that are visible
-    let first_row = ((clip_y - tex_y) / check_size).floor() as i32;
-    let first_col = ((clip_x - tex_x) / check_size).floor() as i32;
+    let first_row = ((clip_y - checker_y) / check_size).floor() as i32;
+    let first_col = ((clip_x - checker_x) / check_size).floor() as i32;
 
     // Start drawing from the actual grid position (may be before clip region)
     let mut row = first_row;
-    let mut cy = tex_y + first_row as f32 * check_size;
+    let mut cy = checker_y + first_row as f32 * check_size;
     while cy < end_y {
         let mut col = first_col;
-        let mut cx = tex_x + first_col as f32 * check_size;
+        let mut cx = checker_x + first_col as f32 * check_size;
         while cx < end_x {
             let c = if (row + col) % 2 == 0 {
                 Color::new(0.25, 0.25, 0.28, 1.0)
@@ -1250,55 +1757,107 @@ pub fn draw_texture_canvas(
         row += 1;
     }
 
-    // Draw texture pixels
-    for py in 0..texture.height {
-        for px in 0..texture.width {
-            let screen_x = tex_x + px as f32 * state.zoom;
-            let screen_y = tex_y + py as f32 * state.zoom;
+    // Draw texture pixels (with optional tiling preview)
+    // When tiling is enabled, we draw 9 copies: center + 8 surrounding
+    let tile_offsets: &[(i32, i32, f32)] = if state.show_tiling {
+        // Outer tiles are slightly dimmed to emphasize the center
+        &[
+            (-1, -1, 0.6), (0, -1, 0.6), (1, -1, 0.6),
+            (-1,  0, 0.6),               (1,  0, 0.6),
+            (-1,  1, 0.6), (0,  1, 0.6), (1,  1, 0.6),
+            ( 0,  0, 1.0), // Center tile drawn last (on top) at full brightness
+        ]
+    } else {
+        &[(0, 0, 1.0)] // Just center tile
+    };
 
-            // Clip to canvas
-            if screen_x + state.zoom < canvas_rect.x
-                || screen_x > canvas_rect.x + canvas_rect.w
-                || screen_y + state.zoom < canvas_rect.y
-                || screen_y > canvas_rect.y + canvas_rect.h
-            {
-                continue;
-            }
+    for &(tile_ox, tile_oy, brightness) in tile_offsets {
+        let tile_offset_x = tile_ox as f32 * tex_screen_w;
+        let tile_offset_y = tile_oy as f32 * tex_screen_h;
 
-            let color = texture.get_color(px, py);
-            if !color.is_transparent() {
-                let [r, g, b, _] = color.to_rgba();
-                draw_rectangle(
-                    screen_x,
-                    screen_y,
-                    state.zoom,
-                    state.zoom,
-                    Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0),
-                );
+        for py in 0..texture.height {
+            for px in 0..texture.width {
+                let screen_x = tex_x + tile_offset_x + px as f32 * state.zoom;
+                let screen_y = tex_y + tile_offset_y + py as f32 * state.zoom;
+
+                // Clip to canvas
+                if screen_x + state.zoom < canvas_rect.x
+                    || screen_x > canvas_rect.x + canvas_rect.w
+                    || screen_y + state.zoom < canvas_rect.y
+                    || screen_y > canvas_rect.y + canvas_rect.h
+                {
+                    continue;
+                }
+
+                let color = texture.get_color(px, py);
+                if !color.is_transparent() {
+                    let [r, g, b, _] = color.to_rgba();
+                    draw_rectangle(
+                        screen_x,
+                        screen_y,
+                        state.zoom,
+                        state.zoom,
+                        Color::new(
+                            r as f32 / 255.0 * brightness,
+                            g as f32 / 255.0 * brightness,
+                            b as f32 / 255.0 * brightness,
+                            1.0,
+                        ),
+                    );
+                }
             }
         }
     }
 
     // Draw pixel grid at high zoom (when enabled)
+    // When tiling is on, extend grid to cover 3x3 tile area
     if state.show_grid && state.zoom >= 4.0 {
         let grid_color = Color::new(1.0, 1.0, 1.0, 0.1);
+        let (grid_start_x, grid_start_y, grid_tiles) = if state.show_tiling {
+            (tex_x - tex_screen_w, tex_y - tex_screen_h, 3)
+        } else {
+            (tex_x, tex_y, 1)
+        };
+        let grid_end_x = grid_start_x + tex_screen_w * grid_tiles as f32;
+        let grid_end_y = grid_start_y + tex_screen_h * grid_tiles as f32;
+
         // Vertical lines
-        for px in 0..=texture.width {
-            let x = tex_x + px as f32 * state.zoom;
-            if x >= canvas_rect.x && x <= canvas_rect.x + canvas_rect.w {
-                draw_line(x, tex_y.max(canvas_rect.y), x, (tex_y + tex_screen_h).min(canvas_rect.y + canvas_rect.h), 1.0, grid_color);
+        for tile in 0..grid_tiles {
+            let tile_offset = tile as f32 * tex_screen_w;
+            for px in 0..=texture.width {
+                let x = grid_start_x + tile_offset + px as f32 * state.zoom;
+                if x >= canvas_rect.x && x <= canvas_rect.x + canvas_rect.w {
+                    draw_line(
+                        x,
+                        grid_start_y.max(canvas_rect.y),
+                        x,
+                        grid_end_y.min(canvas_rect.y + canvas_rect.h),
+                        1.0,
+                        grid_color,
+                    );
+                }
             }
         }
         // Horizontal lines
-        for py in 0..=texture.height {
-            let y = tex_y + py as f32 * state.zoom;
-            if y >= canvas_rect.y && y <= canvas_rect.y + canvas_rect.h {
-                draw_line(tex_x.max(canvas_rect.x), y, (tex_x + tex_screen_w).min(canvas_rect.x + canvas_rect.w), y, 1.0, grid_color);
+        for tile in 0..grid_tiles {
+            let tile_offset = tile as f32 * tex_screen_h;
+            for py in 0..=texture.height {
+                let y = grid_start_y + tile_offset + py as f32 * state.zoom;
+                if y >= canvas_rect.y && y <= canvas_rect.y + canvas_rect.h {
+                    draw_line(
+                        grid_start_x.max(canvas_rect.x),
+                        y,
+                        grid_end_x.min(canvas_rect.x + canvas_rect.w),
+                        y,
+                        1.0,
+                        grid_color,
+                    );
+                }
             }
         }
     }
 
-    // Draw texture border
+    // Draw texture border (always shows center tile boundary)
     draw_rectangle_lines(tex_x, tex_y, tex_screen_w, tex_screen_h, 1.0, Color::new(0.5, 0.5, 0.5, 1.0));
 
     // Draw floating selection pixels (if any)
@@ -1352,6 +1911,22 @@ pub fn draw_texture_canvas(
         // Draw resize handles (only for non-floating selections)
         if selection.floating.is_none() {
             draw_selection_handles(selection, tex_x, tex_y, state.zoom, hovered_edge);
+        }
+    }
+
+    // Draw UV overlay when in UV mode
+    if state.mode == TextureEditorMode::Uv {
+        if let Some(uv) = uv_data {
+            draw_uv_overlay(
+                &canvas_rect,
+                texture.width as f32,
+                texture.height as f32,
+                tex_x,
+                tex_y,
+                state.zoom,
+                uv,
+                &state.uv_selection,
+            );
         }
     }
 
@@ -1469,18 +2044,53 @@ pub fn draw_texture_canvas(
                 width: clipboard.width,
                 height: clipboard.height,
                 floating: Some(clipboard.indices.clone()),
+                mask: None,  // Pasted selections are rectangular
             });
             state.tool = DrawTool::Select;
             state.set_status(&format!("Pasted {}×{} pixels", clipboard.width, clipboard.height));
         }
     }
 
+    // Delete selection (Delete or Backspace key) - clear to transparent
+    if (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) && state.selection.is_some() {
+        if let Some(ref selection) = state.selection {
+            // Signal undo to caller
+            state.undo_save_pending = Some("Delete selection".to_string());
+            // Clear the selected area to transparent (index 0)
+            clear_selection_area(texture, selection);
+            let count = if let Some(ref mask) = selection.mask {
+                mask.iter().filter(|&&b| b).count()
+            } else {
+                selection.width * selection.height
+            };
+            state.set_status(&format!("Deleted {} pixels", count));
+        }
+        state.selection = None;
+    }
+
     // Drawing and selection
     if inside && !state.panning {
-        if let Some((px, py)) = screen_to_texture(ctx.mouse.x, ctx.mouse.y, &canvas_rect, texture, state) {
+        // UV mode: handle UV-specific input
+        if state.mode == TextureEditorMode::Uv {
+            handle_uv_input(ctx, &canvas_rect, texture, state, uv_data);
+        } else if let Some((px, py)) = screen_to_texture(ctx.mouse.x, ctx.mouse.y, &canvas_rect, texture, state) {
             // Handle Select tool
             if state.tool == DrawTool::Select {
-                // Check for edge hover (for resize cursor feedback)
+                // Handle size for hit testing (matches draw_selection_handles)
+                let handle_size = 6.0;
+
+                // Check for handle hover (for resize cursor feedback)
+                let hovered_handle = if let Some(ref selection) = state.selection {
+                    if selection.floating.is_none() && !state.creating_selection && state.resizing_edge.is_none() {
+                        selection.hit_test_handle(ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, handle_size)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Check for edge hover (for visual feedback, used by draw_selection_handles)
                 let hovered_edge = if let Some(ref selection) = state.selection {
                     if selection.floating.is_none() && !state.creating_selection && state.resizing_edge.is_none() {
                         selection.hit_test_edge(ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, 8.0)
@@ -1496,8 +2106,8 @@ pub fn draw_texture_canvas(
                     let cursor_x = tex_x + px as f32 * state.zoom;
                     let cursor_y = tex_y + py as f32 * state.zoom;
 
-                    // Only show crosshair if not hovering an edge
-                    if hovered_edge.is_none() && state.resizing_edge.is_none() {
+                    // Only show crosshair if not hovering a handle or edge
+                    if hovered_handle.is_none() && hovered_edge.is_none() && state.resizing_edge.is_none() {
                         draw_rectangle_lines(
                             cursor_x,
                             cursor_y,
@@ -1511,33 +2121,20 @@ pub fn draw_texture_canvas(
 
                 // Mouse pressed - start selection, move, or resize
                 if ctx.mouse.left_pressed {
-                    // First check if we're clicking on an edge/handle
-                    if let Some(edge) = hovered_edge {
-                        // Shift+click on edge = resize, otherwise move
-                        let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-                        if shift_held {
-                            // Shift+click edge = resize
-                            state.resizing_edge = Some(edge);
-                            state.selection_drag_start = Some((px, py));
-                            state.creating_selection = false;
-                        } else {
-                            // Click edge = move (lift and drag, like clicking inside)
-                            state.selection_drag_start = Some((px, py));
-                            state.creating_selection = false;
-
-                            // Store original position for cancel
-                            if let Some(ref selection) = state.selection {
-                                state.move_original_pos = Some((selection.x, selection.y));
-                            }
-
-                            // Lift pixels into floating selection if not already floating
-                            if state.selection.as_ref().map_or(false, |s| s.floating.is_none()) {
-                                lift_selection_to_floating(texture, state);
-                            }
-                        }
-                    } else if let Some(ref selection) = state.selection {
-                        if selection.contains(px, py) {
-                            // Click inside selection - start moving
+                    // First check if clicking on a handle → resize
+                    if let Some(handle) = hovered_handle {
+                        // Click on handle = resize
+                        state.resizing_edge = Some(handle);
+                        state.selection_drag_start = Some((px, py));
+                        state.creating_selection = false;
+                    }
+                    // Check if clicking on border (edge but not handle) or inside → move
+                    else if let Some(ref selection) = state.selection {
+                        let on_border = selection.hit_test_border(
+                            ctx.mouse.x, ctx.mouse.y, tex_x, tex_y, state.zoom, 8.0, handle_size
+                        );
+                        if selection.contains(px, py) || on_border {
+                            // Click inside selection or on border - start moving
                             state.selection_drag_start = Some((px, py));
                             state.creating_selection = false;
 
@@ -1675,16 +2272,19 @@ pub fn draw_texture_canvas(
 
                     if state.tool.uses_brush_size() {
                         let size = state.brush_size as f32 * state.zoom;
-                        let half = ((state.brush_size as f32 - 1.0) / 2.0) * state.zoom;
+                        // Use integer division to match actual brush drawing (tex_draw_brush_square/circle)
+                        let half = ((state.brush_size as i32 - 1) / 2) as f32 * state.zoom;
                         let cursor_color = Color::new(1.0, 1.0, 1.0, 0.5);
 
                         // Show shape-appropriate cursor
                         if state.tool == DrawTool::Brush && state.brush_shape == BrushShape::Circle && state.brush_size > 1 {
-                            // Circle cursor
-                            let radius = size / 2.0;
+                            // Circle cursor - radius matches (size - 1) / 2 integer division
+                            let r = ((state.brush_size as i32 - 1) / 2) as f32 * state.zoom;
+                            // Center on the pixel, offset by half a pixel in screen space
                             let cx = cursor_x + state.zoom / 2.0;
                             let cy = cursor_y + state.zoom / 2.0;
-                            draw_circle_lines(cx, cy, radius, 1.0, cursor_color);
+                            // Add half zoom to radius to cover the full pixel extents
+                            draw_circle_lines(cx, cy, r + state.zoom / 2.0, 1.0, cursor_color);
                         } else {
                             // Square cursor (or single pixel)
                             draw_rectangle_lines(
@@ -1726,6 +2326,37 @@ pub fn draw_texture_canvas(
                             }
                             DrawTool::Fill => {
                                 flood_fill(texture, px, py, state.selected_index);
+                            }
+                            DrawTool::Eyedropper => {
+                                // Pick color from canvas
+                                let idx = (py as usize) * texture.width + (px as usize);
+                                if idx < texture.indices.len() {
+                                    state.selected_index = texture.indices[idx];
+                                    state.palette_gen_editing = None; // Deselect key color
+                                    state.set_status(&format!("Picked color index {}", state.selected_index));
+                                }
+                                // No undo needed for eyedropper
+                                state.undo_save_pending = None;
+                            }
+                            DrawTool::SelectByColor => {
+                                // Magic wand selection by color
+                                let mask = select_by_color(
+                                    texture,
+                                    px,
+                                    py,
+                                    state.color_tolerance,
+                                    state.contiguous_select,
+                                );
+                                if let Some(sel) = Selection::from_mask(&mask, texture.width, texture.height) {
+                                    let count = mask.iter().filter(|&&b| b).count();
+                                    state.selection = Some(sel);
+                                    state.set_status(&format!("Selected {} pixels", count));
+                                } else {
+                                    state.selection = None;
+                                    state.set_status("No pixels selected");
+                                }
+                                // No undo needed for selection
+                                state.undo_save_pending = None;
                             }
                             _ => {}
                         }
@@ -1871,8 +2502,14 @@ pub fn draw_tool_panel(
         state.pan_y = 0.0;
         state.zoom = 4.0;
     }
-    if draw_toggle_button_small(ctx, col1_x + btn_size + gap, y, btn_size, icon::GRID, "Toggle grid", state.show_grid, icon_font) {
+    if draw_toggle_button_small(ctx, col2_x, y, btn_size, icon::GRID, "Toggle grid", state.show_grid, icon_font) {
         state.show_grid = !state.show_grid;
+    }
+    y += btn_size + gap;
+
+    // === Row 4: Tiling preview ===
+    if draw_toggle_button_small(ctx, col1_x, y, btn_size, icon::SQUARE_SQUARE, "Tiling preview", state.show_tiling, icon_font) {
+        state.show_tiling = !state.show_tiling;
     }
     y += btn_size + gap;
 
@@ -1881,40 +2518,88 @@ pub fn draw_tool_panel(
     draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
     y += 4.0;
 
-    // === Drawing tools in 2-column grid ===
-    // Note: No Eraser tool - just paint with index 0 (transparent) to erase
-    let mut clicked_tool: Option<DrawTool> = None;
-    let all_tools = [
-        DrawTool::Select,
-        DrawTool::Brush,
-        DrawTool::Fill,
-        DrawTool::Line,
-        DrawTool::Rectangle,
-        DrawTool::Ellipse,
-    ];
+    // Mode-specific tools
+    match state.mode {
+        TextureEditorMode::Paint => {
+            // === Drawing tools in 2-column grid ===
+            // Note: No Eraser tool - just paint with index 0 (transparent) to erase
+            let mut clicked_tool: Option<DrawTool> = None;
+            let all_tools = [
+                DrawTool::Select,
+                DrawTool::SelectByColor,
+                DrawTool::Brush,
+                DrawTool::Fill,
+                DrawTool::Eyedropper,
+                DrawTool::Line,
+                DrawTool::Rectangle,
+                DrawTool::Ellipse,
+            ];
 
-    for (i, tool) in all_tools.iter().enumerate() {
-        let x = if i % 2 == 0 { col1_x } else { col2_x };
-        if draw_tool_button_small(ctx, x, y, btn_size, *tool, state.tool == *tool, icon_font) {
-            clicked_tool = Some(*tool);
+            for (i, tool) in all_tools.iter().enumerate() {
+                let x = if i % 2 == 0 { col1_x } else { col2_x };
+                if draw_tool_button_small(ctx, x, y, btn_size, *tool, state.tool == *tool, icon_font) {
+                    clicked_tool = Some(*tool);
+                }
+                if i % 2 == 1 {
+                    y += btn_size + gap;
+                }
+            }
+            // If odd number of tools, advance y
+            if all_tools.len() % 2 == 1 {
+                y += btn_size + gap;
+            }
+
+            // Apply tool selection
+            if let Some(tool) = clicked_tool {
+                state.tool = tool;
+            }
         }
-        if i % 2 == 1 {
+        TextureEditorMode::Uv => {
+            // === UV tools ===
+            // Flip H / Flip V
+            if draw_action_button_small(ctx, col1_x, y, btn_size, icon::FLIP_HORIZONTAL, "Flip H", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::FlipHorizontal);
+                state.set_status("Flip Horizontal");
+            }
+            if draw_action_button_small(ctx, col2_x, y, btn_size, icon::FLIP_VERTICAL, "Flip V", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::FlipVertical);
+                state.set_status("Flip Vertical");
+            }
             y += btn_size + gap;
+
+            // Rotate CW / Reset UVs
+            if draw_action_button_small(ctx, col1_x, y, btn_size, icon::ROTATE_CW, "Rotate 90", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::RotateCW);
+                state.set_status("Rotate 90° CW");
+            }
+            if draw_action_button_small(ctx, col2_x, y, btn_size, icon::REFRESH_CW, "Reset UV", icon_font) {
+                state.uv_operation_pending = Some(UvOperation::ResetUVs);
+                state.set_status("Reset UVs");
+            }
+            y += btn_size + gap;
+
+            // Separator
+            y += 2.0;
+            draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+            y += 4.0;
+
+            // Hint text for keyboard shortcuts
+            let hint_color = Color::new(0.5, 0.5, 0.52, 1.0);
+            draw_text("G: Move", col1_x, y + 10.0, 11.0, hint_color);
+            y += 14.0;
+            draw_text("S: Scale", col1_x, y + 10.0, 11.0, hint_color);
+            y += 14.0;
+            draw_text("R: Rotate", col1_x, y + 10.0, 11.0, hint_color);
+            y += 14.0;
         }
     }
-    // If odd number of tools, advance y
-    if all_tools.len() % 2 == 1 {
-        y += btn_size + gap;
-    }
 
-    // Apply tool selection
-    if let Some(tool) = clicked_tool {
-        state.tool = tool;
-    }
+    let _ = y; // silence unused warning
 
-    // === Tool options section (size, fill toggle) ===
+    // === Tool options section (size, fill toggle) - Paint mode only ===
     // Show for tools that use brush size OR shape tools
-    let show_options = state.tool.uses_brush_size() || matches!(state.tool, DrawTool::Rectangle | DrawTool::Ellipse);
+    let show_options = state.mode == TextureEditorMode::Paint
+        && (state.tool.uses_brush_size() || matches!(state.tool, DrawTool::Rectangle | DrawTool::Ellipse));
     if show_options {
         y += 2.0;
         draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
@@ -2024,6 +2709,66 @@ pub fn draw_tool_panel(
             if ctx.mouse.clicked(&fill_rect) {
                 state.fill_shapes = !state.fill_shapes;
             }
+        }
+    }
+
+    // === SelectByColor tool options ===
+    if state.mode == TextureEditorMode::Paint && state.tool == DrawTool::SelectByColor {
+        y += 2.0;
+        draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+        y += 4.0;
+
+        // Contiguous toggle (single button that toggles)
+        let cont_rect = Rect::new(col1_x, y, btn_size, btn_size);
+        let cont_hovered = ctx.mouse.inside(&cont_rect);
+        let cont_bg = if state.contiguous_select {
+            ACCENT_COLOR
+        } else if cont_hovered {
+            Color::new(0.35, 0.35, 0.38, 1.0)
+        } else {
+            Color::new(0.22, 0.22, 0.25, 1.0)
+        };
+        draw_rectangle(cont_rect.x, cont_rect.y, cont_rect.w, cont_rect.h, cont_bg);
+        // Draw link icon when contiguous, layers icon when selecting all
+        if let Some(font) = icon_font {
+            let icon_char = if state.contiguous_select { icon::LINK } else { icon::LAYERS };
+            draw_icon_in_rect(font, icon_char, &cont_rect, if state.contiguous_select { WHITE } else { TEXT_COLOR });
+        }
+        if cont_hovered {
+            ctx.set_tooltip(if state.contiguous_select { "Contiguous" } else { "All matching" }, ctx.mouse.x, ctx.mouse.y);
+        }
+        if ctx.mouse.clicked(&cont_rect) {
+            state.contiguous_select = !state.contiguous_select;
+        }
+        y += btn_size + gap;
+
+        // Tolerance row: - [tolerance] +
+        let small_btn = btn_size * 0.8;
+
+        // Minus button
+        let minus_rect = Rect::new(col1_x, y, small_btn, small_btn);
+        let minus_hovered = ctx.mouse.inside(&minus_rect);
+        draw_rectangle(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h,
+            if minus_hovered { Color::new(0.35, 0.35, 0.38, 1.0) } else { Color::new(0.22, 0.22, 0.25, 1.0) });
+        draw_text("-", minus_rect.x + small_btn / 2.0 - 2.0, minus_rect.y + small_btn / 2.0 + 4.0, 12.0, TEXT_COLOR);
+        if ctx.mouse.clicked(&minus_rect) && state.color_tolerance > 0 {
+            state.color_tolerance = state.color_tolerance.saturating_sub(1);
+        }
+
+        // Tolerance label centered
+        let tol_text = format!("±{}", state.color_tolerance);
+        let text_dims = measure_text(&tol_text, None, 11, 1.0);
+        let center_x = col1_x + small_btn + (col2_x - col1_x - small_btn) / 2.0;
+        draw_text(&tol_text, center_x - text_dims.width / 2.0, y + small_btn / 2.0 + 4.0, 11.0, WHITE);
+
+        // Plus button
+        let plus_rect = Rect::new(col2_x + btn_size - small_btn, y, small_btn, small_btn);
+        let plus_hovered = ctx.mouse.inside(&plus_rect);
+        draw_rectangle(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h,
+            if plus_hovered { Color::new(0.35, 0.35, 0.38, 1.0) } else { Color::new(0.22, 0.22, 0.25, 1.0) });
+        draw_text("+", plus_rect.x + small_btn / 2.0 - 3.0, plus_rect.y + small_btn / 2.0 + 4.0, 12.0, TEXT_COLOR);
+        if ctx.mouse.clicked(&plus_rect) {
+            state.color_tolerance = state.color_tolerance.saturating_add(1).min(16);
         }
     }
 }
@@ -2283,9 +3028,6 @@ pub fn draw_palette_panel(
         if state.selected_index > 15 {
             state.selected_index = state.selected_index % 16;
         }
-        if state.editing_index > 15 {
-            state.editing_index = state.editing_index % 16;
-        }
     }
     if ctx.mouse.clicked(&btn_8bit) && is_4bit {
         texture.convert_to_8bit();
@@ -2312,24 +3054,20 @@ pub fn draw_palette_panel(
             let rgb = Color::new(r as f32 / 31.0, g as f32 / 31.0, b as f32 / 31.0, 1.0);
             draw_rectangle(sx, y, swatch_size, swatch_size, rgb);
 
-            // Selection highlight if editing this color
+            // Selection highlight if editing this key color
             if state.palette_gen_editing == Some(i) {
                 draw_rectangle_lines(sx - 1.0, y - 1.0, swatch_size + 2.0, swatch_size + 2.0, 2.0, WHITE);
             } else if ctx.mouse.inside(&swatch_rect) {
                 draw_rectangle_lines(sx, y, swatch_size, swatch_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.5));
             }
 
-            // Click to toggle editing (picks color from currently editing_index)
+            // Click to select this key color for editing (mutually exclusive with palette selection)
             if ctx.mouse.clicked(&swatch_rect) {
                 if state.palette_gen_editing == Some(i) {
                     // Already editing, deselect
                     state.palette_gen_editing = None;
                 } else {
-                    // Copy current editing color to this key color
-                    if state.editing_index < texture.palette.len() {
-                        let c = texture.palette[state.editing_index];
-                        state.palette_gen_colors[i] = (c.r5(), c.g5(), c.b5());
-                    }
+                    // Select this key color - RGB sliders will now edit it
                     state.palette_gen_editing = Some(i);
                 }
             }
@@ -2399,25 +3137,19 @@ pub fn draw_palette_panel(
                 }
             }
 
-            // Selection/editing highlight
+            // Selection highlight
             let is_selected = state.selected_index == 0;
-            let is_editing = state.editing_index == 0;
             let hovered = ctx.mouse.inside(&cell_rect);
 
             if is_selected {
                 draw_rectangle_lines(cell_x, cell_y, trans_size, trans_size, 2.0, WHITE);
-            } else if is_editing {
-                draw_rectangle_lines(cell_x, cell_y, trans_size, trans_size, 1.0, Color::new(1.0, 0.8, 0.2, 1.0));
             } else if hovered {
                 draw_rectangle_lines(cell_x, cell_y, trans_size, trans_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.3));
             }
 
             if ctx.mouse.clicked(&cell_rect) {
                 state.selected_index = 0;
-                state.editing_index = 0;
-            }
-            if hovered && ctx.mouse.right_pressed {
-                state.editing_index = 0;
+                state.palette_gen_editing = None; // Deselect key color
             }
         }
 
@@ -2453,23 +3185,17 @@ pub fn draw_palette_panel(
 
                 // Selection highlight
                 let is_selected = state.selected_index == idx as u8;
-                let is_editing = state.editing_index == idx;
                 let hovered = ctx.mouse.inside(&cell_rect);
 
                 if is_selected {
                     draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 2.0, WHITE);
-                } else if is_editing {
-                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 0.8, 0.2, 1.0));
                 } else if hovered {
                     draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.3));
                 }
 
                 if ctx.mouse.clicked(&cell_rect) {
                     state.selected_index = idx as u8;
-                    state.editing_index = idx;
-                }
-                if hovered && ctx.mouse.right_pressed {
-                    state.editing_index = idx;
+                    state.palette_gen_editing = None; // Deselect key color
                 }
             }
         }
@@ -2515,23 +3241,17 @@ pub fn draw_palette_panel(
 
                 // Selection highlight
                 let is_selected = state.selected_index == idx as u8;
-                let is_editing = state.editing_index == idx;
                 let hovered = ctx.mouse.inside(&cell_rect);
 
                 if is_selected {
                     draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 2.0, WHITE);
-                } else if is_editing {
-                    draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 0.8, 0.2, 1.0));
                 } else if hovered {
                     draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0, Color::new(1.0, 1.0, 1.0, 0.3));
                 }
 
                 if ctx.mouse.clicked(&cell_rect) {
                     state.selected_index = idx as u8;
-                    state.editing_index = idx;
-                }
-                if hovered && ctx.mouse.right_pressed {
-                    state.editing_index = idx;
+                    state.palette_gen_editing = None; // Deselect key color
                 }
             }
         }
@@ -2541,16 +3261,34 @@ pub fn draw_palette_panel(
 
     y += grid_height + 8.0;
 
-    // Color editor for editing_index - only show if there's enough space
+    // Color editor - shows RGB sliders for either:
+    // 1. Selected key color (palette_gen_editing) - for generator
+    // 2. Selected palette index (selected_index) - for direct editing
     let remaining_height = rect.bottom() - y;
     let slider_section_height = 16.0 + 3.0 * (10.0 + 4.0); // label + 3 sliders
 
-    if state.editing_index < texture.palette.len() && remaining_height >= slider_section_height {
-        let color = texture.palette[state.editing_index];
+    // Determine what we're editing: key color or palette color
+    let editing_key_color = state.palette_gen_editing;
+    let selected_idx = state.selected_index as usize;
+    let show_sliders = if editing_key_color.is_some() {
+        remaining_height >= slider_section_height
+    } else {
+        selected_idx < texture.palette.len() && remaining_height >= slider_section_height
+    };
 
-        // Index label
+    if show_sliders {
+        // Get current RGB values based on what's selected
+        let (current_r, current_g, current_b, label_text) = if let Some(key_idx) = editing_key_color {
+            let (r, g, b) = state.palette_gen_colors[key_idx];
+            (r, g, b, format!("Key {}", key_idx + 1))
+        } else {
+            let color = texture.palette[selected_idx];
+            (color.r5(), color.g5(), color.b5(), format!("Color {}", selected_idx))
+        };
+
+        // Label
         draw_text(
-            &format!("Color {}", state.editing_index),
+            &label_text,
             rect.x + padding,
             y + 11.0,
             12.0,
@@ -2563,9 +3301,9 @@ pub fn draw_palette_panel(
         let slider_h = 10.0;
 
         let channels = [
-            ("R", color.r5(), Color::new(0.7, 0.3, 0.3, 1.0), 0),
-            ("G", color.g5(), Color::new(0.3, 0.7, 0.3, 1.0), 1),
-            ("B", color.b5(), Color::new(0.3, 0.3, 0.7, 1.0), 2),
+            ("R", current_r, Color::new(0.7, 0.3, 0.3, 1.0), 0),
+            ("G", current_g, Color::new(0.3, 0.7, 0.3, 1.0), 1),
+            ("B", current_b, Color::new(0.3, 0.3, 0.7, 1.0), 2),
         ];
 
         for (label, value, tint, slider_idx) in channels {
@@ -2598,15 +3336,26 @@ pub fn draw_palette_panel(
                     let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
                     let new_val = ((rel_x / track_rect.w) * 31.0).round() as u8;
 
-                    let c = texture.palette[state.editing_index];
-                    let semi = c.is_semi_transparent();
-                    let (r, g, b) = match slider_idx {
-                        0 => (new_val, c.g5(), c.b5()),
-                        1 => (c.r5(), new_val, c.b5()),
-                        _ => (c.r5(), c.g5(), new_val),
-                    };
-                    texture.palette[state.editing_index] = Color15::new_semi(r, g, b, semi);
-                    state.dirty = true;
+                    if let Some(key_idx) = editing_key_color {
+                        // Editing a key color for the generator
+                        let (r, g, b) = state.palette_gen_colors[key_idx];
+                        state.palette_gen_colors[key_idx] = match slider_idx {
+                            0 => (new_val, g, b),
+                            1 => (r, new_val, b),
+                            _ => (r, g, new_val),
+                        };
+                    } else {
+                        // Editing a palette color
+                        let c = texture.palette[selected_idx];
+                        let semi = c.is_semi_transparent();
+                        let (r, g, b) = match slider_idx {
+                            0 => (new_val, c.g5(), c.b5()),
+                            1 => (c.r5(), new_val, c.b5()),
+                            _ => (c.r5(), c.g5(), new_val),
+                        };
+                        texture.palette[selected_idx] = Color15::new_semi(r, g, b, semi);
+                        state.dirty = true;
+                    }
                 } else {
                     state.color_slider = None;
                 }
@@ -2615,8 +3364,10 @@ pub fn draw_palette_panel(
             y += slider_h + 4.0;
         }
 
-        // Effect checkbox + blend mode dropdown - only if there's space
-        if y + 16.0 <= rect.bottom() - padding {
+        // Effect checkbox + blend mode dropdown - only show for palette colors (not key colors)
+        let show_effect = editing_key_color.is_none() && y + 16.0 <= rect.bottom() - padding;
+        if show_effect {
+            let color = texture.palette[selected_idx];
             let checkbox_size = 12.0;
             let checkbox_rect = Rect::new(rect.x + padding, y, checkbox_size, checkbox_size);
             let is_stp = color.is_semi_transparent();
@@ -2668,7 +3419,7 @@ pub fn draw_palette_panel(
             // Click handlers
             let checkbox_click_area = Rect::new(checkbox_rect.x, y, 54.0, 14.0);
             if ctx.mouse.clicked(&checkbox_click_area) {
-                texture.palette[state.editing_index].set_semi_transparent(!is_stp);
+                texture.palette[selected_idx].set_semi_transparent(!is_stp);
                 state.dirty = true;
             }
 
@@ -2717,4 +3468,1274 @@ pub fn draw_palette_panel(
             }
         }
     }
+}
+
+/// Draw UV overlay on the texture canvas
+///
+/// Renders UV wireframe edges and vertex handles for selected faces.
+fn draw_uv_overlay(
+    _canvas_rect: &Rect,
+    tex_width: f32,
+    tex_height: f32,
+    tex_x: f32,
+    tex_y: f32,
+    zoom: f32,
+    uv_data: &UvOverlayData,
+    uv_selection: &[usize],
+) {
+    const EDGE_COLOR: Color = Color::new(1.0, 0.78, 0.39, 1.0);      // Orange
+    const VERTEX_COLOR: Color = Color::new(1.0, 1.0, 1.0, 1.0);      // White
+    const SELECTED_COLOR: Color = Color::new(0.39, 0.78, 1.0, 1.0);  // Light blue
+
+    // Convert UV coords (0-1) to screen coords
+    let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
+        // U goes left-to-right, V goes top-to-bottom (inverted from typical UV)
+        // UV coords map to pixel corners (0=left/top edge, 1=right/bottom edge)
+        let px = u * tex_width;
+        let py = (1.0 - v) * tex_height;
+        (tex_x + px * zoom, tex_y + py * zoom)
+    };
+
+    // Draw selected faces
+    for &face_idx in &uv_data.selected_faces {
+        if let Some(face) = uv_data.faces.get(face_idx) {
+            // Collect screen positions for all vertices
+            let screen_uvs: Vec<_> = face.vertex_indices.iter()
+                .filter_map(|&vi| uv_data.vertices.get(vi))
+                .map(|v| uv_to_screen(v.uv.x, v.uv.y))
+                .collect();
+
+            // Draw edges (all edges of n-gon)
+            let n = screen_uvs.len();
+            for i in 0..n {
+                let j = (i + 1) % n;
+                draw_line(
+                    screen_uvs[i].0, screen_uvs[i].1,
+                    screen_uvs[j].0, screen_uvs[j].1,
+                    2.0, EDGE_COLOR,
+                );
+            }
+
+            // Draw vertices
+            for (i, &vi) in face.vertex_indices.iter().enumerate() {
+                if let Some((sx, sy)) = screen_uvs.get(i) {
+                    if let Some(uv_vert) = uv_data.vertices.get(vi) {
+                        let is_selected = uv_selection.contains(&uv_vert.vertex_index);
+                        let color = if is_selected { SELECTED_COLOR } else { VERTEX_COLOR };
+                        let size = if is_selected { 8.0 } else { 6.0 };
+                        draw_rectangle(sx - size * 0.5, sy - size * 0.5, size, size, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handle UV mode input (vertex selection, transforms)
+fn handle_uv_input(
+    ctx: &mut UiContext,
+    canvas_rect: &Rect,
+    texture: &UserTexture,
+    state: &mut TextureEditorState,
+    uv_data: Option<&UvOverlayData>,
+) {
+    let uv_data = match uv_data {
+        Some(d) => d,
+        None => return, // No UV data, nothing to interact with
+    };
+
+    let tex_width = texture.width as f32;
+    let tex_height = texture.height as f32;
+
+    // Extract values from state to avoid borrow issues with closures
+    let zoom = state.zoom;
+    let pan_x = state.pan_x;
+    let pan_y = state.pan_y;
+
+    // Calculate texture position (same as in draw_texture_canvas)
+    let canvas_cx = canvas_rect.x + canvas_rect.w / 2.0;
+    let canvas_cy = canvas_rect.y + canvas_rect.h / 2.0;
+    let tex_screen_w = tex_width * zoom;
+    let tex_screen_h = tex_height * zoom;
+    let tex_x = canvas_cx - tex_screen_w / 2.0 + pan_x;
+    let tex_y = canvas_cy - tex_screen_h / 2.0 + pan_y;
+
+    // Helper: Convert UV to screen coords
+    let uv_to_screen = |u: f32, v: f32| -> (f32, f32) {
+        let px = u * tex_width;
+        let py = (1.0 - v) * tex_height;
+        (tex_x + px * zoom, tex_y + py * zoom)
+    };
+
+    // Find nearest vertex to a screen position
+    let find_nearest_vertex = |sx: f32, sy: f32, threshold: f32| -> Option<usize> {
+        let mut nearest: Option<(usize, f32)> = None;
+        for uv_vert in &uv_data.vertices {
+            let (vx, vy) = uv_to_screen(uv_vert.uv.x, uv_vert.uv.y);
+            let dist = ((sx - vx).powi(2) + (sy - vy).powi(2)).sqrt();
+            if dist < threshold {
+                if nearest.is_none() || dist < nearest.unwrap().1 {
+                    nearest = Some((uv_vert.vertex_index, dist));
+                }
+            }
+        }
+        nearest.map(|(idx, _)| idx)
+    };
+
+    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let ctrl_held = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
+
+    // Ctrl+A: Select all UV vertices
+    if ctrl_held && is_key_pressed(KeyCode::A) {
+        state.uv_selection.clear();
+        for uv_vert in &uv_data.vertices {
+            state.uv_selection.push(uv_vert.vertex_index);
+        }
+        if !state.uv_selection.is_empty() {
+            state.set_status(&format!("Selected {} vertices", state.uv_selection.len()));
+        }
+    }
+
+    // Handle keyboard shortcuts for modal transforms
+    if is_key_pressed(KeyCode::G) && !state.uv_selection.is_empty() {
+        state.uv_modal_transform = UvModalTransform::Grab;
+        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        // Store original UVs for all selected vertices
+        state.uv_modal_start_uvs.clear();
+        for &vi in &state.uv_selection {
+            if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                state.uv_modal_start_uvs.push((vi, uv_vert.uv));
+            }
+        }
+        state.set_status("Grab: Move mouse, click to confirm, Esc to cancel");
+    }
+
+    if is_key_pressed(KeyCode::T) && !state.uv_selection.is_empty() {
+        // Enter scale pending mode - wait for user to click and drag
+        state.uv_modal_transform = UvModalTransform::ScalePending;
+        state.uv_modal_start_uvs.clear();
+        // Pre-calculate selection center and store original UVs
+        let mut center = RastVec2::new(0.0, 0.0);
+        let mut count = 0;
+        for &vi in &state.uv_selection {
+            if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                center.x += uv_vert.uv.x;
+                center.y += uv_vert.uv.y;
+                count += 1;
+                state.uv_modal_start_uvs.push((vi, uv_vert.uv));
+            }
+        }
+        if count > 0 {
+            center.x /= count as f32;
+            center.y /= count as f32;
+        }
+        state.uv_modal_center = center;
+        state.set_status("Scale: Click and drag to scale, Esc to cancel");
+    }
+
+    // Handle ScalePending → Scale transition when mouse is pressed
+    if state.uv_modal_transform == UvModalTransform::ScalePending && ctx.mouse.left_pressed {
+        state.uv_modal_transform = UvModalTransform::Scale;
+        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        state.set_status("Scale: Release to confirm, Esc to cancel");
+        return; // Don't process this click as anything else
+    }
+
+    // Handle Scale → None transition when mouse is released
+    if state.uv_modal_transform == UvModalTransform::Scale && !ctx.mouse.left_down {
+        state.uv_modal_transform = UvModalTransform::None;
+        state.uv_modal_start_uvs.clear();
+        state.set_status("Scale applied");
+        return;
+    }
+
+    if is_key_pressed(KeyCode::R) && !state.uv_selection.is_empty() {
+        state.uv_modal_transform = UvModalTransform::Rotate;
+        state.uv_modal_start_mouse = (ctx.mouse.x, ctx.mouse.y);
+        state.uv_modal_start_uvs.clear();
+        // Calculate selection center
+        let mut center = RastVec2::new(0.0, 0.0);
+        let mut count = 0;
+        for &vi in &state.uv_selection {
+            if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                center.x += uv_vert.uv.x;
+                center.y += uv_vert.uv.y;
+                count += 1;
+                state.uv_modal_start_uvs.push((vi, uv_vert.uv));
+            }
+        }
+        if count > 0 {
+            center.x /= count as f32;
+            center.y /= count as f32;
+        }
+        state.uv_modal_center = center;
+        state.set_status("Rotate: Move mouse, click to confirm, Esc to cancel");
+    }
+
+    // Cancel modal transform with Escape
+    if is_key_pressed(KeyCode::Escape) {
+        if state.uv_modal_transform != UvModalTransform::None {
+            state.uv_modal_transform = UvModalTransform::None;
+            state.uv_modal_start_uvs.clear();
+            state.set_status("Transform cancelled");
+        } else {
+            // Clear selection
+            state.uv_selection.clear();
+        }
+    }
+
+    // Confirm modal transform with click (except Scale modes which use drag)
+    if ctx.mouse.left_pressed {
+        match state.uv_modal_transform {
+            UvModalTransform::Grab | UvModalTransform::Rotate => {
+                // The transform is applied by the caller (modeler) based on state.uv_modal_start_uvs
+                // Here we just clear the modal state
+                state.uv_modal_transform = UvModalTransform::None;
+                state.uv_modal_start_uvs.clear();
+                state.set_status("Transform applied");
+                return; // Don't process click as selection
+            }
+            // ScalePending and Scale are handled separately above
+            _ => {}
+        }
+    }
+
+    // Handle direct drag continuation
+    if state.uv_drag_active {
+        if ctx.mouse.left_down {
+            // Continue dragging - the actual vertex movement is handled by apply_uv_direct_drag in modeler
+        } else {
+            // Mouse released - end drag
+            state.uv_drag_active = false;
+            state.uv_drag_start_uvs.clear();
+            state.set_status("Drag complete");
+        }
+        return; // Don't process other input while dragging
+    }
+
+    // Vertex selection and drag initiation with click
+    if ctx.mouse.left_pressed {
+        let click_threshold = 12.0; // Pixels
+
+        if let Some(vi) = find_nearest_vertex(ctx.mouse.x, ctx.mouse.y, click_threshold) {
+            let is_already_selected = state.uv_selection.contains(&vi);
+
+            if shift_held {
+                // Toggle selection
+                if let Some(pos) = state.uv_selection.iter().position(|&x| x == vi) {
+                    state.uv_selection.remove(pos);
+                } else {
+                    state.uv_selection.push(vi);
+                }
+            } else if is_already_selected {
+                // Clicked on already-selected vertex - start dragging all selected
+                state.uv_drag_active = true;
+                state.uv_drag_start = (ctx.mouse.x, ctx.mouse.y);
+                state.uv_drag_start_uvs.clear();
+                // Store original UVs for all selected vertices (object_idx=0 since we don't track that here)
+                for &sel_vi in &state.uv_selection {
+                    if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == sel_vi) {
+                        state.uv_drag_start_uvs.push((0, sel_vi, uv_vert.uv));
+                    }
+                }
+                state.set_status("Dragging vertices (pixel snap enabled)");
+            } else {
+                // Click on unselected vertex - select and start drag
+                state.uv_selection.clear();
+                state.uv_selection.push(vi);
+                // Start dragging this vertex
+                state.uv_drag_active = true;
+                state.uv_drag_start = (ctx.mouse.x, ctx.mouse.y);
+                state.uv_drag_start_uvs.clear();
+                if let Some(uv_vert) = uv_data.vertices.iter().find(|v| v.vertex_index == vi) {
+                    state.uv_drag_start_uvs.push((0, vi, uv_vert.uv));
+                }
+                state.set_status("Dragging vertices (pixel snap enabled)");
+            }
+        } else if !shift_held {
+            // Click on empty space - start box selection or clear selection
+            state.uv_box_select_start = Some((ctx.mouse.x, ctx.mouse.y));
+        }
+    }
+
+    // Box selection drag
+    if let Some((start_x, start_y)) = state.uv_box_select_start {
+        if ctx.mouse.left_down {
+            // Draw box selection rectangle
+            let min_x = start_x.min(ctx.mouse.x);
+            let min_y = start_y.min(ctx.mouse.y);
+            let max_x = start_x.max(ctx.mouse.x);
+            let max_y = start_y.max(ctx.mouse.y);
+            draw_rectangle_lines(min_x, min_y, max_x - min_x, max_y - min_y, 1.0, Color::new(1.0, 1.0, 1.0, 0.8));
+        } else {
+            // Mouse released - finalize box selection
+            let min_x = start_x.min(ctx.mouse.x);
+            let min_y = start_y.min(ctx.mouse.y);
+            let max_x = start_x.max(ctx.mouse.x);
+            let max_y = start_y.max(ctx.mouse.y);
+
+            // Find all vertices within the box
+            if !shift_held {
+                state.uv_selection.clear();
+            }
+            for uv_vert in &uv_data.vertices {
+                let (vx, vy) = uv_to_screen(uv_vert.uv.x, uv_vert.uv.y);
+                if vx >= min_x && vx <= max_x && vy >= min_y && vy <= max_y {
+                    if !state.uv_selection.contains(&uv_vert.vertex_index) {
+                        state.uv_selection.push(uv_vert.vertex_index);
+                    }
+                }
+            }
+
+            state.uv_box_select_start = None;
+        }
+    }
+}
+
+// ============================================================================
+// Import Dialog
+// ============================================================================
+
+/// Action returned by the import dialog
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportAction {
+    /// User confirmed import
+    Confirm,
+    /// User cancelled import
+    Cancel,
+}
+
+/// Draw the import dialog overlay
+/// Returns Some(ImportAction) if user clicked a button
+pub fn draw_import_dialog(
+    ctx: &mut UiContext,
+    import_state: &mut super::import::TextureImportState,
+    _icon_font: Option<&Font>,
+) -> Option<ImportAction> {
+    use super::import::{ResizeMode, generate_preview, preview_to_rgba, atlas_dimensions};
+    use crate::modeler::QuantizeMode;
+
+    if !import_state.active {
+        return None;
+    }
+
+    // Regenerate preview if settings changed
+    if import_state.preview_dirty && !import_state.source_rgba.is_empty() {
+        generate_preview(import_state);
+    }
+
+    // Darken background
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.6));
+
+    // Compact button dimensions
+    let btn_h = 20.0;
+    let btn_gap = 3.0;
+    let section_gap = 8.0;
+
+    // Check if atlas mode can be used
+    let min_atlas_dim = super::import::ATLAS_CELL_SIZES[0]; // 32
+    let can_use_atlas = import_state.source_width >= min_atlas_dim * 2 || import_state.source_height >= min_atlas_dim * 2;
+
+    // Dialog dimensions depend on atlas mode
+    let (dialog_w, dialog_h) = if import_state.atlas_mode && can_use_atlas {
+        (820.0, 580.0)  // Wider for atlas view
+    } else {
+        (620.0, 520.0)  // Room for source preview with selection
+    };
+    let dialog_x = (screen_width() - dialog_w) / 2.0;
+    let dialog_y = (screen_height() - dialog_h) / 2.0;
+
+    // Background
+    draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(40, 40, 45, 255));
+    draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(70, 70, 80, 255));
+
+    // === TITLE BAR with action buttons ===
+    let title_h = 32.0;
+    draw_rectangle(dialog_x, dialog_y, dialog_w, title_h, Color::from_rgba(35, 35, 40, 255));
+    draw_text("Import Texture", dialog_x + 12.0, dialog_y + 21.0, 16.0, WHITE);
+
+    // Action buttons in title bar (right side)
+    let action_btn_w = 70.0;
+    let action_btn_h = 22.0;
+    let action_btn_y = dialog_y + 5.0;
+
+    // Cancel button
+    let cancel_x = dialog_x + dialog_w - action_btn_w * 2.0 - btn_gap - 10.0;
+    let cancel_rect = Rect::new(cancel_x, action_btn_y, action_btn_w, action_btn_h);
+    let cancel_hovered = ctx.mouse.inside(&cancel_rect);
+    draw_rectangle(cancel_x, action_btn_y, action_btn_w, action_btn_h,
+        if cancel_hovered { Color::from_rgba(80, 55, 55, 255) } else { Color::from_rgba(60, 50, 50, 255) });
+    draw_rectangle_lines(cancel_x, action_btn_y, action_btn_w, action_btn_h, 1.0, Color::from_rgba(90, 70, 70, 255));
+    let cancel_dims = measure_text("Cancel", None, 11, 1.0);
+    draw_text("Cancel", cancel_x + (action_btn_w - cancel_dims.width) / 2.0, action_btn_y + 15.0, 11.0,
+        if cancel_hovered { WHITE } else { Color::from_rgba(200, 180, 180, 255) });
+
+    if cancel_hovered && ctx.mouse.clicked(&cancel_rect) {
+        import_state.reset();
+        return Some(ImportAction::Cancel);
+    }
+
+    // Import button
+    let import_btn_x = dialog_x + dialog_w - action_btn_w - 10.0;
+    let import_rect = Rect::new(import_btn_x, action_btn_y, action_btn_w, action_btn_h);
+    let import_hovered = ctx.mouse.inside(&import_rect);
+    let has_preview = !import_state.preview_indices.is_empty();
+    let import_enabled = has_preview;
+
+    let import_bg = if !import_enabled {
+        Color::from_rgba(45, 45, 50, 255)
+    } else if import_hovered {
+        Color::from_rgba(55, 90, 70, 255)
+    } else {
+        Color::from_rgba(50, 75, 60, 255)
+    };
+    draw_rectangle(import_btn_x, action_btn_y, action_btn_w, action_btn_h, import_bg);
+    draw_rectangle_lines(import_btn_x, action_btn_y, action_btn_w, action_btn_h, 1.0,
+        if import_enabled { Color::from_rgba(70, 110, 90, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+
+    let import_text_color = if !import_enabled {
+        Color::from_rgba(90, 90, 90, 255)
+    } else if import_hovered {
+        WHITE
+    } else {
+        Color::from_rgba(170, 210, 190, 255)
+    };
+    let import_dims = measure_text("Import", None, 11, 1.0);
+    draw_text("Import", import_btn_x + (action_btn_w - import_dims.width) / 2.0, action_btn_y + 15.0, 11.0, import_text_color);
+
+    if import_enabled && import_hovered && ctx.mouse.clicked(&import_rect) {
+        return Some(ImportAction::Confirm);
+    }
+
+    let content_y = dialog_y + title_h + 8.0;
+    let left_margin = dialog_x + 12.0;
+    let num_colors = import_state.preview_palette.len();
+    let (target_w, _) = import_state.target_size.dimensions();
+
+    // === ATLAS MODE LAYOUT ===
+    if import_state.atlas_mode && can_use_atlas {
+        let cell_size = import_state.atlas_cell_size;
+        let (cols, rows) = atlas_dimensions(import_state.source_width, import_state.source_height, cell_size);
+
+        // Large atlas view on left (up to 512px)
+        let atlas_max_size = 500.0;
+        let source_aspect = import_state.source_width as f32 / import_state.source_height as f32;
+        let (atlas_w, atlas_h) = if source_aspect > 1.0 {
+            (atlas_max_size, atlas_max_size / source_aspect)
+        } else {
+            (atlas_max_size * source_aspect, atlas_max_size)
+        };
+        let atlas_x = left_margin;
+        let atlas_y = content_y;
+
+        // Draw atlas background
+        draw_rectangle(atlas_x, atlas_y, atlas_w, atlas_h, Color::from_rgba(25, 25, 30, 255));
+
+        // Draw source image pixels (scaled)
+        let scale_x = atlas_w / import_state.source_width as f32;
+        let scale_y = atlas_h / import_state.source_height as f32;
+
+        // Draw pixels in batches for performance (sample every Nth pixel)
+        let sample_step = ((import_state.source_width / 256).max(1)).max((import_state.source_height / 256).max(1));
+        for sy in (0..import_state.source_height).step_by(sample_step) {
+            for sx in (0..import_state.source_width).step_by(sample_step) {
+                let idx = (sy * import_state.source_width + sx) * 4;
+                if idx + 3 < import_state.source_rgba.len() {
+                    let a = import_state.source_rgba[idx + 3];
+                    if a > 0 {
+                        let r = import_state.source_rgba[idx] as f32 / 255.0;
+                        let g = import_state.source_rgba[idx + 1] as f32 / 255.0;
+                        let b = import_state.source_rgba[idx + 2] as f32 / 255.0;
+                        let px = atlas_x + sx as f32 * scale_x;
+                        let py = atlas_y + sy as f32 * scale_y;
+                        let pw = scale_x * sample_step as f32;
+                        let ph = scale_y * sample_step as f32;
+                        draw_rectangle(px, py, pw, ph, Color::new(r, g, b, a as f32 / 255.0));
+                    }
+                }
+            }
+        }
+
+        // Draw grid lines for cells
+        let cell_w_screen = atlas_w / cols as f32;
+        let cell_h_screen = atlas_h / rows as f32;
+
+        for row in 0..=rows {
+            let line_y = atlas_y + row as f32 * cell_h_screen;
+            draw_line(atlas_x, line_y, atlas_x + atlas_w, line_y, 1.0, Color::from_rgba(80, 80, 90, 180));
+        }
+        for col in 0..=cols {
+            let line_x = atlas_x + col as f32 * cell_w_screen;
+            draw_line(line_x, atlas_y, line_x, atlas_y + atlas_h, 1.0, Color::from_rgba(80, 80, 90, 180));
+        }
+
+        // Highlight selected cell
+        let (sel_col, sel_row) = import_state.atlas_selected;
+        if sel_col < cols && sel_row < rows {
+            let sel_x = atlas_x + sel_col as f32 * cell_w_screen;
+            let sel_y = atlas_y + sel_row as f32 * cell_h_screen;
+            draw_rectangle_lines(sel_x, sel_y, cell_w_screen, cell_h_screen, 3.0, Color::from_rgba(80, 200, 255, 255));
+        }
+
+        // Handle clicks on atlas
+        let atlas_rect = Rect::new(atlas_x, atlas_y, atlas_w, atlas_h);
+        if ctx.mouse.inside(&atlas_rect) && ctx.mouse.clicked(&atlas_rect) {
+            let mx = ctx.mouse.x - atlas_x;
+            let my = ctx.mouse.y - atlas_y;
+            let click_col = (mx / cell_w_screen) as usize;
+            let click_row = (my / cell_h_screen) as usize;
+
+            if click_col < cols && click_row < rows && import_state.atlas_selected != (click_col, click_row) {
+                import_state.atlas_selected = (click_col, click_row);
+                import_state.preview_dirty = true;
+            }
+        }
+
+        draw_rectangle_lines(atlas_x, atlas_y, atlas_w, atlas_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+
+        // Source info below atlas
+        let info_y = atlas_y + atlas_h + 6.0;
+        let info_text = format!("{}x{} | {}x{} cells | Cell ({}, {})",
+            import_state.source_width, import_state.source_height, cols, rows,
+            sel_col, sel_row);
+        draw_text(&info_text, atlas_x, info_y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+
+        // === RIGHT SIDEBAR for atlas mode ===
+        let sidebar_x = atlas_x + atlas_w + 12.0;
+        let sidebar_w = dialog_w - atlas_w - 36.0;
+        let mut y = content_y;
+
+        // Cell preview (128x128)
+        let preview_size = 128.0;
+        draw_text(&format!("Preview ({}x{})", target_w, target_w), sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 16.0;
+
+        // Checkerboard background
+        let check_sz = 8.0;
+        for cy in 0..(preview_size / check_sz) as i32 {
+            for cx in 0..(preview_size / check_sz) as i32 {
+                let c = if (cx + cy) % 2 == 0 { Color::from_rgba(50, 50, 55, 255) } else { Color::from_rgba(40, 40, 45, 255) };
+                draw_rectangle(sidebar_x + cx as f32 * check_sz, y + cy as f32 * check_sz, check_sz, check_sz, c);
+            }
+        }
+
+        // Draw preview pixels
+        if !import_state.preview_indices.is_empty() {
+            let rgba = preview_to_rgba(import_state);
+            let pixel_size = preview_size / target_w as f32;
+            for py in 0..target_w {
+                for px in 0..target_w {
+                    let idx = (py * target_w + px) * 4;
+                    if idx + 3 < rgba.len() && rgba[idx + 3] > 0 {
+                        let r = rgba[idx] as f32 / 255.0;
+                        let g = rgba[idx + 1] as f32 / 255.0;
+                        let b = rgba[idx + 2] as f32 / 255.0;
+                        draw_rectangle(sidebar_x + px as f32 * pixel_size, y + py as f32 * pixel_size, pixel_size, pixel_size, Color::new(r, g, b, 1.0));
+                    }
+                }
+            }
+        }
+        draw_rectangle_lines(sidebar_x, y, preview_size, preview_size, 1.0, Color::from_rgba(70, 70, 80, 255));
+        y += preview_size + section_gap;
+
+        // Cell size selector
+        draw_text("Cell Size", sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let cell_sizes = super::import::ATLAS_CELL_SIZES;
+        let valid_sizes: Vec<_> = cell_sizes.iter()
+            .filter(|&&size| import_state.source_width >= size && import_state.source_height >= size)
+            .collect();
+        let cell_btn_w = (sidebar_w - btn_gap * 3.0) / 4.0;
+        for (i, &&size) in valid_sizes.iter().enumerate() {
+            let btn_x = sidebar_x + i as f32 * (cell_btn_w + btn_gap);
+            let is_selected = import_state.atlas_cell_size == size;
+            let btn_rect = Rect::new(btn_x, y, cell_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(80, 60, 120, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, cell_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, cell_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let label = format!("{}", size);
+            let dims = measure_text(&label, None, 9, 1.0);
+            draw_text(&label, btn_x + (cell_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 9.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.atlas_cell_size = size;
+                import_state.atlas_selected = (0, 0);
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Atlas toggle (to turn off)
+        draw_text("Atlas Mode", sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let toggle_w = (sidebar_w - btn_gap) / 2.0;
+        for (i, (enabled, label)) in [(false, "Off"), (true, "On")].iter().enumerate() {
+            let btn_x = sidebar_x + i as f32 * (toggle_w + btn_gap);
+            let is_selected = import_state.atlas_mode == *enabled;
+            let btn_rect = Rect::new(btn_x, y, toggle_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, toggle_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, toggle_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 9, 1.0);
+            draw_text(label, btn_x + (toggle_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 9.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.atlas_mode = *enabled;
+                import_state.atlas_selected = (0, 0);
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Compact settings
+        // Target size
+        draw_text("Output Size", sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let size_btn_w = (sidebar_w - btn_gap * 3.0) / 4.0;
+        let sizes = super::import::IMPORT_SIZES;
+        for (i, size) in sizes.iter().enumerate() {
+            let btn_x = sidebar_x + i as f32 * (size_btn_w + btn_gap);
+            let is_selected = import_state.target_size == *size;
+            let btn_rect = Rect::new(btn_x, y, size_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, size_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, size_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let label = size.label();
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (size_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.target_size = *size;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Resize mode
+        draw_text("Resize", sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let resize_btn_w = (sidebar_w - btn_gap * 2.0) / 3.0;
+        for (i, mode) in ResizeMode::ALL.iter().enumerate() {
+            let btn_x = sidebar_x + i as f32 * (resize_btn_w + btn_gap);
+            let is_selected = import_state.resize_mode == *mode;
+            let btn_rect = Rect::new(btn_x, y, resize_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, resize_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, resize_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let label = mode.label();
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (resize_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.resize_mode = *mode;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Depth
+        let hint = if import_state.unique_colors <= 15 { "4" } else { "8" };
+        draw_text(&format!("Depth (rec:{}bit)", hint), sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let depth_btn_w = (sidebar_w - btn_gap) / 2.0;
+        let depths = [(ClutDepth::Bpp4, "4-bit"), (ClutDepth::Bpp8, "8-bit")];
+        for (i, (depth, label)) in depths.iter().enumerate() {
+            let btn_x = sidebar_x + i as f32 * (depth_btn_w + btn_gap);
+            let is_selected = import_state.depth == *depth;
+            let btn_rect = Rect::new(btn_x, y, depth_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, depth_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, depth_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 9, 1.0);
+            draw_text(label, btn_x + (depth_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 9.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.depth = *depth;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Mode
+        draw_text("Quantize", sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let mode_btn_w = (sidebar_w - btn_gap * 2.0) / 3.0;
+        let modes = [(QuantizeMode::Standard, "Std"), (QuantizeMode::PreserveDetail, "Det"), (QuantizeMode::Smooth, "Smo")];
+        for (i, (mode, label)) in modes.iter().enumerate() {
+            let btn_x = sidebar_x + i as f32 * (mode_btn_w + btn_gap);
+            let is_selected = import_state.quantize_mode == *mode;
+            let btn_rect = Rect::new(btn_x, y, mode_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, mode_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, mode_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 9, 1.0);
+            draw_text(label, btn_x + (mode_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 9.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.quantize_mode = *mode;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Advanced: Color space + Denoise in one row
+        draw_text("Advanced", sidebar_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let adv_btn_w = (sidebar_w - btn_gap * 3.0) / 4.0;
+        // RGB/LAB
+        for (i, (use_lab, label)) in [(false, "RGB"), (true, "LAB")].iter().enumerate() {
+            let btn_x = sidebar_x + i as f32 * (adv_btn_w + btn_gap);
+            let is_selected = import_state.use_lab == *use_lab;
+            let btn_rect = Rect::new(btn_x, y, adv_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, adv_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, adv_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (adv_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.use_lab = *use_lab;
+                import_state.preview_dirty = true;
+            }
+        }
+        // Denoise Off/On
+        for (i, (level, label)) in [(0u8, "DN-"), (1, "DN+")].iter().enumerate() {
+            let btn_x = sidebar_x + (i + 2) as f32 * (adv_btn_w + btn_gap);
+            let is_selected = import_state.pre_quantize == *level;
+            let btn_rect = Rect::new(btn_x, y, adv_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, adv_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, adv_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (adv_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.pre_quantize = *level;
+                import_state.preview_dirty = true;
+            }
+        }
+
+        // Palette at bottom - adaptive swatch size for 256 colors
+        if num_colors > 0 {
+            // Use smaller swatches for larger palettes to fit in available space
+            let swatch_size = if num_colors > 64 { 6.0 } else { 12.0 };
+            let palette_height = if num_colors > 64 { 28.0 } else { 32.0 };
+            let palette_y = dialog_y + dialog_h - palette_height - 4.0;
+            let cols_per_row = ((dialog_w - 24.0) / swatch_size) as usize;
+            for (idx, color) in import_state.preview_palette.iter().enumerate() {
+                let col = idx % cols_per_row;
+                let row = idx / cols_per_row;
+                let sx = left_margin + col as f32 * swatch_size;
+                let sy = palette_y + row as f32 * swatch_size;
+                if !color.is_transparent() {
+                    let [r, g, b, _] = color.to_rgba();
+                    draw_rectangle(sx, sy, swatch_size - 1.0, swatch_size - 1.0, Color::from_rgba(r, g, b, 255));
+                }
+            }
+        }
+
+    } else {
+        // === NON-ATLAS MODE LAYOUT ===
+        // Source image on left, quantized preview + settings on right
+
+        // Calculate source preview dimensions (scaled to fit in left panel)
+        let source_max_size = 280.0;
+        let source_aspect = import_state.source_width as f32 / import_state.source_height as f32;
+        let (source_view_w, source_view_h) = if source_aspect > 1.0 {
+            (source_max_size, source_max_size / source_aspect)
+        } else {
+            (source_max_size * source_aspect, source_max_size)
+        };
+        let source_x = left_margin;
+        let source_y = content_y;
+
+        // Draw source image background
+        draw_rectangle(source_x, source_y, source_view_w, source_view_h, Color::from_rgba(25, 25, 30, 255));
+
+        // Draw source image pixels (scaled)
+        let scale_x = source_view_w / import_state.source_width as f32;
+        let scale_y = source_view_h / import_state.source_height as f32;
+
+        // Draw pixels in batches for performance (sample every Nth pixel)
+        let sample_step = ((import_state.source_width / 256).max(1)).max((import_state.source_height / 256).max(1));
+        for sy in (0..import_state.source_height).step_by(sample_step) {
+            for sx in (0..import_state.source_width).step_by(sample_step) {
+                let idx = (sy * import_state.source_width + sx) * 4;
+                if idx + 3 < import_state.source_rgba.len() {
+                    let a = import_state.source_rgba[idx + 3];
+                    if a > 0 {
+                        let r = import_state.source_rgba[idx] as f32 / 255.0;
+                        let g = import_state.source_rgba[idx + 1] as f32 / 255.0;
+                        let b = import_state.source_rgba[idx + 2] as f32 / 255.0;
+                        let px = source_x + sx as f32 * scale_x;
+                        let py = source_y + sy as f32 * scale_y;
+                        let pw = scale_x * sample_step as f32;
+                        let ph = scale_y * sample_step as f32;
+                        draw_rectangle(px, py, pw, ph, Color::new(r, g, b, a as f32 / 255.0));
+                    }
+                }
+            }
+        }
+
+        // Update animation frame for marching ants
+        import_state.crop_anim_frame = import_state.crop_anim_frame.wrapping_add(1);
+
+        // Helper to detect which edge/corner mouse is near
+        let hit_test_crop_edge = |mx: f32, my: f32, sel_x: usize, sel_y: usize, sel_w: usize, sel_h: usize| -> Option<super::import::CropResizeEdge> {
+            use super::import::CropResizeEdge;
+            let threshold = 8.0;
+            let sel_screen_x = source_x + sel_x as f32 * scale_x;
+            let sel_screen_y = source_y + sel_y as f32 * scale_y;
+            let sel_screen_w = sel_w as f32 * scale_x;
+            let sel_screen_h = sel_h as f32 * scale_y;
+
+            let left = sel_screen_x;
+            let right = sel_screen_x + sel_screen_w;
+            let top = sel_screen_y;
+            let bottom = sel_screen_y + sel_screen_h;
+
+            let near_left = (mx - left).abs() < threshold;
+            let near_right = (mx - right).abs() < threshold;
+            let near_top = (my - top).abs() < threshold;
+            let near_bottom = (my - bottom).abs() < threshold;
+            let in_x_range = mx >= left - threshold && mx <= right + threshold;
+            let in_y_range = my >= top - threshold && my <= bottom + threshold;
+
+            // Corners first
+            if near_left && near_top { return Some(CropResizeEdge::TopLeft); }
+            if near_right && near_top { return Some(CropResizeEdge::TopRight); }
+            if near_left && near_bottom { return Some(CropResizeEdge::BottomLeft); }
+            if near_right && near_bottom { return Some(CropResizeEdge::BottomRight); }
+            // Edges
+            if near_top && in_x_range { return Some(CropResizeEdge::Top); }
+            if near_bottom && in_x_range { return Some(CropResizeEdge::Bottom); }
+            if near_left && in_y_range { return Some(CropResizeEdge::Left); }
+            if near_right && in_y_range { return Some(CropResizeEdge::Right); }
+            None
+        };
+
+        // Check for edge hover (for cursor feedback)
+        let hovered_edge = if let Some((sel_x, sel_y, sel_w, sel_h)) = import_state.crop_selection {
+            if import_state.crop_resize_edge.is_none() && !import_state.crop_dragging {
+                hit_test_crop_edge(ctx.mouse.x, ctx.mouse.y, sel_x, sel_y, sel_w, sel_h)
+            } else {
+                import_state.crop_resize_edge
+            }
+        } else {
+            None
+        };
+
+        // Draw selection with marching ants and handles
+        if let Some((sel_x, sel_y, sel_w, sel_h)) = import_state.crop_selection {
+            let sel_screen_x = source_x + sel_x as f32 * scale_x;
+            let sel_screen_y = source_y + sel_y as f32 * scale_y;
+            let sel_screen_w = sel_w as f32 * scale_x;
+            let sel_screen_h = sel_h as f32 * scale_y;
+
+            // Dim the area outside selection
+            let dim_color = Color::new(0.0, 0.0, 0.0, 0.5);
+            draw_rectangle(source_x, source_y, source_view_w, sel_screen_y - source_y, dim_color);
+            draw_rectangle(source_x, sel_screen_y + sel_screen_h, source_view_w, source_y + source_view_h - sel_screen_y - sel_screen_h, dim_color);
+            draw_rectangle(source_x, sel_screen_y, sel_screen_x - source_x, sel_screen_h, dim_color);
+            draw_rectangle(sel_screen_x + sel_screen_w, sel_screen_y, source_x + source_view_w - sel_screen_x - sel_screen_w, sel_screen_h, dim_color);
+
+            // Marching ants border
+            let dash_len = 4.0;
+            let offset = (import_state.crop_anim_frame / 12) as f32 * 2.0;
+            draw_marching_line(sel_screen_x, sel_screen_y, sel_screen_x + sel_screen_w, sel_screen_y, dash_len, offset);
+            draw_marching_line(sel_screen_x + sel_screen_w, sel_screen_y, sel_screen_x + sel_screen_w, sel_screen_y + sel_screen_h, dash_len, offset);
+            draw_marching_line(sel_screen_x + sel_screen_w, sel_screen_y + sel_screen_h, sel_screen_x, sel_screen_y + sel_screen_h, dash_len, offset);
+            draw_marching_line(sel_screen_x, sel_screen_y + sel_screen_h, sel_screen_x, sel_screen_y, dash_len, offset);
+
+            // Draw resize handles
+            let handle_size = 6.0;
+            let half = handle_size / 2.0;
+            use super::import::CropResizeEdge;
+            let handles = [
+                (sel_screen_x - half, sel_screen_y - half, CropResizeEdge::TopLeft),
+                (sel_screen_x + sel_screen_w / 2.0 - half, sel_screen_y - half, CropResizeEdge::Top),
+                (sel_screen_x + sel_screen_w - half, sel_screen_y - half, CropResizeEdge::TopRight),
+                (sel_screen_x + sel_screen_w - half, sel_screen_y + sel_screen_h / 2.0 - half, CropResizeEdge::Right),
+                (sel_screen_x + sel_screen_w - half, sel_screen_y + sel_screen_h - half, CropResizeEdge::BottomRight),
+                (sel_screen_x + sel_screen_w / 2.0 - half, sel_screen_y + sel_screen_h - half, CropResizeEdge::Bottom),
+                (sel_screen_x - half, sel_screen_y + sel_screen_h - half, CropResizeEdge::BottomLeft),
+                (sel_screen_x - half, sel_screen_y + sel_screen_h / 2.0 - half, CropResizeEdge::Left),
+            ];
+            for (hx, hy, edge) in handles {
+                let is_hovered = hovered_edge == Some(edge);
+                let fill = if is_hovered { Color::new(1.0, 0.8, 0.2, 1.0) } else { WHITE };
+                draw_rectangle(hx, hy, handle_size, handle_size, fill);
+                draw_rectangle_lines(hx, hy, handle_size, handle_size, 1.0, BLACK);
+            }
+        }
+
+        // Draw dragging selection rectangle (new selection being created)
+        if import_state.crop_dragging && import_state.crop_resize_edge.is_none() {
+            if let Some((start_x, start_y)) = import_state.crop_drag_start {
+                let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, import_state.source_width as f32) as usize;
+                let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, import_state.source_height as f32) as usize;
+
+                let (sel_left, sel_right) = if mx < start_x { (mx, start_x) } else { (start_x, mx) };
+                let (sel_top, sel_bottom) = if my < start_y { (my, start_y) } else { (start_y, my) };
+
+                let sel_screen_x = source_x + sel_left as f32 * scale_x;
+                let sel_screen_y = source_y + sel_top as f32 * scale_y;
+                let sel_screen_w = (sel_right - sel_left) as f32 * scale_x;
+                let sel_screen_h = (sel_bottom - sel_top) as f32 * scale_y;
+
+                draw_rectangle_lines(sel_screen_x, sel_screen_y, sel_screen_w, sel_screen_h, 2.0, Color::from_rgba(255, 200, 80, 200));
+            }
+        }
+
+        draw_rectangle_lines(source_x, source_y, source_view_w, source_view_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+
+        // Handle mouse input for selection and resize
+        let source_rect = Rect::new(source_x, source_y, source_view_w, source_view_h);
+
+        if ctx.mouse.left_pressed {
+            // Check if clicking on an edge/handle to resize
+            if let Some(edge) = hovered_edge {
+                import_state.crop_resize_edge = Some(edge);
+                import_state.crop_resize_original = import_state.crop_selection;
+                import_state.crop_drag_start = Some((
+                    ((ctx.mouse.x - source_x) / scale_x) as usize,
+                    ((ctx.mouse.y - source_y) / scale_y) as usize,
+                ));
+            } else if ctx.mouse.inside(&source_rect) {
+                // Start new selection
+                let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, (import_state.source_width - 1) as f32) as usize;
+                let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, (import_state.source_height - 1) as f32) as usize;
+                import_state.crop_dragging = true;
+                import_state.crop_drag_start = Some((mx, my));
+                import_state.crop_resize_edge = None;
+            }
+        }
+
+        // Handle resize dragging
+        if let Some(edge) = import_state.crop_resize_edge {
+            if ctx.mouse.left_down {
+                if let (Some((orig_x, orig_y, orig_w, orig_h)), Some((start_mx, start_my))) =
+                    (import_state.crop_resize_original, import_state.crop_drag_start)
+                {
+                    use super::import::CropResizeEdge;
+                    let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, import_state.source_width as f32) as i32;
+                    let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, import_state.source_height as f32) as i32;
+                    let dx = mx - start_mx as i32;
+                    let dy = my - start_my as i32;
+
+                    let (mut new_x, mut new_y, mut new_w, mut new_h) = (orig_x as i32, orig_y as i32, orig_w as i32, orig_h as i32);
+
+                    match edge {
+                        CropResizeEdge::Left | CropResizeEdge::TopLeft | CropResizeEdge::BottomLeft => {
+                            new_x = (orig_x as i32 + dx).max(0);
+                            new_w = (orig_w as i32 - dx).max(4);
+                        }
+                        CropResizeEdge::Right | CropResizeEdge::TopRight | CropResizeEdge::BottomRight => {
+                            new_w = (orig_w as i32 + dx).max(4);
+                        }
+                        _ => {}
+                    }
+                    match edge {
+                        CropResizeEdge::Top | CropResizeEdge::TopLeft | CropResizeEdge::TopRight => {
+                            new_y = (orig_y as i32 + dy).max(0);
+                            new_h = (orig_h as i32 - dy).max(4);
+                        }
+                        CropResizeEdge::Bottom | CropResizeEdge::BottomLeft | CropResizeEdge::BottomRight => {
+                            new_h = (orig_h as i32 + dy).max(4);
+                        }
+                        _ => {}
+                    }
+
+                    // Clamp to image bounds
+                    new_x = new_x.max(0);
+                    new_y = new_y.max(0);
+                    if new_x + new_w > import_state.source_width as i32 {
+                        new_w = import_state.source_width as i32 - new_x;
+                    }
+                    if new_y + new_h > import_state.source_height as i32 {
+                        new_h = import_state.source_height as i32 - new_y;
+                    }
+
+                    import_state.crop_selection = Some((new_x as usize, new_y as usize, new_w as usize, new_h as usize));
+                }
+            } else {
+                // Finished resize
+                import_state.crop_resize_edge = None;
+                import_state.crop_resize_original = None;
+                import_state.crop_drag_start = None;
+                import_state.preview_dirty = true;
+            }
+        }
+        // Handle new selection drag
+        else if import_state.crop_dragging && !ctx.mouse.left_down {
+            if let Some((start_x, start_y)) = import_state.crop_drag_start {
+                let mx = ((ctx.mouse.x - source_x) / scale_x).clamp(0.0, import_state.source_width as f32) as usize;
+                let my = ((ctx.mouse.y - source_y) / scale_y).clamp(0.0, import_state.source_height as f32) as usize;
+
+                let (sel_left, sel_right) = if mx < start_x { (mx, start_x) } else { (start_x, mx) };
+                let (sel_top, sel_bottom) = if my < start_y { (my, start_y) } else { (start_y, my) };
+
+                let sel_w = sel_right.saturating_sub(sel_left);
+                let sel_h = sel_bottom.saturating_sub(sel_top);
+
+                if sel_w >= 4 && sel_h >= 4 {
+                    import_state.crop_selection = Some((sel_left, sel_top, sel_w, sel_h));
+                    import_state.preview_dirty = true;
+                } else if import_state.crop_selection.is_some() {
+                    import_state.crop_selection = None;
+                    import_state.preview_dirty = true;
+                }
+            }
+            import_state.crop_dragging = false;
+            import_state.crop_drag_start = None;
+        }
+
+        // Source info below
+        let info_y = source_y + source_view_h + 4.0;
+        let info_text = if let Some((sel_x, sel_y, sel_w, sel_h)) = import_state.crop_selection {
+            format!("{}x{} | Selection: {}x{} at ({},{})",
+                import_state.source_width, import_state.source_height, sel_w, sel_h, sel_x, sel_y)
+        } else {
+            format!("{}x{} | Drag to select region", import_state.source_width, import_state.source_height)
+        };
+        draw_text(&info_text, source_x, info_y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+
+        // Clear selection button (if selection exists)
+        if import_state.crop_selection.is_some() {
+            let clear_btn_w = 80.0;
+            let clear_btn_x = source_x + source_view_w - clear_btn_w;
+            let clear_btn_y = info_y;
+            let clear_rect = Rect::new(clear_btn_x, clear_btn_y, clear_btn_w, 18.0);
+            let clear_hovered = ctx.mouse.inside(&clear_rect);
+            draw_rectangle(clear_btn_x, clear_btn_y, clear_btn_w, 18.0,
+                if clear_hovered { Color::from_rgba(80, 55, 55, 255) } else { Color::from_rgba(55, 45, 45, 255) });
+            draw_rectangle_lines(clear_btn_x, clear_btn_y, clear_btn_w, 18.0, 1.0, Color::from_rgba(90, 70, 70, 255));
+            let clear_dims = measure_text("Clear", None, 9, 1.0);
+            draw_text("Clear", clear_btn_x + (clear_btn_w - clear_dims.width) / 2.0, clear_btn_y + 12.0, 9.0,
+                if clear_hovered { WHITE } else { Color::from_rgba(180, 160, 160, 255) });
+            if clear_hovered && ctx.mouse.clicked(&clear_rect) {
+                import_state.crop_selection = None;
+                import_state.preview_dirty = true;
+            }
+        }
+
+        // === RIGHT SIDE: Quantized preview + settings ===
+        let settings_x = source_x + source_max_size + 16.0;
+        let settings_w = dialog_w - source_max_size - 40.0;
+        let mut y = content_y;
+
+        // Quantized preview (128x128)
+        let preview_size = 128.0;
+        draw_text(&format!("Preview ({}x{})", target_w, target_w), settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 16.0;
+
+        // Checkerboard background for preview
+        let check_sz = 8.0;
+        for cy in 0..(preview_size / check_sz) as i32 {
+            for cx in 0..(preview_size / check_sz) as i32 {
+                let c = if (cx + cy) % 2 == 0 { Color::from_rgba(50, 50, 55, 255) } else { Color::from_rgba(40, 40, 45, 255) };
+                draw_rectangle(settings_x + cx as f32 * check_sz, y + cy as f32 * check_sz, check_sz, check_sz, c);
+            }
+        }
+
+        // Draw preview pixels
+        if !import_state.preview_indices.is_empty() {
+            let rgba = preview_to_rgba(import_state);
+            let pixel_size = preview_size / target_w as f32;
+            for py in 0..target_w {
+                for px in 0..target_w {
+                    let idx = (py * target_w + px) * 4;
+                    if idx + 3 < rgba.len() && rgba[idx + 3] > 0 {
+                        let r = rgba[idx] as f32 / 255.0;
+                        let g = rgba[idx + 1] as f32 / 255.0;
+                        let b = rgba[idx + 2] as f32 / 255.0;
+                        draw_rectangle(settings_x + px as f32 * pixel_size, y + py as f32 * pixel_size, pixel_size, pixel_size, Color::new(r, g, b, 1.0));
+                    }
+                }
+            }
+        }
+        draw_rectangle_lines(settings_x, y, preview_size, preview_size, 1.0, Color::from_rgba(70, 70, 80, 255));
+        y += preview_size + section_gap;
+
+        // Atlas toggle (if available)
+        if can_use_atlas {
+            draw_text("Atlas Mode", settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+            y += 14.0;
+            let toggle_w = (settings_w - btn_gap) / 2.0;
+            for (i, (enabled, label)) in [(false, "Off"), (true, "On")].iter().enumerate() {
+                let btn_x = settings_x + i as f32 * (toggle_w + btn_gap);
+                let is_selected = import_state.atlas_mode == *enabled;
+                let btn_rect = Rect::new(btn_x, y, toggle_w, btn_h);
+                let hovered = ctx.mouse.inside(&btn_rect);
+                let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+                draw_rectangle(btn_x, y, toggle_w, btn_h, bg);
+                draw_rectangle_lines(btn_x, y, toggle_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+                let dims = measure_text(label, None, 9, 1.0);
+                draw_text(label, btn_x + (toggle_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 9.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+                if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                    import_state.atlas_mode = *enabled;
+                    import_state.atlas_selected = (0, 0);
+                    import_state.preview_dirty = true;
+                }
+            }
+            y += btn_h + section_gap;
+        }
+
+        // Output size
+        draw_text("Output Size", settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let size_btn_w = (settings_w - btn_gap * 3.0) / 4.0;
+        let sizes = super::import::IMPORT_SIZES;
+        for (i, size) in sizes.iter().enumerate() {
+            let btn_x = settings_x + i as f32 * (size_btn_w + btn_gap);
+            let is_selected = import_state.target_size == *size;
+            let btn_rect = Rect::new(btn_x, y, size_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, size_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, size_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let label = size.label();
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (size_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.target_size = *size;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Resize mode
+        draw_text("Resize", settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let resize_btn_w = (settings_w - btn_gap * 2.0) / 3.0;
+        for (i, mode) in ResizeMode::ALL.iter().enumerate() {
+            let btn_x = settings_x + i as f32 * (resize_btn_w + btn_gap);
+            let is_selected = import_state.resize_mode == *mode;
+            let btn_rect = Rect::new(btn_x, y, resize_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, resize_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, resize_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let label = mode.label();
+            let dims = measure_text(label, None, 9, 1.0);
+            draw_text(label, btn_x + (resize_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 9.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.resize_mode = *mode;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Depth
+        let hint = if import_state.unique_colors <= 15 { "4" } else { "8" };
+        draw_text(&format!("Depth (rec:{}bit)", hint), settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let depth_btn_w = (settings_w - btn_gap) / 2.0;
+        let depths = [(ClutDepth::Bpp4, "4-bit"), (ClutDepth::Bpp8, "8-bit")];
+        for (i, (depth, label)) in depths.iter().enumerate() {
+            let btn_x = settings_x + i as f32 * (depth_btn_w + btn_gap);
+            let is_selected = import_state.depth == *depth;
+            let btn_rect = Rect::new(btn_x, y, depth_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, depth_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, depth_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 9, 1.0);
+            draw_text(label, btn_x + (depth_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 9.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.depth = *depth;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Quantize mode
+        draw_text("Quantize", settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let mode_btn_w = (settings_w - btn_gap * 2.0) / 3.0;
+        let modes = [(QuantizeMode::Standard, "Std"), (QuantizeMode::PreserveDetail, "Detail"), (QuantizeMode::Smooth, "Smooth")];
+        for (i, (mode, label)) in modes.iter().enumerate() {
+            let btn_x = settings_x + i as f32 * (mode_btn_w + btn_gap);
+            let is_selected = import_state.quantize_mode == *mode;
+            let btn_rect = Rect::new(btn_x, y, mode_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, mode_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, mode_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (mode_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.quantize_mode = *mode;
+                import_state.preview_dirty = true;
+            }
+        }
+        y += btn_h + section_gap;
+
+        // Advanced options in one row
+        draw_text("Advanced", settings_x, y + 10.0, 10.0, Color::from_rgba(150, 150, 150, 255));
+        y += 14.0;
+        let adv_btn_w = (settings_w - btn_gap * 3.0) / 4.0;
+
+        // RGB/LAB
+        for (i, (use_lab, label)) in [(false, "RGB"), (true, "LAB")].iter().enumerate() {
+            let btn_x = settings_x + i as f32 * (adv_btn_w + btn_gap);
+            let is_selected = import_state.use_lab == *use_lab;
+            let btn_rect = Rect::new(btn_x, y, adv_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, adv_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, adv_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (adv_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.use_lab = *use_lab;
+                import_state.preview_dirty = true;
+            }
+        }
+
+        // Denoise Off/On
+        for (i, (level, label)) in [(0u8, "DN-"), (1, "DN+")].iter().enumerate() {
+            let btn_x = settings_x + (i + 2) as f32 * (adv_btn_w + btn_gap);
+            let is_selected = import_state.pre_quantize == *level;
+            let btn_rect = Rect::new(btn_x, y, adv_btn_w, btn_h);
+            let hovered = ctx.mouse.inside(&btn_rect);
+            let bg = if is_selected { Color::from_rgba(60, 90, 130, 255) } else if hovered { Color::from_rgba(55, 55, 65, 255) } else { Color::from_rgba(45, 45, 55, 255) };
+            draw_rectangle(btn_x, y, adv_btn_w, btn_h, bg);
+            draw_rectangle_lines(btn_x, y, adv_btn_w, btn_h, 1.0, Color::from_rgba(70, 70, 80, 255));
+            let dims = measure_text(label, None, 8, 1.0);
+            draw_text(label, btn_x + (adv_btn_w - dims.width) / 2.0, y + btn_h / 2.0 + 3.0, 8.0, if is_selected { WHITE } else { Color::from_rgba(180, 180, 180, 255) });
+            if hovered && ctx.mouse.clicked(&btn_rect) && !is_selected {
+                import_state.pre_quantize = *level;
+                import_state.preview_dirty = true;
+            }
+        }
+
+        // Palette at bottom - adaptive swatch size for 256 colors
+        if num_colors > 0 {
+            // Use smaller swatches for larger palettes to fit in available space
+            let swatch_size = if num_colors > 64 { 6.0 } else { 12.0 };
+            let palette_height = if num_colors > 64 { 28.0 } else { 32.0 };
+            let palette_y = dialog_y + dialog_h - palette_height - 4.0;
+            let cols_per_row = ((dialog_w - 24.0) / swatch_size) as usize;
+            for (idx, color) in import_state.preview_palette.iter().enumerate() {
+                let col = idx % cols_per_row;
+                let row = idx / cols_per_row;
+                let sx = left_margin + col as f32 * swatch_size;
+                let sy = palette_y + row as f32 * swatch_size;
+                if !color.is_transparent() {
+                    let [r, g, b, _] = color.to_rgba();
+                    draw_rectangle(sx, sy, swatch_size - 1.0, swatch_size - 1.0, Color::from_rgba(r, g, b, 255));
+                }
+            }
+        }
+    }
+
+    // Escape key to cancel
+    if is_key_pressed(KeyCode::Escape) {
+        import_state.reset();
+        return Some(ImportAction::Cancel);
+    }
+
+    None
 }

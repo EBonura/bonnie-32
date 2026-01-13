@@ -202,6 +202,26 @@ impl UserTexture {
         Self::new(name, TextureSize::Size64x64, depth)
     }
 
+    /// Create a texture with pre-existing data (for imports)
+    pub fn new_with_data(
+        name: impl Into<String>,
+        size: TextureSize,
+        depth: ClutDepth,
+        indices: Vec<u8>,
+        palette: Vec<Color15>,
+    ) -> Self {
+        let (width, height) = size.dimensions();
+        Self {
+            name: name.into(),
+            width,
+            height,
+            depth,
+            indices,
+            palette,
+            blend_mode: BlendMode::Opaque,
+        }
+    }
+
     /// Get the texture size enum if it matches a standard size
     pub fn size(&self) -> Option<TextureSize> {
         TextureSize::from_dimensions(self.width, self.height)
