@@ -893,6 +893,7 @@ pub fn draw_modeler_viewport_ext(
                         None, // No axis constraint initially
                         indices,
                         initial_positions,
+                        mouse_pos, // Use mouse_pos as center for screen-space scaling
                     );
                 }
                 ModalTransform::Rotate => {
@@ -2623,13 +2624,9 @@ fn handle_scale_gizmo(
     // Handle ongoing drag with DragManager
     if is_dragging {
         if ctx.mouse.left_down {
-            let fb_mouse = (
-                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-            );
-
+            // Scale uses screen-space coordinates for distance-from-center calculation
             let result = state.drag_manager.update(
-                fb_mouse,
+                mouse_pos,  // screen-space (same as center_screen)
                 &state.camera,
                 fb_width,
                 fb_height,
@@ -2660,26 +2657,37 @@ fn handle_scale_gizmo(
         }
     }
 
-    // Detect hover on cube handles (only when not dragging)
+    // Detect hover on cube handles and center (only when not dragging)
     state.gizmo_hovered_axis = None;
+    let mut center_hovered = false;
     if !is_dragging && inside_viewport {
-        let cube_size = 6.0;
-        for (axis, end_screen, _) in &setup.axis_screen_ends {
-            let dx = mouse_pos.0 - end_screen.0;
-            let dy = mouse_pos.1 - end_screen.1;
-            if dx.abs() < cube_size && dy.abs() < cube_size {
-                state.gizmo_hovered_axis = Some(*axis);
-                break;
+        // Check center circle first (uniform scale)
+        let center_dx = mouse_pos.0 - setup.center_screen.0;
+        let center_dy = mouse_pos.1 - setup.center_screen.1;
+        let center_radius = 8.0; // Slightly larger than visual radius for easier clicking
+        if center_dx * center_dx + center_dy * center_dy < center_radius * center_radius {
+            center_hovered = true;
+            // Don't set gizmo_hovered_axis - None means uniform scale
+        } else {
+            // Check axis cube handles
+            let cube_size = 6.0;
+            for (axis, end_screen, _) in &setup.axis_screen_ends {
+                let dx = mouse_pos.0 - end_screen.0;
+                let dy = mouse_pos.1 - end_screen.1;
+                if dx.abs() < cube_size && dy.abs() < cube_size {
+                    state.gizmo_hovered_axis = Some(*axis);
+                    break;
+                }
             }
         }
     }
-    // Sync hover state to tool
-    state.tool_box.tools.scale.set_hovered_axis(state.gizmo_hovered_axis.map(to_ui_axis));
+    // Sync hover state to tool (None = uniform scale when center hovered)
+    let tool_axis = if center_hovered { None } else { state.gizmo_hovered_axis.map(to_ui_axis) };
+    state.tool_box.tools.scale.set_hovered_axis(tool_axis);
 
-    // Start drag on click
-    if ctx.mouse.left_pressed && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
-        let axis = state.gizmo_hovered_axis.unwrap();
-
+    // Start drag on click (axis handle OR center for uniform scale)
+    let can_start_drag = state.gizmo_hovered_axis.is_some() || center_hovered;
+    if ctx.mouse.left_pressed && inside_viewport && can_start_drag && !is_dragging {
         // Get vertex indices and initial positions
         let mesh = state.mesh();
         let mut indices = state.selection.get_affected_vertex_indices(mesh);
@@ -2691,23 +2699,22 @@ fn handle_scale_gizmo(
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
-        let fb_mouse = (
-            (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-            (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-        );
-
         // Save undo state BEFORE starting the gizmo drag
         state.push_undo("Gizmo Scale");
 
+        // Determine axis: None for uniform scale (center), Some(axis) for constrained
+        let ui_axis = state.gizmo_hovered_axis.map(to_ui_axis);
+
         // Start drag with DragManager and sync tool state
-        let ui_axis = to_ui_axis(axis);
-        state.tool_box.tools.scale.start_drag(Some(ui_axis));
+        // Scale uses screen-space coordinates for distance-from-center calculation
+        state.tool_box.tools.scale.start_drag(ui_axis);
         state.drag_manager.start_scale(
             setup.center,
-            fb_mouse,
-            Some(ui_axis),
+            mouse_pos,           // screen-space mouse position
+            ui_axis,
             indices,
             initial_positions,
+            setup.center_screen, // screen-space center for distance calculation
         );
     }
 
@@ -2732,9 +2739,17 @@ fn handle_scale_gizmo(
         );
     }
 
-    // Draw center circle
-    let center_color = if is_dragging { YELLOW } else { WHITE };
-    draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
+    // Draw center circle (uniform scale handle)
+    let uniform_dragging = is_dragging && state.drag_manager.current_axis().is_none();
+    let center_color = if uniform_dragging {
+        YELLOW
+    } else if center_hovered {
+        Color::from_rgba(255, 255, 255, 255) // Bright white when hovered
+    } else {
+        Color::from_rgba(200, 200, 200, 200) // Dimmer when not hovered
+    };
+    let center_size = if center_hovered || uniform_dragging { 6.0 } else { 4.0 };
+    draw_circle(setup.center_screen.0, setup.center_screen.1, center_size, center_color);
 }
 
 // ============================================================================
