@@ -1,161 +1,167 @@
-# Bonnie Engine
+# BONNIE-32
 
-[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](https://github.com/ebonura/bonnie-engine/releases)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](https://github.com/ebonura/bonnie-32/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg)]()
 
-A PS1-style game engine and level editor created with the goal of answering: **"How would a Souls-like have looked on a PS1?"**
+A fantasy console for making PS1-era 3D games.
 
-**[Live Demo](https://ebonura.github.io/bonnie-engine)** | **[itch.io](https://bonnie-games.itch.io/)** | **[Buy Me a Coffee](https://buymeacoffee.com/bonniegames)**
+**[Try it in your browser](https://ebonura.github.io/bonnie-32)** | **[itch.io](https://bonnie-games.itch.io/)** | **[Buy Me a Coffee](https://buymeacoffee.com/bonniegames)**
 
-## Description
+---
 
-Bonnie Engine is a unified development environment for creating games with authentic PlayStation 1 aesthetics. It includes a software rasterizer that faithfully recreates PS1 hardware limitations, a TR1-style level editor, a music tracker with PS1 SPU reverb emulation, and runs both natively and in the browser via WebAssembly.
+## Why This Exists
 
-### Key Features
+I always imagined how a Souls-like would have been as if it were a late PS1 title. Tried Godot, Love2D, Picotron, even targeting real hardware, but nothing quite fit so I built my own.
 
-- **Authentic PS1 Rendering** - Affine texture mapping, vertex snapping, Gouraud shading, 320x240 resolution, no perspective correction
-- **Room-Based Level Editor** - TR1-style sector grid with dual 2D/3D viewports, texture painting, and portal culling
-- **Music Tracker** - 8-channel tracker with 37-key piano, SF2 soundfont support, and 10 authentic PsyQ SDK reverb presets
-- **Cross-Platform** - Runs natively on Windows/macOS/Linux and in browsers via WASM
-- **Gamepad Support** - Full controller support with Elden Ring-style Souls-like controls
+BONNIE-32 is a fantasy console that gives you:
+- PS1 hardware constraints (320×240, affine textures, vertex snapping)
+- Integrated tools for modeling, texturing, music, and level design
+- Works the same in browser and native (Windows, macOS, Linux)
 
-## Installation
 
-### Requirements
 
-- Rust 1.70+ (for building from source)
-- Cargo
+## How the renderer works
 
-### Build from Source
+The renderer is a software rasterizer written in Rust. It recreates PS1 visuals through optional rendering modes, inspired from how the hardware handled graphics:
 
+| Feature | Effect |
+|---------|--------|
+| **Affine texture mapping** | No perspective correction, textures warp |
+| **Vertex snapping** | Integer coordinates, geometry jitters |
+| **RGB555 color** | 15-bit color with optional dithering |
+| **No sub-pixel precision** | Polygons snap to pixel grid |
+| **Painter's algorithm** | Back-to-front sorting instead of Z-buffer |
+
+The renderer implements these natively as actual rendering techniques, not post-processing.
+
+## Integrated tools
+
+Built-in editors for the full workflow:
+
+### World Editor
+<img src="docs/screenshot-world-editor.png" width="600" alt="World Editor">
+
+Room-based level editor with a Tomb Raider-style sector grid.
+- 2D grid views (top/front/side) and 3D preview
+- Texture painting with palette support
+- Portal system for connecting rooms
+- Object placement
+
+### Asset Editor
+<img src="docs/screenshot-asset-editor.png" width="600" alt="Asset Editor">
+
+Low-poly mesh modeler inspired by PicoCAD and Blender.
+- 4-panel viewport (perspective + orthographic)
+- G/R/T for grab, rotate, scale
+- Texture atlas editor with indexed color
+- UV editor
+- OBJ import
+
+### Music Tracker
+<img src="docs/screenshot-music-tracker.png" width="600" alt="Music Tracker">
+
+Pattern-based tracker with PS1 audio emulation.
+- 8 channels, SF2 soundfont support
+- PsyQ SDK reverb presets (Room, Studio, Hall, Space Echo...)
+- MIDI keyboard input
+- Tracker effects (arpeggio, vibrato, portamento)
+
+### Game Mode
+To test level being worked on.
+- Third-person or free-fly camera
+- Gamepad support
+- Debug overlay
+
+## Quick Start
+
+### Try it now
+[Web demo](https://ebonura.github.io/bonnie-32) runs in your browser.
+
+### Build from source
 ```bash
-git clone https://github.com/EBonura/bonnie-engine.git
-cd bonnie-engine
+git clone https://github.com/EBonura/bonnie-32.git
+cd bonnie-32
 cargo run --release
 ```
 
-### Web Build
+### Pre-built binaries
+Download from [itch.io](https://bonnie-games.itch.io/) or [GitHub Releases](https://github.com/EBonura/bonnie-32/releases).
 
+**macOS users**: Run from the extracted directory and remove quarantine if needed:
 ```bash
-cargo build --release --target wasm32-unknown-unknown
-python3 -m http.server 8000
-# Open http://localhost:8000 in your browser
+xattr -cr ~/Downloads/bonnie-32-macos-*
+cd ~/Downloads/bonnie-32-macos-*
+./bonnie-32
 ```
 
-### Pre-built Binaries
+## Controls Reference
 
-Download from [itch.io](https://bonnie-games.itch.io/) or the [GitHub Releases](https://github.com/EBonura/bonnie-engine/releases) page.
-
-**macOS Note**: The app must be run from its own directory so it can find assets:
-```bash
-cd ~/Downloads/bonnie-engine-macos-aarch64-v0.1.6  # or wherever you extracted it
-./bonnie-engine
-```
-
-If you get security warnings, remove the quarantine attribute first:
-```bash
-xattr -cr ~/Downloads/bonnie-engine-macos-aarch64-v0.1.6
-```
-
-## Usage
-
-The engine is organized into tabs accessible from the top bar:
-
-### Home
-Introduction page with FAQ, motivation, and links. Explains the project's goals and how to get started with each tool.
+### Asset Editor
+| Key | Action |
+|-----|--------|
+| `1` `2` `3` | Vertex / Edge / Face mode |
+| `G` | Grab (move) |
+| `R` | Rotate |
+| `T` | Scale |
+| `E` | Extrude |
+| `X` `Y` `Z` | Axis constraint |
+| `Space` | Toggle fullscreen viewport |
+| `V` | Toggle UV/Build mode |
 
 ### World Editor
-TRLE-inspired room-based level editor with a sector grid system (1024 world units per sector, 256 units per height click). Features:
-- **2D Grid View**: Top-down, front, or side projection for precise editing
-- **3D Viewport**: Software-rendered preview with free camera or orbit mode
-- **Tools**: Select, Draw Floor, Draw Wall, Draw Diagonal Wall, Draw Ceiling, Place Object
-- **Panels**: Texture palette for painting faces, properties panel for vertex colors and face settings
-- **Portals**: Connect rooms together for seamless traversal
-
-### Assets
-PicoCAD-inspired low-poly mesh modeler with a 4-panel viewport layout. Features:
-- **Viewports**: Perspective, Top, Front, Side views (Space to toggle fullscreen)
-- **Selection Modes**: Vertex (1), Edge (2), Face (3)
-- **Transform Tools**: Move (G), Rotate (R), Scale (T) with Blender-style modal editing
-- **Operations**: Extrude faces, OBJ import, shared texture atlas
-- **View Modes**: Build mode for geometry, Texture mode (V) for UV editing
+| Key | Action |
+|-----|--------|
+| `WASD` | Pan camera |
+| `Shift+WASD` | Fast pan |
+| `=` `-` | Zoom in/out |
+| `1-6` | Select tool |
 
 ### Music Tracker
-Pattern-based music tracker inspired by Picotron's design. Features:
-- **8 Channels**: Each with instrument, pan, modulation, and expression controls
-- **Pattern Editor**: Note, volume, and effect columns with keyboard input
-- **Arrangement View**: Sequence patterns into a full song
-- **SF2 Soundfonts**: Load and preview instruments via piano keyboard
-- **PS1 SPU Reverb**: 10 authentic PsyQ SDK reverb presets (Room, Studio, Hall, etc.)
-- **SPU Resampling**: Optional sample rate reduction for authentic lo-fi sound
+| Key | Action |
+|-----|--------|
+| `Z`-`M` / `Q`-`P` | Piano keys (2 octaves) |
+| `Space` | Play/Stop |
+| `Arrow keys` | Navigate pattern |
 
-### Game
-Test your level in real-time with ECS-based game systems. Features:
-- **Camera Modes**: Third-person character follow or free-fly spectator
-- **Controls**: Keyboard/mouse or gamepad with auto-detection (Xbox/PlayStation layouts)
-- **Debug Overlay**: Performance timings, player stats, render breakdown
-- **FPS Limit**: 30 FPS (authentic), 60 FPS, or unlocked
+## Technical specs
 
-## PS1 Technical Reference
+Hardware constraints:
 
-For implementing authentic PS1 constraints:
+| Spec | Value |
+|------|-------|
+| Resolution | 320×240 |
+| Color depth | RGB555 (15-bit) |
+| Texture format | 4-bit or 8-bit indexed |
+| Max texture size | 256×256 |
+| Audio | 8 channels, 44.1kHz |
 
-**VRAM:**
-- Total: 1MB (1,048,576 bytes)
-- Screen buffer (320x240x16bit): ~153,600 bytes
-- Double buffer: ~307,200 bytes
-- Available for textures: ~700-900KB
-- Textures typically 4-bit or 8-bit indexed with CLUTs
-
-**Dithering (Bayer 4x4 matrix):**
-```
- 0/16   8/16   2/16  10/16
-12/16   4/16  14/16   6/16
- 3/16  11/16   1/16   9/16
-15/16   7/16  13/16   5/16
-```
-
-## CI/CD
-
-The project uses GitHub Actions for continuous integration and deployment:
-
-- **Web Deploy**: Every push to `main` automatically builds the WASM version and deploys to [GitHub Pages](https://ebonura.github.io/bonnie-engine) and [itch.io](https://bonnie-games.itch.io/bonnie-engine)
-- **Releases**: When the version in `Cargo.toml` changes, a new GitHub Release is created with pre-built binaries for all platforms (Linux, Windows, macOS Intel/ARM, WASM)
-
-To create a release, simply bump the version in `Cargo.toml` and merge to main.
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/EBonura/bonnie-engine/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/EBonura/bonnie-engine/discussions)
 
 ## Contributing
 
-Contributions are welcome! Please open an issue first to discuss what you'd like to change.
+Contributions welcome! Please open an issue first to discuss changes.
 
-## Authors and Acknowledgments
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-**Created by [Emanuele Bonura](https://bonnie-games.itch.io/)**
+## Credits
 
-The software rasterizer is based on [tipsy](https://github.com/nkanaev/tipsy) by nkanaev.
+Made by [Emanuele Bonura](https://bonnie-games.itch.io/).
 
-### Texture Credits
+Software rasterizer based on [tipsy](https://github.com/nkanaev/tipsy) by nkanaev.
 
+### Included Texture Packs
 - [Retro Texture Pack](https://little-martian.itch.io/retro-textures-pack) by Little Martian
 - [Low Poly 64x64 Textures](https://phobicpaul.itch.io/low-poly-64x64-textures) by PhobicPaul
 - [Quake-Like Texture Pack](https://level-eleven-games.itch.io/quake-like-texture-pack) by Level Eleven Games
 - [Dark Fantasy Townhouse](https://level-eleven-games.itch.io/dark-fantasy-townhouse-64x64-texture-pack) by Level Eleven Games
 - [Tiny Texture Pack 1](https://screamingbrainstudios.itch.io/tiny-texture-pack), [2](https://screamingbrainstudios.itch.io/tiny-texture-pack-2), [3](https://screamingbrainstudios.itch.io/tiny-texture-pack-3) by Screaming Brain Studios
 
+See [THIRD_PARTY.md](THIRD_PARTY.md) for full license information.
+
 ## License
 
 [MIT](LICENSE)
 
-## Future
+---
 
-- **CPU Usage Counter**: Display PS1 CPU budget usage to help creators stay within authentic hardware limits
-
-## Project Status
-
-**Active Development** - This project is under active development. Expect breaking changes between versions.
+*BONNIE-32 is under active development. Expect breaking changes between versions.*

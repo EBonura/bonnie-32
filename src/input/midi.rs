@@ -24,13 +24,13 @@ mod platform {
 
     // FFI bindings to JavaScript functions in index.html
     extern "C" {
-        fn bonnie_midi_init();
-        fn bonnie_midi_is_connected() -> i32;
-        fn bonnie_midi_get_message_count() -> i32;
-        fn bonnie_midi_copy_messages(dest_ptr: *mut u8, max_count: usize) -> usize;
-        fn bonnie_midi_copy_device_name(dest_ptr: *mut u8, max_len: usize) -> usize;
-        fn bonnie_midi_get_device_count() -> i32;
-        fn bonnie_midi_connect_device(index: usize) -> i32;
+        fn b32_midi_init();
+        fn b32_midi_is_connected() -> i32;
+        fn b32_midi_get_message_count() -> i32;
+        fn b32_midi_copy_messages(dest_ptr: *mut u8, max_count: usize) -> usize;
+        fn b32_midi_copy_device_name(dest_ptr: *mut u8, max_len: usize) -> usize;
+        fn b32_midi_get_device_count() -> i32;
+        fn b32_midi_connect_device(index: usize) -> i32;
     }
 
     // Static buffers for FFI
@@ -52,12 +52,12 @@ mod platform {
 
         pub fn poll(&mut self) -> impl Iterator<Item = MidiMessage> {
             if !self.initialized {
-                unsafe { bonnie_midi_init(); }
+                unsafe { b32_midi_init(); }
                 self.initialized = true;
             }
 
             let count = unsafe {
-                bonnie_midi_copy_messages(MESSAGE_BUFFER.as_mut_ptr(), 256)
+                b32_midi_copy_messages(MESSAGE_BUFFER.as_mut_ptr(), 256)
             };
 
             let mut messages = Vec::with_capacity(count);
@@ -87,7 +87,7 @@ mod platform {
         }
 
         pub fn is_connected(&self) -> bool {
-            unsafe { bonnie_midi_is_connected() != 0 }
+            unsafe { b32_midi_is_connected() != 0 }
         }
 
         pub fn device_name(&self) -> String {
@@ -95,7 +95,7 @@ mod platform {
                 return String::new();
             }
             unsafe {
-                let len = bonnie_midi_copy_device_name(NAME_BUFFER.as_mut_ptr(), NAME_BUFFER.len());
+                let len = b32_midi_copy_device_name(NAME_BUFFER.as_mut_ptr(), NAME_BUFFER.len());
                 if len == 0 {
                     return String::new();
                 }
@@ -104,12 +104,12 @@ mod platform {
         }
 
         pub fn list_devices(&self) -> Vec<String> {
-            let count = unsafe { bonnie_midi_get_device_count() } as usize;
+            let count = unsafe { b32_midi_get_device_count() } as usize;
             (0..count).map(|i| format!("MIDI Device {}", i)).collect()
         }
 
         pub fn connect_device(&mut self, index: usize) -> Result<(), String> {
-            let result = unsafe { bonnie_midi_connect_device(index) };
+            let result = unsafe { b32_midi_connect_device(index) };
             if result != 0 {
                 Ok(())
             } else {

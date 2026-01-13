@@ -1163,14 +1163,14 @@ fn draw_texture_editor_panel(
                 if let Ok(ron_str) = tex.to_ron_string() {
                     let filename = format!("{}.ron", texture_name);
                     extern "C" {
-                        fn bonnie_set_export_data(ptr: *const u8, len: usize);
-                        fn bonnie_set_export_filename(ptr: *const u8, len: usize);
-                        fn bonnie_trigger_download();
+                        fn b32_set_export_data(ptr: *const u8, len: usize);
+                        fn b32_set_export_filename(ptr: *const u8, len: usize);
+                        fn b32_trigger_download();
                     }
                     unsafe {
-                        bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
-                        bonnie_set_export_filename(filename.as_ptr(), filename.len());
-                        bonnie_trigger_download();
+                        b32_set_export_data(ron_str.as_ptr(), ron_str.len());
+                        b32_set_export_filename(filename.as_ptr(), filename.len());
+                        b32_trigger_download();
                     }
                     state.texture_editor.dirty = false;
                 }

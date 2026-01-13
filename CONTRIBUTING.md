@@ -1,4 +1,4 @@
-# Contributing to Bonnie Engine
+# Contributing to BONNIE-32
 
 Thanks for your interest in contributing! This project is a passion project with a specific vision, but contributions are welcome.
 

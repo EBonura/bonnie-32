@@ -1,4 +1,4 @@
-# Bonnie Engine Architecture
+# BONNIE-32 Architecture
 
 ## Shared State Model
 

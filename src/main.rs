@@ -1,6 +1,6 @@
-//! Bonnie Engine: PS1-style software rasterizer engine
+//! BONNIE-32: A fantasy console for PS1-era 3D games
 //!
-//! A souls-like game engine with authentic PlayStation 1 rendering:
+//! Like PICO-8, but for low-poly 3D. Authentic PlayStation 1 rendering:
 //! - Affine texture mapping (warpy textures)
 //! - Vertex snapping (jittery vertices)
 //! - Gouraud shading
@@ -34,7 +34,7 @@ use std::path::PathBuf;
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: format!("Bonnie Engine v{}", VERSION),
+        window_title: format!("BONNIE-32 v{}", VERSION),
         window_width: WIDTH as i32 * 3,
         window_height: HEIGHT as i32 * 3,
         window_resizable: true,
@@ -101,7 +101,7 @@ async fn main() {
         println!("WASM: Loaded {} texture packs", app.world_editor.editor_state.texture_packs.len());
     }
 
-    println!("=== Bonnie Engine ===");
+    println!("=== BONNIE-32 ===");
 
     loop {
         // Track frame start time for FPS limiting
@@ -256,35 +256,35 @@ async fn main() {
                     const MAX_FILENAME_LEN: usize = 256;
 
                     extern "C" {
-                        fn bonnie_check_import() -> i32;
-                        fn bonnie_get_import_data_len() -> usize;
-                        fn bonnie_get_import_filename_len() -> usize;
-                        fn bonnie_copy_import_data(ptr: *mut u8, max_len: usize) -> usize;
-                        fn bonnie_copy_import_filename(ptr: *mut u8, max_len: usize) -> usize;
-                        fn bonnie_clear_import();
+                        fn b32_check_import() -> i32;
+                        fn b32_get_import_data_len() -> usize;
+                        fn b32_get_import_filename_len() -> usize;
+                        fn b32_copy_import_data(ptr: *mut u8, max_len: usize) -> usize;
+                        fn b32_copy_import_filename(ptr: *mut u8, max_len: usize) -> usize;
+                        fn b32_clear_import();
                     }
 
-                    let has_import = unsafe { bonnie_check_import() };
+                    let has_import = unsafe { b32_check_import() };
 
                     if has_import != 0 {
-                        let data_len = unsafe { bonnie_get_import_data_len() };
-                        let filename_len = unsafe { bonnie_get_import_filename_len() };
+                        let data_len = unsafe { b32_get_import_data_len() };
+                        let filename_len = unsafe { b32_get_import_filename_len() };
 
                         // Security: Check sizes before allocation to prevent memory exhaustion
                         if data_len > MAX_IMPORT_SIZE {
-                            unsafe { bonnie_clear_import(); }
+                            unsafe { b32_clear_import(); }
                             ws.editor_state.set_status("Import failed: file too large (max 10MB)", 5.0);
                         } else if filename_len > MAX_FILENAME_LEN {
-                            unsafe { bonnie_clear_import(); }
+                            unsafe { b32_clear_import(); }
                             ws.editor_state.set_status("Import failed: filename too long", 5.0);
                         } else {
                             let mut data_buf = vec![0u8; data_len];
                             let mut filename_buf = vec![0u8; filename_len];
 
                             unsafe {
-                                bonnie_copy_import_data(data_buf.as_mut_ptr(), data_len);
-                                bonnie_copy_import_filename(filename_buf.as_mut_ptr(), filename_len);
-                                bonnie_clear_import();
+                                b32_copy_import_data(data_buf.as_mut_ptr(), data_len);
+                                b32_copy_import_filename(filename_buf.as_mut_ptr(), filename_len);
+                                b32_clear_import();
                             }
 
                             let data = String::from_utf8_lossy(&data_buf).to_string();
@@ -1230,14 +1230,14 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
                         .unwrap_or_else(|| "level.ron".to_string());
 
                     extern "C" {
-                        fn bonnie_set_export_data(ptr: *const u8, len: usize);
-                        fn bonnie_set_export_filename(ptr: *const u8, len: usize);
-                        fn bonnie_trigger_download();
+                        fn b32_set_export_data(ptr: *const u8, len: usize);
+                        fn b32_set_export_filename(ptr: *const u8, len: usize);
+                        fn b32_trigger_download();
                     }
                     unsafe {
-                        bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
-                        bonnie_set_export_filename(filename.as_ptr(), filename.len());
-                        bonnie_trigger_download();
+                        b32_set_export_data(ron_str.as_ptr(), ron_str.len());
+                        b32_set_export_filename(filename.as_ptr(), filename.len());
+                        b32_trigger_download();
                     }
 
                     ws.editor_state.dirty = false;
@@ -1255,10 +1255,10 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
         #[cfg(target_arch = "wasm32")]
         EditorAction::Import => {
             extern "C" {
-                fn bonnie_import_file();
+                fn b32_import_file();
             }
             unsafe {
-                bonnie_import_file();
+                b32_import_file();
             }
             ws.editor_state.set_status("Select a .ron file to import...", 3.0);
         }
@@ -1420,14 +1420,14 @@ fn handle_modeler_action(
                         .unwrap_or_else(|| "mesh.ron".to_string());
 
                     extern "C" {
-                        fn bonnie_set_export_data(ptr: *const u8, len: usize);
-                        fn bonnie_set_export_filename(ptr: *const u8, len: usize);
-                        fn bonnie_trigger_download();
+                        fn b32_set_export_data(ptr: *const u8, len: usize);
+                        fn b32_set_export_filename(ptr: *const u8, len: usize);
+                        fn b32_trigger_download();
                     }
                     unsafe {
-                        bonnie_set_export_data(ron_str.as_ptr(), ron_str.len());
-                        bonnie_set_export_filename(filename.as_ptr(), filename.len());
-                        bonnie_trigger_download();
+                        b32_set_export_data(ron_str.as_ptr(), ron_str.len());
+                        b32_set_export_filename(filename.as_ptr(), filename.len());
+                        b32_trigger_download();
                     }
 
                     state.dirty = false;
@@ -1445,10 +1445,10 @@ fn handle_modeler_action(
         #[cfg(target_arch = "wasm32")]
         ModelerAction::Import => {
             extern "C" {
-                fn bonnie_import_file();
+                fn b32_import_file();
             }
             unsafe {
-                bonnie_import_file();
+                b32_import_file();
             }
             state.set_status("Select a .ron file to import...", 3.0);
         }

@@ -1,6 +1,6 @@
 //! Landing page / Home tab
 //!
-//! Displays introduction, motivation, and FAQ for Bonnie Engine.
+//! Displays introduction, motivation, and FAQ for BONNIE-32.
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, draw_link_row};
@@ -106,16 +106,16 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     let mut y = (rect.y + padding + state.scroll_y).round();
 
     // === HEADER ===
-    let title = format!("Bonnie Engine v{}", VERSION);
+    let title = format!("BONNIE-32 v{}", VERSION);
     draw_text(&title, content_x, y + 32.0, 32.0, ACCENT_COLOR);
     y += 44.0;
 
-    draw_text("A PS1-Style Game Engine Built From Scratch", content_x, y + 18.0, 18.0, MUTED_COLOR);
+    draw_text("A Fantasy Console for PS1-Era 3D Games", content_x, y + 18.0, 18.0, MUTED_COLOR);
     y += 54.0;
 
     // === INTRO SECTION ===
-    y = draw_section(content_x, y, content_width, "What is this?",
-        "Bonnie Engine is a complete game development environment built from scratch in Rust, designed to recreate the authentic PlayStation 1 aesthetic.\n\nEverything you see - the software rasterizer, the editor UI, the level format - is custom code. The world-building system takes heavy inspiration from the Tomb Raider series, which remains one of the best examples of how complex 3D worlds could be achieved on PS1 hardware.\n\nA key principle: everything runs as a single platform, both natively and in the browser. Same code, same tools, same experience - no compromises on either side."
+    y = draw_section(content_x, y, content_width, "What is BONNIE-32?",
+        "BONNIE-32 is a fantasy console for PS1-era 3D games. Think PICO-8, but for low-poly 3D.\n\nLike PICO-8 unlocked retro 2D gamedev with its constraints and all-in-one tooling, BONNIE-32 aims to do the same for late 90s-style 3D. Everything is built from scratch in Rust: the software rasterizer, the editor UI, the level format. The world-building system takes heavy inspiration from Tomb Raider.\n\nEverything runs as a single platform, both natively and in the browser. Same code, same tools, same experience."
     );
 
     // === PS1 FEATURES SECTION ===
@@ -125,7 +125,7 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
 
     // === WHY SECTION ===
     y = draw_section(content_x, y, content_width, "Why build this?",
-        "It started with a question: what would a Souls-like have looked like on a PS1? There are great examples like Bloodborne PSX by Lilith Walther, built in Unity. I wanted to try my own approach from scratch.\n\nBut I can see this expanding beyond Souls-like games. The engine could support tactical RPGs (think FF Tactics), platformers, survival horror, or any genre that benefits from the PS1 aesthetic. The goal is a flexible creative tool.\n\nModern retro-style games typically achieve the aesthetic top-down with shaders and post-processing, often with great results. I wanted to try the opposite: a bottom-up approach with a real software rasterizer that works like the PS1's GTE.\n\nI tried several approaches before landing here: first LOVR, then Picotron, even coding for actual PS1 hardware. Each had limitations - primitive SDKs, distribution headaches, or not enough flexibility. Rust + WASM turned out to be the sweet spot: native performance, browser deployment, and a modern toolchain."
+        "It started with a question: what would a Souls-like have looked like on a PS1?\n\nI tried Godot, Love2D, Picotron, even real PS1 hardware - nothing quite fit. Modern engines simulate the aesthetic with shaders. I wanted to embrace the limitations from the ground up with a real software rasterizer.\n\nThe result is something closer to a fantasy console than an engine. Fixed constraints, integrated tools, and a focus on making PS1-style games accessible to create and share."
     );
 
     // === WHERE TO START SECTION ===
@@ -138,8 +138,8 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     y += 30.0;
 
     y = draw_faq_item(content_x, y, content_width,
-        "Is this a game or an engine?",
-        "Both! The primary goal is to ship a Souls-like game set in a PS1-style world. But the engine and creative tools are part of the package - think RPG Maker, but for PS1-era 3D games. Everything you need to build, animate, and compose.",
+        "Is this a game or a tool?",
+        "Both! The primary goal is to ship a Souls-like game set in a PS1-style world. But BONNIE-32 and its creative tools are part of the package - think PICO-8, but for PS1-era 3D games. Everything you need to build, texture, and compose.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
@@ -154,7 +154,7 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
 
     y = draw_faq_item(content_x, y, content_width,
         "Can I use this to make my own game?",
-        "Absolutely - feel free to use this however you like! Contributing assets or ideas to my project would be awesome, but you're welcome to build your own thing too. Just keep in mind this isn't a general-purpose engine - it's tailored to my specific vision, so it may lack features you'd expect. Note: Some code and assets have their own licenses. Please review THIRD_PARTY.md before using or distributing anything.",
+        "Absolutely - feel free to use BONNIE-32 however you like! Contributing assets or ideas would be awesome, but you're welcome to build your own thing too. Like any fantasy console, there are intentional constraints - embrace them! Note: Some code and assets have their own licenses. Please review THIRD_PARTY.md before distributing.",
     );
 
     y = draw_faq_item(content_x, y, content_width,
@@ -168,8 +168,8 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     );
 
     y = draw_faq_item(content_x, y, content_width,
-        "What's with the name \"Bonnie\"?",
-        "Back in my short but intense music career as a metal guitarist, we'd record demos on a cheap laptop with makeshift gear in whatever garage was available. We jokingly called it \"Bonnie Studios\" - a playful twist on my last name. This engine carries on that DIY spirit.",
+        "What's with the name \"BONNIE-32\"?",
+        "\"Bonnie\" comes from my last name - back in my music days, we jokingly called our makeshift recording setup \"Bonnie Studios\". The \"-32\" follows the fantasy console naming convention (like PICO-8) and hints at the 32-bit PS1 era this platform emulates.",
     );
 
     // === FOOTER ===
@@ -184,7 +184,7 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
         content_x,
         y + 14.0,
         &[
-            ("GitHub", "https://github.com/EBonura/bonnie-engine"),
+            ("GitHub", "https://github.com/EBonura/bonnie-32"),
             ("itch.io", "https://bonnie-games.itch.io/"),
             ("Buy Me a Coffee", "https://buymeacoffee.com/bonniegames"),
         ],

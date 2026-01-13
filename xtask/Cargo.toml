@@ -2,7 +2,7 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2021"
-description = "Build automation tasks for Bonnie Engine"
+description = "Build automation tasks for BONNIE-32"
 
 [dependencies]
 anyhow = "1.0"

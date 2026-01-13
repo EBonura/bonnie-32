@@ -191,10 +191,10 @@ mod wasm {
 
     #[cfg(target_arch = "wasm32")]
     extern "C" {
-        fn bonnie_set_loading_status(ptr: *const u8, len: usize);
-        fn bonnie_hide_loading();
-        fn bonnie_get_cached_texture_info(path_ptr: *const u8, path_len: usize) -> u32;
-        fn bonnie_copy_cached_texture(
+        fn b32_set_loading_status(ptr: *const u8, len: usize);
+        fn b32_hide_loading();
+        fn b32_get_cached_texture_info(path_ptr: *const u8, path_len: usize) -> u32;
+        fn b32_copy_cached_texture(
             path_ptr: *const u8,
             path_len: usize,
             dest_ptr: *mut u8,
@@ -205,7 +205,7 @@ mod wasm {
     /// Update loading status text
     #[cfg(target_arch = "wasm32")]
     pub fn set_status(msg: &str) {
-        unsafe { bonnie_set_loading_status(msg.as_ptr(), msg.len()) }
+        unsafe { b32_set_loading_status(msg.as_ptr(), msg.len()) }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -214,7 +214,7 @@ mod wasm {
     /// Hide the loading overlay
     #[cfg(target_arch = "wasm32")]
     pub fn hide_loading() {
-        unsafe { bonnie_hide_loading() }
+        unsafe { b32_hide_loading() }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -227,7 +227,7 @@ mod wasm {
         const MAX_TEXTURE_DIM: usize = 4096;
 
         unsafe {
-            let info = bonnie_get_cached_texture_info(path.as_ptr(), path.len());
+            let info = b32_get_cached_texture_info(path.as_ptr(), path.len());
             if info == 0 {
                 return None;
             }
@@ -244,7 +244,7 @@ mod wasm {
             let rgba_size = width * height * 4;
 
             let mut rgba_buffer = vec![0u8; rgba_size];
-            let copied = bonnie_copy_cached_texture(
+            let copied = b32_copy_cached_texture(
                 path.as_ptr(),
                 path.len(),
                 rgba_buffer.as_mut_ptr(),

@@ -2,14 +2,14 @@
 members = ["xtask"]
 
 [package]
-name = "bonnie-engine"
-version = "0.1.6"
+name = "bonnie-32"
+version = "0.1.7"
 edition = "2021"
-description = "PS1-style software rasterizer engine"
+description = "A fantasy console for PS1-era 3D games"
 authors = ["ebonura"]
 
 [[bin]]
-name = "bonnie-engine"
+name = "bonnie-32"
 path = "src/main.rs"
 
 [dependencies]
