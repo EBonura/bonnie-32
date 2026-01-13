@@ -130,7 +130,7 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
 
     // === WHERE TO START SECTION ===
     y = draw_section(content_x, y, content_width, "Where to start",
-        "Use the tabs at the top to switch between the available tools:\n\nWorld - Build levels using a sector-based editor inspired by classic tools like the Tomb Raider Level Editor. Features a 2D grid view, 3D preview, and portals.\n\nAssets - A low-poly mesh modeler designed for PS1-style models. Includes Blender-style controls (G/S/R for grab/scale/rotate), extrude, multi-object editing, and a shared texture atlas. PicoCAD was a major influence here.\n\nMusic - A pattern-based tracker for composing music. Supports SF2 soundfonts, up to 8 channels, and classic tracker effects like arpeggio and vibrato."
+        "Use the tabs at the top to switch between the available tools:\n\nWorld - Build levels using a sector-based editor inspired by classic tools like the Tomb Raider Level Editor. Features a 2D grid view, 3D preview, and portals.\n\nAssets - A low-poly mesh modeler designed for PS1-style models. Includes Blender-style controls (G/S/R for grab/scale/rotate), extrude, multi-object editing, and a shared texture atlas. PicoCAD was a major influence here.\n\nPaint - Create custom indexed textures with PS1-style palettes. Draw with 4-bit or 8-bit color depth, apply dithering patterns, and manage a library of reusable textures.\n\nMusic - A pattern-based tracker for composing music. Supports SF2 soundfonts, up to 8 channels, and classic tracker effects like arpeggio and vibrato."
     );
 
     // === FAQ SECTION ===
