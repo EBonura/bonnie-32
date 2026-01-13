@@ -21,6 +21,15 @@ Like a fantasy console, BONNIE-32 provides:
 
 Everything is built from scratch in Rust: the software rasterizer, the editor UI, the level format. No shaders faking the look - the renderer actually works like PS1 hardware.
 
+![World Editor](docs/screenshot-world-editor.png)
+*World Editor - TR1-style sector grid with 2D/3D views*
+
+![Asset Editor](docs/screenshot-asset-editor.png)
+*Asset Editor - Low-poly modeler with per-object textures*
+
+![Music Tracker](docs/screenshot-music-tracker.png)
+*Music Tracker - Pattern-based composition with PS1 SPU reverb*
+
 ## The PS1 Aesthetic
 
 The software rasterizer recreates the quirks that defined the PS1 look:
