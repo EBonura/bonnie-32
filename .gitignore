@@ -6,6 +6,7 @@ docs/assets/
 docs/fonts/
 docs/levels/
 docs/textures/
+docs/mq_js_bundle.js
 
 # Copyrighted PS1 model references (not for distribution)
 assets/meshes/ps1-reference/
