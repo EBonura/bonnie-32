@@ -14,10 +14,10 @@ A fantasy console for making PS1-era 3D games.
 
 I always imagined how a Souls-like would have been as if it were a late PS1 title. Tried Godot, Love2D, Picotron, even targeting real hardware, but nothing quite fit so I built my own.
 
-BONNIE-32 is a fantasy console that gives you:
-- PS1 hardware constraints (320×240, affine textures, vertex snapping)
+BONNIE-32 is a fantasy console aimed at 5th generation hardware, specifically targeting PS1, that gives you:
+- A renderer designed around PS1 hardware constraints (320×240, affine textures, vertex snapping)
 - Integrated tools for modeling, texturing, music, and level design
-- Works the same in browser and native (Windows, macOS, Linux)
+- 100% Rust with modern toolchain, works the same in browser and native (Windows, macOS, Linux)
 
 
 
