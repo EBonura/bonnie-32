@@ -1,7 +1,7 @@
 name: Deploy Dev Build
 
 # Deploys feature branches to /dev/ subdirectory
-# Access at: https://ebonura.github.io/bonnie-engine/dev/
+# Access at: https://ebonura.github.io/bonnie-32/dev/
 
 on:
   push:

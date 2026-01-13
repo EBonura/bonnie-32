@@ -391,8 +391,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonnie-engine"
-version = "0.1.6"
+name = "bonnie-32"
+version = "0.1.7"
 dependencies = [
  "base64 0.22.1",
  "brotli",

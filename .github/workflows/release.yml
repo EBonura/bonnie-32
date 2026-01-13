@@ -62,20 +62,20 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: bonnie-engine
-            asset_name: bonnie-engine-linux-x86_64
+            artifact_name: bonnie-32
+            asset_name: bonnie-32-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: bonnie-engine.exe
-            asset_name: bonnie-engine-windows-x86_64
+            artifact_name: bonnie-32.exe
+            asset_name: bonnie-32-windows-x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: bonnie-engine
-            asset_name: bonnie-engine-macos-x86_64
+            artifact_name: bonnie-32
+            asset_name: bonnie-32-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: bonnie-engine
-            asset_name: bonnie-engine-macos-aarch64
+            artifact_name: bonnie-32
+            asset_name: bonnie-32-macos-aarch64
 
     runs-on: ${{ matrix.os }}
 
@@ -161,13 +161,13 @@ jobs:
 
       - name: Package WASM
         run: |
-          cd dist/web && tar -czvf ../../bonnie-engine-wasm-v${{ steps.version.outputs.version }}.tar.gz *
+          cd dist/web && tar -czvf ../../bonnie-32-wasm-v${{ steps.version.outputs.version }}.tar.gz *
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bonnie-engine-wasm-v${{ steps.version.outputs.version }}
-          path: bonnie-engine-wasm-v${{ steps.version.outputs.version }}.tar.gz
+          name: bonnie-32-wasm-v${{ steps.version.outputs.version }}
+          path: bonnie-32-wasm-v${{ steps.version.outputs.version }}.tar.gz
 
   release:
     needs: [check-version, build, build-wasm]
@@ -208,11 +208,11 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           files: |
-            artifacts/bonnie-engine-linux-x86_64-v${{ steps.version.outputs.version }}/bonnie-engine-linux-x86_64-v${{ steps.version.outputs.version }}.tar.gz
-            artifacts/bonnie-engine-windows-x86_64-v${{ steps.version.outputs.version }}/bonnie-engine-windows-x86_64-v${{ steps.version.outputs.version }}.zip
-            artifacts/bonnie-engine-macos-x86_64-v${{ steps.version.outputs.version }}/bonnie-engine-macos-x86_64-v${{ steps.version.outputs.version }}.tar.gz
-            artifacts/bonnie-engine-macos-aarch64-v${{ steps.version.outputs.version }}/bonnie-engine-macos-aarch64-v${{ steps.version.outputs.version }}.tar.gz
-            artifacts/bonnie-engine-wasm-v${{ steps.version.outputs.version }}/bonnie-engine-wasm-v${{ steps.version.outputs.version }}.tar.gz
+            artifacts/bonnie-32-linux-x86_64-v${{ steps.version.outputs.version }}/bonnie-32-linux-x86_64-v${{ steps.version.outputs.version }}.tar.gz
+            artifacts/bonnie-32-windows-x86_64-v${{ steps.version.outputs.version }}/bonnie-32-windows-x86_64-v${{ steps.version.outputs.version }}.zip
+            artifacts/bonnie-32-macos-x86_64-v${{ steps.version.outputs.version }}/bonnie-32-macos-x86_64-v${{ steps.version.outputs.version }}.tar.gz
+            artifacts/bonnie-32-macos-aarch64-v${{ steps.version.outputs.version }}/bonnie-32-macos-aarch64-v${{ steps.version.outputs.version }}.tar.gz
+            artifacts/bonnie-32-wasm-v${{ steps.version.outputs.version }}/bonnie-32-wasm-v${{ steps.version.outputs.version }}.tar.gz
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

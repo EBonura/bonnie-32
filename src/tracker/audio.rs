@@ -468,27 +468,27 @@ pub mod wasm {
 
     extern "C" {
         // Soundfont cache
-        fn bonnie_is_soundfont_loaded() -> i32;
-        fn bonnie_get_soundfont_size() -> usize;
-        fn bonnie_copy_soundfont(dest_ptr: *mut u8, max_len: usize) -> usize;
+        fn b32_is_soundfont_loaded() -> i32;
+        fn b32_get_soundfont_size() -> usize;
+        fn b32_copy_soundfont(dest_ptr: *mut u8, max_len: usize) -> usize;
         // Audio output
-        fn bonnie_audio_init(sample_rate: u32);
-        fn bonnie_audio_write(left_ptr: *const f32, right_ptr: *const f32, len: usize);
+        fn b32_audio_init(sample_rate: u32);
+        fn b32_audio_write(left_ptr: *const f32, right_ptr: *const f32, len: usize);
     }
 
     pub fn is_soundfont_cached() -> bool {
-        unsafe { bonnie_is_soundfont_loaded() != 0 }
+        unsafe { b32_is_soundfont_loaded() != 0 }
     }
 
     pub fn get_cached_soundfont() -> Option<Vec<u8>> {
         unsafe {
-            let size = bonnie_get_soundfont_size();
+            let size = b32_get_soundfont_size();
             if size == 0 {
                 return None;
             }
 
             let mut buffer = vec![0u8; size];
-            let copied = bonnie_copy_soundfont(buffer.as_mut_ptr(), size);
+            let copied = b32_copy_soundfont(buffer.as_mut_ptr(), size);
 
             if copied != size {
                 return None;
@@ -499,12 +499,12 @@ pub mod wasm {
     }
 
     pub fn init_audio() {
-        unsafe { bonnie_audio_init(SAMPLE_RATE) }
+        unsafe { b32_audio_init(SAMPLE_RATE) }
     }
 
     pub fn write_audio(left: &[f32], right: &[f32]) {
         let len = left.len().min(right.len());
-        unsafe { bonnie_audio_write(left.as_ptr(), right.as_ptr(), len) }
+        unsafe { b32_audio_write(left.as_ptr(), right.as_ptr(), len) }
     }
 }
 

@@ -37,16 +37,16 @@ mod platform {
 
     // FFI bindings to JavaScript functions in index.html
     extern "C" {
-        fn bonnie_gamepad_has_gamepad() -> i32;
-        fn bonnie_gamepad_get_button_mask() -> u32;
-        fn bonnie_gamepad_get_button_pressed_mask() -> u32;
-        fn bonnie_gamepad_get_left_stick_x() -> i32;
-        fn bonnie_gamepad_get_left_stick_y() -> i32;
-        fn bonnie_gamepad_get_right_stick_x() -> i32;
-        fn bonnie_gamepad_get_right_stick_y() -> i32;
-        fn bonnie_gamepad_get_left_trigger() -> i32;
-        fn bonnie_gamepad_get_right_trigger() -> i32;
-        fn bonnie_gamepad_copy_name(dest_ptr: *mut u8, max_len: usize) -> usize;
+        fn b32_gamepad_has_gamepad() -> i32;
+        fn b32_gamepad_get_button_mask() -> u32;
+        fn b32_gamepad_get_button_pressed_mask() -> u32;
+        fn b32_gamepad_get_left_stick_x() -> i32;
+        fn b32_gamepad_get_left_stick_y() -> i32;
+        fn b32_gamepad_get_right_stick_x() -> i32;
+        fn b32_gamepad_get_right_stick_y() -> i32;
+        fn b32_gamepad_get_left_trigger() -> i32;
+        fn b32_gamepad_get_right_trigger() -> i32;
+        fn b32_gamepad_copy_name(dest_ptr: *mut u8, max_len: usize) -> usize;
     }
 
     // Static buffer for gamepad name (256 bytes should be plenty)
@@ -66,7 +66,7 @@ mod platform {
         }
 
         pub fn has_gamepad(&self) -> bool {
-            unsafe { bonnie_gamepad_has_gamepad() != 0 }
+            unsafe { b32_gamepad_has_gamepad() != 0 }
         }
 
         pub fn gamepad_name(&self) -> String {
@@ -74,7 +74,7 @@ mod platform {
                 return String::new();
             }
             unsafe {
-                let len = bonnie_gamepad_copy_name(GAMEPAD_NAME_BUFFER.as_mut_ptr(), GAMEPAD_NAME_BUFFER.len());
+                let len = b32_gamepad_copy_name(GAMEPAD_NAME_BUFFER.as_mut_ptr(), GAMEPAD_NAME_BUFFER.len());
                 if len == 0 {
                     return String::new();
                 }
@@ -83,33 +83,33 @@ mod platform {
         }
 
         pub fn is_button_down(&self, button: u32) -> bool {
-            let mask = unsafe { bonnie_gamepad_get_button_mask() };
+            let mask = unsafe { b32_gamepad_get_button_mask() };
             (mask & (1 << button)) != 0
         }
 
         pub fn is_button_pressed(&self, button: u32) -> bool {
-            let mask = unsafe { bonnie_gamepad_get_button_pressed_mask() };
+            let mask = unsafe { b32_gamepad_get_button_pressed_mask() };
             (mask & (1 << button)) != 0
         }
 
         pub fn left_stick(&self) -> Vec2 {
-            let x = unsafe { bonnie_gamepad_get_left_stick_x() } as f32 / 10000.0;
-            let y = -(unsafe { bonnie_gamepad_get_left_stick_y() } as f32 / 10000.0); // Invert Y
+            let x = unsafe { b32_gamepad_get_left_stick_x() } as f32 / 10000.0;
+            let y = -(unsafe { b32_gamepad_get_left_stick_y() } as f32 / 10000.0); // Invert Y
             apply_deadzone(x, y, self.deadzone)
         }
 
         pub fn right_stick(&self) -> Vec2 {
-            let x = unsafe { bonnie_gamepad_get_right_stick_x() } as f32 / 10000.0;
-            let y = -(unsafe { bonnie_gamepad_get_right_stick_y() } as f32 / 10000.0); // Invert Y
+            let x = unsafe { b32_gamepad_get_right_stick_x() } as f32 / 10000.0;
+            let y = -(unsafe { b32_gamepad_get_right_stick_y() } as f32 / 10000.0); // Invert Y
             apply_deadzone(x, y, self.deadzone)
         }
 
         pub fn left_trigger(&self) -> f32 {
-            (unsafe { bonnie_gamepad_get_left_trigger() }) as f32 / 10000.0
+            (unsafe { b32_gamepad_get_left_trigger() }) as f32 / 10000.0
         }
 
         pub fn right_trigger(&self) -> f32 {
-            (unsafe { bonnie_gamepad_get_right_trigger() }) as f32 / 10000.0
+            (unsafe { b32_gamepad_get_right_trigger() }) as f32 / 10000.0
         }
 
         pub fn deadzone(&self) -> f32 {

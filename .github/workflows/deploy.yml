@@ -1,8 +1,8 @@
 name: Deploy
 
 # Deploys main branch to GitHub Pages and itch.io
-# GitHub Pages: https://ebonura.github.io/bonnie-engine/
-# itch.io: https://bonnie-games.itch.io/bonnie-engine
+# GitHub Pages: https://ebonura.github.io/bonnie-32/
+# itch.io: https://bonnie-games.itch.io/bonnie-32
 
 on:
   push:
@@ -44,4 +44,4 @@ jobs:
           curl -L -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
           unzip butler.zip
           chmod +x butler
-          ./butler push ./dist/web bonnie-games/bonnie-engine:html5
+          ./butler push ./dist/web bonnie-games/bonnie-32:html5

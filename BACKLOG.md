@@ -1,4 +1,4 @@
-# Bonnie Engine Backlog
+# BONNIE-32 Backlog
 
 This document tracks planned features, known issues, and future improvements.
 

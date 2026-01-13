@@ -1,4 +1,4 @@
-//! Build automation tasks for Bonnie Engine
+//! Build automation tasks for BONNIE-32
 //!
 //! Usage:
 //!   cargo xtask build-web        # Build WASM for web deployment
@@ -11,7 +11,7 @@ use std::process::Command;
 
 #[derive(Parser)]
 #[command(name = "xtask")]
-#[command(about = "Build automation for Bonnie Engine")]
+#[command(about = "Build automation for BONNIE-32")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -115,8 +115,8 @@ fn build_web(dev: bool) -> Result<()> {
     // Copy WASM binary
     println!("Copying files to dist/web...");
     std::fs::copy(
-        root.join("target/wasm32-unknown-unknown/release/bonnie-engine.wasm"),
-        dist.join("bonnie-engine.wasm"),
+        root.join("target/wasm32-unknown-unknown/release/bonnie-32.wasm"),
+        dist.join("bonnie-32.wasm"),
     )?;
 
     // Copy web files from docs/
@@ -149,8 +149,8 @@ fn build_web(dev: bool) -> Result<()> {
         let index_path = dist.join("index.html");
         let index = std::fs::read_to_string(&index_path)?;
         let index = index
-            .replace("Loading Bonnie Engine", "Loading Bonnie Engine (DEV)")
-            .replace("<title>Bonnie Engine", "<title>[DEV] Bonnie Engine");
+            .replace("Loading BONNIE-32", "Loading BONNIE-32 (DEV)")
+            .replace("<title>BONNIE-32", "<title>[DEV] BONNIE-32");
         std::fs::write(&index_path, index)?;
     }
 

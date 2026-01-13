@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-This document lists all third-party assets and libraries used in Bonnie Engine along with their licenses.
+This document lists all third-party assets and libraries used in BONNIE-32 along with their licenses.
 
 ## Fonts
 
