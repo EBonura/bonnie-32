@@ -135,6 +135,7 @@ pub mod icon {
     pub const CIRCLE: char = '\u{e076}';          // circle (ellipse shape)
     pub const DROPLET: char = '\u{e0b4}';         // droplet (fill toggle)
     pub const PIPETTE: char = '\u{e4c6}';         // pipette (eyedropper/color picker)
+    pub const WAND: char = '\u{e1a8}';            // wand-2 (magic select by color)
 }
 
 /// Draw a Lucide icon centered in a rect

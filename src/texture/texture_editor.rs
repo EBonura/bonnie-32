@@ -62,6 +62,8 @@ const PANEL_BG: Color = Color::new(0.18, 0.18, 0.20, 1.0);
 pub enum DrawTool {
     /// Selection tool for copy/paste/move
     Select,
+    /// Magic selection by color (click to select all pixels with similar palette index)
+    SelectByColor,
     /// Brush with configurable size (size 1 = pencil)
     #[default]
     Brush,
@@ -99,6 +101,10 @@ pub struct Selection {
     /// Floating pixel data (lifted from canvas when moving)
     /// None = selection outline only, Some = floating pixels
     pub floating: Option<Vec<u8>>,
+    /// Optional mask for irregular selections (e.g., magic wand select by color)
+    /// None = rectangular selection (all pixels in bounding box)
+    /// Some = only pixels where mask[idx] == true are selected
+    pub mask: Option<Vec<bool>>,
 }
 
 impl Selection {
@@ -112,15 +118,81 @@ impl Selection {
             width: (max_x - min_x + 1) as usize,
             height: (max_y - min_y + 1) as usize,
             floating: None,
+            mask: None,
         }
     }
 
-    /// Check if a point is inside the selection
+    /// Create a selection from a mask (for irregular selections like magic wand)
+    /// The mask covers the entire texture, returns None if no pixels are selected
+    pub fn from_mask(mask: &[bool], tex_width: usize, tex_height: usize) -> Option<Self> {
+        // Find bounding box of selected pixels
+        let mut min_x = tex_width;
+        let mut min_y = tex_height;
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+
+        for y in 0..tex_height {
+            for x in 0..tex_width {
+                if mask[y * tex_width + x] {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+
+        if min_x > max_x || min_y > max_y {
+            return None; // No pixels selected
+        }
+
+        // Create a mask relative to the bounding box
+        let sel_width = max_x - min_x + 1;
+        let sel_height = max_y - min_y + 1;
+        let mut sel_mask = vec![false; sel_width * sel_height];
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                if mask[y * tex_width + x] {
+                    let local_x = x - min_x;
+                    let local_y = y - min_y;
+                    sel_mask[local_y * sel_width + local_x] = true;
+                }
+            }
+        }
+
+        Some(Self {
+            x: min_x as i32,
+            y: min_y as i32,
+            width: sel_width,
+            height: sel_height,
+            floating: None,
+            mask: Some(sel_mask),
+        })
+    }
+
+    /// Check if a point is inside the selection (considers mask if present)
     pub fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x
-            && px < self.x + self.width as i32
-            && py >= self.y
-            && py < self.y + self.height as i32
+        // First check bounding box
+        if px < self.x || px >= self.x + self.width as i32
+            || py < self.y || py >= self.y + self.height as i32
+        {
+            return false;
+        }
+
+        // If there's a mask, check it
+        if let Some(ref mask) = self.mask {
+            let local_x = (px - self.x) as usize;
+            let local_y = (py - self.y) as usize;
+            mask[local_y * self.width + local_x]
+        } else {
+            true
+        }
+    }
+
+    /// Check if this is a rectangular selection (no mask)
+    pub fn is_rectangular(&self) -> bool {
+        self.mask.is_none()
     }
 
     /// Get pixel index within the selection (for floating data)
@@ -273,6 +345,7 @@ impl DrawTool {
     pub fn icon(&self) -> char {
         match self {
             DrawTool::Select => icon::POINTER,         // selection tool
+            DrawTool::SelectByColor => icon::WAND,     // magic wand select by color
             DrawTool::Brush => icon::PENCIL,           // pencil icon (size 1 = pixel, size 2+ = brush)
             DrawTool::Fill => icon::PAINT_BUCKET,
             DrawTool::Line => icon::PENCIL_LINE,       // pencil-line icon
@@ -286,6 +359,7 @@ impl DrawTool {
     pub fn tooltip(&self) -> &'static str {
         match self {
             DrawTool::Select => "Select (S)",
+            DrawTool::SelectByColor => "Select by Color (W)",
             DrawTool::Brush => "Brush (B)",
             DrawTool::Fill => "Fill (F)",
             DrawTool::Line => "Line (L)",
@@ -390,6 +464,10 @@ pub struct TextureEditorState {
     pub redo_requested: bool,
     /// Fill shapes (Rectangle/Ellipse) instead of outline
     pub fill_shapes: bool,
+    /// Color tolerance for SelectByColor tool (0 = exact match, higher = more indices selected)
+    pub color_tolerance: u8,
+    /// Whether SelectByColor selects only contiguous pixels (true) or all matching pixels (false)
+    pub contiguous_select: bool,
     /// Show pixel grid overlay
     pub show_grid: bool,
     /// Show tiling preview (8 copies around center for seamless texture editing)
@@ -491,6 +569,8 @@ impl Default for TextureEditorState {
             undo_requested: false,
             redo_requested: false,
             fill_shapes: false,
+            color_tolerance: 0,       // Exact match by default
+            contiguous_select: true,  // Contiguous selection by default
             show_grid: true, // Grid on by default
             show_tiling: false, // Tiling preview off by default
             selection: None,
@@ -560,6 +640,8 @@ impl TextureEditorState {
         self.brush_slider_active = false;
         self.panning = false;
         self.dirty = false;
+        self.color_tolerance = 0;
+        self.contiguous_select = true;
         self.selection = None;
         self.selection_drag_start = None;
         self.creating_selection = false;
@@ -803,6 +885,87 @@ fn flood_fill(texture: &mut UserTexture, start_x: i32, start_y: i32, fill_index:
     }
 }
 
+/// Select pixels by color index with optional tolerance and contiguity
+/// Returns a mask of selected pixels (true = selected)
+fn select_by_color(
+    texture: &UserTexture,
+    start_x: i32,
+    start_y: i32,
+    tolerance: u8,
+    contiguous: bool,
+) -> Vec<bool> {
+    let mut mask = vec![false; texture.width * texture.height];
+
+    if start_x < 0 || start_y < 0 {
+        return mask;
+    }
+    let x = start_x as usize;
+    let y = start_y as usize;
+    if x >= texture.width || y >= texture.height {
+        return mask;
+    }
+
+    let target_index = texture.get_index(x, y);
+
+    // Helper to check if an index matches with tolerance
+    let matches = |idx: u8| -> bool {
+        if tolerance == 0 {
+            idx == target_index
+        } else {
+            // Calculate difference handling u8 overflow
+            let diff = if idx > target_index {
+                idx - target_index
+            } else {
+                target_index - idx
+            };
+            diff <= tolerance
+        }
+    };
+
+    if contiguous {
+        // Flood fill algorithm for contiguous selection
+        let mut stack = vec![(x, y)];
+        while let Some((cx, cy)) = stack.pop() {
+            if cx >= texture.width || cy >= texture.height {
+                continue;
+            }
+            let idx = cy * texture.width + cx;
+            if mask[idx] {
+                continue; // Already visited
+            }
+            if !matches(texture.get_index(cx, cy)) {
+                continue;
+            }
+
+            mask[idx] = true;
+
+            if cx > 0 {
+                stack.push((cx - 1, cy));
+            }
+            if cx + 1 < texture.width {
+                stack.push((cx + 1, cy));
+            }
+            if cy > 0 {
+                stack.push((cx, cy - 1));
+            }
+            if cy + 1 < texture.height {
+                stack.push((cx, cy + 1));
+            }
+        }
+    } else {
+        // Non-contiguous: select all pixels that match
+        for py in 0..texture.height {
+            for px in 0..texture.width {
+                if matches(texture.get_index(px, py)) {
+                    mask[py * texture.width + px] = true;
+                }
+            }
+        }
+    }
+
+    mask
+}
+
 /// Draw a rectangle outline on texture
 fn tex_draw_rect_outline(texture: &mut UserTexture, x0: i32, y0: i32, x1: i32, y1: i32, index: u8) {
     let (min_x, max_x) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
@@ -995,20 +1158,77 @@ fn draw_ellipse_filled_preview(tex_x: f32, tex_y: f32, x0: i32, y0: i32, x1: i32
 
 /// Draw marching ants selection border
 fn draw_selection_marching_ants(selection: &Selection, tex_x: f32, tex_y: f32, zoom: f32, frame: u32) {
-    let x = tex_x + selection.x as f32 * zoom;
-    let y = tex_y + selection.y as f32 * zoom;
-    let w = selection.width as f32 * zoom;
-    let h = selection.height as f32 * zoom;
+    if let Some(ref mask) = selection.mask {
+        // Masked selection: draw ants around each border pixel
+        draw_masked_marching_ants(selection, mask, tex_x, tex_y, zoom, frame);
+    } else {
+        // Rectangular selection: draw ants around bounding box
+        let x = tex_x + selection.x as f32 * zoom;
+        let y = tex_y + selection.y as f32 * zoom;
+        let w = selection.width as f32 * zoom;
+        let h = selection.height as f32 * zoom;
 
-    // Marching ants effect: alternate black and white dashes that move over time
+        // Marching ants effect: alternate black and white dashes that move over time
+        let dash_len = 4.0;
+        let offset = (frame / 12) as f32 * 2.0; // Slow animation speed (divide by 12 for ~5 FPS)
+
+        // Draw dashed lines for all four edges
+        draw_marching_line(x, y, x + w, y, dash_len, offset);           // Top
+        draw_marching_line(x + w, y, x + w, y + h, dash_len, offset);   // Right
+        draw_marching_line(x + w, y + h, x, y + h, dash_len, offset);   // Bottom
+        draw_marching_line(x, y + h, x, y, dash_len, offset);           // Left
+    }
+}
+
+/// Draw marching ants around pixels in a masked selection
+fn draw_masked_marching_ants(
+    selection: &Selection,
+    mask: &[bool],
+    tex_x: f32,
+    tex_y: f32,
+    zoom: f32,
+    frame: u32,
+) {
     let dash_len = 4.0;
-    let offset = (frame / 12) as f32 * 2.0; // Slow animation speed (divide by 12 for ~5 FPS)
+    let offset = (frame / 12) as f32 * 2.0;
 
-    // Draw dashed lines for all four edges
-    draw_marching_line(x, y, x + w, y, dash_len, offset);           // Top
-    draw_marching_line(x + w, y, x + w, y + h, dash_len, offset);   // Right
-    draw_marching_line(x + w, y + h, x, y + h, dash_len, offset);   // Bottom
-    draw_marching_line(x, y + h, x, y, dash_len, offset);           // Left
+    // For each pixel in the mask, check if it's on a border
+    for ly in 0..selection.height {
+        for lx in 0..selection.width {
+            let idx = ly * selection.width + lx;
+            if !mask[idx] {
+                continue;
+            }
+
+            // This pixel is selected - check its 4 neighbors
+            let px = tex_x + (selection.x + lx as i32) as f32 * zoom;
+            let py = tex_y + (selection.y + ly as i32) as f32 * zoom;
+
+            // Check top neighbor
+            let top_empty = ly == 0 || !mask[(ly - 1) * selection.width + lx];
+            if top_empty {
+                draw_marching_line(px, py, px + zoom, py, dash_len, offset);
+            }
+
+            // Check bottom neighbor
+            let bottom_empty = ly + 1 >= selection.height || !mask[(ly + 1) * selection.width + lx];
+            if bottom_empty {
+                draw_marching_line(px, py + zoom, px + zoom, py + zoom, dash_len, offset);
+            }
+
+            // Check left neighbor
+            let left_empty = lx == 0 || !mask[ly * selection.width + lx - 1];
+            if left_empty {
+                draw_marching_line(px, py, px, py + zoom, dash_len, offset);
+            }
+
+            // Check right neighbor
+            let right_empty = lx + 1 >= selection.width || !mask[ly * selection.width + lx + 1];
+            if right_empty {
+                draw_marching_line(px + zoom, py, px + zoom, py + zoom, dash_len, offset);
+            }
+        }
+    }
 }
 
 /// Draw a single marching ants line segment
@@ -1103,6 +1323,14 @@ fn make_clipboard_from_selection(texture: &UserTexture, selection: &Selection) -
     } else {
         for y in 0..selection.height {
             for x in 0..selection.width {
+                // Check mask if present (for irregular selections)
+                if let Some(ref mask) = selection.mask {
+                    if !mask[y * selection.width + x] {
+                        indices.push(0); // Transparent for non-selected pixels
+                        continue;
+                    }
+                }
+
                 let tx = selection.x + x as i32;
                 let ty = selection.y + y as i32;
                 if tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
@@ -1125,6 +1353,13 @@ fn make_clipboard_from_selection(texture: &UserTexture, selection: &Selection) -
 fn clear_selection_area(texture: &mut UserTexture, selection: &Selection) {
     for y in 0..selection.height {
         for x in 0..selection.width {
+            // Check mask if present (for irregular selections)
+            if let Some(ref mask) = selection.mask {
+                if !mask[y * selection.width + x] {
+                    continue; // Not selected
+                }
+            }
+
             let tx = selection.x + x as i32;
             let ty = selection.y + y as i32;
             if tx >= 0 && ty >= 0 && (tx as usize) < texture.width && (ty as usize) < texture.height {
@@ -1442,6 +1677,7 @@ pub fn draw_texture_canvas(
     if state.mode == TextureEditorMode::Paint && ctx.mouse.inside(&canvas_rect) {
         use macroquad::prelude::{is_key_pressed, KeyCode};
         if is_key_pressed(KeyCode::S) { state.tool = DrawTool::Select; }
+        if is_key_pressed(KeyCode::W) { state.tool = DrawTool::SelectByColor; }
         if is_key_pressed(KeyCode::B) { state.tool = DrawTool::Brush; }
         if is_key_pressed(KeyCode::F) { state.tool = DrawTool::Fill; }
         if is_key_pressed(KeyCode::I) { state.tool = DrawTool::Eyedropper; }
@@ -1808,10 +2044,28 @@ pub fn draw_texture_canvas(
                 width: clipboard.width,
                 height: clipboard.height,
                 floating: Some(clipboard.indices.clone()),
+                mask: None,  // Pasted selections are rectangular
             });
             state.tool = DrawTool::Select;
             state.set_status(&format!("Pasted {}×{} pixels", clipboard.width, clipboard.height));
         }
+    }
+
+    // Delete selection (Delete or Backspace key) - clear to transparent
+    if (is_key_pressed(KeyCode::Delete) || is_key_pressed(KeyCode::Backspace)) && state.selection.is_some() {
+        if let Some(ref selection) = state.selection {
+            // Signal undo to caller
+            state.undo_save_pending = Some("Delete selection".to_string());
+            // Clear the selected area to transparent (index 0)
+            clear_selection_area(texture, selection);
+            let count = if let Some(ref mask) = selection.mask {
+                mask.iter().filter(|&&b| b).count()
+            } else {
+                selection.width * selection.height
+            };
+            state.set_status(&format!("Deleted {} pixels", count));
+        }
+        state.selection = None;
     }
 
     // Drawing and selection
@@ -2084,6 +2338,26 @@ pub fn draw_texture_canvas(
                                 // No undo needed for eyedropper
                                 state.undo_save_pending = None;
                             }
+                            DrawTool::SelectByColor => {
+                                // Magic wand selection by color
+                                let mask = select_by_color(
+                                    texture,
+                                    px,
+                                    py,
+                                    state.color_tolerance,
+                                    state.contiguous_select,
+                                );
+                                if let Some(sel) = Selection::from_mask(&mask, texture.width, texture.height) {
+                                    let count = mask.iter().filter(|&&b| b).count();
+                                    state.selection = Some(sel);
+                                    state.set_status(&format!("Selected {} pixels", count));
+                                } else {
+                                    state.selection = None;
+                                    state.set_status("No pixels selected");
+                                }
+                                // No undo needed for selection
+                                state.undo_save_pending = None;
+                            }
                             _ => {}
                         }
                     }
@@ -2252,6 +2526,7 @@ pub fn draw_tool_panel(
             let mut clicked_tool: Option<DrawTool> = None;
             let all_tools = [
                 DrawTool::Select,
+                DrawTool::SelectByColor,
                 DrawTool::Brush,
                 DrawTool::Fill,
                 DrawTool::Eyedropper,
@@ -2434,6 +2709,66 @@ pub fn draw_tool_panel(
             if ctx.mouse.clicked(&fill_rect) {
                 state.fill_shapes = !state.fill_shapes;
             }
+        }
+    }
+
+    // === SelectByColor tool options ===
+    if state.mode == TextureEditorMode::Paint && state.tool == DrawTool::SelectByColor {
+        y += 2.0;
+        draw_line(col1_x, y, col2_x + btn_size, y, 1.0, Color::new(0.3, 0.3, 0.32, 1.0));
+        y += 4.0;
+
+        // Contiguous toggle (single button that toggles)
+        let cont_rect = Rect::new(col1_x, y, btn_size, btn_size);
+        let cont_hovered = ctx.mouse.inside(&cont_rect);
+        let cont_bg = if state.contiguous_select {
+            ACCENT_COLOR
+        } else if cont_hovered {
+            Color::new(0.35, 0.35, 0.38, 1.0)
+        } else {
+            Color::new(0.22, 0.22, 0.25, 1.0)
+        };
+        draw_rectangle(cont_rect.x, cont_rect.y, cont_rect.w, cont_rect.h, cont_bg);
+        // Draw link icon when contiguous, layers icon when selecting all
+        if let Some(font) = icon_font {
+            let icon_char = if state.contiguous_select { icon::LINK } else { icon::LAYERS };
+            draw_icon_in_rect(font, icon_char, &cont_rect, if state.contiguous_select { WHITE } else { TEXT_COLOR });
+        }
+        if cont_hovered {
+            ctx.set_tooltip(if state.contiguous_select { "Contiguous" } else { "All matching" }, ctx.mouse.x, ctx.mouse.y);
+        }
+        if ctx.mouse.clicked(&cont_rect) {
+            state.contiguous_select = !state.contiguous_select;
+        }
+        y += btn_size + gap;
+
+        // Tolerance row: - [tolerance] +
+        let small_btn = btn_size * 0.8;
+
+        // Minus button
+        let minus_rect = Rect::new(col1_x, y, small_btn, small_btn);
+        let minus_hovered = ctx.mouse.inside(&minus_rect);
+        draw_rectangle(minus_rect.x, minus_rect.y, minus_rect.w, minus_rect.h,
+            if minus_hovered { Color::new(0.35, 0.35, 0.38, 1.0) } else { Color::new(0.22, 0.22, 0.25, 1.0) });
+        draw_text("-", minus_rect.x + small_btn / 2.0 - 2.0, minus_rect.y + small_btn / 2.0 + 4.0, 12.0, TEXT_COLOR);
+        if ctx.mouse.clicked(&minus_rect) && state.color_tolerance > 0 {
+            state.color_tolerance = state.color_tolerance.saturating_sub(1);
+        }
+
+        // Tolerance label centered
+        let tol_text = format!("±{}", state.color_tolerance);
+        let text_dims = measure_text(&tol_text, None, 11, 1.0);
+        let center_x = col1_x + small_btn + (col2_x - col1_x - small_btn) / 2.0;
+        draw_text(&tol_text, center_x - text_dims.width / 2.0, y + small_btn / 2.0 + 4.0, 11.0, WHITE);
+
+        // Plus button
+        let plus_rect = Rect::new(col2_x + btn_size - small_btn, y, small_btn, small_btn);
+        let plus_hovered = ctx.mouse.inside(&plus_rect);
+        draw_rectangle(plus_rect.x, plus_rect.y, plus_rect.w, plus_rect.h,
+            if plus_hovered { Color::new(0.35, 0.35, 0.38, 1.0) } else { Color::new(0.22, 0.22, 0.25, 1.0) });
+        draw_text("+", plus_rect.x + small_btn / 2.0 - 3.0, plus_rect.y + small_btn / 2.0 + 4.0, 12.0, TEXT_COLOR);
+        if ctx.mouse.clicked(&plus_rect) {
+            state.color_tolerance = state.color_tolerance.saturating_add(1).min(16);
         }
     }
 }
