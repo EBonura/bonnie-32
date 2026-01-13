@@ -1,7 +1,8 @@
 /target
 /dist
 
-# Local WASM testing (copied assets for python http server)
+# Web deployment (docs/ = GitHub Pages source, not traditional documentation)
+# Exclude copied/generated files used for local testing
 docs/assets/
 docs/fonts/
 docs/levels/
