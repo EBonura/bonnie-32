@@ -914,6 +914,12 @@ pub struct ModelerState {
 
     // Thumbnail size for paint texture grid (32, 48, 64, 96)
     pub paint_thumb_size: f32,
+
+    // Object rename dialog state (object index, current text input)
+    pub rename_dialog: Option<(usize, String)>,
+
+    // Object delete confirmation dialog (object index)
+    pub delete_dialog: Option<usize>,
 }
 
 /// Context menu for right-click actions
@@ -982,9 +988,9 @@ impl ModelerState {
         // Project is the single source of truth for mesh data
         let mut project = MeshProject::default();
 
-        // Apply first user texture to the default cube, or create a grey fallback
+        // Apply first user texture to the default cube and project atlas template
         let (editing_texture, selected_user_texture) = if let Some((name, tex)) = user_textures.iter().next() {
-            // Copy user texture to project atlas
+            // Copy user texture to project atlas (template for new objects)
             project.atlas.width = tex.width;
             project.atlas.height = tex.height;
             project.atlas.depth = tex.depth;
@@ -993,6 +999,14 @@ impl ModelerState {
             if let Some(clut) = project.clut_pool.get_mut(project.atlas.default_clut) {
                 clut.colors = tex.palette.clone();
                 clut.depth = tex.depth;
+            }
+            // Also copy to the first object's atlas
+            if let Some(obj) = project.objects.get_mut(0) {
+                obj.atlas.width = tex.width;
+                obj.atlas.height = tex.height;
+                obj.atlas.depth = tex.depth;
+                obj.atlas.indices = tex.indices.clone();
+                obj.atlas.default_clut = project.atlas.default_clut;
             }
             (Some(tex.clone()), Some(name.to_string()))
         } else {
@@ -1008,6 +1022,10 @@ impl ModelerState {
                     let idx = if (cx + cy) % 2 == 0 { grey_light } else { grey_dark };
                     project.atlas.indices[y * project.atlas.width + x] = idx;
                 }
+            }
+            // Also set the first object's atlas
+            if let Some(obj) = project.objects.get_mut(0) {
+                obj.atlas = project.atlas.clone();
             }
             (None, None)
         };
@@ -1127,6 +1145,9 @@ impl ModelerState {
             editing_texture,
             selected_user_texture,
             paint_thumb_size: 64.0,  // Default thumbnail size
+
+            rename_dialog: None,
+            delete_dialog: None,
         }
     }
 
@@ -1284,14 +1305,38 @@ impl ModelerState {
     // PicoCAD-style Project Helpers
     // ========================================================================
 
-    /// Get the indexed texture atlas
+    /// Get the indexed texture atlas for the selected object
+    /// Falls back to project atlas if no object is selected
     pub fn atlas(&self) -> &IndexedAtlas {
+        if let Some(idx) = self.project.selected_object {
+            if let Some(obj) = self.project.objects.get(idx) {
+                return &obj.atlas;
+            }
+        }
         &self.project.atlas
     }
 
-    /// Get mutable indexed texture atlas
+    /// Get mutable indexed texture atlas for the selected object
+    /// Falls back to project atlas if no object is selected
     pub fn atlas_mut(&mut self) -> &mut IndexedAtlas {
+        if let Some(idx) = self.project.selected_object {
+            if let Some(obj) = self.project.objects.get_mut(idx) {
+                eprintln!("[DEBUG atlas_mut] Returning atlas for object {} ('{}')", idx, obj.name);
+                return &mut obj.atlas;
+            }
+        }
+        eprintln!("[DEBUG atlas_mut] Returning PROJECT atlas (no object selected)");
         &mut self.project.atlas
+    }
+
+    /// Get the indexed texture atlas for a specific object
+    pub fn object_atlas(&self, idx: usize) -> Option<&IndexedAtlas> {
+        self.project.objects.get(idx).map(|o| &o.atlas)
+    }
+
+    /// Get mutable indexed texture atlas for a specific object
+    pub fn object_atlas_mut(&mut self, idx: usize) -> Option<&mut IndexedAtlas> {
+        self.project.objects.get_mut(idx).map(|o| &mut o.atlas)
     }
 
     /// Get all visible mesh objects
@@ -1333,25 +1378,22 @@ impl ModelerState {
         idx
     }
 
-    /// Generate a unique object name by appending a number if needed
+    /// Generate a unique object name with 2-digit suffix (e.g., "Cube.00", "Cube.01")
     pub fn generate_unique_object_name(&self, base_name: &str) -> String {
         let existing_names: std::collections::HashSet<&str> = self.project.objects
             .iter()
             .map(|o| o.name.as_str())
             .collect();
 
-        if !existing_names.contains(base_name) {
-            return base_name.to_string();
-        }
-
-        // Find the next available number
-        for i in 1.. {
-            let candidate = format!("{}.{:03}", base_name, i);
+        // Always use 2-digit suffix, starting from .00
+        for i in 0..100 {
+            let candidate = format!("{}.{:02}", base_name, i);
             if !existing_names.contains(candidate.as_str()) {
                 return candidate;
             }
         }
-        base_name.to_string() // Fallback (shouldn't reach here)
+        // Fallback for 100+ objects (unlikely)
+        format!("{}.{}", base_name, self.project.objects.len())
     }
 
     /// Create a new project (replaces current)

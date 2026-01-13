@@ -968,24 +968,48 @@ pub fn draw_modeler_viewport_ext(
     }
 
     // Render all visible objects
-    // Convert atlas to rasterizer texture (shared by all objects)
     // Use RGB555 or RGB888 based on settings
     let use_rgb555 = state.raster_settings.use_rgb555;
 
-    // Pre-convert atlas to appropriate format using CLUT
-    let clut = state.project.effective_clut();
-    let atlas_texture = clut.map(|c| state.project.atlas.to_raster_texture(c, "atlas"));
-    let atlas_texture_15 = if use_rgb555 {
-        clut.map(|c| state.project.atlas.to_texture15(c, "atlas"))
-    } else {
-        None
-    };
+    // Log once per render frame (use frame counter if available, or static counter)
+    static mut FRAME_COUNTER: u32 = 0;
+    let frame_num = unsafe { FRAME_COUNTER += 1; FRAME_COUNTER };
+
+    // Only log every 60 frames to reduce spam
+    let should_log = frame_num % 60 == 0;
+
+    // Fallback CLUT for objects with no assigned CLUT
+    let fallback_clut = state.project.clut_pool.first_id()
+        .and_then(|id| state.project.clut_pool.get(id));
 
     for (obj_idx, obj) in state.project.objects.iter().enumerate() {
         // Skip hidden objects
         if !obj.visible {
             continue;
         }
+
+        // Get this object's CLUT from the shared pool (per-object atlas.default_clut)
+        let obj_clut = if obj.atlas.default_clut.is_valid() {
+            state.project.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
+        } else {
+            fallback_clut
+        };
+
+        if should_log {
+            // Log first 8 indices to see if atlas data differs between objects
+            let indices_preview: Vec<u8> = obj.atlas.indices.iter().take(8).copied().collect();
+            eprintln!("[DEBUG render] obj[{}] '{}': atlas {}x{} depth={:?} clut={:?} indices[0..8]={:?}",
+                obj_idx, obj.name, obj.atlas.width, obj.atlas.height, obj.atlas.depth,
+                obj.atlas.default_clut, indices_preview);
+        }
+
+        // Convert this object's atlas to rasterizer texture using its own CLUT
+        let atlas_texture = obj_clut.map(|c| obj.atlas.to_raster_texture(c, &format!("atlas_{}", obj_idx)));
+        let atlas_texture_15 = if use_rgb555 {
+            obj_clut.map(|c| obj.atlas.to_texture15(c, &format!("atlas_{}", obj_idx)))
+        } else {
+            None
+        };
 
         // Use project mesh directly (mesh() accessor returns selected object's mesh)
         let mesh = &obj.mesh;

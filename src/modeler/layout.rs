@@ -153,6 +153,9 @@ pub fn draw_modeler(
     // Draw context menu (on top of everything)
     draw_context_menu(ctx, state);
 
+    // Draw rename/delete dialogs (modal, on top of everything)
+    draw_object_dialogs(ctx, state, icon_font);
+
     action
 }
 
@@ -580,11 +583,6 @@ fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, ic
     // === LIGHTS SECTION ===
     draw_section_label(x, &mut y, width, "Lights");
     draw_lights_section(ctx, x, &mut y, width, state, icon_font);
-    y += 4.0;
-
-    // === SHORTCUTS SECTION ===
-    draw_section_label(x, &mut y, width, "Shortcuts");
-    draw_shortcuts_section(x, &mut y, width, rect.bottom());
 }
 
 /// Draw overview content (object list with visibility toggles)
@@ -595,6 +593,8 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     // Collect click actions first (to avoid borrow issues)
     let mut select_idx: Option<usize> = None;
     let mut toggle_vis_idx: Option<usize> = None;
+    let mut rename_idx: Option<usize> = None;
+    let mut delete_idx: Option<usize> = None;
 
     let obj_count = state.project.objects.len();
     for idx in 0..obj_count {
@@ -605,11 +605,12 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         let obj = &state.project.objects[idx];
         let is_selected = state.project.selected_object == Some(idx);
         let item_rect = Rect::new(rect.x, y, rect.w, line_height);
+        let is_hovered = ctx.mouse.inside(&item_rect);
 
         // Selection highlight
         if is_selected {
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
-        } else if ctx.mouse.inside(&item_rect) {
+        } else if is_hovered {
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
         }
 
@@ -623,14 +624,40 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             toggle_vis_idx = Some(idx);
         }
 
-        // Object name with face count
+        // Rename and delete icons (show when selected or hovered)
+        let show_icons = is_selected || is_hovered;
+        let icon_size = 14.0;
+        let delete_rect = Rect::new(rect.right() - icon_size - 4.0, y + 2.0, icon_size, icon_size);
+        let rename_rect = Rect::new(delete_rect.x - icon_size - 4.0, y + 2.0, icon_size, icon_size);
+
+        if show_icons {
+            // Rename icon (pencil)
+            let rename_hover = ctx.mouse.inside(&rename_rect);
+            let rename_color = if rename_hover { ACCENT_COLOR } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::PENCIL, &rename_rect, 11.0, rename_color);
+            if rename_hover && ctx.mouse.left_pressed {
+                rename_idx = Some(idx);
+            }
+
+            // Delete icon (trash)
+            let delete_hover = ctx.mouse.inside(&delete_rect);
+            let delete_color = if delete_hover { Color::from_rgba(255, 100, 100, 255) } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::TRASH, &delete_rect, 11.0, delete_color);
+            if delete_hover && ctx.mouse.left_pressed {
+                delete_idx = Some(idx);
+            }
+        }
+
+        // Object name with face count (account for icon space)
         let fc = obj.mesh.face_count();
         let name_color = poly_count_color(fc);
+        let name_width = if show_icons { rect.w - 60.0 } else { rect.w - 22.0 };
         draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, FONT_SIZE_HEADER, name_color);
 
-        // Handle selection click (not on visibility toggle)
-        let name_rect = Rect::new(rect.x + 20.0, y, rect.w - 20.0, line_height);
-        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed && toggle_vis_idx.is_none() {
+        // Handle selection click (not on visibility toggle or icons)
+        let name_rect = Rect::new(rect.x + 20.0, y, name_width, line_height);
+        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed
+            && toggle_vis_idx.is_none() && rename_idx.is_none() && delete_idx.is_none() {
             select_idx = Some(idx);
         }
 
@@ -640,9 +667,20 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     // Apply actions after the loop
     if let Some(idx) = toggle_vis_idx {
         state.project.objects[idx].visible = !state.project.objects[idx].visible;
+    } else if let Some(idx) = rename_idx {
+        // Open rename dialog with current name
+        let name = state.project.objects[idx].name.clone();
+        state.rename_dialog = Some((idx, name));
+    } else if let Some(idx) = delete_idx {
+        // Open delete confirmation dialog
+        state.delete_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
+        // Clear editing state when switching objects to prevent texture bleeding
+        if state.project.selected_object != Some(idx) {
+            state.editing_indexed_atlas = false;
+            state.editing_texture = None;
+        }
         state.project.selected_object = Some(idx);
-        // Project is single source of truth - mesh() reads from it directly
     }
 }
 
@@ -739,27 +777,6 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
 
     if let Some(i) = toggle_idx {
         state.raster_settings.lights[i].enabled = !state.raster_settings.lights[i].enabled;
-    }
-}
-
-/// Draw shortcuts reference section
-fn draw_shortcuts_section(x: f32, y: &mut f32, _width: f32, max_y: f32) {
-    let shortcuts = [
-        ("G/R/S", "Move/Rotate/Scale"),
-        ("E", "Extrude face"),
-        ("X/Del", "Delete"),
-        ("1/2/3", "Vert/Edge/Face"),
-        ("V", "Toggle Build/UV"),
-        ("Space", "Fullscreen viewport"),
-        ("Ctrl+Z/Y", "Undo/Redo"),
-    ];
-
-    for (key, desc) in shortcuts {
-        if *y + LINE_HEIGHT > max_y {
-            break;
-        }
-        draw_text(&format!("{}: {}", key, desc), x + 4.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_DIM);
-        *y += LINE_HEIGHT;
     }
 }
 
@@ -871,9 +888,9 @@ fn draw_collapsible_header(
     (new_expanded, clicked)
 }
 
-/// Create a UserTexture for editing from the project's IndexedAtlas
+/// Create a UserTexture for editing from the selected object's IndexedAtlas
 fn create_editing_texture(state: &ModelerState) -> UserTexture {
-    let indexed = &state.project.atlas;
+    let indexed = state.atlas();
     // Get CLUT for palette colors
     let clut = state.project.clut_pool.get(indexed.default_clut)
         .or_else(|| state.project.clut_pool.iter().next())
@@ -1290,31 +1307,41 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
         get_internal_gl().quad_gl.scissor(None);
     }
 
-    // Handle single-click to select and assign texture to project
+    // Handle single-click to select and assign texture to selected object
     if let Some(name) = clicked_texture {
         state.selected_user_texture = Some(name.clone());
 
-        // Copy the texture to the project's atlas
-        if let Some(tex) = state.user_textures.get(&name) {
-            // Copy indices to atlas (resize if needed)
-            state.project.atlas.width = tex.width;
-            state.project.atlas.height = tex.height;
-            state.project.atlas.depth = tex.depth;
-            state.project.atlas.indices = tex.indices.clone();
+        eprintln!("[DEBUG texture_click] Selected texture '{}', selected_object={:?}", name, state.project.selected_object);
 
-            // Update the default CLUT with the texture's palette
-            if let Some(clut) = state.project.clut_pool.get_mut(state.project.atlas.default_clut) {
-                clut.colors = tex.palette.clone();
-                clut.depth = tex.depth;
-            } else if let Some(first_clut) = state.project.clut_pool.iter_mut().next() {
-                // Fallback to first CLUT if default isn't set
-                first_clut.colors = tex.palette.clone();
-                first_clut.depth = tex.depth;
-                state.project.atlas.default_clut = first_clut.id;
-            }
+        // Clone texture data to avoid borrow issues
+        let tex_data = state.user_textures.get(&name).cloned();
+        if let Some(tex) = tex_data {
+            eprintln!("[DEBUG texture_click] Applying texture to atlas...");
+
+            // Create a new CLUT for this object with the texture's palette
+            // This ensures each object has its own CLUT, not shared with other objects
+            let obj_name = state.selected_object()
+                .map(|o| o.name.clone())
+                .unwrap_or_else(|| "object".to_string());
+            let clut_name = format!("{}_clut", obj_name);
+
+            let mut new_clut = Clut::new_4bit(&clut_name);
+            new_clut.colors = tex.palette.clone();
+            new_clut.depth = tex.depth;
+            let new_clut_id = state.project.clut_pool.add_clut(new_clut);
+
+            eprintln!("[DEBUG texture_click] Created new CLUT '{}' with id {:?}", clut_name, new_clut_id);
+
+            // Update the selected object's atlas
+            let atlas = state.atlas_mut();
+            atlas.width = tex.width;
+            atlas.height = tex.height;
+            atlas.depth = tex.depth;
+            atlas.indices = tex.indices.clone();
+            atlas.default_clut = new_clut_id;
 
             // Update the editing texture to match
-            state.editing_texture = Some(tex.clone());
+            state.editing_texture = Some(tex);
             state.dirty = true;
         }
     }
@@ -1480,18 +1507,23 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.redo();
     }
 
-    // Sync editing_texture back to project.atlas (so mesh updates in real-time)
-    // Get fresh reference to editing texture after all draws
-    if let Some(ref editing_tex) = state.editing_texture {
-        // Sync to project atlas for mesh preview
-        state.project.atlas.width = editing_tex.width;
-        state.project.atlas.height = editing_tex.height;
-        state.project.atlas.depth = editing_tex.depth;
-        state.project.atlas.indices = editing_tex.indices.clone();
-        // Update the default CLUT with the texture's palette
-        if let Some(clut) = state.project.clut_pool.get_mut(state.project.atlas.default_clut) {
-            clut.colors = editing_tex.palette.clone();
-            clut.depth = editing_tex.depth;
+    // Sync editing_texture back to selected object's atlas (only when actively editing)
+    // This prevents overwriting other objects' atlases when switching selection
+    if state.editing_indexed_atlas {
+        let editing_tex_data = state.editing_texture.clone();
+        if let Some(editing_tex) = editing_tex_data {
+            // Sync to selected object's atlas for mesh preview
+            let atlas = state.atlas_mut();
+            atlas.width = editing_tex.width;
+            atlas.height = editing_tex.height;
+            atlas.depth = editing_tex.depth;
+            atlas.indices = editing_tex.indices.clone();
+            let default_clut_id = atlas.default_clut;
+            // Update the default CLUT with the texture's palette
+            if let Some(clut) = state.project.clut_pool.get_mut(default_clut_id) {
+                clut.colors = editing_tex.palette.clone();
+                clut.depth = editing_tex.depth;
+            }
         }
     }
 
@@ -1854,7 +1886,7 @@ fn draw_atlas_preview(
     scale: f32,
     state: &ModelerState,
 ) {
-    let atlas = &state.project.atlas;
+    let atlas = state.atlas();
     let atlas_width = atlas.width;
     let atlas_height = atlas.height;
 
@@ -1971,11 +2003,12 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
 
     draw_text("Size:", x + 4.0, *y + 12.0, 12.0, TEXT_DIM);
 
+    let atlas_width = state.atlas().width;
     let mut btn_x = x + 32.0;
     for (size, label) in sizes {
         let btn_w = label.len() as f32 * 7.0 + 6.0;
         let btn_rect = Rect::new(btn_x, *y, btn_w, btn_h);
-        let is_current = state.project.atlas.width == size;
+        let is_current = atlas_width == size;
         let hovered = ctx.mouse.inside(&btn_rect);
 
         let bg = if is_current {
@@ -1992,7 +2025,7 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
 
         if hovered && ctx.mouse.left_pressed && !is_current {
             state.push_undo_with_atlas("Resize Atlas");
-            state.project.atlas.resize(size, size);
+            state.atlas_mut().resize(size, size);
             state.dirty = true;
         }
 
@@ -2745,26 +2778,35 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         ortho_settings.backface_cull = false; // Show all faces in ortho views
         ortho_settings.backface_wireframe = false;
 
-        // Convert atlas to texture (shared by all objects)
-        // Get effective CLUT for rendering
-        let clut = state.project.effective_clut();
-        let default_clut = Clut::new_4bit("default");
-        let clut_ref = clut.unwrap_or(&default_clut);
-
         let use_rgb555 = state.raster_settings.use_rgb555;
-        let atlas_texture = state.project.atlas.to_raster_texture(clut_ref, "atlas");
-        let atlas_texture_15 = if use_rgb555 {
-            Some(state.project.atlas.to_texture15(clut_ref, "atlas"))
-        } else {
-            None
-        };
 
-        // Render all visible objects
+        // Fallback CLUT for objects with no assigned CLUT
+        let default_clut = Clut::new_4bit("default");
+        let fallback_clut = state.project.clut_pool.first_id()
+            .and_then(|id| state.project.clut_pool.get(id))
+            .unwrap_or(&default_clut);
+
+        // Render all visible objects (each with its own texture atlas and CLUT)
         for (obj_idx, obj) in state.project.objects.iter().enumerate() {
             // Skip hidden objects
             if !obj.visible {
                 continue;
             }
+
+            // Get this object's CLUT from the shared pool (per-object atlas.default_clut)
+            let obj_clut = if obj.atlas.default_clut.is_valid() {
+                state.project.clut_pool.get(obj.atlas.default_clut).unwrap_or(fallback_clut)
+            } else {
+                fallback_clut
+            };
+
+            // Convert this object's atlas to rasterizer texture using its own CLUT
+            let atlas_texture = obj.atlas.to_raster_texture(obj_clut, &format!("atlas_{}", obj_idx));
+            let atlas_texture_15 = if use_rgb555 {
+                Some(obj.atlas.to_texture15(obj_clut, &format!("atlas_{}", obj_idx)))
+            } else {
+                None
+            };
 
             // Use project mesh directly (mesh() accessor returns selected object's mesh)
             let obj_mesh = &obj.mesh;
@@ -2809,17 +2851,19 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
                 if use_rgb555 {
                     // RGB555 rendering path
-                    let textures_15 = [atlas_texture_15.as_ref().unwrap().clone()];
-                    render_mesh_15(
-                        fb,
-                        &vertices,
-                        &faces,
-                        &textures_15,
-                        Some(&blend_modes),
-                        &ortho_camera,
-                        &ortho_settings,
-                        None,
-                    );
+                    if let Some(ref tex15) = atlas_texture_15 {
+                        let textures_15 = [tex15.clone()];
+                        render_mesh_15(
+                            fb,
+                            &vertices,
+                            &faces,
+                            &textures_15,
+                            Some(&blend_modes),
+                            &ortho_camera,
+                            &ortho_settings,
+                            None,
+                        );
+                    }
                 } else {
                     // RGB888 rendering path (original)
                     let textures = [atlas_texture.clone()];
@@ -3521,8 +3565,9 @@ fn draw_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, fb: 
 #[allow(dead_code)]
 fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     // Cache atlas dimensions to avoid borrow issues
-    let atlas_width = state.project.atlas.width;
-    let atlas_height = state.project.atlas.height;
+    let atlas = state.atlas();
+    let atlas_width = atlas.width;
+    let atlas_height = atlas.height;
     let atlas_w = atlas_width as f32;
     let atlas_h = atlas_height as f32;
 
@@ -3950,7 +3995,7 @@ fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
         None => return,
     };
 
-    let atlas_size = state.project.atlas.width as f32;
+    let atlas_size = state.atlas().width as f32;
 
     state.push_undo(if flip_h { "Flip UV Horizontal" } else { "Flip UV Vertical" });
 
@@ -3989,7 +4034,7 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
         None => return,
     };
 
-    let atlas_size = state.project.atlas.width as f32;
+    let atlas_size = state.atlas().width as f32;
 
     state.push_undo("Rotate UV 90°");
 
@@ -4029,7 +4074,7 @@ fn reset_selected_uvs(state: &mut ModelerState) {
             return;
         }
 
-        let atlas_size = state.project.atlas.width as f32;
+        let atlas_size = state.atlas().width as f32;
 
         state.push_undo("Reset UVs");
 
@@ -4880,6 +4925,32 @@ fn delete_selection(state: &mut ModelerState) {
             return;
         }
     }
+
+    // Check if mesh is now empty and remove the object if so
+    if let Some(idx) = state.project.selected_object {
+        let is_empty = state.project.objects.get(idx)
+            .map(|o| o.mesh.faces.is_empty())
+            .unwrap_or(false);
+
+        if is_empty {
+            let name = state.project.objects.get(idx)
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+
+            state.project.objects.remove(idx);
+
+            // Update selected_object to point to a valid object
+            if state.project.objects.is_empty() {
+                state.project.selected_object = None;
+            } else if idx >= state.project.objects.len() {
+                // Select the last object if we removed the last one
+                state.project.selected_object = Some(state.project.objects.len() - 1);
+            }
+            // If idx is still valid, keep it (now points to the next object)
+
+            state.set_status(&format!("Deleted object '{}'", name), 1.5);
+        }
+    }
 }
 
 /// Copy current selection to clipboard
@@ -5213,6 +5284,167 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     // Close if clicked outside menu
     if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
         state.context_menu = None;
+    }
+}
+
+/// Draw rename and delete dialogs for objects
+fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font: Option<&Font>) {
+    // Handle rename dialog
+    if let Some((idx, ref current_name)) = state.rename_dialog.clone() {
+        let dialog_w = 280.0;
+        let dialog_h = 120.0;
+        let dialog_x = (screen_width() - dialog_w) / 2.0;
+        let dialog_y = (screen_height() - dialog_h) / 2.0;
+        let dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+        // Background
+        draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(80, 80, 90, 255));
+
+        // Title
+        draw_text("Rename Object", dialog_x + 12.0, dialog_y + 22.0, 16.0, WHITE);
+
+        // Text input field
+        let input_rect = Rect::new(dialog_x + 12.0, dialog_y + 40.0, dialog_w - 24.0, 28.0);
+        draw_rectangle(input_rect.x, input_rect.y, input_rect.w, input_rect.h, Color::from_rgba(30, 30, 35, 255));
+        draw_rectangle_lines(input_rect.x, input_rect.y, input_rect.w, input_rect.h, 1.0, ACCENT_COLOR);
+        draw_text(&current_name, input_rect.x + 8.0, input_rect.y + 19.0, 14.0, TEXT_COLOR);
+
+        // Handle text input
+        let mut new_name = current_name.clone();
+        // Check for character input
+        if let Some(ch) = get_char_pressed() {
+            if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.' || ch == ' ' {
+                new_name.push(ch);
+            }
+        }
+        // Handle backspace
+        if is_key_pressed(KeyCode::Backspace) && !new_name.is_empty() {
+            new_name.pop();
+        }
+        // Update the dialog state with new name
+        if new_name != *current_name {
+            state.rename_dialog = Some((idx, new_name));
+        }
+
+        // Buttons
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = dialog_y + dialog_h - btn_h - 12.0;
+
+        // Cancel button
+        let cancel_rect = Rect::new(dialog_x + dialog_w - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, TEXT_COLOR);
+
+        // Confirm button
+        let confirm_rect = Rect::new(dialog_x + dialog_w - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let confirm_hover = ctx.mouse.inside(&confirm_rect);
+        draw_rectangle(confirm_rect.x, confirm_rect.y, confirm_rect.w, confirm_rect.h,
+            if confirm_hover { Color::from_rgba(60, 100, 140, 255) } else { ACCENT_COLOR });
+        draw_text("Rename", confirm_rect.x + 14.0, confirm_rect.y + 18.0, 14.0, WHITE);
+
+        // Handle button clicks (use clicked() for buttons, not left_pressed)
+        if ctx.mouse.clicked(&cancel_rect) {
+            state.rename_dialog = None;
+        } else if ctx.mouse.clicked(&confirm_rect) {
+            if let Some((idx, name)) = &state.rename_dialog {
+                if !name.is_empty() && *idx < state.project.objects.len() {
+                    state.project.objects[*idx].name = name.clone();
+                    state.set_status(&format!("Renamed to '{}'", name), 1.0);
+                }
+            }
+            state.rename_dialog = None;
+        }
+
+        // Handle Enter/Escape keys
+        if is_key_pressed(KeyCode::Escape) {
+            state.rename_dialog = None;
+        } else if is_key_pressed(KeyCode::Enter) {
+            if let Some((idx, name)) = &state.rename_dialog {
+                if !name.is_empty() && *idx < state.project.objects.len() {
+                    state.project.objects[*idx].name = name.clone();
+                    state.set_status(&format!("Renamed to '{}'", name), 1.0);
+                }
+            }
+            state.rename_dialog = None;
+        }
+    }
+
+    // Handle delete confirmation dialog
+    if let Some(idx) = state.delete_dialog {
+        let obj_name = state.project.objects.get(idx)
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
+
+        let dialog_w = 300.0;
+        let dialog_h = 120.0;
+        let dialog_x = (screen_width() - dialog_w) / 2.0;
+        let dialog_y = (screen_height() - dialog_h) / 2.0;
+        let dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+        // Background
+        draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(100, 60, 60, 255));
+
+        // Warning icon and title
+        let icon_rect = Rect::new(dialog_x + 12.0, dialog_y + 12.0, 20.0, 20.0);
+        draw_icon_centered(icon_font, icon::TRASH, &icon_rect, 16.0, Color::from_rgba(255, 100, 100, 255));
+        draw_text("Delete Object?", dialog_x + 36.0, dialog_y + 26.0, 16.0, WHITE);
+
+        // Message
+        draw_text(&format!("Delete '{}'?", obj_name), dialog_x + 12.0, dialog_y + 55.0, 14.0, TEXT_COLOR);
+        draw_text("This cannot be undone.", dialog_x + 12.0, dialog_y + 72.0, 12.0, TEXT_DIM);
+
+        // Buttons
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = dialog_y + dialog_h - btn_h - 12.0;
+
+        // Cancel button
+        let cancel_rect = Rect::new(dialog_x + dialog_w - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, TEXT_COLOR);
+
+        // Delete button (red)
+        let delete_rect = Rect::new(dialog_x + dialog_w - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let delete_hover = ctx.mouse.inside(&delete_rect);
+        draw_rectangle(delete_rect.x, delete_rect.y, delete_rect.w, delete_rect.h,
+            if delete_hover { Color::from_rgba(180, 60, 60, 255) } else { Color::from_rgba(140, 50, 50, 255) });
+        draw_text("Delete", delete_rect.x + 18.0, delete_rect.y + 18.0, 14.0, WHITE);
+
+        // Handle button clicks (use clicked() for buttons, not left_pressed)
+        if ctx.mouse.clicked(&cancel_rect) {
+            state.delete_dialog = None;
+        } else if ctx.mouse.clicked(&delete_rect) {
+            // Delete the object
+            if idx < state.project.objects.len() {
+                state.project.objects.remove(idx);
+                // Update selected_object
+                if state.project.objects.is_empty() {
+                    state.project.selected_object = None;
+                } else if let Some(sel) = state.project.selected_object {
+                    if sel >= state.project.objects.len() {
+                        state.project.selected_object = Some(state.project.objects.len() - 1);
+                    } else if sel > idx {
+                        state.project.selected_object = Some(sel - 1);
+                    }
+                }
+                state.selection.clear();
+                state.dirty = true;
+                state.set_status(&format!("Deleted '{}'", obj_name), 1.0);
+            }
+            state.delete_dialog = None;
+        }
+
+        // Handle Escape key
+        if is_key_pressed(KeyCode::Escape) {
+            state.delete_dialog = None;
+        }
     }
 }
 

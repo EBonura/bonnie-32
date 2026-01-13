@@ -138,6 +138,8 @@ pub struct MeshObject {
     pub name: String,
     /// The geometry
     pub mesh: EditableMesh,
+    /// Per-object texture atlas (stores palette indices)
+    pub atlas: IndexedAtlas,
     /// Whether this object is visible in the viewport
     pub visible: bool,
     /// Whether this object is locked (can't be selected/edited)
@@ -151,6 +153,7 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh: EditableMesh::new(),
+            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
@@ -161,6 +164,18 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh,
+            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
+            visible: true,
+            locked: false,
+            color: None,
+        }
+    }
+
+    pub fn with_mesh_and_atlas(name: impl Into<String>, mesh: EditableMesh, atlas: IndexedAtlas) -> Self {
+        Self {
+            name: name.into(),
+            mesh,
+            atlas,
             visible: true,
             locked: false,
             color: None,
@@ -208,7 +223,7 @@ impl MeshProject {
         Self {
             name: name.into(),
             // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
-            objects: vec![MeshObject::cube("object", 1024.0)],
+            objects: vec![MeshObject::cube("Cube.00", 1024.0)],
             atlas,
             clut_pool,
             preview_clut: None,
