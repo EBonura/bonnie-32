@@ -99,6 +99,16 @@ async fn main() {
         use editor::TexturePack;
         app.world_editor.editor_state.texture_packs = TexturePack::load_from_manifest().await;
         println!("WASM: Loaded {} texture packs", app.world_editor.editor_state.texture_packs.len());
+
+        // Load user textures from manifest (for both editor and modeler)
+        match app.world_editor.editor_state.user_textures.discover_from_manifest().await {
+            Ok(count) => println!("WASM: Loaded {} user textures for editor", count),
+            Err(e) => eprintln!("WASM: Failed to load user textures for editor: {}", e),
+        }
+        match app.modeler.user_textures.discover_from_manifest().await {
+            Ok(count) => println!("WASM: Loaded {} user textures for modeler", count),
+            Err(e) => eprintln!("WASM: Failed to load user textures for modeler: {}", e),
+        }
     }
 
     println!("=== BONNIE-32 ===");
