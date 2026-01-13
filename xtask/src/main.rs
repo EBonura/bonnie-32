@@ -143,6 +143,9 @@ fn build_web(dev: bool) -> Result<()> {
     // Regenerate texture manifest without excluded packs
     regenerate_texture_manifest(&dist.join("assets/textures"))?;
 
+    // Generate manifest for user textures (for WASM loading)
+    regenerate_user_texture_manifest(&dist.join("assets/textures-user"))?;
+
     // Apply dev modifications if requested
     if dev {
         println!("Applying DEV build modifications...");
@@ -194,5 +197,37 @@ fn regenerate_texture_manifest(textures_dir: &Path) -> Result<()> {
 
     std::fs::write(textures_dir.join("manifest.txt"), manifest)?;
     println!("Regenerated texture manifest");
+    Ok(())
+}
+
+/// Generate manifest for user textures (flat list of .ron files)
+fn regenerate_user_texture_manifest(textures_user_dir: &Path) -> Result<()> {
+    // If directory doesn't exist, skip
+    if !textures_user_dir.exists() {
+        println!("No textures-user directory, skipping manifest generation");
+        return Ok(());
+    }
+
+    let mut manifest = String::new();
+
+    // Get sorted list of .ron files
+    let mut files: Vec<_> = std::fs::read_dir(textures_user_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "ron")
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort_by_key(|e| e.file_name());
+
+    // Write one filename per line
+    for file in files {
+        manifest.push_str(&format!("{}\n", file.file_name().to_string_lossy()));
+    }
+
+    std::fs::write(textures_user_dir.join("manifest.txt"), manifest)?;
+    println!("Regenerated user texture manifest ({} files)", manifest.lines().count());
     Ok(())
 }

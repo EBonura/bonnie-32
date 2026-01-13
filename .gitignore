@@ -9,6 +9,9 @@ docs/levels/
 docs/textures/
 docs/mq_js_bundle.js
 
+# Generated manifests
+assets/textures-user/manifest.txt
+
 # Copyrighted PS1 model references (not for distribution)
 assets/meshes/ps1-reference/
 
