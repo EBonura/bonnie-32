@@ -21,15 +21,6 @@ Like a fantasy console, BONNIE-32 provides:
 
 Everything is built from scratch in Rust: the software rasterizer, the editor UI, the level format. No shaders faking the look - the renderer actually works like PS1 hardware.
 
-![World Editor](docs/screenshot-world-editor.png)
-*World Editor - TR1-style sector grid with 2D/3D views*
-
-![Asset Editor](docs/screenshot-asset-editor.png)
-*Asset Editor - Low-poly modeler with per-object textures*
-
-![Music Tracker](docs/screenshot-music-tracker.png)
-*Music Tracker - Pattern-based composition with PS1 SPU reverb*
-
 ## The PS1 Aesthetic
 
 The software rasterizer recreates the quirks that defined the PS1 look:
@@ -49,6 +40,8 @@ These aren't post-processing effects - they're how the renderer actually works.
 BONNIE-32 includes everything you need to create PS1-style games:
 
 ### World Editor
+<img src="docs/screenshot-world-editor.png" width="600" alt="World Editor">
+
 TR1-inspired room-based level editor with a sector grid system.
 - 2D grid view (top/front/side) + 3D software-rendered preview
 - Texture painting with palette support
@@ -56,6 +49,8 @@ TR1-inspired room-based level editor with a sector grid system.
 - Object placement and properties
 
 ### Asset Editor
+<img src="docs/screenshot-asset-editor.png" width="600" alt="Asset Editor">
+
 PicoCAD-inspired low-poly mesh modeler.
 - 4-panel viewport (perspective + orthographic views)
 - Blender-style controls: G (grab), R (rotate), S (scale)
@@ -64,6 +59,8 @@ PicoCAD-inspired low-poly mesh modeler.
 - OBJ import support
 
 ### Music Tracker
+<img src="docs/screenshot-music-tracker.png" width="600" alt="Music Tracker">
+
 Pattern-based tracker for authentic PS1 audio.
 - 8 channels with SF2 soundfont support
 - 10 authentic PsyQ SDK reverb presets (Room, Studio, Hall, Space Echo...)
