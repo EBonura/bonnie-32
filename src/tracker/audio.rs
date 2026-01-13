@@ -17,6 +17,9 @@ use super::psx_reverb::{PsxReverb, ReverbType};
 /// Sample rate for audio output
 pub const SAMPLE_RATE: u32 = 44100;
 
+/// Output gain multiplier - boosts overall volume since soundfont is quiet
+const OUTPUT_GAIN: f32 = 2.0;
+
 /// PS1 SPU Pitch Register emulation
 ///
 /// The PS1 SPU uses a 16-bit pitch register where:
@@ -434,11 +437,11 @@ mod native {
                     // Apply PS1 SPU Gaussian resampling (authentic sample rate conversion)
                     state.resampler.process(&mut left_buffer[..samples_needed], &mut right_buffer[..samples_needed]);
 
-                    // Apply master volume
-                    let master = state.master_volume;
+                    // Apply master volume and output gain
+                    let gain = state.master_volume * OUTPUT_GAIN;
                     for i in 0..samples_needed {
-                        data[i * 2] = left_buffer[i] * master;
-                        data[i * 2 + 1] = right_buffer[i] * master;
+                        data[i * 2] = left_buffer[i] * gain;
+                        data[i * 2 + 1] = right_buffer[i] * gain;
                     }
                 } else {
                     for sample in data.iter_mut() {
@@ -705,11 +708,11 @@ impl AudioEngine {
             // Apply PS1 SPU Gaussian resampling (authentic sample rate conversion)
             state.resampler.process(&mut self.left_buffer[..samples], &mut self.right_buffer[..samples]);
 
-            // Apply master volume
-            let master = state.master_volume;
+            // Apply master volume and output gain
+            let gain = state.master_volume * OUTPUT_GAIN;
             for i in 0..samples {
-                self.left_buffer[i] *= master;
-                self.right_buffer[i] *= master;
+                self.left_buffer[i] *= gain;
+                self.right_buffer[i] *= gain;
             }
 
             wasm::write_audio(&self.left_buffer[..samples], &self.right_buffer[..samples]);

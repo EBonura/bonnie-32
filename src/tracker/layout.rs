@@ -1059,7 +1059,16 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
     let black_key_w = 16.0;
     let black_key_h = 60.0;
 
-    draw_text(&format!("Piano - Octave {}", state.octave), piano_x, piano_y - 10.0, 16.0, TEXT_COLOR);
+    // Piano header with octave
+    draw_text(&format!("Piano - Octave {}", state.octave), piano_x, piano_y - 22.0, 14.0, TEXT_COLOR);
+
+    // MIDI status indicator
+    if state.midi.is_connected() {
+        let device_name = state.midi.device_name();
+        draw_text(&format!("MIDI: {}", device_name), piano_x, piano_y - 8.0, 11.0, Color::new(0.0, 0.8, 0.6, 1.0));
+    } else {
+        draw_text("MIDI: No device", piano_x, piano_y - 8.0, 11.0, TEXT_DIM);
+    }
 
     // Define all white keys we need to display (semitones 0-36, ~3 octaves: C to C)
     // semitone offset, note name
@@ -1085,10 +1094,10 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
         let midi_note = state.octave * 12 + *semitone;
         let is_hovered = ctx.mouse.inside(&key_rect);
-        let is_key_pressed = is_note_key_down(*semitone);
+        let is_key_pressed = is_note_key_down(*semitone) || state.midi.is_note_held(midi_note);
         let is_mouse_pressed = is_hovered && ctx.mouse.left_down;
 
-        // Background - cyan highlight when key pressed (keyboard or mouse), gray when hovered
+        // Background - cyan highlight when key pressed (keyboard, MIDI, or mouse), gray when hovered
         let bg = if is_key_pressed || is_mouse_pressed {
             Color::new(0.0, 0.75, 0.9, 1.0) // Cyan highlight
         } else if is_hovered {
@@ -1128,10 +1137,10 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
         let midi_note = state.octave * 12 + *semitone;
         let is_hovered = ctx.mouse.inside(&key_rect);
-        let is_key_pressed = is_note_key_down(*semitone);
+        let is_key_pressed = is_note_key_down(*semitone) || state.midi.is_note_held(midi_note);
         let is_mouse_pressed = is_hovered && ctx.mouse.left_down;
 
-        // Background - cyan highlight when key pressed (keyboard or mouse)
+        // Background - cyan highlight when key pressed (keyboard, MIDI, or mouse)
         let bg = if is_key_pressed || is_mouse_pressed {
             Color::new(0.0, 0.6, 0.75, 1.0) // Darker cyan for black keys
         } else if is_hovered {

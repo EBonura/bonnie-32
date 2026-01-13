@@ -120,6 +120,11 @@ mod platform {
         pub fn disconnect(&mut self) {
             // Web MIDI doesn't have explicit disconnect
         }
+
+        /// Check if a MIDI note is currently held down
+        pub fn is_note_held(&self, note: u8) -> bool {
+            self.held_notes.get(note as usize).copied().unwrap_or(false)
+        }
     }
 
     impl Default for MidiInput {
@@ -139,6 +144,9 @@ mod platform {
     use midir::{MidiInput as MidirInput, MidiInputConnection};
     use std::sync::{Arc, Mutex};
 
+    /// How often to check for new MIDI devices (in frames)
+    const RECONNECT_INTERVAL: u32 = 2;
+
     pub struct MidiInput {
         /// Shared message queue (filled by callback)
         messages: Arc<Mutex<Vec<MidiMessage>>>,
@@ -148,6 +156,8 @@ mod platform {
         device_name: String,
         /// Track held notes
         held_notes: [bool; 128],
+        /// Frame counter for periodic reconnection attempts
+        reconnect_counter: u32,
     }
 
     impl MidiInput {
@@ -158,6 +168,7 @@ mod platform {
                 connection: None,
                 device_name: String::new(),
                 held_notes: [false; 128],
+                reconnect_counter: 0,
             };
 
             // Auto-connect to first available device
@@ -169,6 +180,30 @@ mod platform {
         }
 
         pub fn poll(&mut self) -> impl Iterator<Item = MidiMessage> {
+            self.reconnect_counter += 1;
+            if self.reconnect_counter >= RECONNECT_INTERVAL {
+                self.reconnect_counter = 0;
+
+                // Check if currently connected device is still available
+                if self.connection.is_some() {
+                    let devices = self.list_devices();
+                    if !devices.iter().any(|d| d == &self.device_name) {
+                        // Device disconnected
+                        println!("MIDI: {} disconnected", self.device_name);
+                        self.connection = None;
+                        self.device_name.clear();
+                        self.held_notes = [false; 128];
+                    }
+                }
+
+                // Try to connect if no device
+                if self.connection.is_none() {
+                    if self.connect_device(0).is_ok() {
+                        println!("MIDI: Connected to {}", self.device_name);
+                    }
+                }
+            }
+
             let mut lock = self.messages.lock().unwrap();
             let messages: Vec<_> = lock.drain(..).collect();
             drop(lock);
@@ -243,6 +278,11 @@ mod platform {
         pub fn disconnect(&mut self) {
             self.connection = None;
             self.device_name.clear();
+        }
+
+        /// Check if a MIDI note is currently held down
+        pub fn is_note_held(&self, note: u8) -> bool {
+            self.held_notes.get(note as usize).copied().unwrap_or(false)
         }
     }
 
