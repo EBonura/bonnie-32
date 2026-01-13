@@ -12,6 +12,7 @@ use crate::ui::{
 use super::state::{TrackerState, TrackerView};
 use super::psx_reverb::ReverbType;
 use super::actions::build_context;
+use crate::input::MidiMessage;
 use super::song_browser::{SongBrowserAction, next_available_song_name};
 
 // Layout constants
@@ -1719,6 +1720,37 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
         if is_key_pressed(KeyCode::Apostrophe) {
             state.enter_note_off();
             state.clear_selection();
+        }
+    }
+
+    // MIDI keyboard input
+    // Process all pending MIDI messages regardless of view/mode (for live preview)
+    for msg in state.midi.poll() {
+        match msg {
+            MidiMessage::NoteOn(note, velocity) => {
+                // Preview the note (always, for live playing)
+                let instrument = state.current_instrument();
+                state.audio.set_program(state.current_channel as i32, instrument as i32);
+                state.audio.note_on(state.current_channel as i32, note as i32, velocity as i32);
+
+                // Enter note into pattern only in edit mode + pattern view + note column
+                if state.view == TrackerView::Pattern && state.edit_mode && state.current_column == 0 {
+                    state.enter_note(note);
+                    state.clear_selection();
+                }
+            }
+            MidiMessage::NoteOff(note) => {
+                // Stop note preview
+                state.audio.note_off(state.current_channel as i32, note as i32);
+            }
+            MidiMessage::ControlChange(controller, value) => {
+                // Map common MIDI CCs to tracker controls
+                match controller {
+                    1 => state.set_preview_modulation(value), // Mod wheel
+                    7 => state.default_volume = value,        // Volume slider
+                    _ => {}
+                }
+            }
         }
     }
 

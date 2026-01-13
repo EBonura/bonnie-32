@@ -622,6 +622,146 @@
         });
 
         // =============================================================================
+        // MIDI Input (Web MIDI API)
+        // =============================================================================
+
+        var MidiInput = {
+            access: null,
+            input: null,
+            deviceName: "",
+            // Ring buffer for messages (max 256 messages between polls)
+            // Each message: [type, note, velocity] where type: 0=off, 1=on, 2=cc
+            messages: new Uint8Array(256 * 3),
+            messageCount: 0,
+
+            // Request MIDI access (async, called on first poll)
+            requestAccess: async function() {
+                if (MidiInput.access) return true;
+
+                try {
+                    MidiInput.access = await navigator.requestMIDIAccess();
+                    console.log('Web MIDI access granted');
+
+                    // Auto-connect to first input
+                    MidiInput.access.inputs.forEach(function(input) {
+                        if (!MidiInput.input) {
+                            MidiInput.connectInput(input);
+                        }
+                    });
+
+                    // Listen for device changes
+                    MidiInput.access.onstatechange = function(e) {
+                        if (e.port.type === 'input' && e.port.state === 'connected' && !MidiInput.input) {
+                            MidiInput.connectInput(e.port);
+                        }
+                    };
+
+                    return true;
+                } catch (e) {
+                    console.warn('Web MIDI not available:', e);
+                    return false;
+                }
+            },
+
+            connectInput: function(input) {
+                if (MidiInput.input) {
+                    MidiInput.input.onmidimessage = null;
+                }
+                MidiInput.input = input;
+                MidiInput.deviceName = input.name || "MIDI Device";
+                input.onmidimessage = MidiInput.onMessage;
+                console.log('MIDI connected:', MidiInput.deviceName);
+            },
+
+            onMessage: function(event) {
+                var data = event.data;
+                if (data.length < 2) return;
+
+                var status = data[0] & 0xF0;
+                var note = data[1];
+                var velocity = data.length > 2 ? data[2] : 0;
+
+                // Convert to simple format: type (0=off, 1=on, 2=cc), note, velocity
+                var msgType;
+                if (status === 0x90 && velocity > 0) {
+                    msgType = 1; // Note on
+                } else if (status === 0x80 || (status === 0x90 && velocity === 0)) {
+                    msgType = 0; // Note off
+                } else if (status === 0xB0) {
+                    msgType = 2; // CC
+                } else {
+                    return; // Ignore other messages
+                }
+
+                // Add to ring buffer (drop if full)
+                if (MidiInput.messageCount < 256) {
+                    var offset = MidiInput.messageCount * 3;
+                    MidiInput.messages[offset] = msgType;
+                    MidiInput.messages[offset + 1] = note;
+                    MidiInput.messages[offset + 2] = velocity;
+                    MidiInput.messageCount++;
+                }
+            },
+
+            // FFI functions called from Rust
+
+            init: function() {
+                MidiInput.requestAccess();
+            },
+
+            isConnected: function() {
+                return MidiInput.input ? 1 : 0;
+            },
+
+            getMessageCount: function() {
+                return MidiInput.messageCount;
+            },
+
+            // Copy messages to WASM memory and clear buffer
+            copyMessages: function(destPtr, maxCount) {
+                var count = Math.min(MidiInput.messageCount, maxCount);
+                if (count > 0) {
+                    var dest = new Uint8Array(wasm_memory.buffer, destPtr, count * 3);
+                    dest.set(MidiInput.messages.subarray(0, count * 3));
+                }
+                MidiInput.messageCount = 0;
+                return count;
+            },
+
+            // Copy device name to WASM memory
+            copyDeviceName: function(destPtr, maxLen) {
+                var name = MidiInput.deviceName;
+                var encoder = new TextEncoder();
+                var bytes = encoder.encode(name);
+                var len = Math.min(bytes.length, maxLen);
+                var mem = new Uint8Array(wasm_memory.buffer, destPtr, len);
+                mem.set(bytes.subarray(0, len));
+                return len;
+            },
+
+            getDeviceCount: function() {
+                if (!MidiInput.access) return 0;
+                return MidiInput.access.inputs.size;
+            },
+
+            connectDevice: function(index) {
+                if (!MidiInput.access) return 0;
+
+                var i = 0;
+                var found = false;
+                MidiInput.access.inputs.forEach(function(input) {
+                    if (i === index && !found) {
+                        MidiInput.connectInput(input);
+                        found = true;
+                    }
+                    i++;
+                });
+
+                return found ? 1 : 0;
+            }
+        };
+
+        // =============================================================================
         // Register WASM imports
         // =============================================================================
 
@@ -640,6 +780,15 @@
                 env.bonnie_gamepad_get_left_trigger = GamepadInput.getLeftTrigger;
                 env.bonnie_gamepad_get_right_trigger = GamepadInput.getRightTrigger;
                 env.bonnie_gamepad_copy_name = GamepadInput.copyName;
+
+                // MIDI input
+                env.bonnie_midi_init = MidiInput.init;
+                env.bonnie_midi_is_connected = MidiInput.isConnected;
+                env.bonnie_midi_get_message_count = MidiInput.getMessageCount;
+                env.bonnie_midi_copy_messages = MidiInput.copyMessages;
+                env.bonnie_midi_copy_device_name = MidiInput.copyDeviceName;
+                env.bonnie_midi_get_device_count = MidiInput.getDeviceCount;
+                env.bonnie_midi_connect_device = MidiInput.connectDevice;
 
                 // File I/O
                 env.bonnie_import_file = FileIO.import;

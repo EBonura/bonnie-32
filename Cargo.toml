@@ -28,6 +28,7 @@ brotli = "8.0"  # Pure Rust compression (WASM compatible, better ratio than gzip
 rfd = "0.14"
 cpal = "0.15"
 gilrs = "0.11"  # Native gamepad input
+midir = "0.10"  # Native MIDI keyboard input
 webbrowser = "1.0"
 indicatif = "0.17"
 crashlog = "0.1"  # Panic logging with backtrace
