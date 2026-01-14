@@ -1238,8 +1238,13 @@ fn rasterize_triangle(
             // Check if inside triangle (same threshold as original)
             const ERR: f32 = -0.0001;
             if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
-                // Interpolate depth
-                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+                // Perspective-correct depth interpolation
+                // In screen space after perspective divide, 1/z interpolates linearly, not z itself
+                let inv_z1 = 1.0 / v1.z;
+                let inv_z2 = 1.0 / v2.z;
+                let inv_z3 = 1.0 / v3.z;
+                let inv_z_interp = bc_x * inv_z1 + bc_y * inv_z2 + bc_z * inv_z3;
+                let z = 1.0 / inv_z_interp;
 
                 // Z-buffer test (skip in xray mode - render all faces regardless of depth)
                 if settings.use_zbuffer && !settings.xray_mode {
@@ -1258,17 +1263,15 @@ fn rasterize_triangle(
                     let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
                     (u, v)
                 } else {
-                    // Perspective-correct interpolation
-                    let bcc_x = bc_x / v1.z;
-                    let bcc_y = bc_y / v2.z;
-                    let bcc_z = bc_z / v3.z;
-                    let bd = bcc_x + bcc_y + bcc_z;
-                    let bcc_x = bcc_x / bd;
-                    let bcc_y = bcc_y / bd;
-                    let bcc_z = bcc_z / bd;
-
-                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
-                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    // Perspective-correct interpolation (reuse inv_z values)
+                    let u_over_z = bc_x * surface.uv1.x * inv_z1
+                                 + bc_y * surface.uv2.x * inv_z2
+                                 + bc_z * surface.uv3.x * inv_z3;
+                    let v_over_z = bc_x * surface.uv1.y * inv_z1
+                                 + bc_y * surface.uv2.y * inv_z2
+                                 + bc_z * surface.uv3.y * inv_z3;
+                    let u = u_over_z / inv_z_interp;
+                    let v = v_over_z / inv_z_interp;
                     (u, v)
                 };
 
@@ -1451,8 +1454,14 @@ fn rasterize_triangle_15(
             // Check if inside triangle
             const ERR: f32 = -0.0001;
             if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
-                // Interpolate depth
-                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+                // Perspective-correct depth interpolation
+                // In screen space after perspective divide, 1/z interpolates linearly, not z itself
+                // z_correct = 1 / (bc_x/z1 + bc_y/z2 + bc_z/z3)
+                let inv_z1 = 1.0 / v1.z;
+                let inv_z2 = 1.0 / v2.z;
+                let inv_z3 = 1.0 / v3.z;
+                let inv_z_interp = bc_x * inv_z1 + bc_y * inv_z2 + bc_z * inv_z3;
+                let z = 1.0 / inv_z_interp;
 
                 // Z-buffer test (skip in xray mode - render all faces regardless of depth)
                 if settings.use_zbuffer && !settings.xray_mode {
@@ -1471,17 +1480,15 @@ fn rasterize_triangle_15(
                     let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
                     (u, v)
                 } else {
-                    // Perspective-correct interpolation
-                    let bcc_x = bc_x / v1.z;
-                    let bcc_y = bc_y / v2.z;
-                    let bcc_z = bc_z / v3.z;
-                    let bd = bcc_x + bcc_y + bcc_z;
-                    let bcc_x = bcc_x / bd;
-                    let bcc_y = bcc_y / bd;
-                    let bcc_z = bcc_z / bd;
-
-                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
-                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    // Perspective-correct interpolation using 1/z method (reuse inv_z values)
+                    let u_over_z = bc_x * surface.uv1.x * inv_z1
+                                 + bc_y * surface.uv2.x * inv_z2
+                                 + bc_z * surface.uv3.x * inv_z3;
+                    let v_over_z = bc_x * surface.uv1.y * inv_z1
+                                 + bc_y * surface.uv2.y * inv_z2
+                                 + bc_z * surface.uv3.y * inv_z3;
+                    let u = u_over_z / inv_z_interp;
+                    let v = v_over_z / inv_z_interp;
                     (u, v)
                 };
 
@@ -1700,8 +1707,13 @@ fn rasterize_triangle_indexed(
             // Check if inside triangle
             const ERR: f32 = -0.0001;
             if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
-                // Interpolate depth
-                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+                // Perspective-correct depth interpolation
+                // In screen space after perspective divide, 1/z interpolates linearly, not z itself
+                let inv_z1 = 1.0 / v1.z;
+                let inv_z2 = 1.0 / v2.z;
+                let inv_z3 = 1.0 / v3.z;
+                let inv_z_interp = bc_x * inv_z1 + bc_y * inv_z2 + bc_z * inv_z3;
+                let z = 1.0 / inv_z_interp;
 
                 // Z-buffer test (skip in xray mode - render all faces regardless of depth)
                 if settings.use_zbuffer && !settings.xray_mode {
@@ -1720,17 +1732,15 @@ fn rasterize_triangle_indexed(
                     let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
                     (u, v)
                 } else {
-                    // Perspective-correct interpolation
-                    let bcc_x = bc_x / v1.z;
-                    let bcc_y = bc_y / v2.z;
-                    let bcc_z = bc_z / v3.z;
-                    let bd = bcc_x + bcc_y + bcc_z;
-                    let bcc_x = bcc_x / bd;
-                    let bcc_y = bcc_y / bd;
-                    let bcc_z = bcc_z / bd;
-
-                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
-                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    // Perspective-correct interpolation (reuse inv_z values)
+                    let u_over_z = bc_x * surface.uv1.x * inv_z1
+                                 + bc_y * surface.uv2.x * inv_z2
+                                 + bc_z * surface.uv3.x * inv_z3;
+                    let v_over_z = bc_x * surface.uv1.y * inv_z1
+                                 + bc_y * surface.uv2.y * inv_z2
+                                 + bc_z * surface.uv3.y * inv_z3;
+                    let u = u_over_z / inv_z_interp;
+                    let v = v_over_z / inv_z_interp;
                     (u, v)
                 };
 
@@ -1884,10 +1894,12 @@ pub fn render_mesh(
                 fb.width,
                 fb.height,
             );
-            // Use cam_pos.z for depth (painter's algorithm needs camera-space z, not fixed-point depth)
+            // Store cam_pos.z + 5.0 (perspective divide denominator) for correct interpolation
+            // This matches the float path's project() which returns z = denom = cam_z + DISTANCE
             let rel_pos = v.pos - camera.position;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-            (Vec3::new(sx as f32, sy as f32, cam_pos.z), cam_pos)
+            const DISTANCE: f32 = 5.0;
+            (Vec3::new(sx as f32, sy as f32, cam_pos.z + DISTANCE), cam_pos)
         } else {
             // Standard float path
             let rel_pos = v.pos - camera.position;
@@ -2030,16 +2042,6 @@ pub fn render_mesh(
             let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
             b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
-
-        // Debug: log sorted surfaces (compact single line)
-        static mut DEBUG_COUNTER: u32 = 0;
-        let counter = unsafe { DEBUG_COUNTER += 1; DEBUG_COUNTER };
-        if counter % 60 == 0 {
-            let depths: Vec<String> = surfaces.iter().take(6)
-                .map(|s| format!("f{}:{:.1}", s.face_idx, (s.v1.z + s.v2.z + s.v3.z) / 3.0))
-                .collect();
-            eprintln!("[PAINTER] {} surfaces: {}", surfaces.len(), depths.join(" "));
-        }
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
@@ -2219,10 +2221,12 @@ pub fn render_mesh_15(
                 fb.width,
                 fb.height,
             );
-            // Use cam_pos.z for depth (painter's algorithm needs camera-space z, not fixed-point depth)
+            // Store cam_pos.z + 5.0 (perspective divide denominator) for correct interpolation
+            // This matches the float path's project() which returns z = denom = cam_z + DISTANCE
             let rel_pos = v.pos - camera.position;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-            (Vec3::new(sx as f32, sy as f32, cam_pos.z), cam_pos)
+            const DISTANCE: f32 = 5.0;
+            (Vec3::new(sx as f32, sy as f32, cam_pos.z + DISTANCE), cam_pos)
         } else {
             // Standard float path
             let rel_pos = v.pos - camera.position;
@@ -2416,16 +2420,6 @@ pub fn render_mesh_15(
             let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
             b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
-
-        // Debug: log sorted surfaces (compact single line)
-        static mut DEBUG_COUNTER_15: u32 = 0;
-        let counter = unsafe { DEBUG_COUNTER_15 += 1; DEBUG_COUNTER_15 };
-        if counter % 60 == 0 {
-            let depths: Vec<String> = opaque_surfaces.iter().take(6)
-                .map(|s| format!("f{}:{:.1}", s.face_idx, (s.v1.z + s.v2.z + s.v3.z) / 3.0))
-                .collect();
-            eprintln!("[PAINTER_15] {} surfaces: {}", opaque_surfaces.len(), depths.join(" "));
-        }
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;

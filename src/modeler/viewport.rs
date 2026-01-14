@@ -1086,26 +1086,6 @@ pub fn draw_modeler_viewport_ext(
 
     // Render all combined geometry in one pass
     if !all_vertices.is_empty() && !all_faces.is_empty() {
-        // Debug: log face distances (painter's algorithm debug)
-        static mut FRAME_DBG: u32 = 0;
-        unsafe { FRAME_DBG += 1; }
-        let frame_dbg = unsafe { FRAME_DBG };
-        if frame_dbg % 60 == 0 && !state.raster_settings.use_zbuffer {
-            let face_dists: Vec<String> = all_faces.iter().enumerate().map(|(i, f)| {
-                let p0 = all_vertices[f.v0].pos;
-                let p1 = all_vertices[f.v1].pos;
-                let p2 = all_vertices[f.v2].pos;
-                let center = Vec3::new(
-                    (p0.x + p1.x + p2.x) / 3.0,
-                    (p0.y + p1.y + p2.y) / 3.0,
-                    (p0.z + p1.z + p2.z) / 3.0,
-                );
-                let dist = (center - state.camera.position).len();
-                format!("{}:{:.0}", i, dist)
-            }).collect();
-            eprintln!("[COMBINED] {} faces: {}", all_faces.len(), face_dists.join(" "));
-        }
-
         // Use combined raster settings
         let combined_settings = if any_double_sided {
             let mut settings = state.raster_settings.clone();
