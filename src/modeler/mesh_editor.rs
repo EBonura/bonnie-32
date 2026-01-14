@@ -160,7 +160,7 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh: EditableMesh::new(),
-            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
+            atlas: IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
@@ -173,7 +173,7 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh,
-            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
+            atlas: IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
@@ -481,6 +481,26 @@ impl IndexedAtlas {
             height,
             depth,
             indices: vec![0; width * height],
+            default_clut: ClutId::NONE,
+        }
+    }
+
+    /// Create a new indexed atlas with a checkerboard pattern (visible by default)
+    pub fn new_checkerboard(width: usize, height: usize, depth: ClutDepth) -> Self {
+        let mut indices = vec![0u8; width * height];
+        let cell_size = 8; // 8x8 checkerboard cells
+        for y in 0..height {
+            for x in 0..width {
+                let checker = ((x / cell_size) + (y / cell_size)) % 2 == 0;
+                // Use indices 7 and 15 for visible checkerboard (light/dark gray)
+                indices[y * width + x] = if checker { 7 } else { 15 };
+            }
+        }
+        Self {
+            width,
+            height,
+            depth,
+            indices,
             default_clut: ClutId::NONE,
         }
     }
