@@ -448,31 +448,37 @@ fn draw_orbit_preview(
     let settings = RasterSettings::default();
     let use_rgb555 = settings.use_rgb555;
 
-    // Convert atlas to appropriate texture format using CLUT
-    let clut = project.effective_clut();
-    let atlas_texture = clut.map(|c| project.atlas.to_raster_texture(c, "atlas"));
-    let atlas_texture_15 = if use_rgb555 {
-        clut.map(|c| project.atlas.to_texture15(c, "atlas"))
-    } else {
-        None
-    };
+    // Fallback CLUT from project pool
+    let fallback_clut = project.clut_pool.get(project.atlas.default_clut);
 
-    // Render all objects with texture
-    for obj in &project.objects {
-        if obj.visible {
-            let (vertices, faces) = obj.mesh.to_render_data_textured();
-            if !vertices.is_empty() {
-                if use_rgb555 {
-                    if let Some(ref tex15) = atlas_texture_15 {
-                        let textures_15 = [tex15.clone()];
-                        render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
-                    }
-                } else {
-                    if let Some(ref tex) = atlas_texture {
-                        let textures = [tex.clone()];
-                        render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
-                    }
-                }
+    // Render each object with its own atlas texture
+    for (obj_idx, obj) in project.objects.iter().enumerate() {
+        if !obj.visible {
+            continue;
+        }
+
+        // Get this object's CLUT from the shared pool
+        let obj_clut = if obj.atlas.default_clut.is_valid() {
+            project.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
+        } else {
+            fallback_clut
+        };
+
+        let (vertices, faces) = obj.mesh.to_render_data_textured();
+        if vertices.is_empty() {
+            continue;
+        }
+
+        // Convert this object's atlas to texture
+        if let Some(clut) = obj_clut {
+            if use_rgb555 {
+                let tex15 = obj.atlas.to_texture15(clut, &format!("atlas_{}", obj_idx));
+                let textures_15 = [tex15];
+                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
+            } else {
+                let tex = obj.atlas.to_raster_texture(clut, &format!("atlas_{}", obj_idx));
+                let textures = [tex];
+                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
             }
         }
     }

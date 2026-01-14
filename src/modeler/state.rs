@@ -1284,11 +1284,9 @@ impl ModelerState {
     pub fn atlas_mut(&mut self) -> &mut IndexedAtlas {
         if let Some(idx) = self.project.selected_object {
             if let Some(obj) = self.project.objects.get_mut(idx) {
-                eprintln!("[DEBUG atlas_mut] Returning atlas for object {} ('{}')", idx, obj.name);
                 return &mut obj.atlas;
             }
         }
-        eprintln!("[DEBUG atlas_mut] Returning PROJECT atlas (no object selected)");
         &mut self.project.atlas
     }
 

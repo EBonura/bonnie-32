@@ -3656,7 +3656,7 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     if let Some(clut) = state.project.effective_clut() {
         for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
             for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
-                let pixel = state.project.atlas.get_color(bx, by, clut);
+                let pixel = state.atlas().get_color(bx, by, clut);
                 let px = atlas_x + bx as f32 * scale;
                 let py = atlas_y + by as f32 * scale;
                 let pw = (pixels_per_block as f32 * scale).min(atlas_x + atlas_screen_w - px).max(scale);
@@ -3699,9 +3699,10 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
             }
             let index = state.active_palette_index;
             let brush = brush_size as usize;
+            let atlas = state.atlas_mut();
             for dy in 0..brush {
                 for dx in 0..brush {
-                    state.project.atlas.set_index(px + dx, py + dy, index);
+                    atlas.set_index(px + dx, py + dy, index);
                 }
             }
             state.dirty = true;
