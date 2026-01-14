@@ -1320,12 +1320,22 @@ fn rasterize_triangle(
                 }
 
                 // Write pixel
-                if color.blend == BlendMode::Opaque {
-                    fb.set_pixel_with_depth(x, y, z, color);
+                if settings.use_zbuffer {
+                    // Z-buffer mode: test depth before writing
+                    if color.blend == BlendMode::Opaque {
+                        fb.set_pixel_with_depth(x, y, z, color);
+                    } else {
+                        let idx = y * fb.width + x;
+                        if z < fb.zbuffer[idx] {
+                            fb.zbuffer[idx] = z;
+                            fb.set_pixel_blended(x, y, color, color.blend);
+                        }
+                    }
                 } else {
-                    let idx = y * fb.width + x;
-                    if z < fb.zbuffer[idx] {
-                        fb.zbuffer[idx] = z;
+                    // Painter's algorithm: just write (surfaces are pre-sorted)
+                    if color.blend == BlendMode::Opaque {
+                        fb.set_pixel(x, y, color);
+                    } else {
                         fb.set_pixel_blended(x, y, color, color.blend);
                     }
                 }
@@ -1560,8 +1570,8 @@ fn rasterize_triangle_15(
                 if settings.xray_mode {
                     // X-ray mode: always blend at 50% alpha, no z-buffer update
                     fb.set_pixel_xray_15(x, y, color);
-                } else {
-                    // Normal mode: PS1-authentic semi-transparency handling
+                } else if settings.use_zbuffer {
+                    // Z-buffer mode: test depth before writing
                     let idx = y * fb.width + x;
                     if z < fb.zbuffer[idx] {
                         // Only update z-buffer if not skipping (opaque pass updates, transparent pass doesn't)
@@ -1573,6 +1583,13 @@ fn rasterize_triangle_15(
                         } else {
                             fb.set_pixel_15(x, y, color);
                         }
+                    }
+                } else {
+                    // Painter's algorithm: just write (surfaces are pre-sorted)
+                    if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, blend_mode);
+                    } else {
+                        fb.set_pixel_15(x, y, color);
                     }
                 }
             }
@@ -1798,8 +1815,8 @@ fn rasterize_triangle_indexed(
                 if settings.xray_mode {
                     // X-ray mode: always blend at 50% alpha, no z-buffer update
                     fb.set_pixel_xray_15(x, y, color);
-                } else {
-                    // Normal mode
+                } else if settings.use_zbuffer {
+                    // Z-buffer mode: test depth before writing
                     let idx = y * fb.width + x;
                     if z < fb.zbuffer[idx] {
                         fb.zbuffer[idx] = z;
@@ -1808,6 +1825,13 @@ fn rasterize_triangle_indexed(
                         } else {
                             fb.set_pixel_15(x, y, color);
                         }
+                    }
+                } else {
+                    // Painter's algorithm: just write (surfaces are pre-sorted)
+                    if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, face_blend_mode);
+                    } else {
+                        fb.set_pixel_15(x, y, color);
                     }
                 }
             }
