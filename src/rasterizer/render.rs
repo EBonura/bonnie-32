@@ -1875,7 +1875,7 @@ pub fn render_mesh(
             (screen, cam_pos)
         } else if settings.use_fixed_point {
             // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
-            let (sx, sy, depth) = super::fixed::project_fixed(
+            let (sx, sy, _fixed_depth) = super::fixed::project_fixed(
                 v.pos,
                 camera.position,
                 camera.basis_x,
@@ -1884,10 +1884,10 @@ pub fn render_mesh(
                 fb.width,
                 fb.height,
             );
-            // Still need cam_pos for culling/shading (use float for this)
+            // Use cam_pos.z for depth (painter's algorithm needs camera-space z, not fixed-point depth)
             let rel_pos = v.pos - camera.position;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
+            (Vec3::new(sx as f32, sy as f32, cam_pos.z), cam_pos)
         } else {
             // Standard float path
             let rel_pos = v.pos - camera.position;
@@ -2030,6 +2030,16 @@ pub fn render_mesh(
             let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
             b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
+
+        // Debug: log sorted surfaces (compact single line)
+        static mut DEBUG_COUNTER: u32 = 0;
+        let counter = unsafe { DEBUG_COUNTER += 1; DEBUG_COUNTER };
+        if counter % 60 == 0 {
+            let depths: Vec<String> = surfaces.iter().take(6)
+                .map(|s| format!("f{}:{:.1}", s.face_idx, (s.v1.z + s.v2.z + s.v3.z) / 3.0))
+                .collect();
+            eprintln!("[PAINTER] {} surfaces: {}", surfaces.len(), depths.join(" "));
+        }
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;
@@ -2200,7 +2210,7 @@ pub fn render_mesh_15(
             (screen, cam_pos)
         } else if settings.use_fixed_point {
             // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
-            let (sx, sy, depth) = super::fixed::project_fixed(
+            let (sx, sy, _fixed_depth) = super::fixed::project_fixed(
                 v.pos,
                 camera.position,
                 camera.basis_x,
@@ -2209,10 +2219,10 @@ pub fn render_mesh_15(
                 fb.width,
                 fb.height,
             );
-            // Still need cam_pos for culling/shading (use float for this)
+            // Use cam_pos.z for depth (painter's algorithm needs camera-space z, not fixed-point depth)
             let rel_pos = v.pos - camera.position;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
+            (Vec3::new(sx as f32, sy as f32, cam_pos.z), cam_pos)
         } else {
             // Standard float path
             let rel_pos = v.pos - camera.position;
@@ -2406,6 +2416,16 @@ pub fn render_mesh_15(
             let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
             b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
+
+        // Debug: log sorted surfaces (compact single line)
+        static mut DEBUG_COUNTER_15: u32 = 0;
+        let counter = unsafe { DEBUG_COUNTER_15 += 1; DEBUG_COUNTER_15 };
+        if counter % 60 == 0 {
+            let depths: Vec<String> = opaque_surfaces.iter().take(6)
+                .map(|s| format!("f{}:{:.1}", s.face_idx, (s.v1.z + s.v2.z + s.v3.z) / 3.0))
+                .collect();
+            eprintln!("[PAINTER_15] {} surfaces: {}", opaque_surfaces.len(), depths.join(" "));
+        }
     }
 
     timings.sort_ms = ((get_time() - sort_start) * 1000.0) as f32;

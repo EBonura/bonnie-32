@@ -967,20 +967,23 @@ pub fn draw_modeler_viewport_ext(
         }
     }
 
-    // Render all visible objects
-    // Use RGB555 or RGB888 based on settings
+    // Render all visible objects using combined geometry
+    // This ensures proper depth sorting across all objects (painter's algorithm and z-buffer)
     let use_rgb555 = state.raster_settings.use_rgb555;
-
-    // Log once per render frame (use frame counter if available, or static counter)
-    static mut FRAME_COUNTER: u32 = 0;
-    let frame_num = unsafe { FRAME_COUNTER += 1; FRAME_COUNTER };
-
-    // Only log every 60 frames to reduce spam
-    let should_log = frame_num % 60 == 0;
 
     // Fallback CLUT for objects with no assigned CLUT
     let fallback_clut = state.project.clut_pool.first_id()
         .and_then(|id| state.project.clut_pool.get(id));
+
+    // Collect all geometry from all objects into combined lists
+    let mut all_vertices: Vec<RasterVertex> = Vec::new();
+    let mut all_faces: Vec<RasterFace> = Vec::new();
+    let mut all_textures: Vec<crate::rasterizer::Texture> = Vec::new();
+    let mut all_textures_15: Vec<crate::rasterizer::Texture15> = Vec::new();
+    let mut all_blend_modes: Vec<crate::rasterizer::BlendMode> = Vec::new();
+
+    // Track if any object needs backface culling disabled
+    let mut any_double_sided = false;
 
     for (obj_idx, obj) in state.project.objects.iter().enumerate() {
         // Skip hidden objects
@@ -988,30 +991,26 @@ pub fn draw_modeler_viewport_ext(
             continue;
         }
 
-        // Get this object's CLUT from the shared pool (per-object atlas.default_clut)
+        if obj.double_sided {
+            any_double_sided = true;
+        }
+
+        // Get this object's CLUT from the shared pool
         let obj_clut = if obj.atlas.default_clut.is_valid() {
             state.project.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
         } else {
             fallback_clut
         };
 
-        if should_log {
-            // Log first 8 indices to see if atlas data differs between objects
-            let indices_preview: Vec<u8> = obj.atlas.indices.iter().take(8).copied().collect();
-            eprintln!("[DEBUG render] obj[{}] '{}': atlas {}x{} depth={:?} clut={:?} indices[0..8]={:?}",
-                obj_idx, obj.name, obj.atlas.width, obj.atlas.height, obj.atlas.depth,
-                obj.atlas.default_clut, indices_preview);
+        // Convert this object's atlas to rasterizer texture
+        let texture_idx = all_textures.len();
+        if let Some(clut) = obj_clut {
+            all_textures.push(obj.atlas.to_raster_texture(clut, &format!("atlas_{}", obj_idx)));
+            if use_rgb555 {
+                all_textures_15.push(obj.atlas.to_texture15(clut, &format!("atlas_{}", obj_idx)));
+            }
         }
 
-        // Convert this object's atlas to rasterizer texture using its own CLUT
-        let atlas_texture = obj_clut.map(|c| obj.atlas.to_raster_texture(c, &format!("atlas_{}", obj_idx)));
-        let atlas_texture_15 = if use_rgb555 {
-            obj_clut.map(|c| obj.atlas.to_texture15(c, &format!("atlas_{}", obj_idx)))
-        } else {
-            None
-        };
-
-        // Use project mesh directly (mesh() accessor returns selected object's mesh)
         let mesh = &obj.mesh;
 
         // Dim non-selected objects slightly
@@ -1021,8 +1020,94 @@ pub fn draw_modeler_viewport_ext(
             140u8
         };
 
-        // Per-object raster settings (handle double_sided)
-        let obj_raster_settings = if obj.double_sided {
+        // Track vertex offset for this object
+        let vertex_offset = all_vertices.len();
+
+        // Add vertices from this object
+        for v in &mesh.vertices {
+            all_vertices.push(RasterVertex {
+                pos: v.pos,
+                normal: v.normal,
+                uv: v.uv,
+                color: RasterColor::new(base_color, base_color, base_color),
+                bone_index: None,
+            });
+        }
+
+        // Add mirrored vertices if mirror mode is enabled for selected object
+        let mirror_vertex_offset = if state.current_mirror_settings().enabled && state.project.selected_object == Some(obj_idx) {
+            let offset = all_vertices.len();
+            for v in &mesh.vertices {
+                all_vertices.push(RasterVertex {
+                    pos: state.current_mirror_settings().mirror_position(v.pos),
+                    normal: state.current_mirror_settings().mirror_normal(v.normal),
+                    uv: v.uv,
+                    color: RasterColor::new(
+                        (base_color as f32 * 0.85) as u8,
+                        (base_color as f32 * 0.85) as u8,
+                        (base_color as f32 * 0.85) as u8,
+                    ),
+                    bone_index: None,
+                });
+            }
+            Some(offset)
+        } else {
+            None
+        };
+
+        // Add faces from this object (with adjusted vertex indices and texture ID)
+        for edit_face in &mesh.faces {
+            for [v0, v1, v2] in edit_face.triangulate() {
+                all_faces.push(RasterFace {
+                    v0: vertex_offset + v0,
+                    v1: vertex_offset + v1,
+                    v2: vertex_offset + v2,
+                    texture_id: Some(texture_idx),
+                    black_transparent: edit_face.black_transparent,
+                    blend_mode: edit_face.blend_mode,
+                });
+                all_blend_modes.push(edit_face.blend_mode);
+
+                // Add mirrored face if mirror mode enabled
+                if let Some(mirror_offset) = mirror_vertex_offset {
+                    all_faces.push(RasterFace {
+                        v0: mirror_offset + v0,
+                        v1: mirror_offset + v2,  // Swap to reverse winding
+                        v2: mirror_offset + v1,
+                        texture_id: Some(texture_idx),
+                        black_transparent: edit_face.black_transparent,
+                        blend_mode: edit_face.blend_mode,
+                    });
+                    all_blend_modes.push(edit_face.blend_mode);
+                }
+            }
+        }
+    }
+
+    // Render all combined geometry in one pass
+    if !all_vertices.is_empty() && !all_faces.is_empty() {
+        // Debug: log face distances (painter's algorithm debug)
+        static mut FRAME_DBG: u32 = 0;
+        unsafe { FRAME_DBG += 1; }
+        let frame_dbg = unsafe { FRAME_DBG };
+        if frame_dbg % 60 == 0 && !state.raster_settings.use_zbuffer {
+            let face_dists: Vec<String> = all_faces.iter().enumerate().map(|(i, f)| {
+                let p0 = all_vertices[f.v0].pos;
+                let p1 = all_vertices[f.v1].pos;
+                let p2 = all_vertices[f.v2].pos;
+                let center = Vec3::new(
+                    (p0.x + p1.x + p2.x) / 3.0,
+                    (p0.y + p1.y + p2.y) / 3.0,
+                    (p0.z + p1.z + p2.z) / 3.0,
+                );
+                let dist = (center - state.camera.position).len();
+                format!("{}:{:.0}", i, dist)
+            }).collect();
+            eprintln!("[COMBINED] {} faces: {}", all_faces.len(), face_dists.join(" "));
+        }
+
+        // Use combined raster settings
+        let combined_settings = if any_double_sided {
             let mut settings = state.raster_settings.clone();
             settings.backface_cull = false;
             settings.backface_wireframe = false;
@@ -1031,126 +1116,26 @@ pub fn draw_modeler_viewport_ext(
             state.raster_settings.clone()
         };
 
-        let vertices: Vec<RasterVertex> = mesh.vertices.iter().map(|v| {
-            RasterVertex {
-                pos: v.pos,
-                normal: v.normal,
-                uv: v.uv,
-                color: RasterColor::new(base_color, base_color, base_color),
-                bone_index: None,
-            }
-        }).collect();
-
-        // Triangulate n-gon faces for rendering (all use texture 0 - the atlas)
-        let mut faces: Vec<RasterFace> = Vec::new();
-        for edit_face in &mesh.faces {
-            for [v0, v1, v2] in edit_face.triangulate() {
-                faces.push(RasterFace {
-                    v0,
-                    v1,
-                    v2,
-                    texture_id: Some(0),
-                    black_transparent: edit_face.black_transparent,
-                    blend_mode: edit_face.blend_mode,
-                });
-            }
-        }
-
-        if !vertices.is_empty() && !faces.is_empty() {
-            // Collect per-face blend modes
-            let blend_modes: Vec<crate::rasterizer::BlendMode> = faces.iter()
-                .map(|f| f.blend_mode)
-                .collect();
-
-            if use_rgb555 {
-                // RGB555 rendering path
-                // Per-face blend modes + per-pixel STP bit (PS1-authentic)
-                if let Some(ref tex15) = atlas_texture_15 {
-                    let textures_15 = [tex15.clone()];
-                    render_mesh_15(
-                        fb,
-                        &vertices,
-                        &faces,
-                        &textures_15,
-                        Some(&blend_modes),
-                        &state.camera,
-                        &obj_raster_settings,
-                        None,
-                    );
-                }
-            } else {
-                // RGB888 rendering path (original)
-                if let Some(ref tex) = atlas_texture {
-                    let textures = [tex.clone()];
-                    render_mesh(
-                        fb,
-                        &vertices,
-                        &faces,
-                        &textures,
-                        &state.camera,
-                        &obj_raster_settings,
-                    );
-                }
-            }
-
-            // Render mirrored geometry if mirror mode is enabled
-            if state.current_mirror_settings().enabled {
-                // Create mirrored vertices
-                let mirrored_vertices: Vec<RasterVertex> = vertices.iter().map(|v| {
-                    RasterVertex {
-                        pos: state.current_mirror_settings().mirror_position(v.pos),
-                        normal: state.current_mirror_settings().mirror_normal(v.normal),
-                        uv: v.uv,
-                        // Slightly dim the mirrored side to indicate it's generated
-                        color: RasterColor::new(
-                            (base_color as f32 * 0.85) as u8,
-                            (base_color as f32 * 0.85) as u8,
-                            (base_color as f32 * 0.85) as u8,
-                        ),
-                        bone_index: None,
-                    }
-                }).collect();
-
-                // Create mirrored faces with reversed winding order
-                let mirrored_faces: Vec<RasterFace> = faces.iter().map(|f| {
-                    RasterFace {
-                        v0: f.v0,
-                        v1: f.v2,  // Swap v1 and v2 to reverse winding
-                        v2: f.v1,
-                        texture_id: f.texture_id,
-                        black_transparent: f.black_transparent,
-                        blend_mode: f.blend_mode,
-                    }
-                }).collect();
-
-                if use_rgb555 {
-                    if let Some(ref tex15) = atlas_texture_15 {
-                        let textures_15 = [tex15.clone()];
-                        render_mesh_15(
-                            fb,
-                            &mirrored_vertices,
-                            &mirrored_faces,
-                            &textures_15,
-                            Some(&blend_modes),
-                            &state.camera,
-                            &obj_raster_settings,
-                            None,
-                        );
-                    }
-                } else {
-                    if let Some(ref tex) = atlas_texture {
-                        let textures = [tex.clone()];
-                        render_mesh(
-                            fb,
-                            &mirrored_vertices,
-                            &mirrored_faces,
-                            &textures,
-                            &state.camera,
-                            &obj_raster_settings,
-                        );
-                    }
-                }
-            }
+        if use_rgb555 {
+            render_mesh_15(
+                fb,
+                &all_vertices,
+                &all_faces,
+                &all_textures_15,
+                Some(&all_blend_modes),
+                &state.camera,
+                &combined_settings,
+                None,
+            );
+        } else {
+            render_mesh(
+                fb,
+                &all_vertices,
+                &all_faces,
+                &all_textures,
+                &state.camera,
+                &combined_settings,
+            );
         }
     }
 
