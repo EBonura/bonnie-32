@@ -2025,9 +2025,10 @@ pub fn render_mesh(
     // Sort by depth if not using Z-buffer (painter's algorithm)
     if !settings.use_zbuffer {
         surfaces.sort_by(|a, b| {
-            let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
-            let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
-            b_max_z.partial_cmp(&a_max_z).unwrap()
+            // Use center point (average z) for more accurate depth sorting
+            let a_center_z = (a.v1.z + a.v2.z + a.v3.z) / 3.0;
+            let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
+            b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
     }
 
@@ -2391,17 +2392,19 @@ pub fn render_mesh_15(
     // Sort transparent surfaces back-to-front (always, regardless of z-buffer mode)
     // This is required for correct blending order (PS1 Ordering Table style)
     transparent_surfaces.sort_by(|a, b| {
-        let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
-        let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
-        b_max_z.partial_cmp(&a_max_z).unwrap()  // Back-to-front (far first)
+        // Use center point (average z) for more accurate depth sorting
+        let a_center_z = (a.v1.z + a.v2.z + a.v3.z) / 3.0;
+        let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
+        b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
     });
 
     // Sort opaque surfaces only if using painter's algorithm (no z-buffer)
     if !settings.use_zbuffer {
         opaque_surfaces.sort_by(|a, b| {
-            let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
-            let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
-            b_max_z.partial_cmp(&a_max_z).unwrap()  // Back-to-front
+            // Use center point (average z) for more accurate depth sorting
+            let a_center_z = (a.v1.z + a.v2.z + a.v3.z) / 3.0;
+            let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
+            b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
     }
 
