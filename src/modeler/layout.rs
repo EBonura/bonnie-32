@@ -5,7 +5,7 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Too
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
-use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode};
+use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode, Axis, MirrorSettings};
 use crate::texture::{
     UserTexture, TextureSize,
     draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
@@ -325,36 +325,7 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         state.set_status(&format!("Vertex Linking: {}", mode), 1.5);
     }
 
-    // Mirror editing toggle
-    let mirror_label = format!("Mirror {} (edit one side, other auto-mirrors)", state.mirror_settings.axis.label());
-    if toolbar.icon_button_active(ctx, icon::COLUMNS_2, icon_font, &mirror_label, state.mirror_settings.enabled) {
-        state.mirror_settings.enabled = !state.mirror_settings.enabled;
-        let mode = if state.mirror_settings.enabled { "ON" } else { "OFF" };
-        state.set_status(&format!("Mirror {}: {}", state.mirror_settings.axis.label(), mode), 1.5);
-    }
-
-    // Apply Mirror button (only shown when mirror is enabled)
-    if state.mirror_settings.enabled {
-        if toolbar.icon_button(ctx, icon::PLUS, icon_font, "Apply Mirror (bake + merge overlapping)") {
-            // Bake the virtual mirror into actual geometry
-            let axis = state.mirror_settings.axis;
-            let threshold = state.mirror_settings.threshold;
-            state.push_undo("Apply Mirror");
-            let mut merged_count = 0;
-            if let Some(mesh) = state.mesh_mut() {
-                mesh.apply_mirror(axis, threshold);
-                // Auto-merge overlapping vertices (especially center vertices)
-                merged_count = mesh.merge_by_distance(threshold);
-            }
-            state.mirror_settings.enabled = false;
-            if merged_count > 0 {
-                state.set_status(&format!("Mirror applied, {} vertices merged", merged_count), 2.5);
-            } else {
-                state.set_status("Mirror applied", 2.0);
-            }
-            state.dirty = true;
-        }
-    }
+    // Note: Mirror editing is now per-object in the Properties section
 
     toolbar.separator();
 
@@ -575,9 +546,9 @@ fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, ic
     draw_overview_content(ctx, overview_rect, state, icon_font);
     y += overview_height + 4.0;
 
-    // === SELECTION SECTION ===
-    draw_section_label(x, &mut y, width, "Selection");
-    draw_selection_info(ctx, x, &mut y, width, state);
+    // === SELECTION SECTION (per-object properties) ===
+    draw_section_label(x, &mut y, width, "Properties");
+    draw_selection_info(ctx, x, &mut y, width, state, icon_font);
     y += 4.0;
 
     // === LIGHTS SECTION ===
@@ -684,41 +655,135 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     }
 }
 
-/// Draw selection info (what's selected, tool, etc.)
-fn draw_selection_info(_ctx: &mut UiContext, x: f32, y: &mut f32, _width: f32, state: &ModelerState) {
-    let line_height = 16.0;
+/// Draw per-object properties (double-sided, mirror settings)
+fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let line_height = 18.0;
+    let toggle_size = 16.0;
 
-    // Selection type
-    let sel_text = match &state.selection {
-        super::state::ModelerSelection::None => "Nothing selected".to_string(),
-        super::state::ModelerSelection::Mesh => "Mesh (whole)".to_string(),
-        super::state::ModelerSelection::Vertices(v) => format!("{} vertex(es)", v.len()),
-        super::state::ModelerSelection::Edges(e) => format!("{} edge(s)", e.len()),
-        super::state::ModelerSelection::Faces(f) => format!("{} face(s)", f.len()),
+    // Check if any object is selected
+    let selected_idx = match state.project.selected_object {
+        Some(idx) => idx,
+        None => {
+            draw_text("No object selected", x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
+            *y += line_height;
+            return;
+        }
     };
-    draw_text(&sel_text, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
+
+    // Get object name for display
+    let obj_name = state.project.objects[selected_idx].name.clone();
+    draw_text(&obj_name, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
     *y += line_height;
 
-    // Current tool
-    let tool_label = match state.tool_box.active_transform_tool() {
-        Some(ModelerToolId::Move) => "Tool: Move (G)",
-        Some(ModelerToolId::Rotate) => "Tool: Rotate (R)",
-        Some(ModelerToolId::Scale) => "Tool: Scale (S)",
-        _ => "Tool: Select",
-    };
-    draw_text(tool_label, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
+    // === Double-Sided Toggle ===
+    let double_sided = state.project.objects[selected_idx].double_sided;
+    let ds_rect = Rect::new(x + 4.0, *y, toggle_size, toggle_size);
+    let ds_icon = if double_sided { icon::SQUARE_CHECK } else { icon::SQUARE };
+    let ds_color = if double_sided { ACCENT_COLOR } else { TEXT_DIM };
+    draw_icon_centered(icon_font, ds_icon, &ds_rect, 12.0, ds_color);
+    draw_text("Double-Sided", x + 24.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
+
+    if ctx.mouse.inside(&Rect::new(x, *y, width, line_height)) && ctx.mouse.left_pressed {
+        state.project.objects[selected_idx].double_sided = !double_sided;
+        state.dirty = true;
+    }
     *y += line_height;
 
-    // Select mode
-    let mode_label = match state.select_mode {
-        super::state::SelectMode::Vertex => "Mode: Vertex (1)",
-        super::state::SelectMode::Edge => "Mode: Edge (2)",
-        super::state::SelectMode::Face => "Mode: Face (3)",
-    };
-    draw_text(mode_label, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
+    // === Mirror Settings ===
+    let mirror = state.project.objects[selected_idx].mirror;
+    let mirror_enabled = mirror.map(|m| m.enabled).unwrap_or(false);
+    let mirror_axis = mirror.map(|m| m.axis).unwrap_or(Axis::X);
+
+    // Mirror enable toggle
+    let mir_rect = Rect::new(x + 4.0, *y, toggle_size, toggle_size);
+    let mir_icon = if mirror_enabled { icon::SQUARE_CHECK } else { icon::SQUARE };
+    let mir_color = if mirror_enabled { ACCENT_COLOR } else { TEXT_DIM };
+    draw_icon_centered(icon_font, mir_icon, &mir_rect, 12.0, mir_color);
+    draw_text("Mirror", x + 24.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
+
+    if ctx.mouse.inside(&Rect::new(x, *y, 70.0, line_height)) && ctx.mouse.left_pressed {
+        // Toggle mirror enabled
+        let new_enabled = !mirror_enabled;
+        if new_enabled {
+            state.project.objects[selected_idx].mirror = Some(MirrorSettings {
+                enabled: true,
+                axis: mirror_axis,
+                threshold: 1.0,
+            });
+        } else {
+            if let Some(ref mut m) = state.project.objects[selected_idx].mirror {
+                m.enabled = false;
+            }
+        }
+        state.dirty = true;
+    }
+
+    // Axis buttons (X, Y, Z) - shown on same line
+    if mirror_enabled {
+        let btn_w = 20.0;
+        let btn_h = 16.0;
+        let btn_y = *y;
+        let mut btn_x = x + 75.0;
+
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            let is_active = mirror_axis == axis;
+            let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
+            let bg_color = if is_active {
+                Color::from_rgba(60, 100, 140, 255)
+            } else if ctx.mouse.inside(&btn_rect) {
+                Color::from_rgba(60, 60, 70, 255)
+            } else {
+                Color::from_rgba(45, 45, 55, 255)
+            };
+            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg_color);
+            draw_text(axis.label(), btn_x + 6.0, btn_y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+            if ctx.mouse.inside(&btn_rect) && ctx.mouse.left_pressed {
+                if let Some(ref mut m) = state.project.objects[selected_idx].mirror {
+                    m.axis = axis;
+                }
+                state.dirty = true;
+            }
+            btn_x += btn_w + 2.0;
+        }
+    }
     *y += line_height;
 
-    // Note: Face Properties (blend mode) is now in the right panel texture section
+    // Apply Mirror button (only when mirror is enabled)
+    if mirror_enabled {
+        let apply_rect = Rect::new(x + 4.0, *y, width - 8.0, line_height);
+        let apply_hover = ctx.mouse.inside(&apply_rect);
+        let apply_bg = if apply_hover {
+            Color::from_rgba(70, 90, 110, 255)
+        } else {
+            Color::from_rgba(50, 60, 75, 255)
+        };
+        draw_rectangle(apply_rect.x, apply_rect.y, apply_rect.w, apply_rect.h, apply_bg);
+        draw_text("Apply Mirror", x + 8.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
+
+        if apply_hover && ctx.mouse.left_pressed {
+            // Bake the virtual mirror into actual geometry
+            let axis = mirror_axis;
+            let threshold = mirror.map(|m| m.threshold).unwrap_or(1.0);
+            state.push_undo("Apply Mirror");
+            let mut merged_count = 0;
+            if let Some(mesh) = state.mesh_mut() {
+                mesh.apply_mirror(axis, threshold);
+                merged_count = mesh.merge_by_distance(threshold);
+            }
+            // Disable mirror after applying
+            if let Some(ref mut m) = state.project.objects[selected_idx].mirror {
+                m.enabled = false;
+            }
+            if merged_count > 0 {
+                state.set_status(&format!("Mirror applied, {} vertices merged", merged_count), 2.5);
+            } else {
+                state.set_status("Mirror applied", 2.0);
+            }
+            state.dirty = true;
+        }
+        *y += line_height;
+    }
 }
 
 /// Draw lights section

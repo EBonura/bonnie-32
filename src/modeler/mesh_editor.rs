@@ -10,6 +10,7 @@
 use crate::rasterizer::{Vec3, Vec2, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use super::state::MirrorSettings;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;
 
@@ -146,6 +147,12 @@ pub struct MeshObject {
     pub locked: bool,
     /// Color tint for identification in viewport (optional)
     pub color: Option<[u8; 3]>,
+    /// If true, backface culling is disabled (both sides render)
+    #[serde(default)]
+    pub double_sided: bool,
+    /// Per-object mirror settings (replaces global mirror)
+    #[serde(default)]
+    pub mirror: Option<MirrorSettings>,
 }
 
 impl MeshObject {
@@ -157,6 +164,8 @@ impl MeshObject {
             visible: true,
             locked: false,
             color: None,
+            double_sided: false,
+            mirror: None,
         }
     }
 
@@ -168,6 +177,8 @@ impl MeshObject {
             visible: true,
             locked: false,
             color: None,
+            double_sided: false,
+            mirror: None,
         }
     }
 
@@ -179,6 +190,8 @@ impl MeshObject {
             visible: true,
             locked: false,
             color: None,
+            double_sided: false,
+            mirror: None,
         }
     }
 

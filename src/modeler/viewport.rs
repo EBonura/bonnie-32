@@ -132,7 +132,7 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
     }
 
     // Second pass: apply movements (mutable)
-    let mirror_settings = state.mirror_settings;
+    let mirror_settings = state.current_mirror_settings();
     if let Some(mesh) = state.mesh_mut() {
         let mut already_moved = std::collections::HashSet::new();
         for (idx, old_pos, new_pos) in &movements {
@@ -190,7 +190,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
 
     // Apply the updated positions
     let mut made_changes = false;
-    let mirror_settings = state.mirror_settings;
+    let mirror_settings = state.current_mirror_settings();
     if let Some(mesh) = state.mesh_mut() {
         match result {
             DragUpdateResult::Move { positions, .. } => {
@@ -943,12 +943,12 @@ pub fn draw_modeler_viewport_ext(
     }
 
     // Draw mirror plane indicator when mirror mode is enabled
-    if state.mirror_settings.enabled {
+    if state.current_mirror_settings().enabled {
         let mirror_color = RasterColor::new(255, 100, 100); // Pinkish-red for mirror plane
         let extent = crate::world::SECTOR_SIZE * 5.0; // Large enough to be visible
 
         // Draw cross lines along the mirror plane
-        match state.mirror_settings.axis {
+        match state.current_mirror_settings().axis {
             Axis::X => {
                 // X mirror: plane at X=0, draw vertical line in YZ plane
                 draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, -extent, 0.0), Vec3::new(0.0, extent, 0.0), mirror_color);
@@ -1021,6 +1021,16 @@ pub fn draw_modeler_viewport_ext(
             140u8
         };
 
+        // Per-object raster settings (handle double_sided)
+        let obj_raster_settings = if obj.double_sided {
+            let mut settings = state.raster_settings.clone();
+            settings.backface_cull = false;
+            settings.backface_wireframe = false;
+            settings
+        } else {
+            state.raster_settings.clone()
+        };
+
         let vertices: Vec<RasterVertex> = mesh.vertices.iter().map(|v| {
             RasterVertex {
                 pos: v.pos,
@@ -1064,7 +1074,7 @@ pub fn draw_modeler_viewport_ext(
                         &textures_15,
                         Some(&blend_modes),
                         &state.camera,
-                        &state.raster_settings,
+                        &obj_raster_settings,
                         None,
                     );
                 }
@@ -1078,18 +1088,18 @@ pub fn draw_modeler_viewport_ext(
                         &faces,
                         &textures,
                         &state.camera,
-                        &state.raster_settings,
+                        &obj_raster_settings,
                     );
                 }
             }
 
             // Render mirrored geometry if mirror mode is enabled
-            if state.mirror_settings.enabled {
+            if state.current_mirror_settings().enabled {
                 // Create mirrored vertices
                 let mirrored_vertices: Vec<RasterVertex> = vertices.iter().map(|v| {
                     RasterVertex {
-                        pos: state.mirror_settings.mirror_position(v.pos),
-                        normal: state.mirror_settings.mirror_normal(v.normal),
+                        pos: state.current_mirror_settings().mirror_position(v.pos),
+                        normal: state.current_mirror_settings().mirror_normal(v.normal),
                         uv: v.uv,
                         // Slightly dim the mirrored side to indicate it's generated
                         color: RasterColor::new(
@@ -1123,7 +1133,7 @@ pub fn draw_modeler_viewport_ext(
                             &textures_15,
                             Some(&blend_modes),
                             &state.camera,
-                            &state.raster_settings,
+                            &obj_raster_settings,
                             None,
                         );
                     }
@@ -1136,7 +1146,7 @@ pub fn draw_modeler_viewport_ext(
                             &mirrored_faces,
                             &textures,
                             &state.camera,
-                            &state.raster_settings,
+                            &obj_raster_settings,
                         );
                     }
                 }
@@ -1917,6 +1927,11 @@ fn find_hovered_element(
     let mesh = state.mesh();
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
+    // Check if current object is double-sided (allow selecting backfaces)
+    let double_sided = state.selected_object()
+        .map(|obj| obj.double_sided)
+        .unwrap_or(false);
+
     const VERTEX_THRESHOLD: f32 = 6.0;
     const EDGE_THRESHOLD: f32 = 4.0;
 
@@ -1964,13 +1979,13 @@ fn find_hovered_element(
         }
     }
 
-    // Check vertices first (highest priority) - only if on front-facing face (unless X-ray mode)
+    // Check vertices first (highest priority) - only if on front-facing face (unless X-ray or double-sided)
     for (idx, vert) in mesh.vertices.iter().enumerate() {
-        if !state.xray_mode && !vertex_on_front_face[idx] {
-            continue; // Skip vertices only on backfaces (X-ray allows selecting through)
+        if !state.xray_mode && !double_sided && !vertex_on_front_face[idx] {
+            continue; // Skip vertices only on backfaces (X-ray/double-sided allows selecting through)
         }
         // Skip vertices on the non-editable side when mirror is enabled
-        if !state.mirror_settings.is_editable_side(vert.pos) {
+        if !state.current_mirror_settings().is_editable_side(vert.pos) {
             continue;
         }
         if let Some((sx, sy)) = world_to_screen_with_ortho(
@@ -2000,14 +2015,14 @@ fn find_hovered_element(
                 // Normalize edge order for consistency
                 let edge = if v0_idx < v1_idx { (v0_idx, v1_idx) } else { (v1_idx, v0_idx) };
 
-                // Skip edges only on backfaces (unless X-ray mode)
-                if !state.xray_mode && !edge_on_front_face.contains(&edge) {
+                // Skip edges only on backfaces (unless X-ray or double-sided)
+                if !state.xray_mode && !double_sided && !edge_on_front_face.contains(&edge) {
                     continue;
                 }
 
                 if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                     // Skip edges with any vertex on non-editable side when mirror is enabled
-                    if !state.mirror_settings.is_editable_side(v0.pos) || !state.mirror_settings.is_editable_side(v1.pos) {
+                    if !state.current_mirror_settings().is_editable_side(v0.pos) || !state.current_mirror_settings().is_editable_side(v1.pos) {
                         continue;
                     }
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
@@ -2032,7 +2047,7 @@ fn find_hovered_element(
             // Skip faces with any vertex on non-editable side when mirror is enabled
             let face_on_editable_side = face.vertices.iter().all(|&vi| {
                 mesh.vertices.get(vi)
-                    .map(|v| state.mirror_settings.is_editable_side(v.pos))
+                    .map(|v| state.current_mirror_settings().is_editable_side(v.pos))
                     .unwrap_or(false)
             });
             if !face_on_editable_side {
@@ -2053,8 +2068,8 @@ fn find_hovered_element(
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
-                        if !state.xray_mode && signed_area <= 0.0 {
-                            continue; // Backface - skip (X-ray allows selecting through)
+                        if !state.xray_mode && !double_sided && signed_area <= 0.0 {
+                            continue; // Backface - skip (X-ray/double-sided allows selecting through)
                         }
 
                         // Check if mouse is inside the triangle
@@ -2441,7 +2456,7 @@ fn handle_move_gizmo(
                             .map(|(idx, start_pos)| (*idx, *start_pos + delta))
                             .collect();
 
-                        let mirror_settings = state.mirror_settings;
+                        let mirror_settings = state.current_mirror_settings();
                         if let Some(mesh) = state.mesh_mut() {
                             for (idx, mut new_pos) in updates {
                                 if snap_enabled {
@@ -2477,7 +2492,7 @@ fn handle_move_gizmo(
                     let snap_disabled = is_key_down(KeyCode::Z);
                     let snap_enabled = state.snap_settings.enabled && !snap_disabled;
                     let snap_settings = state.snap_settings.clone();
-                    let mirror_settings = state.mirror_settings;
+                    let mirror_settings = state.current_mirror_settings();
                     if let Some(mesh) = state.mesh_mut() {
                         for (vert_idx, new_pos) in positions {
                             if let Some(vert) = mesh.vertices.get_mut(vert_idx) {

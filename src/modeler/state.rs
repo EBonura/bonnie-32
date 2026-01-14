@@ -462,7 +462,7 @@ pub enum BrushType {
 // and tab-based mode switching in TextureEditorState
 
 /// Axis constraint for transforms
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     X,
     Y,
@@ -562,7 +562,7 @@ impl SnapSettings {
 
 /// Mirror editing settings
 /// When enabled, only one side of the mesh is editable; the other side is auto-generated.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MirrorSettings {
     pub enabled: bool,
     pub axis: Axis,
@@ -829,8 +829,7 @@ pub struct ModelerState {
     // Snap/quantization settings
     pub snap_settings: SnapSettings,
 
-    // Mirror editing settings
-    pub mirror_settings: MirrorSettings,
+    // Note: Mirror editing is now per-object (in MeshObject.mirror)
 
     /// Clipboard for copy/paste operations
     pub clipboard: Clipboard,
@@ -1102,7 +1101,6 @@ impl ModelerState {
             max_undo_levels: 50,
 
             snap_settings: SnapSettings::default(),
-            mirror_settings: MirrorSettings::default(),
             clipboard: Clipboard::default(),
             xray_mode: false,
 
@@ -1368,6 +1366,14 @@ impl ModelerState {
     /// Get the currently selected mesh object mutably
     pub fn selected_object_mut(&mut self) -> Option<&mut MeshObject> {
         self.project.selected_mut()
+    }
+
+    /// Get the mirror settings for the currently selected object
+    /// Returns MirrorSettings::default() if no object is selected or no mirror is set
+    pub fn current_mirror_settings(&self) -> MirrorSettings {
+        self.selected_object()
+            .and_then(|obj| obj.mirror)
+            .unwrap_or_default()
     }
 
     /// Add a new object to the project

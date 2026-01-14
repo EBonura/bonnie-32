@@ -114,6 +114,10 @@ pub mod icon {
     pub const LOCK: char = '\u{e109}';            // Locked
     pub const LOCK_OPEN: char = '\u{e10a}';       // Unlocked
 
+    // Checkbox icons
+    pub const SQUARE_CHECK: char = '\u{e16a}';    // square-check (checked checkbox)
+    pub const CHECK: char = '\u{e06b}';           // check (checkmark)
+
     // Input / Controller
     pub const GAMEPAD_2: char = '\u{e0df}';       // Gamepad controller
 
