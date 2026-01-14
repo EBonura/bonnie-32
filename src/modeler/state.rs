@@ -987,45 +987,10 @@ impl ModelerState {
         // Project is the single source of truth for mesh data
         let mut project = MeshProject::default();
 
-        // Apply first user texture to the default cube and project atlas template
+        // Select first user texture for editing (but don't apply to default cube)
         let (editing_texture, selected_user_texture) = if let Some((name, tex)) = user_textures.iter().next() {
-            // Copy user texture to project atlas (template for new objects)
-            project.atlas.width = tex.width;
-            project.atlas.height = tex.height;
-            project.atlas.depth = tex.depth;
-            project.atlas.indices = tex.indices.clone();
-            // Update the default CLUT with the texture's palette
-            if let Some(clut) = project.clut_pool.get_mut(project.atlas.default_clut) {
-                clut.colors = tex.palette.clone();
-                clut.depth = tex.depth;
-            }
-            // Also copy to the first object's atlas
-            if let Some(obj) = project.objects.get_mut(0) {
-                obj.atlas.width = tex.width;
-                obj.atlas.height = tex.height;
-                obj.atlas.depth = tex.depth;
-                obj.atlas.indices = tex.indices.clone();
-                obj.atlas.default_clut = project.atlas.default_clut;
-            }
             (Some(tex.clone()), Some(name.to_string()))
         } else {
-            // No user textures - create a grey checkerboard fallback
-            let grey_light = 8;  // Light grey index
-            let grey_dark = 7;   // Dark grey index
-            let size = project.atlas.width.min(project.atlas.height);
-            let check_size = size / 8; // 8x8 checker pattern
-            for y in 0..project.atlas.height {
-                for x in 0..project.atlas.width {
-                    let cx = x / check_size.max(1);
-                    let cy = y / check_size.max(1);
-                    let idx = if (cx + cy) % 2 == 0 { grey_light } else { grey_dark };
-                    project.atlas.indices[y * project.atlas.width + x] = idx;
-                }
-            }
-            // Also set the first object's atlas
-            if let Some(obj) = project.objects.get_mut(0) {
-                obj.atlas = project.atlas.clone();
-            }
             (None, None)
         };
 
