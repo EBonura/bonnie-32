@@ -444,8 +444,14 @@ fn draw_orbit_preview(
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(25, 25, 35));
 
-    // Render settings - use RGB555 by default
-    let settings = RasterSettings::default();
+    // Check if any object needs backface culling disabled
+    let any_double_sided = project.objects.iter().any(|obj| obj.visible && obj.double_sided);
+
+    // Render settings - disable backface culling if any object is double-sided
+    let mut settings = RasterSettings::default();
+    if any_double_sided {
+        settings.backface_cull = false;
+    }
     let use_rgb555 = settings.use_rgb555;
 
     // Fallback CLUT from first object's atlas
