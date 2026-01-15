@@ -1,6 +1,6 @@
-//! Mesh Browser
+//! OBJ Importer
 //!
-//! Modal dialog for browsing and previewing OBJ mesh files.
+//! Modal dialog for importing OBJ mesh files into the asset editor.
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, icon, icon_button, icon_button_active, ACCENT_COLOR, TEXT_COLOR};
@@ -151,31 +151,26 @@ pub async fn load_mesh(path: &PathBuf) -> Option<EditableMesh> {
     use macroquad::prelude::*;
 
     let path_str = path.to_string_lossy().replace('\\', "/");
-    eprintln!("[mesh_browser] Loading mesh from: {}", path_str);
 
     match load_string(&path_str).await {
         Ok(contents) => {
-            eprintln!("[mesh_browser] Loaded {} bytes, parsing OBJ...", contents.len());
             match ObjImporter::parse(&contents) {
-                Ok(mesh) => {
-                    eprintln!("[mesh_browser] Parsed: {} vertices, {} faces", mesh.vertices.len(), mesh.faces.len());
-                    Some(mesh)
-                }
+                Ok(mesh) => Some(mesh),
                 Err(e) => {
-                    eprintln!("[mesh_browser] OBJ parse error: {}", e);
+                    eprintln!("OBJ parse error: {}", e);
                     None
                 }
             }
         }
         Err(e) => {
-            eprintln!("[mesh_browser] Failed to load mesh file {}: {}", path_str, e);
+            eprintln!("Failed to load mesh file {}: {}", path_str, e);
             None
         }
     }
 }
 
 /// State for the mesh browser dialog
-pub struct MeshBrowser {
+pub struct ObjImportBrowser {
     /// Whether the browser is open
     pub open: bool,
     /// List of available meshes
@@ -216,7 +211,7 @@ pub struct MeshBrowser {
     pub clut_depth_override: Option<ClutDepth>,
 }
 
-impl Default for MeshBrowser {
+impl Default for ObjImportBrowser {
     fn default() -> Self {
         Self {
             open: false,
@@ -247,7 +242,7 @@ impl Default for MeshBrowser {
     }
 }
 
-impl MeshBrowser {
+impl ObjImportBrowser {
     /// Open the browser with the given list of meshes
     pub fn open(&mut self, meshes: Vec<MeshInfo>) {
         self.open = true;
@@ -338,7 +333,7 @@ impl MeshBrowser {
 
 /// Result from drawing the mesh browser
 #[derive(Debug, Clone, PartialEq)]
-pub enum MeshBrowserAction {
+pub enum ObjImportAction {
     None,
     /// User selected a mesh to preview
     SelectPreview(usize),
@@ -351,17 +346,17 @@ pub enum MeshBrowserAction {
 }
 
 /// Draw the mesh browser modal dialog
-pub fn draw_mesh_browser(
+pub fn draw_obj_importer(
     ctx: &mut UiContext,
-    browser: &mut MeshBrowser,
+    browser: &mut ObjImportBrowser,
     icon_font: Option<&Font>,
     fb: &mut Framebuffer,
-) -> MeshBrowserAction {
+) -> ObjImportAction {
     if !browser.open {
-        return MeshBrowserAction::None;
+        return ObjImportAction::None;
     }
 
-    let mut action = MeshBrowserAction::None;
+    let mut action = ObjImportAction::None;
 
     // Darken background
     draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::from_rgba(0, 0, 0, 180));
@@ -379,12 +374,12 @@ pub fn draw_mesh_browser(
     // Header
     let header_h = 40.0;
     draw_rectangle(dialog_x, dialog_y, dialog_w, header_h, Color::from_rgba(45, 45, 55, 255));
-    draw_text("Browse Meshes", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
+    draw_text("Import OBJ", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
 
     // Close button
     let close_rect = Rect::new(dialog_x + dialog_w - 36.0, dialog_y + 4.0, 32.0, 32.0);
     if draw_close_button(ctx, close_rect, icon_font) {
-        action = MeshBrowserAction::Cancel;
+        action = ObjImportAction::Cancel;
     }
 
     // Content area
@@ -421,7 +416,7 @@ pub fn draw_mesh_browser(
     if let Some(clicked_idx) = list_result.clicked {
         if browser.selected_index != Some(clicked_idx) {
             browser.selected_index = Some(clicked_idx);
-            action = MeshBrowserAction::SelectPreview(clicked_idx);
+            action = ObjImportAction::SelectPreview(clicked_idx);
         }
     }
 
@@ -611,7 +606,7 @@ pub fn draw_mesh_browser(
         // Allow scaling down to 0.001 for very large source models
         browser.import_scale = (browser.import_scale / 2.0).max(0.001);
         if browser.preview_mesh.is_some() {
-            action = MeshBrowserAction::ReloadPreview;
+            action = ObjImportAction::ReloadPreview;
         }
     }
 
@@ -630,7 +625,7 @@ pub fn draw_mesh_browser(
         // Allow scaling up to 1,000,000 for very small source models
         browser.import_scale = (browser.import_scale * 2.0).min(1_000_000.0);
         if browser.preview_mesh.is_some() {
-            action = MeshBrowserAction::ReloadPreview;
+            action = ObjImportAction::ReloadPreview;
         }
     }
 
@@ -639,7 +634,7 @@ pub fn draw_mesh_browser(
     if icon_button_active(ctx, flip_rect, icon::FLIP_VERTICAL, icon_font, "Flip Normals", browser.flip_normals) {
         browser.flip_normals = !browser.flip_normals;
         if browser.preview_mesh.is_some() {
-            action = MeshBrowserAction::ReloadPreview;
+            action = ObjImportAction::ReloadPreview;
         }
     }
 
@@ -667,7 +662,7 @@ pub fn draw_mesh_browser(
     if icon_button_active(ctx, flip_h_rect, icon::FLIP_HORIZONTAL, icon_font, "Flip Horizontal (mirror X)", browser.flip_horizontal) {
         browser.flip_horizontal = !browser.flip_horizontal;
         if browser.preview_mesh.is_some() {
-            action = MeshBrowserAction::ReloadPreview;
+            action = ObjImportAction::ReloadPreview;
         }
     }
 
@@ -676,7 +671,7 @@ pub fn draw_mesh_browser(
     if icon_button_active(ctx, flip_v_rect, icon::FLIP_VERTICAL, icon_font, "Flip Vertical (mirror Y)", browser.flip_vertical) {
         browser.flip_vertical = !browser.flip_vertical;
         if browser.preview_mesh.is_some() {
-            action = MeshBrowserAction::ReloadPreview;
+            action = ObjImportAction::ReloadPreview;
         }
     }
 
@@ -730,19 +725,19 @@ pub fn draw_mesh_browser(
     // Cancel button
     let cancel_rect = Rect::new(dialog_x + dialog_w - 180.0, footer_y + 8.0, 80.0, 28.0);
     if draw_text_button(ctx, cancel_rect, "Cancel", Color::from_rgba(60, 60, 70, 255)) {
-        action = MeshBrowserAction::Cancel;
+        action = ObjImportAction::Cancel;
     }
 
     // Open button
     let open_rect = Rect::new(dialog_x + dialog_w - 90.0, footer_y + 8.0, 80.0, 28.0);
     let open_enabled = browser.preview_mesh.is_some();
     if draw_text_button_enabled(ctx, open_rect, "Open", ACCENT_COLOR, open_enabled) {
-        action = MeshBrowserAction::OpenMesh;
+        action = ObjImportAction::OpenMesh;
     }
 
     // Handle Escape to close
     if is_key_pressed(KeyCode::Escape) {
-        action = MeshBrowserAction::Cancel;
+        action = ObjImportAction::Cancel;
     }
 
     action
@@ -751,7 +746,7 @@ pub fn draw_mesh_browser(
 /// Draw the orbit preview of a mesh
 fn draw_orbit_preview(
     ctx: &mut UiContext,
-    browser: &mut MeshBrowser,
+    browser: &mut ObjImportBrowser,
     rect: Rect,
     fb: &mut Framebuffer,
 ) {

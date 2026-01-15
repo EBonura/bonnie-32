@@ -29,7 +29,7 @@ use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level, save_level};
 use ui::{UiContext, MouseState, Rect, draw_fixed_tabs, TabEntry, layout as tab_layout, icon};
 use editor::{EditorAction, draw_editor, draw_example_browser, BrowserAction, discover_examples};
-use modeler::{ModelerAction, ModelBrowserAction, MeshBrowserAction, draw_model_browser, draw_mesh_browser, discover_models, discover_meshes, ObjImporter, TextureImportResult};
+use modeler::{ModelerAction, ModelBrowserAction, ObjImportAction, draw_model_browser, draw_obj_importer, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
 use std::path::PathBuf;
 
@@ -494,7 +494,7 @@ async fn main() {
 
                 // Block background input if any browser is open
                 let real_mouse_modeler = mouse_state;
-                if ms.model_browser.open || ms.mesh_browser.open {
+                if ms.model_browser.open || ms.obj_importer.open {
                     ui_ctx.begin_modal();
                 }
 
@@ -509,7 +509,7 @@ async fn main() {
                 );
 
                 // Handle modeler actions
-                handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.mesh_browser);
+                handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.obj_importer);
 
                 // Draw model browser overlay if open
                 if ms.model_browser.open {
@@ -573,27 +573,27 @@ async fn main() {
                 }
 
                 // Draw mesh browser overlay if open
-                if ms.mesh_browser.open {
+                if ms.obj_importer.open {
                     ui_ctx.end_modal(real_mouse_modeler);
 
-                    let browser_action = draw_mesh_browser(
+                    let browser_action = draw_obj_importer(
                         &mut ui_ctx,
-                        &mut ms.mesh_browser,
+                        &mut ms.obj_importer,
                         app.icon_font.as_ref(),
                         &mut fb,
                     );
 
                     match browser_action {
-                        MeshBrowserAction::SelectPreview(idx) => {
+                        ObjImportAction::SelectPreview(idx) => {
                             // Load preview for selected mesh
                             let index = idx;
 
-                            if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
+                            if let Some(mesh_info) = ms.obj_importer.meshes.get(index) {
                                 let path = mesh_info.path.clone();
                                 let texture_path = mesh_info.texture_path.clone();
                                 let additional_textures = mesh_info.additional_textures.clone();
-                                let scale = ms.mesh_browser.import_scale;
-                                let flip = ms.mesh_browser.flip_normals;
+                                let scale = ms.obj_importer.import_scale;
+                                let flip = ms.obj_importer.flip_normals;
 
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
@@ -619,7 +619,7 @@ async fn main() {
                                                 }
                                             }
 
-                                            ms.mesh_browser.set_preview(mesh);
+                                            ms.obj_importer.set_preview(mesh);
 
                                             // Load all textures (primary + additional)
                                             let mut textures = Vec::new();
@@ -640,7 +640,7 @@ async fn main() {
                                                 }
                                             }
 
-                                            ms.mesh_browser.set_preview_textures(textures);
+                                            ms.obj_importer.set_preview_textures(textures);
                                         }
                                         Err(e) => {
                                             eprintln!("Failed to load mesh: {}", e);
@@ -650,22 +650,22 @@ async fn main() {
                                 }
                                 #[cfg(target_arch = "wasm32")]
                                 {
-                                    ms.mesh_browser.pending_load_path = Some(path);
+                                    ms.obj_importer.pending_load_path = Some(path);
                                 }
                             }
                         }
-                        MeshBrowserAction::ReloadPreview => {
+                        ObjImportAction::ReloadPreview => {
                             // Reload with current scale/flip settings
-                            if let Some(index) = ms.mesh_browser.selected_index {
-                                if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
+                            if let Some(index) = ms.obj_importer.selected_index {
+                                if let Some(mesh_info) = ms.obj_importer.meshes.get(index) {
                                     let path = mesh_info.path.clone();
 
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
-                                        let scale = ms.mesh_browser.import_scale;
-                                        let flip_normals = ms.mesh_browser.flip_normals;
-                                        let flip_h = ms.mesh_browser.flip_horizontal;
-                                        let flip_v = ms.mesh_browser.flip_vertical;
+                                        let scale = ms.obj_importer.import_scale;
+                                        let flip_normals = ms.obj_importer.flip_normals;
+                                        let flip_h = ms.obj_importer.flip_horizontal;
+                                        let flip_v = ms.obj_importer.flip_vertical;
 
                                         if let Ok(mut mesh) = ObjImporter::load_from_file(&path) {
                                             // Apply scale to preview
@@ -697,26 +697,26 @@ async fn main() {
                                             }
 
                                             // Use update_preview to preserve camera angles
-                                            ms.mesh_browser.update_preview(mesh);
+                                            ms.obj_importer.update_preview(mesh);
                                         }
                                     }
                                     #[cfg(target_arch = "wasm32")]
                                     {
                                         // Queue async reload with new settings
-                                        ms.mesh_browser.pending_load_path = Some(path);
+                                        ms.obj_importer.pending_load_path = Some(path);
                                     }
                                 }
                             }
                         }
-                        MeshBrowserAction::OpenMesh => {
-                            let path = ms.mesh_browser.selected_mesh()
+                        ObjImportAction::OpenMesh => {
+                            let path = ms.obj_importer.selected_mesh()
                                 .map(|m| m.path.clone())
                                 .unwrap_or_else(|| PathBuf::from("assets/meshes/untitled.obj"));
-                            let scale = ms.mesh_browser.import_scale;
-                            let flip_normals = ms.mesh_browser.flip_normals;
-                            let flip_h = ms.mesh_browser.flip_horizontal;
-                            let flip_v = ms.mesh_browser.flip_vertical;
-                            let clut_depth_override = ms.mesh_browser.clut_depth_override;
+                            let scale = ms.obj_importer.import_scale;
+                            let flip_normals = ms.obj_importer.flip_normals;
+                            let flip_h = ms.obj_importer.flip_horizontal;
+                            let flip_v = ms.obj_importer.flip_vertical;
+                            let clut_depth_override = ms.obj_importer.clut_depth_override;
 
                             #[cfg(not(target_arch = "wasm32"))]
                             {
@@ -810,7 +810,7 @@ async fn main() {
                             #[cfg(target_arch = "wasm32")]
                             {
                                 // WASM fallback - just use preview mesh (already has scale/flip applied from preview)
-                                if let Some(imported_mesh) = ms.mesh_browser.preview_mesh.take() {
+                                if let Some(imported_mesh) = ms.obj_importer.preview_mesh.take() {
                                     // Set mesh directly in project (single source of truth)
                                     if let Some(mesh) = ms.modeler_state.mesh_mut() {
                                         *mesh = imported_mesh;
@@ -826,12 +826,12 @@ async fn main() {
                                 }
                             }
 
-                            ms.mesh_browser.close();
+                            ms.obj_importer.close();
                         }
-                        MeshBrowserAction::Cancel => {
-                            ms.mesh_browser.close();
+                        ObjImportAction::Cancel => {
+                            ms.obj_importer.close();
                         }
-                        MeshBrowserAction::None => {}
+                        ObjImportAction::None => {}
                     }
                 }
             }
@@ -916,23 +916,23 @@ async fn main() {
                 }
             }
             // Load mesh list from manifest if pending
-            if ms.mesh_browser.pending_load_list {
-                ms.mesh_browser.pending_load_list = false;
+            if ms.obj_importer.pending_load_list {
+                ms.obj_importer.pending_load_list = false;
                 use modeler::load_mesh_list;
                 let meshes = load_mesh_list().await;
-                ms.mesh_browser.meshes = meshes;
+                ms.obj_importer.meshes = meshes;
             }
             // Load individual mesh preview if pending
-            if let Some(path) = ms.mesh_browser.pending_load_path.take() {
+            if let Some(path) = ms.obj_importer.pending_load_path.take() {
                 use modeler::load_mesh;
                 use modeler::{apply_mesh_flip_horizontal, apply_mesh_flip_vertical};
 
                 if let Some(mut mesh) = load_mesh(&path).await {
                     // Get transform settings from browser
-                    let scale = ms.mesh_browser.import_scale;
-                    let flip_normals = ms.mesh_browser.flip_normals;
-                    let flip_h = ms.mesh_browser.flip_horizontal;
-                    let flip_v = ms.mesh_browser.flip_vertical;
+                    let scale = ms.obj_importer.import_scale;
+                    let flip_normals = ms.obj_importer.flip_normals;
+                    let flip_h = ms.obj_importer.flip_horizontal;
+                    let flip_v = ms.obj_importer.flip_vertical;
 
                     // Apply scale to preview
                     for vertex in &mut mesh.vertices {
@@ -961,14 +961,14 @@ async fn main() {
                     }
 
                     // Update MeshInfo counts (since WASM loads async with initial 0 counts)
-                    if let Some(idx) = ms.mesh_browser.selected_index {
-                        if let Some(info) = ms.mesh_browser.meshes.get_mut(idx) {
+                    if let Some(idx) = ms.obj_importer.selected_index {
+                        if let Some(info) = ms.obj_importer.meshes.get_mut(idx) {
                             info.vertex_count = mesh.vertices.len();
                             info.face_count = mesh.faces.len();
                         }
                     }
 
-                    ms.mesh_browser.set_preview(mesh);
+                    ms.obj_importer.set_preview(mesh);
                 } else {
                     ms.modeler_state.set_status("Failed to load mesh preview", 3.0);
                 }
@@ -1327,7 +1327,7 @@ fn handle_modeler_action(
     action: ModelerAction,
     state: &mut modeler::ModelerState,
     model_browser: &mut modeler::ModelBrowser,
-    mesh_browser: &mut modeler::MeshBrowser,
+    obj_importer: &mut modeler::ObjImportBrowser,
 ) {
     match action {
         ModelerAction::New => {
@@ -1345,11 +1345,11 @@ fn handle_modeler_action(
         }
         ModelerAction::BrowseMeshes => {
             let meshes = discover_meshes();
-            mesh_browser.open(meshes);
+            obj_importer.open(meshes);
             // On WASM, trigger async load of mesh list
             #[cfg(target_arch = "wasm32")]
             {
-                mesh_browser.pending_load_list = true;
+                obj_importer.pending_load_list = true;
             }
             state.set_status("Browse meshes", 2.0);
         }

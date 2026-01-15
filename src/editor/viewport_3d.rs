@@ -803,16 +803,16 @@ pub fn draw_viewport_3d(
                                 if LAST_GX.load(Ordering::Relaxed) != gx_i || LAST_GZ.load(Ordering::Relaxed) != gz_i {
                                     LAST_GX.store(gx_i, Ordering::Relaxed);
                                     LAST_GZ.store(gz_i, Ordering::Relaxed);
-                                    let floor_info = sector.floor.as_ref().map(|f| {
+                                    let _floor_info = sector.floor.as_ref().map(|f| {
                                         let (l, r) = f.edge_heights(dir);
                                         format!("F[{:.0},{:.0}]", l, r)
                                     }).unwrap_or_else(|| "F[-]".to_string());
-                                    let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                    let _ceiling_info = sector.ceiling.as_ref().map(|c| {
                                         let (l, r) = c.edge_heights(dir);
                                         format!("C[{:.0},{:.0}]", l, r)
                                     }).unwrap_or_else(|| "C[-]".to_string());
                                     let walls = sector.walls(dir);
-                                    let walls_info = if walls.is_empty() {
+                                    let _walls_info = if walls.is_empty() {
                                         "W[]".to_string()
                                     } else {
                                         let w_strs: Vec<String> = walls.iter().map(|w| {
@@ -904,16 +904,16 @@ pub fn draw_viewport_3d(
                                     LAST_DIAG_GX.store(gx_i, Ordering::Relaxed);
                                     LAST_DIAG_GZ.store(gz_i, Ordering::Relaxed);
                                     let dir = if is_nwse { crate::world::Direction::NwSe } else { crate::world::Direction::NeSw };
-                                    let floor_info = sector.floor.as_ref().map(|f| {
+                                    let _floor_info = sector.floor.as_ref().map(|f| {
                                         let (l, r) = f.edge_heights(dir);
                                         format!("F[{:.0},{:.0}]", l, r)
                                     }).unwrap_or_else(|| "F[-]".to_string());
-                                    let ceiling_info = sector.ceiling.as_ref().map(|c| {
+                                    let _ceiling_info = sector.ceiling.as_ref().map(|c| {
                                         let (l, r) = c.edge_heights(dir);
                                         format!("C[{:.0},{:.0}]", l, r)
                                     }).unwrap_or_else(|| "C[-]".to_string());
                                     let walls = if is_nwse { &sector.walls_nwse } else { &sector.walls_nesw };
-                                    let walls_info = if walls.is_empty() {
+                                    let _walls_info = if walls.is_empty() {
                                         "W[]".to_string()
                                     } else {
                                         let w_strs: Vec<String> = walls.iter().map(|w| {

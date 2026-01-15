@@ -1,7 +1,7 @@
 //! Modeler UI layout and rendering
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, icon_button_active, ActionRegistry, draw_icon_centered};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
@@ -3236,7 +3236,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             state.select_mode = SelectMode::Face;
         } else if !is_key_down(KeyCode::X) {
             // Clicked on nothing - start potential box select (don't clear selection yet)
-            eprintln!("[DEBUG] Clicked empty space in {:?} - setting box_select_pending_start", viewport_id);
             state.ortho_box_select_pending_start = Some((ctx.mouse.x, ctx.mouse.y));
             state.ortho_box_select_viewport = Some(viewport_id);
         }
@@ -3252,9 +3251,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
         // Check if we're already in box select mode
         let is_box_selecting = state.drag_manager.active.is_box_select();
-
-        eprintln!("[DEBUG ORTHO BOX] viewport={:?} is_box_selecting={} pending={:?} mouse=({}, {})",
-            viewport_id, is_box_selecting, state.ortho_box_select_pending_start, ctx.mouse.x, ctx.mouse.y);
 
         if is_box_selecting {
             // Update the box select tracker with current mouse position
@@ -3272,7 +3268,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 };
 
                 if let Some((x0, y0, x1, y1)) = bounds {
-                    eprintln!("[DEBUG] Applying ortho box selection: bounds=({}, {}) to ({}, {})", x0, y0, x1, y1);
                     // Apply box selection for ortho views
                     apply_ortho_box_selection(state, viewport_id, x0, y0, x1, y1, rect.x, rect.y, rect.w, rect.h, ortho_zoom, ortho_center);
                 }
@@ -3288,7 +3283,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 let dy = (ctx.mouse.y - start_pos.1).abs();
                 // Only become box select if moved at least 5 pixels
                 if dx > 5.0 || dy > 5.0 {
-                    eprintln!("[DEBUG] Starting ortho box select! dx={} dy={}", dx, dy);
                     state.drag_manager.start_box_select(start_pos);
                     // Update with current position
                     if let super::drag::ActiveDrag::BoxSelect(tracker) = &mut state.drag_manager.active {
@@ -3509,8 +3503,6 @@ fn apply_ortho_box_selection(
     ortho_zoom: f32,
     ortho_center: crate::rasterizer::Vec2,
 ) {
-    eprintln!("[DEBUG apply_ortho_box_selection] viewport={:?} screen=({}, {})-({}, {}) rect=({}, {}, {}, {}) zoom={} center={:?}",
-        viewport_id, screen_x0, screen_y0, screen_x1, screen_y1, rect_x, rect_y, rect_w, rect_h, ortho_zoom, ortho_center);
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
         || is_key_down(KeyCode::X);
@@ -3545,8 +3537,6 @@ fn apply_ortho_box_selection(
 
     let mesh = state.mesh();
 
-    eprintln!("[DEBUG] select_mode={:?} mesh has {} vertices", state.select_mode, mesh.vertices.len());
-
     match state.select_mode {
         SelectMode::Vertex => {
             let mut selected = if add_to_selection {
@@ -3556,11 +3546,8 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
-                let (sx, sy) = world_to_screen(vert.pos);
+                let (_sx, _sy) = world_to_screen(vert.pos);
                 let in_box = is_in_box(vert.pos);
-                if idx < 3 {
-                    eprintln!("[DEBUG] vertex {} pos={:?} -> screen=({}, {}) in_box={}", idx, vert.pos, sx, sy, in_box);
-                }
                 if in_box && !selected.contains(&idx) {
                     selected.push(idx);
                 }
@@ -5394,7 +5381,7 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
         let dialog_h = 120.0;
         let dialog_x = (screen_width() - dialog_w) / 2.0;
         let dialog_y = (screen_height() - dialog_h) / 2.0;
-        let dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+        let _dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
         // Background
         draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
@@ -5490,7 +5477,7 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
         let dialog_h = 120.0;
         let dialog_x = (screen_width() - dialog_w) / 2.0;
         let dialog_y = (screen_height() - dialog_h) / 2.0;
-        let dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+        let _dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
         // Background
         draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));

@@ -7,7 +7,7 @@
 //! - Reading: Auto-detects format by checking for valid RON start
 //! - Writing: Always uses brotli compression
 
-use crate::rasterizer::{Vec3, Vec2, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
+use crate::rasterizer::{Vec3, Vec2, Vertex, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -2077,69 +2077,48 @@ impl EditableMesh {
         let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
         visited.insert(start_face);
 
-        eprintln!("[FACE LOOP] Starting face {}, edge ({}, {})", start_face, edge_v0, edge_v1);
-
         // Get the opposite edge for the second direction
         let opposite_start_edge = self.opposite_edge_in_quad(start_face, edge_v0, edge_v1);
-        eprintln!("[FACE LOOP] Opposite start edge: {:?}", opposite_start_edge);
 
         // Traverse in both directions
         // Direction 0: use the original edge direction
         // Direction 1: use the opposite edge direction
         for direction in 0..2 {
-            eprintln!("[FACE LOOP] === Direction {} ===", direction);
-
             let mut current_face = start_face;
             let mut current_edge = if direction == 0 {
                 (edge_v0, edge_v1)
             } else {
                 match opposite_start_edge {
                     Some(e) => e,
-                    None => {
-                        eprintln!("[FACE LOOP] No opposite edge for direction 1, skipping");
-                        continue;
-                    }
+                    None => continue,
                 }
             };
 
             loop {
-                eprintln!("[FACE LOOP] Current face {}, edge ({}, {})", current_face, current_edge.0, current_edge.1);
-
                 // Find the opposite edge in the current face
                 let opposite = match self.opposite_edge_in_quad(current_face, current_edge.0, current_edge.1) {
                     Some(e) => e,
-                    None => {
-                        eprintln!("[FACE LOOP] Face {} is not a quad or edge not found, stopping", current_face);
-                        break;
-                    }
+                    None => break,
                 };
-
-                eprintln!("[FACE LOOP] Opposite edge: ({}, {})", opposite.0, opposite.1);
 
                 // Find the face on the other side of this edge
                 let adjacent_faces = self.faces_with_edge(opposite.0, opposite.1);
-                eprintln!("[FACE LOOP] Adjacent faces to opposite edge: {:?}", adjacent_faces);
 
                 let next_face = adjacent_faces.iter()
                     .find(|&&f| f != current_face && !visited.contains(&f));
 
                 match next_face {
                     Some(&face_idx) => {
-                        eprintln!("[FACE LOOP] Found next face: {}", face_idx);
                         visited.insert(face_idx);
                         loop_faces.push(face_idx);
                         current_face = face_idx;
                         current_edge = opposite;
                     }
-                    None => {
-                        eprintln!("[FACE LOOP] No unvisited adjacent face found, stopping");
-                        break;
-                    }
+                    None => break,
                 }
             }
         }
 
-        eprintln!("[FACE LOOP] Final result: {} faces", loop_faces.len());
         loop_faces
     }
 

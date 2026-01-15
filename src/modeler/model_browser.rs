@@ -200,7 +200,7 @@ impl AssetBrowser {
                     TextureRef::Checkerboard | TextureRef::None => {
                         self.preview_cluts.push(checkerboard_clut().clone());
                     }
-                    TextureRef::Embedded(embedded) => {
+                    TextureRef::Embedded(_embedded) => {
                         // For embedded, we'd need a CLUT pool - use checkerboard for now
                         self.preview_cluts.push(checkerboard_clut().clone());
                     }

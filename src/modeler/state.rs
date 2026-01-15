@@ -1330,32 +1330,16 @@ impl ModelerState {
     pub fn resolve_all_texture_refs(&mut self) {
         use crate::rasterizer::Clut;
 
-        // Debug: print what texture refs we have
-        eprintln!("[resolve_all_texture_refs] Processing {} objects", self.objects().len());
-        for (idx, obj) in self.objects().iter().enumerate() {
-            eprintln!("  Object {}: '{}' has texture_ref: {:?}", idx, obj.name, obj.texture_ref);
-        }
-        eprintln!("  Texture library has {} textures", self.user_textures.len());
-        for (name, tex) in self.user_textures.iter() {
-            eprintln!("    - '{}' id={}", name, tex.id);
-        }
-
-        // First, collect all ID -> texture data mappings we need
+        // Collect all ID -> texture data mappings we need
         // (to avoid borrow checker issues with self)
         let updates: Vec<(usize, String, usize, usize, crate::rasterizer::ClutDepth, Vec<u8>, Vec<Color15>)> = self.objects()
             .iter()
             .enumerate()
             .filter_map(|(idx, obj)| {
                 if let TextureRef::Id(id) = &obj.texture_ref {
-                    eprintln!("  Looking up texture ID {} for object '{}'", id, obj.name);
-                    let result = self.user_textures.get_by_id(*id).map(|tex| {
-                        eprintln!("    Found texture '{}' ({}x{})", tex.name, tex.width, tex.height);
+                    self.user_textures.get_by_id(*id).map(|tex| {
                         (idx, obj.name.clone(), tex.width, tex.height, tex.depth, tex.indices.clone(), tex.palette.clone())
-                    });
-                    if result.is_none() {
-                        eprintln!("    NOT FOUND in library!");
-                    }
-                    result
+                    })
                 } else {
                     None
                 }

@@ -14,7 +14,7 @@ mod viewport;
 mod model_browser;
 mod mesh_editor;
 mod obj_import;
-mod mesh_browser;
+mod obj_importer;
 mod quantize;
 pub mod actions;
 pub mod drag;
@@ -31,7 +31,7 @@ pub use model_browser::*;
 #[allow(unused_imports)]
 pub use mesh_editor::*;
 pub use obj_import::*;
-pub use mesh_browser::*;
+pub use obj_importer::*;
 #[allow(unused_imports)]
 pub use quantize::*;
 // Actions used internally by layout.rs

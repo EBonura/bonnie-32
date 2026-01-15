@@ -7,7 +7,7 @@ use crate::editor::{EditorState, EditorLayout, ExampleBrowser};
 use crate::game::GameToolState;
 use crate::input::InputState;
 use crate::landing::LandingState;
-use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, MeshBrowser};
+use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, ObjImportBrowser};
 use crate::project::ProjectData;
 use crate::tracker::TrackerState;
 use crate::world::Level;
@@ -78,7 +78,7 @@ pub struct ModelerToolState {
     pub modeler_state: ModelerState,
     pub modeler_layout: ModelerLayout,
     pub model_browser: ModelBrowser,
-    pub mesh_browser: MeshBrowser,
+    pub obj_importer: ObjImportBrowser,
 }
 
 /// Main application state containing all tool states
@@ -136,7 +136,7 @@ impl AppState {
                 modeler_state: ModelerState::new(),
                 modeler_layout: ModelerLayout::new(),
                 model_browser: ModelBrowser::default(),
-                mesh_browser: MeshBrowser::default(),
+                obj_importer: ObjImportBrowser::default(),
             },
             tracker: TrackerState::new(),
             icon_font,
