@@ -448,8 +448,9 @@ fn draw_orbit_preview(
     let settings = RasterSettings::default();
     let use_rgb555 = settings.use_rgb555;
 
-    // Fallback CLUT from project pool
-    let fallback_clut = project.clut_pool.get(project.atlas.default_clut);
+    // Fallback CLUT from first object's atlas
+    let fallback_clut = project.objects.first()
+        .and_then(|obj| project.clut_pool.get(obj.atlas.default_clut));
 
     // Render each object with its own atlas texture
     for (obj_idx, obj) in project.objects.iter().enumerate() {

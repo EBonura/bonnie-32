@@ -1269,25 +1269,29 @@ impl ModelerState {
     // ========================================================================
 
     /// Get the indexed texture atlas for the selected object
-    /// Falls back to project atlas if no object is selected
+    /// Falls back to first object if no object is selected
     pub fn atlas(&self) -> &IndexedAtlas {
-        if let Some(idx) = self.project.selected_object {
-            if let Some(obj) = self.project.objects.get(idx) {
-                return &obj.atlas;
-            }
-        }
-        &self.project.atlas
+        // Determine which object index to use
+        let idx = self.project.selected_object
+            .filter(|&i| i < self.project.objects.len())
+            .unwrap_or(0);
+
+        &self.project.objects.get(idx)
+            .expect("Project must have at least one object")
+            .atlas
     }
 
     /// Get mutable indexed texture atlas for the selected object
-    /// Falls back to project atlas if no object is selected
+    /// Falls back to first object if no object is selected
     pub fn atlas_mut(&mut self) -> &mut IndexedAtlas {
-        if let Some(idx) = self.project.selected_object {
-            if let Some(obj) = self.project.objects.get_mut(idx) {
-                return &mut obj.atlas;
-            }
-        }
-        &mut self.project.atlas
+        // Determine which object index to use
+        let idx = self.project.selected_object
+            .filter(|&i| i < self.project.objects.len())
+            .unwrap_or(0);
+
+        &mut self.project.objects.get_mut(idx)
+            .expect("Project must have at least one object")
+            .atlas
     }
 
     /// Get the indexed texture atlas for a specific object
@@ -1405,7 +1409,7 @@ impl ModelerState {
         self.undo_stack.push(UndoEvent::Mesh {
             object_index: self.project.selected_object,
             mesh: self.mesh().clone(),
-            atlas: Some(self.project.atlas.clone()),
+            atlas: Some(self.atlas().clone()),
             description: description.to_string(),
         });
         self.redo_stack.clear();
@@ -1461,27 +1465,31 @@ impl ModelerState {
             match event {
                 UndoEvent::Mesh { object_index, mesh, atlas, description } => {
                     // Save current state to redo stack
-                    let current_mesh = if let Some(idx) = object_index {
-                        self.project.objects.get(idx).map(|o| o.mesh.clone())
+                    let (current_mesh, current_atlas) = if let Some(idx) = object_index {
+                        if let Some(obj) = self.project.objects.get(idx) {
+                            (Some(obj.mesh.clone()), if atlas.is_some() { Some(obj.atlas.clone()) } else { None })
+                        } else {
+                            (None, None)
+                        }
                     } else {
-                        None
+                        (None, None)
                     };
                     self.redo_stack.push(UndoEvent::Mesh {
                         object_index,
                         mesh: current_mesh.unwrap_or_else(EditableMesh::new),
-                        atlas: if atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
+                        atlas: current_atlas,
                         description: description.clone(),
                     });
 
-                    // Restore the mesh to the correct object
+                    // Restore the mesh and atlas to the correct object
                     if let Some(idx) = object_index {
                         if let Some(obj) = self.project.objects.get_mut(idx) {
                             obj.mesh = mesh;
+                            if let Some(a) = atlas {
+                                obj.atlas = a;
+                            }
                         }
                         self.project.selected_object = Some(idx);
-                    }
-                    if let Some(a) = atlas {
-                        self.project.atlas = a;
                     }
                     self.dirty = true;
                     self.set_status(&format!("Undo: {}", description), 1.0);
@@ -1521,27 +1529,31 @@ impl ModelerState {
             match event {
                 UndoEvent::Mesh { object_index, mesh, atlas, description } => {
                     // Save current state to undo stack
-                    let current_mesh = if let Some(idx) = object_index {
-                        self.project.objects.get(idx).map(|o| o.mesh.clone())
+                    let (current_mesh, current_atlas) = if let Some(idx) = object_index {
+                        if let Some(obj) = self.project.objects.get(idx) {
+                            (Some(obj.mesh.clone()), if atlas.is_some() { Some(obj.atlas.clone()) } else { None })
+                        } else {
+                            (None, None)
+                        }
                     } else {
-                        None
+                        (None, None)
                     };
                     self.undo_stack.push(UndoEvent::Mesh {
                         object_index,
                         mesh: current_mesh.unwrap_or_else(EditableMesh::new),
-                        atlas: if atlas.is_some() { Some(self.project.atlas.clone()) } else { None },
+                        atlas: current_atlas,
                         description: description.clone(),
                     });
 
-                    // Restore the mesh to the correct object
+                    // Restore the mesh and atlas to the correct object
                     if let Some(idx) = object_index {
                         if let Some(obj) = self.project.objects.get_mut(idx) {
                             obj.mesh = mesh;
+                            if let Some(a) = atlas {
+                                obj.atlas = a;
+                            }
                         }
                         self.project.selected_object = Some(idx);
-                    }
-                    if let Some(a) = atlas {
-                        self.project.atlas = a;
                     }
                     self.dirty = true;
                     self.set_status(&format!("Redo: {}", description), 1.0);

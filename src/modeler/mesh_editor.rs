@@ -205,10 +205,8 @@ impl MeshObject {
 pub struct MeshProject {
     /// Project name
     pub name: String,
-    /// All mesh objects in the project
+    /// All mesh objects in the project (each has its own atlas)
     pub objects: Vec<MeshObject>,
-    /// The indexed texture atlas (stores palette indices)
-    pub atlas: IndexedAtlas,
 
     /// Global CLUT pool (shared across all textures)
     #[serde(default)]
@@ -225,19 +223,17 @@ pub struct MeshProject {
 
 impl MeshProject {
     pub fn new(name: impl Into<String>) -> Self {
-        // Create pool first so we can link its first CLUT to the atlas
+        // Create pool first so we can link its first CLUT to objects
         let clut_pool = ClutPool::default();
         let first_clut_id = clut_pool.first_id().unwrap_or(ClutId::NONE);
 
-        // Create atlas with default CLUT linked to pool's first CLUT
-        let mut atlas = IndexedAtlas::new(128, 128, ClutDepth::Bpp4);
-        atlas.default_clut = first_clut_id;
+        // Create default cube with atlas linked to pool's first CLUT
+        let mut cube = MeshObject::cube("Cube.00", 1024.0);
+        cube.atlas.default_clut = first_clut_id;
 
         Self {
             name: name.into(),
-            // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
-            objects: vec![MeshObject::cube("Cube.00", 1024.0)],
-            atlas,
+            objects: vec![cube],
             clut_pool,
             preview_clut: None,
             selected_object: Some(0),
@@ -271,7 +267,7 @@ impl MeshProject {
         self.objects.iter().map(|o| o.mesh.face_count()).sum()
     }
 
-    /// Get the effective CLUT for the atlas (preview_clut > default_clut > first in pool)
+    /// Get the effective CLUT for rendering (preview_clut > first object's clut > first in pool)
     pub fn effective_clut(&self) -> Option<&Clut> {
         // Try preview override first
         if let Some(preview_id) = self.preview_clut {
@@ -279,10 +275,12 @@ impl MeshProject {
                 return Some(clut);
             }
         }
-        // Try atlas default
-        if self.atlas.default_clut.is_valid() {
-            if let Some(clut) = self.clut_pool.get(self.atlas.default_clut) {
-                return Some(clut);
+        // Try first object's atlas default CLUT
+        if let Some(first_obj) = self.objects.first() {
+            if first_obj.atlas.default_clut.is_valid() {
+                if let Some(clut) = self.clut_pool.get(first_obj.atlas.default_clut) {
+                    return Some(clut);
+                }
             }
         }
         // Fall back to first CLUT in pool

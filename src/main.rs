@@ -767,8 +767,8 @@ async fn main() {
                                             let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
                                             indexed.default_clut = clut_id;
                                             let depth_label = indexed.depth.short_label();
-                                            // Set the indexed atlas as the project atlas
-                                            ms.modeler_state.project.atlas = indexed;
+                                            // Set the indexed atlas on the selected object
+                                            *ms.modeler_state.atlas_mut() = indexed;
                                             ms.modeler_state.selected_clut = Some(clut_id);
                                             // Show "(forced)" if user manually selected the depth
                                             let forced = if clut_depth_override.is_some() { " forced" } else { "" };
