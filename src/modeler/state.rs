@@ -7,10 +7,11 @@
 
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15, Clut};
+use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15, Clut, ClutId};
 use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
+use crate::asset::Asset;
 use super::mesh_editor::{
-    EditableMesh, MeshProject, MeshObject, IndexedAtlas, EditFace, TextureRef,
+    EditableMesh, MeshObject, IndexedAtlas, EditFace, TextureRef, ClutPool,
     checkerboard_atlas, checkerboard_clut,
 };
 use super::model::Animation;
@@ -776,9 +777,17 @@ pub struct ModelerState {
     // Edit mode
     pub interaction_mode: InteractionMode,
 
-    // PicoCAD-style project with multiple objects and texture atlas
-    // This is the single source of truth for mesh data - access via mesh() and mesh_mut()
-    pub project: MeshProject,
+    // Asset with embedded mesh + components
+    // This is the single source of truth for mesh data - access via objects() and objects_mut()
+    pub asset: Asset,
+
+    // Selection and CLUT state (moved from MeshProject, not serialized with asset)
+    /// Currently selected object index within the mesh component
+    pub selected_object: Option<usize>,
+    /// Global CLUT pool (shared across all textures)
+    pub clut_pool: ClutPool,
+    /// Preview CLUT override (for testing palette swaps without changing default)
+    pub preview_clut: Option<ClutId>,
 
     // File state
     pub current_file: Option<PathBuf>,
@@ -1011,8 +1020,12 @@ impl ModelerState {
             lib
         };
 
-        // Project is the single source of truth for mesh data
-        let mut project = MeshProject::default();
+        // Asset is the single source of truth for mesh data
+        // Asset::new() creates a default cube mesh
+        let asset = Asset::new("untitled");
+
+        // Initialize CLUT pool with a default grayscale palette
+        let clut_pool = ClutPool::default();
 
         // Select first user texture for editing (but don't apply to default cube)
         let (editing_texture, selected_user_texture) = if let Some((name, tex)) = user_textures.iter().next() {
@@ -1024,8 +1037,11 @@ impl ModelerState {
         Self {
             interaction_mode: InteractionMode::Edit,
 
-            // PicoCAD-style project (single source of truth for geometry)
-            project,
+            // Asset (single source of truth for geometry)
+            asset,
+            selected_object: Some(0),
+            clut_pool,
+            preview_clut: None,
 
             current_file: None,
 
@@ -1231,13 +1247,24 @@ impl ModelerState {
     }
 
     // ========================================================================
-    // Mesh Access (project is single source of truth)
+    // Object/Mesh Access (asset is single source of truth)
     // ========================================================================
+
+    /// Get all mesh objects as a slice
+    pub fn objects(&self) -> &[MeshObject] {
+        self.asset.mesh().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Get mutable access to mesh objects
+    pub fn objects_mut(&mut self) -> Option<&mut Vec<MeshObject>> {
+        self.asset.mesh_mut()
+    }
 
     /// Get a reference to the currently selected mesh (single source of truth)
     pub fn mesh(&self) -> &EditableMesh {
         static EMPTY: std::sync::OnceLock<EditableMesh> = std::sync::OnceLock::new();
-        self.project.selected()
+        self.selected_object
+            .and_then(|i| self.objects().get(i))
             .map(|obj| &obj.mesh)
             .unwrap_or_else(|| EMPTY.get_or_init(EditableMesh::new))
     }
@@ -1245,7 +1272,8 @@ impl ModelerState {
     /// Get a mutable reference to the currently selected mesh (single source of truth)
     /// Returns None if no object is selected
     pub fn mesh_mut(&mut self) -> Option<&mut EditableMesh> {
-        self.project.selected_mut().map(|obj| &mut obj.mesh)
+        let idx = self.selected_object?;
+        self.objects_mut()?.get_mut(idx).map(|obj| &mut obj.mesh)
     }
 
     /// Toggle interaction mode (Object <-> Edit)
@@ -1257,19 +1285,21 @@ impl ModelerState {
 
     /// Create a new mesh (replaces current)
     pub fn new_mesh(&mut self) {
-        self.project = MeshProject::default();
-        // Project is single source of truth - mesh() will read from it
+        self.asset = Asset::new("untitled");
+        self.selected_object = Some(0);
+        self.clut_pool = ClutPool::default();
+        self.preview_clut = None;
         self.current_file = None;
         self.selection.clear();
         self.dirty = false;
         self.set_status("New mesh", 1.0);
     }
 
-    /// Save project to file (includes mesh + texture atlas)
+    /// Save asset to file (includes mesh + components)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_project(&mut self, path: &std::path::Path) -> Result<(), String> {
-        // Project is single source of truth - mesh is already in project
-        self.project.save_to_file(path)
+        // Asset is single source of truth - save it directly
+        self.asset.save(path)
             .map_err(|e| format!("{}", e))?;
         self.current_file = Some(path.to_path_buf());
         self.dirty = false;
@@ -1277,15 +1307,15 @@ impl ModelerState {
         Ok(())
     }
 
-    /// Load project from file (includes mesh + texture atlas)
+    /// Load asset from file (includes mesh + components)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_project(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let project = MeshProject::load_from_file(path)
+        let asset = Asset::load(path)
             .map_err(|e| format!("{}", e))?;
-        self.project = project;
-        // Resolve hash-based texture references using the texture library
+        self.asset = asset;
+        self.selected_object = if self.objects().is_empty() { None } else { Some(0) };
+        // Resolve ID-based texture references using the texture library
         self.resolve_all_texture_refs();
-        // Project is single source of truth - mesh() will read from it
         self.current_file = Some(path.to_path_buf());
         self.selection.clear();
         self.dirty = false;
@@ -1293,65 +1323,104 @@ impl ModelerState {
         Ok(())
     }
 
-    /// Resolve all ID-based texture references in the project
+    /// Resolve all ID-based texture references in the asset
     ///
     /// For objects with TextureRef::Id, looks up the texture in the library
-    /// and populates the runtime atlas with the texture data.
+    /// and populates the runtime atlas with the texture data AND creates CLUTs.
     pub fn resolve_all_texture_refs(&mut self) {
-        for obj in &mut self.project.objects {
-            if let TextureRef::Id(id) = &obj.texture_ref {
-                if let Some(tex) = self.user_textures.get_by_id(*id) {
-                    // Found the texture - populate atlas with its data
-                    obj.atlas.width = tex.width;
-                    obj.atlas.height = tex.height;
-                    obj.atlas.depth = tex.depth;
-                    obj.atlas.indices = tex.indices.clone();
-                    // Note: CLUT needs to be added to clut_pool separately
-                    // For now, atlas will use whatever CLUT was set when texture was applied
+        use crate::rasterizer::Clut;
+
+        // Debug: print what texture refs we have
+        eprintln!("[resolve_all_texture_refs] Processing {} objects", self.objects().len());
+        for (idx, obj) in self.objects().iter().enumerate() {
+            eprintln!("  Object {}: '{}' has texture_ref: {:?}", idx, obj.name, obj.texture_ref);
+        }
+        eprintln!("  Texture library has {} textures", self.user_textures.len());
+        for (name, tex) in self.user_textures.iter() {
+            eprintln!("    - '{}' id={}", name, tex.id);
+        }
+
+        // First, collect all ID -> texture data mappings we need
+        // (to avoid borrow checker issues with self)
+        let updates: Vec<(usize, String, usize, usize, crate::rasterizer::ClutDepth, Vec<u8>, Vec<Color15>)> = self.objects()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, obj)| {
+                if let TextureRef::Id(id) = &obj.texture_ref {
+                    eprintln!("  Looking up texture ID {} for object '{}'", id, obj.name);
+                    let result = self.user_textures.get_by_id(*id).map(|tex| {
+                        eprintln!("    Found texture '{}' ({}x{})", tex.name, tex.width, tex.height);
+                        (idx, obj.name.clone(), tex.width, tex.height, tex.depth, tex.indices.clone(), tex.palette.clone())
+                    });
+                    if result.is_none() {
+                        eprintln!("    NOT FOUND in library!");
+                    }
+                    result
+                } else {
+                    None
                 }
-                // If texture not found, keep checkerboard fallback
+            })
+            .collect();
+
+        // Now apply the updates - create CLUTs and set atlas data
+        for (idx, obj_name, width, height, depth, indices, palette) in updates {
+            // Create a CLUT for this object with the texture's palette
+            let clut_name = format!("{}_clut", obj_name);
+            let mut new_clut = Clut::new_4bit(&clut_name);
+            new_clut.colors = palette;
+            new_clut.depth = depth;
+            let clut_id = self.clut_pool.add_clut(new_clut);
+
+            // Update the object's atlas
+            if let Some(objects) = self.objects_mut() {
+                if let Some(obj) = objects.get_mut(idx) {
+                    obj.atlas.width = width;
+                    obj.atlas.height = height;
+                    obj.atlas.depth = depth;
+                    obj.atlas.indices = indices;
+                    obj.atlas.default_clut = clut_id;
+                }
             }
         }
     }
 
     // ========================================================================
-    // PicoCAD-style Project Helpers
+    // Asset Helpers
     // ========================================================================
 
     /// Get the indexed texture atlas for the selected object
     /// Falls back to first object if no object is selected
     pub fn atlas(&self) -> &IndexedAtlas {
+        static EMPTY: std::sync::OnceLock<IndexedAtlas> = std::sync::OnceLock::new();
         // Determine which object index to use
-        let idx = self.project.selected_object
-            .filter(|&i| i < self.project.objects.len())
+        let idx = self.selected_object
+            .filter(|&i| i < self.objects().len())
             .unwrap_or(0);
 
-        &self.project.objects.get(idx)
-            .expect("Project must have at least one object")
-            .atlas
+        self.objects().get(idx)
+            .map(|obj| &obj.atlas)
+            .unwrap_or_else(|| EMPTY.get_or_init(|| IndexedAtlas::new_checkerboard(128, 128, crate::rasterizer::ClutDepth::Bpp4)))
     }
 
     /// Get mutable indexed texture atlas for the selected object
     /// Falls back to first object if no object is selected
-    pub fn atlas_mut(&mut self) -> &mut IndexedAtlas {
+    pub fn atlas_mut(&mut self) -> Option<&mut IndexedAtlas> {
         // Determine which object index to use
-        let idx = self.project.selected_object
-            .filter(|&i| i < self.project.objects.len())
+        let idx = self.selected_object
+            .filter(|&i| i < self.objects().len())
             .unwrap_or(0);
 
-        &mut self.project.objects.get_mut(idx)
-            .expect("Project must have at least one object")
-            .atlas
+        self.objects_mut()?.get_mut(idx).map(|obj| &mut obj.atlas)
     }
 
     /// Get the indexed texture atlas for a specific object
     pub fn object_atlas(&self, idx: usize) -> Option<&IndexedAtlas> {
-        self.project.objects.get(idx).map(|o| &o.atlas)
+        self.objects().get(idx).map(|o| &o.atlas)
     }
 
     /// Get mutable indexed texture atlas for a specific object
     pub fn object_atlas_mut(&mut self, idx: usize) -> Option<&mut IndexedAtlas> {
-        self.project.objects.get_mut(idx).map(|o| &mut o.atlas)
+        self.objects_mut()?.get_mut(idx).map(|o| &mut o.atlas)
     }
 
     /// Resolve a TextureRef to actual texture data
@@ -1372,8 +1441,8 @@ impl ModelerState {
                     .map(ResolvedTexture::UserTexture)
             }
             TextureRef::Embedded(atlas) => {
-                // Get CLUT from the project's CLUT pool
-                self.project.clut_pool.get(atlas.default_clut)
+                // Get CLUT from the CLUT pool
+                self.clut_pool.get(atlas.default_clut)
                     .map(|clut| ResolvedTexture::Embedded {
                         atlas: atlas.as_ref(),
                         clut,
@@ -1384,33 +1453,33 @@ impl ModelerState {
 
     /// Resolve texture for a specific object index
     pub fn resolve_object_texture(&self, idx: usize) -> Option<ResolvedTexture<'_>> {
-        self.project.objects.get(idx)
+        self.objects().get(idx)
             .and_then(|obj| self.resolve_texture(&obj.texture_ref))
     }
 
     /// Get all visible mesh objects
     pub fn visible_objects(&self) -> impl Iterator<Item = (usize, &MeshObject)> {
-        self.project.objects.iter().enumerate().filter(|(_, o)| o.visible)
+        self.objects().iter().enumerate().filter(|(_, o)| o.visible)
     }
 
     /// Get the currently selected object index
     pub fn selected_object_index(&self) -> Option<usize> {
-        self.project.selected_object
+        self.selected_object
     }
 
     /// Select an object by index
     pub fn select_object(&mut self, index: usize) {
-        if index < self.project.objects.len() {
+        if index < self.objects().len() {
             // Clear editing state when switching objects
-            if self.project.selected_object != Some(index) {
+            if self.selected_object != Some(index) {
                 self.editing_indexed_atlas = false;
                 self.editing_texture = None;
             }
-            self.project.selected_object = Some(index);
+            self.selected_object = Some(index);
             self.selection.clear();
 
             // Extract info before mutating self
-            let (obj_name, tex_ref) = self.project.objects.get(index)
+            let (obj_name, tex_ref) = self.objects().get(index)
                 .map(|obj| (obj.name.clone(), obj.texture_ref.clone()))
                 .unwrap_or_default();
 
@@ -1440,12 +1509,13 @@ impl ModelerState {
 
     /// Get the currently selected mesh object
     pub fn selected_object(&self) -> Option<&MeshObject> {
-        self.project.selected()
+        self.selected_object.and_then(|i| self.objects().get(i))
     }
 
     /// Get the currently selected mesh object mutably
     pub fn selected_object_mut(&mut self) -> Option<&mut MeshObject> {
-        self.project.selected_mut()
+        let idx = self.selected_object?;
+        self.objects_mut()?.get_mut(idx)
     }
 
     /// Get the mirror settings for the currently selected object
@@ -1456,17 +1526,27 @@ impl ModelerState {
             .unwrap_or_default()
     }
 
-    /// Add a new object to the project
+    /// Add a new object to the asset
     pub fn add_object(&mut self, obj: MeshObject) -> usize {
-        let idx = self.project.add_object(obj);
-        self.project.selected_object = Some(idx);
-        self.dirty = true;
-        idx
+        if let Some(objects) = self.objects_mut() {
+            let idx = objects.len();
+            objects.push(obj);
+            self.selected_object = Some(idx);
+            self.dirty = true;
+            idx
+        } else {
+            // No mesh component - create one with this object
+            use crate::asset::AssetComponent;
+            self.asset.add_component(AssetComponent::Mesh { objects: vec![obj] });
+            self.selected_object = Some(0);
+            self.dirty = true;
+            0
+        }
     }
 
     /// Generate a unique object name with 2-digit suffix (e.g., "Cube.00", "Cube.01")
     pub fn generate_unique_object_name(&self, base_name: &str) -> String {
-        let existing_names: std::collections::HashSet<&str> = self.project.objects
+        let existing_names: std::collections::HashSet<&str> = self.objects()
             .iter()
             .map(|o| o.name.as_str())
             .collect();
@@ -1479,21 +1559,20 @@ impl ModelerState {
             }
         }
         // Fallback for 100+ objects (unlikely)
-        format!("{}.{}", base_name, self.project.objects.len())
+        format!("{}.{}", base_name, self.objects().len())
     }
 
-    /// Create a new project (replaces current)
+    /// Create a new asset (replaces current)
     pub fn new_project(&mut self) {
-        self.project = MeshProject::default();
-        // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
-        // Set directly in project (single source of truth)
-        if let Some(mesh) = self.mesh_mut() {
-            *mesh = EditableMesh::cube(1024.0);
-        }
+        self.asset = Asset::new("untitled");
+        self.selected_object = Some(0);
+        self.clut_pool = ClutPool::default();
+        self.preview_clut = None;
+        // Default cube is already created by Asset::new()
         self.current_file = None;
         self.selection.clear();
         self.dirty = false;
-        self.set_status("New project", 1.0);
+        self.set_status("New asset", 1.0);
     }
 
     // ========================================================================
@@ -1503,7 +1582,7 @@ impl ModelerState {
     /// Save current mesh state for undo (before making geometry changes)
     pub fn save_undo(&mut self, description: &str) {
         self.undo_stack.push(UndoEvent::Mesh {
-            object_index: self.project.selected_object,
+            object_index: self.selected_object,
             mesh: self.mesh().clone(),
             atlas: None,
             description: description.to_string(),
@@ -1520,7 +1599,7 @@ impl ModelerState {
     /// Save current mesh state including texture atlas (for paint operations)
     pub fn save_undo_with_atlas(&mut self, description: &str) {
         self.undo_stack.push(UndoEvent::Mesh {
-            object_index: self.project.selected_object,
+            object_index: self.selected_object,
             mesh: self.mesh().clone(),
             atlas: Some(self.atlas().clone()),
             description: description.to_string(),
@@ -1579,7 +1658,7 @@ impl ModelerState {
                 UndoEvent::Mesh { object_index, mesh, atlas, description } => {
                     // Save current state to redo stack
                     let (current_mesh, current_atlas) = if let Some(idx) = object_index {
-                        if let Some(obj) = self.project.objects.get(idx) {
+                        if let Some(obj) = self.objects().get(idx) {
                             (Some(obj.mesh.clone()), if atlas.is_some() { Some(obj.atlas.clone()) } else { None })
                         } else {
                             (None, None)
@@ -1596,13 +1675,15 @@ impl ModelerState {
 
                     // Restore the mesh and atlas to the correct object
                     if let Some(idx) = object_index {
-                        if let Some(obj) = self.project.objects.get_mut(idx) {
-                            obj.mesh = mesh;
-                            if let Some(a) = atlas {
-                                obj.atlas = a;
+                        if let Some(objects) = self.objects_mut() {
+                            if let Some(obj) = objects.get_mut(idx) {
+                                obj.mesh = mesh;
+                                if let Some(a) = atlas {
+                                    obj.atlas = a;
+                                }
                             }
                         }
-                        self.project.selected_object = Some(idx);
+                        self.selected_object = Some(idx);
                     }
                     self.dirty = true;
                     self.set_status(&format!("Undo: {}", description), 1.0);
@@ -1643,7 +1724,7 @@ impl ModelerState {
                 UndoEvent::Mesh { object_index, mesh, atlas, description } => {
                     // Save current state to undo stack
                     let (current_mesh, current_atlas) = if let Some(idx) = object_index {
-                        if let Some(obj) = self.project.objects.get(idx) {
+                        if let Some(obj) = self.objects().get(idx) {
                             (Some(obj.mesh.clone()), if atlas.is_some() { Some(obj.atlas.clone()) } else { None })
                         } else {
                             (None, None)
@@ -1660,13 +1741,15 @@ impl ModelerState {
 
                     // Restore the mesh and atlas to the correct object
                     if let Some(idx) = object_index {
-                        if let Some(obj) = self.project.objects.get_mut(idx) {
-                            obj.mesh = mesh;
-                            if let Some(a) = atlas {
-                                obj.atlas = a;
+                        if let Some(objects) = self.objects_mut() {
+                            if let Some(obj) = objects.get_mut(idx) {
+                                obj.mesh = mesh;
+                                if let Some(a) = atlas {
+                                    obj.atlas = a;
+                                }
                             }
                         }
-                        self.project.selected_object = Some(idx);
+                        self.selected_object = Some(idx);
                     }
                     self.dirty = true;
                     self.set_status(&format!("Redo: {}", description), 1.0);

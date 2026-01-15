@@ -22,6 +22,7 @@ mod game;
 mod project;
 mod input;
 mod texture;
+mod asset;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -523,16 +524,16 @@ async fn main() {
 
                     match browser_action {
                         ModelBrowserAction::SelectPreview(index) => {
-                            if let Some(model_info) = ms.model_browser.models.get(index) {
-                                let path = model_info.path.clone();
+                            if let Some(asset_info) = ms.model_browser.assets.get(index) {
+                                let path = asset_info.path.clone();
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
-                                    match modeler::MeshProject::load_from_file(&path) {
-                                        Ok(project) => {
-                                            ms.model_browser.set_preview(project);
+                                    match asset::Asset::load(&path) {
+                                        Ok(asset) => {
+                                            ms.model_browser.set_preview(asset, &ms.modeler_state.user_textures);
                                         }
                                         Err(e) => {
-                                            eprintln!("Failed to load model: {}", e);
+                                            eprintln!("Failed to load asset: {}", e);
                                             ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
                                         }
                                     }
@@ -543,13 +544,16 @@ async fn main() {
                                 }
                             }
                         }
-                        ModelBrowserAction::OpenModel => {
-                            if let Some(project) = ms.model_browser.preview_project.take() {
-                                let path = ms.model_browser.selected_model()
-                                    .map(|m| m.path.clone())
-                                    .unwrap_or_else(|| PathBuf::from("assets/models/untitled.ron"));
-                                ms.modeler_state.project = project;
-                                // Project is single source of truth - mesh() reads from it directly
+                        ModelBrowserAction::OpenAsset => {
+                            if let Some(asset) = ms.model_browser.preview_asset.take() {
+                                let path = ms.model_browser.selected_asset()
+                                    .map(|a| a.path.clone())
+                                    .unwrap_or_else(|| PathBuf::from("assets/assets/untitled.ron"));
+                                // Set the asset directly in the modeler
+                                ms.modeler_state.asset = asset;
+                                ms.modeler_state.selected_object = if ms.modeler_state.objects().is_empty() { None } else { Some(0) };
+                                // Resolve ID-based texture refs using the texture library
+                                ms.modeler_state.resolve_all_texture_refs();
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = false;
                                 ms.modeler_state.selection = modeler::ModelerSelection::None;
@@ -557,7 +561,7 @@ async fn main() {
                                 ms.model_browser.close();
                             }
                         }
-                        ModelBrowserAction::NewModel => {
+                        ModelBrowserAction::NewAsset => {
                             ms.modeler_state.new_mesh();
                             ms.model_browser.close();
                         }
@@ -763,12 +767,14 @@ async fn main() {
                                         if let Some(tex_result) = result.texture {
                                             let TextureImportResult { mut indexed, clut, color_count } = tex_result;
                                             // Clear existing CLUTs and add only the imported one
-                                            ms.modeler_state.project.clut_pool.clear();
-                                            let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
+                                            ms.modeler_state.clut_pool.clear();
+                                            let clut_id = ms.modeler_state.clut_pool.add_clut(clut);
                                             indexed.default_clut = clut_id;
                                             let depth_label = indexed.depth.short_label();
                                             // Set the indexed atlas on the selected object
-                                            *ms.modeler_state.atlas_mut() = indexed;
+                                            if let Some(atlas) = ms.modeler_state.atlas_mut() {
+                                                *atlas = indexed;
+                                            }
                                             ms.modeler_state.selected_clut = Some(clut_id);
                                             // Show "(forced)" if user manually selected the depth
                                             let forced = if clut_depth_override.is_some() { " forced" } else { "" };
@@ -1051,21 +1057,21 @@ fn next_available_level_name() -> PathBuf {
     levels_dir.join(format!("level_{:03}.ron", next_num))
 }
 
-/// Find the next available model filename with format "model_001", "model_002", etc.
-fn next_available_model_name() -> PathBuf {
-    let models_dir = PathBuf::from("assets/models");
+/// Find the next available asset filename with format "asset_001", "asset_002", etc.
+fn next_available_asset_path() -> PathBuf {
+    let assets_dir = PathBuf::from(asset::ASSETS_DIR);
 
     // Create directory if it doesn't exist
-    let _ = std::fs::create_dir_all(&models_dir);
+    let _ = std::fs::create_dir_all(&assets_dir);
 
-    // Find the highest existing model_XXX number
+    // Find the highest existing asset_XXX number
     let mut highest = 0;
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+    if let Ok(entries) = std::fs::read_dir(&assets_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                // Check for pattern "model_XXX"
-                if let Some(num_str) = stem.strip_prefix("model_") {
+                // Check for pattern "asset_XXX"
+                if let Some(num_str) = stem.strip_prefix("asset_") {
                     if let Ok(num) = num_str.parse::<u32>() {
                         highest = highest.max(num);
                     }
@@ -1076,7 +1082,7 @@ fn next_available_model_name() -> PathBuf {
 
     // Generate next filename
     let next_num = highest + 1;
-    models_dir.join(format!("model_{:03}.ron", next_num))
+    assets_dir.join(format!("asset_{:03}.ron", next_num))
 }
 
 fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, game: &mut game::GameToolState) {
@@ -1335,7 +1341,7 @@ fn handle_modeler_action(
             {
                 model_browser.pending_load_list = true;
             }
-            state.set_status("Browse models", 2.0);
+            state.set_status("Browse assets", 2.0);
         }
         ModelerAction::BrowseMeshes => {
             let meshes = discover_meshes();
@@ -1354,8 +1360,8 @@ fn handle_modeler_action(
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             } else {
-                // No current file - save with auto-generated name (model_001, model_002, etc.)
-                let default_path = next_available_model_name();
+                // No current file - save with auto-generated name (asset_001, asset_002, etc.)
+                let default_path = next_available_asset_path();
                 if let Err(e) = state.save_project(&default_path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 } else {
@@ -1369,13 +1375,13 @@ fn handle_modeler_action(
         }
         #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::SaveAs => {
-            let default_dir = PathBuf::from("assets/models");
+            let default_dir = PathBuf::from(asset::ASSETS_DIR);
             let _ = std::fs::create_dir_all(&default_dir);
 
             let dialog = rfd::FileDialog::new()
-                .add_filter("RON Model", &["ron"])
+                .add_filter("RON Asset", &["ron"])
                 .set_directory(&default_dir)
-                .set_file_name("model.ron");
+                .set_file_name("asset.ron");
 
             if let Some(save_path) = dialog.save_file() {
                 if let Err(e) = state.save_project(&save_path) {
@@ -1389,7 +1395,7 @@ fn handle_modeler_action(
         }
         #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::PromptLoad => {
-            let default_dir = PathBuf::from("assets/models");
+            let default_dir = PathBuf::from(asset::ASSETS_DIR);
             let _ = std::fs::create_dir_all(&default_dir);
 
             let dialog = rfd::FileDialog::new()

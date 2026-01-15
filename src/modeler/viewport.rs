@@ -972,8 +972,8 @@ pub fn draw_modeler_viewport_ext(
     let use_rgb555 = state.raster_settings.use_rgb555;
 
     // Fallback CLUT for objects with no assigned CLUT
-    let fallback_clut = state.project.clut_pool.first_id()
-        .and_then(|id| state.project.clut_pool.get(id));
+    let fallback_clut = state.clut_pool.first_id()
+        .and_then(|id| state.clut_pool.get(id));
 
     // Collect all geometry from all objects into combined lists
     let mut all_vertices: Vec<RasterVertex> = Vec::new();
@@ -985,7 +985,7 @@ pub fn draw_modeler_viewport_ext(
     // Track if any object needs backface culling disabled
     let mut any_double_sided = false;
 
-    for (obj_idx, obj) in state.project.objects.iter().enumerate() {
+    for (obj_idx, obj) in state.objects().iter().enumerate() {
         // Skip hidden objects
         if !obj.visible {
             continue;
@@ -997,7 +997,7 @@ pub fn draw_modeler_viewport_ext(
 
         // Get this object's CLUT from the shared pool
         let obj_clut = if obj.atlas.default_clut.is_valid() {
-            state.project.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
+            state.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
         } else {
             fallback_clut
         };
@@ -1014,7 +1014,7 @@ pub fn draw_modeler_viewport_ext(
         let mesh = &obj.mesh;
 
         // Dim non-selected objects slightly
-        let base_color = if state.project.selected_object == Some(obj_idx) {
+        let base_color = if state.selected_object == Some(obj_idx) {
             180u8
         } else {
             140u8
@@ -1035,7 +1035,7 @@ pub fn draw_modeler_viewport_ext(
         }
 
         // Add mirrored vertices if mirror mode is enabled for selected object
-        let mirror_vertex_offset = if state.current_mirror_settings().enabled && state.project.selected_object == Some(obj_idx) {
+        let mirror_vertex_offset = if state.current_mirror_settings().enabled && state.selected_object == Some(obj_idx) {
             let offset = all_vertices.len();
             for v in &mesh.vertices {
                 all_vertices.push(RasterVertex {

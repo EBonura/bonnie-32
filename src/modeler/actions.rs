@@ -71,9 +71,9 @@ pub fn create_modeler_actions() -> ActionRegistry {
 
     registry.register(
         Action::new("file.browse_models")
-            .label("Browse Models")
+            .label("Browse Assets")
             .icon(icon::LAYERS)
-            .status_tip("Open model browser")
+            .status_tip("Open asset browser")
             .category("File"),
     );
 

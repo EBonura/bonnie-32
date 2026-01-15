@@ -1459,26 +1459,38 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     });
 
                     if let Some((gx, gz)) = sector_data {
-                        // Check if we can place this object type
-                        let can_place = state.level.can_add_object(
-                            current_room_idx, gx, gz, &state.selected_object_type
-                        );
-
-                        match can_place {
-                            Ok(()) => {
-                                state.save_undo();
-                                let new_object = crate::world::LevelObject::new(
-                                    gx, gz,
-                                    state.selected_object_type.clone()
-                                );
-                                let obj_name = state.selected_object_type.display_name();
-                                if let Ok(idx) = state.level.add_object(current_room_idx, new_object) {
-                                    state.set_selection(super::Selection::Object { room: current_room_idx, index: idx });
-                                    state.set_status(&format!("{} placed", obj_name), 1.0);
+                        // Determine if placing an asset or a built-in object type
+                        let (new_object, obj_name) = if let Some(ref asset_name) = state.selected_asset {
+                            // Get asset ID from library
+                            if let Some(asset) = state.asset_library.get(asset_name) {
+                                let obj = crate::world::LevelObject::from_asset(gx, gz, asset.id);
+                                (Some(obj), asset_name.clone())
+                            } else {
+                                state.set_status(&format!("Asset '{}' not found", asset_name), 2.0);
+                                (None, String::new())
+                            }
+                        } else {
+                            // Check if we can place this built-in object type
+                            match state.level.can_add_object(current_room_idx, gx, gz, &state.selected_object_type) {
+                                Ok(()) => {
+                                    let obj = crate::world::LevelObject::new(
+                                        gx, gz,
+                                        state.selected_object_type.clone()
+                                    );
+                                    (Some(obj), state.selected_object_type.display_name().to_string())
+                                }
+                                Err(msg) => {
+                                    state.set_status(msg, 2.0);
+                                    (None, String::new())
                                 }
                             }
-                            Err(msg) => {
-                                state.set_status(msg, 2.0);
+                        };
+
+                        if let Some(new_object) = new_object {
+                            state.save_undo();
+                            if let Ok(idx) = state.level.add_object(current_room_idx, new_object) {
+                                state.set_selection(super::Selection::Object { room: current_room_idx, index: idx });
+                                state.set_status(&format!("{} placed", obj_name), 1.0);
                             }
                         }
                     } else {

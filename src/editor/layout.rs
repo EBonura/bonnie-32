@@ -539,6 +539,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     // Object type picker (only show when PlaceObject tool is active)
     // Shows "< Type >" with arrows to cycle through object types
+    // Also shows "< Asset >" picker if assets are available
     if state.tool == EditorTool::PlaceObject {
         toolbar.separator();
 
@@ -570,12 +571,46 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             }
         }).unwrap_or(0);
 
-        // Draw "< Type >" navigation
+        // Draw "< Type >" navigation for built-in object types
         if toolbar.arrow_picker(ctx, icon_font, object_types[current_idx].0, &mut |delta: i32| {
             let new_idx = (current_idx as i32 + delta).rem_euclid(object_types.len() as i32) as usize;
             state.selected_object_type = object_types[new_idx].1.clone();
+            // Clear asset selection when switching to built-in type
+            state.selected_asset = None;
         }) {
             // Arrow was clicked, selection already changed via callback
+        }
+
+        // Asset picker (if assets are available)
+        if !state.asset_library.is_empty() {
+            toolbar.separator();
+
+            // Collect asset names
+            let asset_names: Vec<&str> = state.asset_library.names().collect();
+
+            // Find current asset index (or show "Asset" if none selected)
+            let (current_asset_idx, current_label) = if let Some(ref selected) = state.selected_asset {
+                let idx = asset_names.iter().position(|n| *n == selected.as_str()).unwrap_or(0);
+                (Some(idx), asset_names.get(idx).copied().unwrap_or("Asset"))
+            } else {
+                (None, "Asset")
+            };
+
+            // Draw "< Asset >" navigation
+            if toolbar.arrow_picker(ctx, icon_font, current_label, &mut |delta: i32| {
+                if asset_names.is_empty() {
+                    return;
+                }
+                let new_idx = if let Some(idx) = current_asset_idx {
+                    (idx as i32 + delta).rem_euclid(asset_names.len() as i32) as usize
+                } else {
+                    // First selection - start at index 0 or last depending on direction
+                    if delta > 0 { 0 } else { asset_names.len() - 1 }
+                };
+                state.selected_asset = Some(asset_names[new_idx].to_string());
+            }) {
+                // Arrow was clicked, selection already changed via callback
+            }
         }
     }
 

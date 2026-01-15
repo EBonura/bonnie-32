@@ -1,66 +1,67 @@
-//! Model Browser
+//! Asset Browser
 //!
-//! Modal dialog for browsing and previewing saved mesh models.
+//! Modal dialog for browsing and previewing saved assets.
+//! Assets are component-based 3D objects with embedded mesh + component definitions.
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
 use crate::world::SECTOR_SIZE;
-use super::mesh_editor::MeshProject;
+use crate::asset::{Asset, ASSETS_DIR};
 use std::path::PathBuf;
 
-/// Info about a model file
+/// Info about an asset file
 #[derive(Debug, Clone)]
-pub struct ModelInfo {
+pub struct AssetInfo {
     /// Display name (file stem)
     pub name: String,
     /// Full path to the file
     pub path: PathBuf,
 }
 
-/// Discover model files in a directory
+/// Discover asset files in the assets directory
 #[cfg(not(target_arch = "wasm32"))]
-pub fn discover_models() -> Vec<ModelInfo> {
-    let models_dir = PathBuf::from("assets/models");
-    let mut models = Vec::new();
+pub fn discover_assets() -> Vec<AssetInfo> {
+    let assets_dir = PathBuf::from(ASSETS_DIR);
+    let mut assets = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+    if let Ok(entries) = std::fs::read_dir(&assets_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map_or(false, |ext| ext == "ron") {
                 let name = path.file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                models.push(ModelInfo { name, path });
+                assets.push(AssetInfo { name, path });
             }
         }
     }
 
     // Sort by name
-    models.sort_by(|a, b| a.name.cmp(&b.name));
-    models
+    assets.sort_by(|a, b| a.name.cmp(&b.name));
+    assets
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn discover_models() -> Vec<ModelInfo> {
+pub fn discover_assets() -> Vec<AssetInfo> {
     // WASM: return empty, load async from manifest
     Vec::new()
 }
 
-/// Load model list from manifest asynchronously (for WASM)
-pub async fn load_model_list() -> Vec<ModelInfo> {
+/// Load asset list from manifest asynchronously (for WASM)
+pub async fn load_asset_list() -> Vec<AssetInfo> {
     use macroquad::prelude::*;
 
     // Load and parse manifest
-    let manifest = match load_string("assets/models/manifest.txt").await {
+    let manifest = match load_string(&format!("{}/manifest.txt", ASSETS_DIR)).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to load models manifest: {}", e);
+            eprintln!("Failed to load assets manifest: {}", e);
             return Vec::new();
         }
     };
 
-    let mut models = Vec::new();
+    let mut assets = Vec::new();
 
     for line in manifest.lines() {
         let line = line.trim();
@@ -72,19 +73,18 @@ pub async fn load_model_list() -> Vec<ModelInfo> {
             .strip_suffix(".ron")
             .unwrap_or(line)
             .to_string();
-        let path = PathBuf::from(format!("assets/models/{}", line));
+        let path = PathBuf::from(format!("{}/{}", ASSETS_DIR, line));
 
-        models.push(ModelInfo { name, path });
+        assets.push(AssetInfo { name, path });
     }
 
-    models
+    assets
 }
 
-/// Load a specific model by path (for WASM async loading)
+/// Load a specific asset by path (for WASM async loading)
 /// Supports both compressed (brotli) and uncompressed RON files
-pub async fn load_model(path: &PathBuf) -> Option<MeshProject> {
+pub async fn load_asset_async(path: &PathBuf) -> Option<Asset> {
     use macroquad::prelude::*;
-    use std::io::Cursor;
 
     let path_str = path.to_string_lossy().replace('\\', "/");
 
@@ -94,40 +94,21 @@ pub async fn load_model(path: &PathBuf) -> Option<MeshProject> {
         Err(_) => return None,
     };
 
-    // Detect format: RON files start with '(' or whitespace, brotli is binary
-    let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
-
-    let contents = if is_plain_ron {
-        // Plain RON text
-        match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return None,
-        }
-    } else {
-        // Brotli compressed - decompress first
-        let mut decompressed = Vec::new();
-        match brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed) {
-            Ok(_) => match String::from_utf8(decompressed) {
-                Ok(s) => s,
-                Err(_) => return None,
-            },
-            Err(_) => return None,
-        }
-    };
-
-    MeshProject::load_from_str(&contents).ok()
+    Asset::load_from_bytes(&bytes).ok()
 }
 
-/// State for the model browser dialog
-pub struct ModelBrowser {
+/// State for the asset browser dialog
+pub struct AssetBrowser {
     /// Whether the browser is open
     pub open: bool,
-    /// List of available models
-    pub models: Vec<ModelInfo>,
+    /// List of available assets
+    pub assets: Vec<AssetInfo>,
     /// Currently selected index
     pub selected_index: Option<usize>,
-    /// Currently loaded preview project (includes mesh + texture atlas)
-    pub preview_project: Option<MeshProject>,
+    /// Currently loaded preview asset
+    pub preview_asset: Option<Asset>,
+    /// CLUTs for preview rendering (one per object, indexed by object index)
+    pub preview_cluts: Vec<crate::rasterizer::Clut>,
     /// Orbit camera state for preview
     pub orbit_yaw: f32,
     pub orbit_pitch: f32,
@@ -140,17 +121,18 @@ pub struct ModelBrowser {
     pub scroll_offset: f32,
     /// Path pending async load (WASM)
     pub pending_load_path: Option<PathBuf>,
-    /// Whether we need to async load the model list (WASM)
+    /// Whether we need to async load the asset list (WASM)
     pub pending_load_list: bool,
 }
 
-impl Default for ModelBrowser {
+impl Default for AssetBrowser {
     fn default() -> Self {
         Self {
             open: false,
-            models: Vec::new(),
+            assets: Vec::new(),
             selected_index: None,
-            preview_project: None,
+            preview_asset: None,
+            preview_cluts: Vec::new(),
             orbit_yaw: 0.5,
             orbit_pitch: 0.3,
             // Scale: 1024 units = 1 meter
@@ -165,25 +147,69 @@ impl Default for ModelBrowser {
     }
 }
 
-impl ModelBrowser {
-    /// Open the browser with the given list of models
-    pub fn open(&mut self, models: Vec<ModelInfo>) {
+impl AssetBrowser {
+    /// Open the browser with the given list of assets
+    pub fn open(&mut self, assets: Vec<AssetInfo>) {
         self.open = true;
-        self.models = models;
+        self.assets = assets;
         self.selected_index = None;
-        self.preview_project = None;
+        self.preview_asset = None;
+        self.preview_cluts.clear();
         self.scroll_offset = 0.0;
     }
 
     /// Close the browser
     pub fn close(&mut self) {
         self.open = false;
-        self.preview_project = None;
+        self.preview_asset = None;
+        self.preview_cluts.clear();
     }
 
-    /// Set the preview project
-    pub fn set_preview(&mut self, project: MeshProject) {
-        // Calculate bounding box to center camera (across all objects)
+    /// Set the preview asset with texture resolution
+    ///
+    /// The texture library is used to resolve TextureRef::Id references
+    /// so that preview rendering shows the correct textures.
+    pub fn set_preview(&mut self, mut asset: Asset, texture_library: &crate::texture::TextureLibrary) {
+        use crate::rasterizer::Clut;
+        use super::mesh_editor::{TextureRef, checkerboard_clut};
+
+        // Clear old CLUTs and prepare for new ones
+        self.preview_cluts.clear();
+
+        // Resolve texture references using the library and build CLUTs
+        if let Some(objects) = asset.mesh_mut() {
+            for obj in objects.iter_mut() {
+                match &obj.texture_ref {
+                    TextureRef::Id(id) => {
+                        if let Some(tex) = texture_library.get_by_id(*id) {
+                            // Copy texture data to atlas
+                            obj.atlas.width = tex.width;
+                            obj.atlas.height = tex.height;
+                            obj.atlas.depth = tex.depth;
+                            obj.atlas.indices = tex.indices.clone();
+                            // Create CLUT with the texture's palette
+                            let mut clut = Clut::new_4bit("preview");
+                            clut.colors = tex.palette.clone();
+                            clut.depth = tex.depth;
+                            self.preview_cluts.push(clut);
+                        } else {
+                            // Texture not found, use checkerboard
+                            self.preview_cluts.push(checkerboard_clut().clone());
+                        }
+                    }
+                    TextureRef::Checkerboard | TextureRef::None => {
+                        self.preview_cluts.push(checkerboard_clut().clone());
+                    }
+                    TextureRef::Embedded(embedded) => {
+                        // For embedded, we'd need a CLUT pool - use checkerboard for now
+                        self.preview_cluts.push(checkerboard_clut().clone());
+                    }
+                }
+            }
+        }
+
+        let asset = asset; // Make immutable again
+        // Calculate bounding box to center camera (across all mesh objects)
         let mut min_y = f32::MAX;
         let mut max_y = f32::MIN;
         let mut min_x = f32::MAX;
@@ -191,14 +217,16 @@ impl ModelBrowser {
         let mut min_z = f32::MAX;
         let mut max_z = f32::MIN;
 
-        for obj in &project.objects {
-            for vertex in &obj.mesh.vertices {
-                min_x = min_x.min(vertex.pos.x);
-                max_x = max_x.max(vertex.pos.x);
-                min_y = min_y.min(vertex.pos.y);
-                max_y = max_y.max(vertex.pos.y);
-                min_z = min_z.min(vertex.pos.z);
-                max_z = max_z.max(vertex.pos.z);
+        if let Some(objects) = asset.mesh() {
+            for obj in objects {
+                for vertex in &obj.mesh.vertices {
+                    min_x = min_x.min(vertex.pos.x);
+                    max_x = max_x.max(vertex.pos.x);
+                    min_y = min_y.min(vertex.pos.y);
+                    max_y = max_y.max(vertex.pos.y);
+                    min_z = min_z.min(vertex.pos.z);
+                    max_z = max_z.max(vertex.pos.z);
+                }
             }
         }
 
@@ -222,43 +250,43 @@ impl ModelBrowser {
             self.orbit_distance = 4096.0;
         }
 
-        self.preview_project = Some(project);
+        self.preview_asset = Some(asset);
         self.orbit_yaw = 0.8;
         self.orbit_pitch = 0.3;
     }
 
-    /// Get the currently selected model info
-    pub fn selected_model(&self) -> Option<&ModelInfo> {
-        self.selected_index.and_then(|i| self.models.get(i))
+    /// Get the currently selected asset info
+    pub fn selected_asset(&self) -> Option<&AssetInfo> {
+        self.selected_index.and_then(|i| self.assets.get(i))
     }
 }
 
-/// Result from drawing the model browser
+/// Result from drawing the asset browser
 #[derive(Debug, Clone, PartialEq)]
-pub enum ModelBrowserAction {
+pub enum AssetBrowserAction {
     None,
-    /// User selected a model to preview
+    /// User selected an asset to preview
     SelectPreview(usize),
-    /// User wants to open the selected model
-    OpenModel,
-    /// User wants to start with a new empty model
-    NewModel,
+    /// User wants to open the selected asset
+    OpenAsset,
+    /// User wants to start with a new empty asset
+    NewAsset,
     /// User cancelled
     Cancel,
 }
 
-/// Draw the model browser modal dialog
-pub fn draw_model_browser(
+/// Draw the asset browser modal dialog
+pub fn draw_asset_browser(
     ctx: &mut UiContext,
-    browser: &mut ModelBrowser,
+    browser: &mut AssetBrowser,
     icon_font: Option<&Font>,
     fb: &mut Framebuffer,
-) -> ModelBrowserAction {
+) -> AssetBrowserAction {
     if !browser.open {
-        return ModelBrowserAction::None;
+        return AssetBrowserAction::None;
     }
 
-    let mut action = ModelBrowserAction::None;
+    let mut action = AssetBrowserAction::None;
 
     // Darken background
     draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::from_rgba(0, 0, 0, 180));
@@ -276,12 +304,12 @@ pub fn draw_model_browser(
     // Header
     let header_h = 40.0;
     draw_rectangle(dialog_x, dialog_y, dialog_w, header_h, Color::from_rgba(45, 45, 55, 255));
-    draw_text("Browse Models", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
+    draw_text("Browse Assets", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
 
     // Close button
     let close_rect = Rect::new(dialog_x + dialog_w - 36.0, dialog_y + 4.0, 32.0, 32.0);
     if draw_close_button(ctx, close_rect, icon_font) {
-        action = ModelBrowserAction::Cancel;
+        action = AssetBrowserAction::Cancel;
     }
 
     // Content area
@@ -293,7 +321,7 @@ pub fn draw_model_browser(
     let list_rect = Rect::new(dialog_x + 8.0, content_y, list_w, content_h);
     let item_h = 28.0;
 
-    let items: Vec<String> = browser.models.iter().map(|m| m.name.clone()).collect();
+    let items: Vec<String> = browser.assets.iter().map(|a| a.name.clone()).collect();
 
     let list_result = draw_scrollable_list(
         ctx,
@@ -308,7 +336,7 @@ pub fn draw_model_browser(
     if let Some(clicked_idx) = list_result.clicked {
         if browser.selected_index != Some(clicked_idx) {
             browser.selected_index = Some(clicked_idx);
-            action = ModelBrowserAction::SelectPreview(clicked_idx);
+            action = AssetBrowserAction::SelectPreview(clicked_idx);
         }
     }
 
@@ -319,30 +347,32 @@ pub fn draw_model_browser(
 
     draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h, Color::from_rgba(20, 20, 25, 255));
 
-    let has_preview = browser.preview_project.is_some();
+    let has_preview = browser.preview_asset.is_some();
     let has_selection = browser.selected_index.is_some();
 
     if has_preview {
         draw_orbit_preview(ctx, browser, preview_rect, fb);
 
         // Draw stats at bottom of preview
-        if let Some(project) = &browser.preview_project {
+        if let Some(asset) = &browser.preview_asset {
             let stats_y = preview_rect.bottom() - 24.0;
             draw_rectangle(preview_rect.x, stats_y, preview_rect.w, 24.0, Color::from_rgba(30, 30, 35, 200));
 
+            let obj_count = asset.mesh().map(|m| m.len()).unwrap_or(0);
+            let comp_count = asset.components.len();
             let stats_text = format!(
-                "Vertices: {}  Faces: {}  Objects: {}",
-                project.total_vertices(), project.total_faces(), project.objects.len()
+                "Vertices: {}  Faces: {}  Objects: {}  Components: {}",
+                asset.total_vertices(), asset.total_faces(), obj_count, comp_count
             );
             draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
         }
     } else if has_selection {
         draw_text("Loading preview...", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
-    } else if browser.models.is_empty() {
-        draw_text("No models found in assets/models/", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
-        draw_text("Save a model first!", preview_rect.x + 20.0, preview_rect.y + 60.0, 14.0, Color::from_rgba(80, 80, 80, 255));
+    } else if browser.assets.is_empty() {
+        draw_text(&format!("No assets found in {}/", ASSETS_DIR), preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+        draw_text("Save an asset first!", preview_rect.x + 20.0, preview_rect.y + 60.0, 14.0, Color::from_rgba(80, 80, 80, 255));
     } else {
-        draw_text("Select a model to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+        draw_text("Select an asset to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
     }
 
     // Footer with buttons
@@ -352,40 +382,49 @@ pub fn draw_model_browser(
     // New button (left side)
     let new_rect = Rect::new(dialog_x + 10.0, footer_y + 8.0, 80.0, 28.0);
     if draw_text_button(ctx, new_rect, "New", Color::from_rgba(60, 60, 70, 255)) {
-        action = ModelBrowserAction::NewModel;
+        action = AssetBrowserAction::NewAsset;
     }
 
     // Cancel button
     let cancel_rect = Rect::new(dialog_x + dialog_w - 180.0, footer_y + 8.0, 80.0, 28.0);
     if draw_text_button(ctx, cancel_rect, "Cancel", Color::from_rgba(60, 60, 70, 255)) {
-        action = ModelBrowserAction::Cancel;
+        action = AssetBrowserAction::Cancel;
     }
 
     // Open button
     let open_rect = Rect::new(dialog_x + dialog_w - 90.0, footer_y + 8.0, 80.0, 28.0);
-    let open_enabled = browser.preview_project.is_some();
+    let open_enabled = browser.preview_asset.is_some();
     if draw_text_button_enabled(ctx, open_rect, "Open", ACCENT_COLOR, open_enabled) {
-        action = ModelBrowserAction::OpenModel;
+        action = AssetBrowserAction::OpenAsset;
     }
 
     // Handle Escape to close
     if is_key_pressed(KeyCode::Escape) {
-        action = ModelBrowserAction::Cancel;
+        action = AssetBrowserAction::Cancel;
     }
 
     action
 }
 
-/// Draw the orbit preview of a model
+/// Draw the orbit preview of an asset
 fn draw_orbit_preview(
     ctx: &mut UiContext,
-    browser: &mut ModelBrowser,
+    browser: &mut AssetBrowser,
     rect: Rect,
     fb: &mut Framebuffer,
 ) {
-    let project = match &browser.preview_project {
-        Some(p) => p,
+    let asset = match &browser.preview_asset {
+        Some(a) => a,
         None => return,
+    };
+
+    let objects = match asset.mesh() {
+        Some(objs) => objs,
+        None => {
+            // Asset has no mesh - show placeholder
+            draw_text("No mesh", rect.x + rect.w / 2.0 - 30.0, rect.y + rect.h / 2.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+            return;
+        }
     };
 
     // Handle mouse drag for orbit
@@ -445,7 +484,7 @@ fn draw_orbit_preview(
     fb.clear(RasterColor::new(25, 25, 35));
 
     // Check if any object needs backface culling disabled
-    let any_double_sided = project.objects.iter().any(|obj| obj.visible && obj.double_sided);
+    let any_double_sided = objects.iter().any(|obj| obj.visible && obj.double_sided);
 
     // Render settings - disable backface culling if any object is double-sided
     let mut settings = RasterSettings::default();
@@ -454,39 +493,32 @@ fn draw_orbit_preview(
     }
     let use_rgb555 = settings.use_rgb555;
 
-    // Fallback CLUT from first object's atlas
-    let fallback_clut = project.objects.first()
-        .and_then(|obj| project.clut_pool.get(obj.atlas.default_clut));
+    // Use preview_cluts which were populated during set_preview with actual palettes
+    use crate::modeler::mesh_editor::checkerboard_clut;
+    let fallback_clut = checkerboard_clut();
 
-    // Render each object with its own atlas texture
-    for (obj_idx, obj) in project.objects.iter().enumerate() {
+    // Render each visible object with its atlas texture and corresponding CLUT
+    for (obj_idx, obj) in objects.iter().enumerate() {
         if !obj.visible {
             continue;
         }
-
-        // Get this object's CLUT from the shared pool
-        let obj_clut = if obj.atlas.default_clut.is_valid() {
-            project.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
-        } else {
-            fallback_clut
-        };
 
         let (vertices, faces) = obj.mesh.to_render_data_textured();
         if vertices.is_empty() {
             continue;
         }
 
-        // Convert this object's atlas to texture
-        if let Some(clut) = obj_clut {
-            if use_rgb555 {
-                let tex15 = obj.atlas.to_texture15(clut, &format!("atlas_{}", obj_idx));
-                let textures_15 = [tex15];
-                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
-            } else {
-                let tex = obj.atlas.to_raster_texture(clut, &format!("atlas_{}", obj_idx));
-                let textures = [tex];
-                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
-            }
+        // Use the object's CLUT from preview_cluts, or fallback to checkerboard
+        let clut = browser.preview_cluts.get(obj_idx).unwrap_or(fallback_clut);
+
+        if use_rgb555 {
+            let tex15 = obj.atlas.to_texture15(clut, &format!("atlas_{}", obj_idx));
+            let textures_15 = [tex15];
+            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
+        } else {
+            let tex = obj.atlas.to_raster_texture(clut, &format!("atlas_{}", obj_idx));
+            let textures = [tex];
+            render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
         }
     }
 
@@ -562,4 +594,42 @@ fn draw_text_button_enabled(ctx: &mut UiContext, rect: Rect, text: &str, bg_colo
     draw_text(text, tx, ty, 14.0, text_color);
 
     clicked
+}
+
+// ============================================================================
+// Legacy aliases for backward compatibility
+// ============================================================================
+
+/// Legacy alias for AssetInfo
+pub type ModelInfo = AssetInfo;
+
+/// Legacy alias for AssetBrowser
+pub type ModelBrowser = AssetBrowser;
+
+/// Legacy alias for AssetBrowserAction
+pub type ModelBrowserAction = AssetBrowserAction;
+
+/// Legacy alias for discover_assets
+pub fn discover_models() -> Vec<AssetInfo> {
+    discover_assets()
+}
+
+/// Legacy alias for load_asset_list
+pub async fn load_model_list() -> Vec<AssetInfo> {
+    load_asset_list().await
+}
+
+/// Legacy alias for load_asset_async
+pub async fn load_model(path: &PathBuf) -> Option<Asset> {
+    load_asset_async(path).await
+}
+
+/// Legacy alias for draw_asset_browser
+pub fn draw_model_browser(
+    ctx: &mut UiContext,
+    browser: &mut AssetBrowser,
+    icon_font: Option<&Font>,
+    fb: &mut Framebuffer,
+) -> AssetBrowserAction {
+    draw_asset_browser(ctx, browser, icon_font, fb)
 }

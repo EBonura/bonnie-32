@@ -193,8 +193,8 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         }
     }
 
-    // Model browser (works on both native and WASM)
-    if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Models") {
+    // Asset browser (works on both native and WASM)
+    if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Assets") {
         action = ModelerAction::BrowseModels;
     }
 
@@ -386,11 +386,11 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     let mut y = rect.y;
 
     // Header with project stats
-    let total_verts = state.project.total_vertices();
-    let total_faces = state.project.total_faces();
+    let total_verts: usize = state.objects().iter().map(|o| o.mesh.vertex_count()).sum();
+    let total_faces: usize = state.objects().iter().map(|o| o.mesh.face_count()).sum();
     draw_text(
         &format!("{} objects | {} verts | {} faces",
-            state.project.objects.len(), total_verts, total_faces),
+            state.objects().len(), total_verts, total_faces),
         rect.x, y + 14.0, 12.0, TEXT_DIM,
     );
     y += row_height;
@@ -400,12 +400,12 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     y += 4.0;
 
     // List of objects
-    let selected_idx = state.project.selected_object;
+    let selected_idx = state.selected_object;
     let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let mut clicked_object: Option<usize> = None;
     let mut toggle_visibility: Option<usize> = None;
 
-    for (i, obj) in state.project.objects.iter().enumerate() {
+    for (i, obj) in state.objects().iter().enumerate() {
         let row_rect = Rect {
             x: rect.x,
             y,
@@ -476,15 +476,17 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
     // Apply interactions
     if let Some(i) = toggle_visibility {
-        state.project.objects[i].visible = !state.project.objects[i].visible;
+        if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(i)) {
+            obj.visible = !obj.visible;
+        }
     }
     if let Some(i) = clicked_object {
         state.select_object(i);
     }
 
     // Show selection info at bottom
-    if let Some(idx) = state.project.selected_object {
-        if let Some(obj) = state.project.objects.get(idx) {
+    if let Some(idx) = state.selected_object {
+        if let Some(obj) = state.objects().get(idx) {
             let info_y = rect.y + rect.h - 32.0;
             draw_line(rect.x, info_y - 4.0, rect.x + rect.w, info_y - 4.0, 1.0, Color::from_rgba(60, 60, 65, 255));
 
@@ -566,14 +568,17 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let mut rename_idx: Option<usize> = None;
     let mut delete_idx: Option<usize> = None;
 
-    let obj_count = state.project.objects.len();
+    let obj_count = state.objects().len();
     for idx in 0..obj_count {
         if y + line_height > rect.bottom() {
             break;
         }
 
-        let obj = &state.project.objects[idx];
-        let is_selected = state.project.selected_object == Some(idx);
+        let obj = match state.objects().get(idx) {
+            Some(o) => o,
+            None => continue,
+        };
+        let is_selected = state.selected_object == Some(idx);
         let item_rect = Rect::new(rect.x, y, rect.w, line_height);
         let is_hovered = ctx.mouse.inside(&item_rect);
 
@@ -636,10 +641,12 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
 
     // Apply actions after the loop
     if let Some(idx) = toggle_vis_idx {
-        state.project.objects[idx].visible = !state.project.objects[idx].visible;
+        if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(idx)) {
+            obj.visible = !obj.visible;
+        }
     } else if let Some(idx) = rename_idx {
         // Open rename dialog with current name
-        let name = state.project.objects[idx].name.clone();
+        let name = state.objects().get(idx).map(|o| o.name.clone()).unwrap_or_default();
         state.rename_dialog = Some((idx, name));
     } else if let Some(idx) = delete_idx {
         // Open delete confirmation dialog
@@ -655,7 +662,7 @@ fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
     let toggle_size = 16.0;
 
     // Check if any object is selected
-    let selected_idx = match state.project.selected_object {
+    let selected_idx = match state.selected_object {
         Some(idx) => idx,
         None => {
             draw_text("No object selected", x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
@@ -664,13 +671,15 @@ fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
         }
     };
 
-    // Get object name for display
-    let obj_name = state.project.objects[selected_idx].name.clone();
+    // Get object data for display (capture values to avoid borrow issues)
+    let (obj_name, double_sided, mirror) = match state.objects().get(selected_idx) {
+        Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror),
+        None => return,
+    };
     draw_text(&obj_name, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
     *y += line_height;
 
     // === Double-Sided Toggle ===
-    let double_sided = state.project.objects[selected_idx].double_sided;
     let ds_rect = Rect::new(x + 4.0, *y, toggle_size, toggle_size);
     let ds_icon = if double_sided { icon::SQUARE_CHECK } else { icon::SQUARE };
     let ds_color = if double_sided { ACCENT_COLOR } else { TEXT_DIM };
@@ -678,13 +687,14 @@ fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
     draw_text("Double-Sided", x + 24.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
 
     if ctx.mouse.inside(&Rect::new(x, *y, width, line_height)) && ctx.mouse.left_pressed {
-        state.project.objects[selected_idx].double_sided = !double_sided;
+        if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
+            obj.double_sided = !double_sided;
+        }
         state.dirty = true;
     }
     *y += line_height;
 
     // === Mirror Settings ===
-    let mirror = state.project.objects[selected_idx].mirror;
     let mirror_enabled = mirror.map(|m| m.enabled).unwrap_or(false);
     let mirror_axis = mirror.map(|m| m.axis).unwrap_or(Axis::X);
 
@@ -698,14 +708,14 @@ fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
     if ctx.mouse.inside(&Rect::new(x, *y, 70.0, line_height)) && ctx.mouse.left_pressed {
         // Toggle mirror enabled
         let new_enabled = !mirror_enabled;
-        if new_enabled {
-            state.project.objects[selected_idx].mirror = Some(MirrorSettings {
-                enabled: true,
-                axis: mirror_axis,
-                threshold: 1.0,
-            });
-        } else {
-            if let Some(ref mut m) = state.project.objects[selected_idx].mirror {
+        if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
+            if new_enabled {
+                obj.mirror = Some(MirrorSettings {
+                    enabled: true,
+                    axis: mirror_axis,
+                    threshold: 1.0,
+                });
+            } else if let Some(ref mut m) = obj.mirror {
                 m.enabled = false;
             }
         }
@@ -733,8 +743,10 @@ fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
             draw_text(axis.label(), btn_x + 6.0, btn_y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
 
             if ctx.mouse.inside(&btn_rect) && ctx.mouse.left_pressed {
-                if let Some(ref mut m) = state.project.objects[selected_idx].mirror {
-                    m.axis = axis;
+                if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
+                    if let Some(ref mut m) = obj.mirror {
+                        m.axis = axis;
+                    }
                 }
                 state.dirty = true;
             }
@@ -766,8 +778,10 @@ fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
                 merged_count = mesh.merge_by_distance(threshold);
             }
             // Disable mirror after applying
-            if let Some(ref mut m) = state.project.objects[selected_idx].mirror {
-                m.enabled = false;
+            if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
+                if let Some(ref mut m) = obj.mirror {
+                    m.enabled = false;
+                }
             }
             if merged_count > 0 {
                 state.set_status(&format!("Mirror applied, {} vertices merged", merged_count), 2.5);
@@ -951,8 +965,8 @@ fn draw_collapsible_header(
 fn create_editing_texture(state: &ModelerState) -> UserTexture {
     let indexed = state.atlas();
     // Get CLUT for palette colors
-    let clut = state.project.clut_pool.get(indexed.default_clut)
-        .or_else(|| state.project.clut_pool.iter().next())
+    let clut = state.clut_pool.get(indexed.default_clut)
+        .or_else(|| state.clut_pool.iter().next())
         .cloned()
         .unwrap_or_else(|| Clut::new_4bit("default".to_string()));
 
@@ -1384,7 +1398,7 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
             let mut new_clut = Clut::new_4bit(&clut_name);
             new_clut.colors = tex.palette.clone();
             new_clut.depth = tex.depth;
-            let new_clut_id = state.project.clut_pool.add_clut(new_clut);
+            let new_clut_id = state.clut_pool.add_clut(new_clut);
 
             // Update the selected object's texture reference and atlas
             let tex_id = tex.id;
@@ -1572,16 +1586,17 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         let editing_tex_data = state.editing_texture.clone();
         if let Some(editing_tex) = editing_tex_data {
             // Sync to selected object's atlas for mesh preview
-            let atlas = state.atlas_mut();
-            atlas.width = editing_tex.width;
-            atlas.height = editing_tex.height;
-            atlas.depth = editing_tex.depth;
-            atlas.indices = editing_tex.indices.clone();
-            let default_clut_id = atlas.default_clut;
-            // Update the default CLUT with the texture's palette
-            if let Some(clut) = state.project.clut_pool.get_mut(default_clut_id) {
-                clut.colors = editing_tex.palette.clone();
-                clut.depth = editing_tex.depth;
+            if let Some(atlas) = state.atlas_mut() {
+                atlas.width = editing_tex.width;
+                atlas.height = editing_tex.height;
+                atlas.depth = editing_tex.depth;
+                atlas.indices = editing_tex.indices.clone();
+                let default_clut_id = atlas.default_clut;
+                // Update the default CLUT with the texture's palette
+                if let Some(clut) = state.clut_pool.get_mut(default_clut_id) {
+                    clut.colors = editing_tex.palette.clone();
+                    clut.depth = editing_tex.depth;
+                }
             }
         }
     }
@@ -1625,23 +1640,21 @@ fn apply_uv_modal_transform(
         return;
     }
 
-    // Get the mesh to modify
-    let obj = match state.project.selected_mut() {
-        Some(o) => o,
-        None => return,
-    };
-
-    // Calculate transform parameters
+    // Extract all needed values before borrowing state mutably
     let zoom = state.texture_editor.zoom;
     let pan_x = state.texture_editor.pan_x;
     let pan_y = state.texture_editor.pan_y;
     let (start_mx, start_my) = state.texture_editor.uv_modal_start_mouse;
+    let uv_modal_center = state.texture_editor.uv_modal_center;
+    let start_uvs: Vec<(usize, RastVec2)> = state.texture_editor.uv_modal_start_uvs.iter()
+        .map(|(vi, uv)| (*vi, *uv))
+        .collect();
 
     // Calculate texture position on screen
     let canvas_cx = canvas_rect.x + canvas_rect.w / 2.0;
     let canvas_cy = canvas_rect.y + canvas_rect.h / 2.0;
-    let tex_x = canvas_cx - tex_width * zoom / 2.0 + pan_x;
-    let tex_y = canvas_cy - tex_height * zoom / 2.0 + pan_y;
+    let _tex_x = canvas_cx - tex_width * zoom / 2.0 + pan_x;
+    let _tex_y = canvas_cy - tex_height * zoom / 2.0 + pan_y;
 
     // Screen delta in UV space
     let delta_screen_x = ctx.mouse.x - start_mx;
@@ -1649,10 +1662,16 @@ fn apply_uv_modal_transform(
     let delta_u = delta_screen_x / (tex_width * zoom);
     let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
 
+    // Get the mesh to modify
+    let obj = match state.selected_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
     match transform {
         UvModalTransform::Grab => {
             // Move selected vertices by delta with pixel snapping
-            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+            for (vi, original_uv) in &start_uvs {
                 if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
                     let new_u = original_uv.x + delta_u;
                     let new_v = original_uv.y + delta_v;
@@ -1661,20 +1680,18 @@ fn apply_uv_modal_transform(
                     v.uv.y = (new_v * tex_height).round() / tex_height;
                 }
             }
-            state.dirty = true;
         }
         UvModalTransform::Scale => {
             // Scale around center - snap center to pixel boundary for consistent results
-            let raw_center = state.texture_editor.uv_modal_center;
             let center = RastVec2::new(
-                (raw_center.x * tex_width).round() / tex_width,
-                (raw_center.y * tex_height).round() / tex_height,
+                (uv_modal_center.x * tex_width).round() / tex_width,
+                (uv_modal_center.y * tex_height).round() / tex_height,
             );
             // Scale factor based on horizontal mouse movement
             let scale = 1.0 + delta_screen_x * 0.01;
             let scale = scale.max(0.01); // Prevent negative/zero scale
 
-            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+            for (vi, original_uv) in &start_uvs {
                 if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
                     // Snap original UV to pixel boundary for consistent scaling
                     let snapped_orig = RastVec2::new(
@@ -1690,17 +1707,16 @@ fn apply_uv_modal_transform(
                     v.uv.y = (new_v * tex_height).round() / tex_height;
                 }
             }
-            state.dirty = true;
         }
         UvModalTransform::Rotate => {
             // Rotate around center with pixel snapping
-            let center = state.texture_editor.uv_modal_center;
+            let center = uv_modal_center;
             // Rotation angle based on horizontal mouse movement
             let angle = delta_screen_x * 0.01; // Radians
             let cos_a = angle.cos();
             let sin_a = angle.sin();
 
-            for (vi, original_uv) in &state.texture_editor.uv_modal_start_uvs {
+            for (vi, original_uv) in &start_uvs {
                 if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
                     let offset_x = original_uv.x - center.x;
                     let offset_y = original_uv.y - center.y;
@@ -1711,10 +1727,10 @@ fn apply_uv_modal_transform(
                     v.uv.y = (new_v * tex_height).round() / tex_height;
                 }
             }
-            state.dirty = true;
         }
         UvModalTransform::None | UvModalTransform::ScalePending => {}
     }
+    state.dirty = true;
 }
 
 /// Apply direct UV drag with pixel snapping
@@ -1729,15 +1745,12 @@ fn apply_uv_direct_drag(
         return;
     }
 
-    // Get the mesh to modify
-    let obj = match state.project.selected_mut() {
-        Some(o) => o,
-        None => return,
-    };
-
-    // Calculate transform parameters
+    // Extract all needed values before borrowing state mutably
     let zoom = state.texture_editor.zoom;
     let (start_mx, start_my) = state.texture_editor.uv_drag_start;
+    let drag_start_uvs: Vec<(usize, usize, RastVec2)> = state.texture_editor.uv_drag_start_uvs.iter()
+        .map(|&(fi, vi, uv)| (fi, vi, uv))
+        .collect();
 
     // Screen delta in UV space
     let delta_screen_x = ctx.mouse.x - start_mx;
@@ -1745,8 +1758,14 @@ fn apply_uv_direct_drag(
     let delta_u = delta_screen_x / (tex_width * zoom);
     let delta_v = -delta_screen_y / (tex_height * zoom); // Inverted Y
 
+    // Get the mesh to modify
+    let obj = match state.selected_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
     // Move selected vertices by delta with pixel snapping
-    for &(_, vi, original_uv) in &state.texture_editor.uv_drag_start_uvs {
+    for &(_, vi, original_uv) in &drag_start_uvs {
         if let Some(v) = obj.mesh.vertices.get_mut(vi) {
             // Calculate new UV
             let new_u = original_uv.x + delta_u;
@@ -1778,18 +1797,18 @@ fn apply_uv_operation(
         None => return,
     };
 
-    // Get the mesh to modify
-    let obj = match state.project.selected_mut() {
-        Some(o) => o,
-        None => return,
-    };
-
-    // Get selected vertex indices
+    // Get selected vertex indices before mutably borrowing state
     let selected_vertices = state.texture_editor.uv_selection.clone();
     if selected_vertices.is_empty() {
         state.texture_editor.set_status("No vertices selected");
         return;
     }
+
+    // Get the mesh to modify
+    let obj = match state.selected_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
 
     // Calculate center of selection (for flip/rotate operations)
     let mut center_u = 0.0f32;
@@ -1870,7 +1889,7 @@ fn apply_uv_operation(
 
 /// Build UV overlay data from currently selected faces
 fn build_uv_overlay_data(state: &ModelerState) -> Option<UvOverlayData> {
-    let obj = state.project.selected()?;
+    let obj = state.selected_object()?;
 
     // Get selected face indices
     let selected_faces = match &state.selection {
@@ -1949,8 +1968,15 @@ fn draw_atlas_preview(
     let atlas_width = atlas.width;
     let atlas_height = atlas.height;
 
-    // Get CLUT for rendering atlas preview
-    let clut = state.project.effective_clut();
+    // Get CLUT for rendering atlas preview (effective_clut logic)
+    let clut = state.preview_clut
+        .and_then(|id| state.clut_pool.get(id))
+        .or_else(|| {
+            state.objects().first()
+                .filter(|obj| obj.atlas.default_clut.is_valid())
+                .and_then(|obj| state.clut_pool.get(obj.atlas.default_clut))
+        })
+        .or_else(|| state.clut_pool.first_id().and_then(|id| state.clut_pool.get(id)));
 
     // Draw checkerboard background
     let checker_size = 8.0;
@@ -2012,7 +2038,7 @@ fn draw_atlas_preview(
         (atlas_x + (px + 0.5) * scale, atlas_y + (py + 0.5) * scale)
     };
 
-    if let Some(obj) = state.project.selected() {
+    if let Some(obj) = state.selected_object() {
         let face_edge_color = Color::from_rgba(255, 200, 100, 255);
         let vertex_color = Color::from_rgba(255, 255, 255, 255);
         let selected_vertex_color = Color::from_rgba(100, 200, 255, 255);
@@ -2084,7 +2110,9 @@ fn draw_atlas_size_selector(ctx: &mut UiContext, x: f32, y: &mut f32, _width: f3
 
         if hovered && ctx.mouse.left_pressed && !is_current {
             state.push_undo_with_atlas("Resize Atlas");
-            state.atlas_mut().resize(size, size);
+            if let Some(atlas) = state.atlas_mut() {
+                atlas.resize(size, size);
+            }
             state.dirty = true;
         }
 
@@ -2227,8 +2255,8 @@ fn draw_clut_editor_panel(
     }
 
     if hovered_4bit && ctx.mouse.left_pressed {
-        let clut = Clut::new_4bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
-        let id = state.project.clut_pool.add_clut(clut);
+        let clut = Clut::new_4bit(format!("CLUT {}", state.clut_pool.len() + 1));
+        let id = state.clut_pool.add_clut(clut);
         state.selected_clut = Some(id);
         state.set_status("Added 4-bit CLUT", 1.0);
     }
@@ -2248,8 +2276,8 @@ fn draw_clut_editor_panel(
     }
 
     if hovered_8bit && ctx.mouse.left_pressed {
-        let clut = Clut::new_8bit(format!("CLUT {}", state.project.clut_pool.len() + 1));
-        let id = state.project.clut_pool.add_clut(clut);
+        let clut = Clut::new_8bit(format!("CLUT {}", state.clut_pool.len() + 1));
+        let id = state.clut_pool.add_clut(clut);
         state.selected_clut = Some(id);
         state.set_status("Added 8-bit CLUT", 1.0);
     }
@@ -2264,12 +2292,12 @@ fn draw_clut_editor_panel(
     draw_rectangle(x + padding, cur_y, width - padding * 2.0, list_height, Color::from_rgba(30, 30, 35, 255));
 
     // Draw CLUT items
-    let clut_count = state.project.clut_pool.len();
+    let clut_count = state.clut_pool.len();
     if clut_count == 0 {
         draw_text("(empty)", x + padding + 4.0, cur_y + 12.0, 12.0, TEXT_DIM);
     } else {
         let mut item_y = cur_y + 2.0;
-        for clut in state.project.clut_pool.iter() {
+        for clut in state.clut_pool.iter() {
             if item_y + item_height > cur_y + list_height {
                 break; // Scroll limit
             }
@@ -2314,7 +2342,7 @@ fn draw_clut_editor_panel(
     // Section 2: Palette Grid (4x4 for 4-bit, 16x16 for 8-bit)
     // ========================================================================
     if let Some(clut_id) = state.selected_clut {
-        if let Some(clut) = state.project.clut_pool.get(clut_id) {
+        if let Some(clut) = state.clut_pool.get(clut_id) {
             // Draw palette grid
             let grid_size = match clut.depth {
                 ClutDepth::Bpp4 => 4,  // 4x4 grid
@@ -2415,7 +2443,7 @@ fn draw_clut_editor_panel(
 
                 if ctx.mouse.inside(&semi_rect) && ctx.mouse.left_pressed {
                     // Toggle semi-transparent bit
-                    if let Some(clut_mut) = state.project.clut_pool.get_mut(clut_id) {
+                    if let Some(clut_mut) = state.clut_pool.get_mut(clut_id) {
                         let c = &mut clut_mut.colors[state.selected_clut_entry];
                         *c = Color15::new_semi(c.r5(), c.g5(), c.b5(), !c.is_semi_transparent());
                         state.dirty = true;
@@ -2466,7 +2494,7 @@ fn draw_clut_editor_panel(
                             let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_w);
                             let new_val = ((rel_x / slider_w) * 31.0).round() as u8;
 
-                            if let Some(clut_mut) = state.project.clut_pool.get_mut(clut_id) {
+                            if let Some(clut_mut) = state.clut_pool.get_mut(clut_id) {
                                 let c = clut_mut.colors[state.selected_clut_entry];
                                 let semi = c.is_semi_transparent();
                                 let (r, g, b) = match slider_idx {
@@ -2807,8 +2835,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     let wireframe_mode = state.raster_settings.wireframe_overlay;
 
     // Check if any visible object has vertices
-    let has_visible_geometry = state.project.objects.iter().any(|obj| obj.visible && !obj.mesh.vertices.is_empty())
-        || (!mesh.vertices.is_empty() && state.project.selected_object.map_or(true, |i| state.project.objects.get(i).map_or(true, |o| o.visible)));
+    let has_visible_geometry = state.objects().iter().any(|obj| obj.visible && !obj.mesh.vertices.is_empty())
+        || (!mesh.vertices.is_empty() && state.selected_object.map_or(true, |i| state.objects().get(i).map_or(true, |o| o.visible)));
 
     if has_visible_geometry && !wireframe_mode {
         // Create ortho camera for this view direction
@@ -2841,12 +2869,12 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
         // Fallback CLUT for objects with no assigned CLUT
         let default_clut = Clut::new_4bit("default");
-        let fallback_clut = state.project.clut_pool.first_id()
-            .and_then(|id| state.project.clut_pool.get(id))
+        let fallback_clut = state.clut_pool.first_id()
+            .and_then(|id| state.clut_pool.get(id))
             .unwrap_or(&default_clut);
 
         // Render all visible objects (each with its own texture atlas and CLUT)
-        for (obj_idx, obj) in state.project.objects.iter().enumerate() {
+        for (obj_idx, obj) in state.objects().iter().enumerate() {
             // Skip hidden objects
             if !obj.visible {
                 continue;
@@ -2854,7 +2882,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
             // Get this object's CLUT from the shared pool (per-object atlas.default_clut)
             let obj_clut = if obj.atlas.default_clut.is_valid() {
-                state.project.clut_pool.get(obj.atlas.default_clut).unwrap_or(fallback_clut)
+                state.clut_pool.get(obj.atlas.default_clut).unwrap_or(fallback_clut)
             } else {
                 fallback_clut
             };
@@ -2871,7 +2899,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             let obj_mesh = &obj.mesh;
 
             // Dim non-selected objects slightly
-            let base_color = if state.project.selected_object == Some(obj_idx) {
+            let base_color = if state.selected_object == Some(obj_idx) {
                 180u8
             } else {
                 140u8
@@ -3645,9 +3673,17 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
     let atlas_x = rect.x + (rect.w - atlas_screen_w) * 0.5;
     let atlas_y = rect.y + padding;
 
-    // Draw the actual texture atlas
+    // Draw the actual texture atlas (effective_clut logic)
     let pixels_per_block = (1.0 / scale).max(1.0) as usize;
-    if let Some(clut) = state.project.effective_clut() {
+    let effective_clut = state.preview_clut
+        .and_then(|id| state.clut_pool.get(id))
+        .or_else(|| {
+            state.objects().first()
+                .filter(|obj| obj.atlas.default_clut.is_valid())
+                .and_then(|obj| state.clut_pool.get(obj.atlas.default_clut))
+        })
+        .or_else(|| state.clut_pool.first_id().and_then(|id| state.clut_pool.get(id)));
+    if let Some(clut) = effective_clut {
         for by in (0..atlas_height).step_by(pixels_per_block.max(1)) {
             for bx in (0..atlas_width).step_by(pixels_per_block.max(1)) {
                 let pixel = state.atlas().get_color(bx, by, clut);
@@ -3693,10 +3729,11 @@ fn draw_atlas_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState) {
             }
             let index = state.active_palette_index;
             let brush = brush_size as usize;
-            let atlas = state.atlas_mut();
-            for dy in 0..brush {
-                for dx in 0..brush {
-                    atlas.set_index(px + dx, py + dy, index);
+            if let Some(atlas) = state.atlas_mut() {
+                for dy in 0..brush {
+                    for dx in 0..brush {
+                        atlas.set_index(px + dx, py + dy, index);
+                    }
                 }
             }
             state.dirty = true;
@@ -3998,7 +4035,7 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
 /// Get UV vertices from selected faces
 fn get_uv_vertices_from_selection(state: &ModelerState) -> Vec<usize> {
     let mut verts = std::collections::HashSet::new();
-    if let Some(obj) = state.project.selected() {
+    if let Some(obj) = state.selected_object() {
         if let super::state::ModelerSelection::Faces(faces) = &state.selection {
             for &fi in faces {
                 if let Some(face) = obj.mesh.faces.get(fi) {
@@ -4018,7 +4055,7 @@ fn compute_uv_center(state: &ModelerState, verts: &[usize]) -> Option<crate::ras
     if verts.is_empty() {
         return None;
     }
-    let obj = state.project.selected()?;
+    let obj = state.selected_object()?;
     let mut sum_u = 0.0f32;
     let mut sum_v = 0.0f32;
     let mut count = 0;
@@ -4059,7 +4096,7 @@ fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
 
     state.push_undo(if flip_h { "Flip UV Horizontal" } else { "Flip UV Vertical" });
 
-    if let Some(obj) = state.project.selected_mut() {
+    if let Some(obj) = state.selected_object_mut() {
         for &vi in &verts {
             if let Some(v) = obj.mesh.vertices.get_mut(vi) {
                 if flip_h {
@@ -4076,7 +4113,7 @@ fn flip_selected_uvs(state: &mut ModelerState, flip_h: bool, flip_v: bool) {
         }
     }
 
-    // Project is single source of truth
+    // Asset is single source of truth
     state.dirty = true;
     state.set_status(if flip_h { "Flipped UV horizontal" } else { "Flipped UV vertical" }, 1.0);
 }
@@ -4098,7 +4135,7 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
 
     state.push_undo("Rotate UV 90°");
 
-    if let Some(obj) = state.project.selected_mut() {
+    if let Some(obj) = state.selected_object_mut() {
         for &vi in &verts {
             if let Some(v) = obj.mesh.vertices.get_mut(vi) {
                 // Translate to origin
@@ -4121,7 +4158,7 @@ fn rotate_selected_uvs(state: &mut ModelerState, clockwise: bool) {
         }
     }
 
-    // Project is single source of truth
+    // Asset is single source of truth
     state.dirty = true;
     state.set_status(if clockwise { "Rotated UV 90° CW" } else { "Rotated UV 90° CCW" }, 1.0);
 }
@@ -4138,7 +4175,7 @@ fn reset_selected_uvs(state: &mut ModelerState) {
 
         state.push_undo("Reset UVs");
 
-        if let Some(obj) = state.project.selected_mut() {
+        if let Some(obj) = state.selected_object_mut() {
             for &fi in faces {
                 if let Some(face) = obj.mesh.faces.get(fi).cloned() {
                     if face.vertices.len() < 3 {
@@ -4987,24 +5024,26 @@ fn delete_selection(state: &mut ModelerState) {
     }
 
     // Check if mesh is now empty and remove the object if so
-    if let Some(idx) = state.project.selected_object {
-        let is_empty = state.project.objects.get(idx)
+    if let Some(idx) = state.selected_object {
+        let is_empty = state.objects().get(idx)
             .map(|o| o.mesh.faces.is_empty())
             .unwrap_or(false);
 
         if is_empty {
-            let name = state.project.objects.get(idx)
+            let name = state.objects().get(idx)
                 .map(|o| o.name.clone())
                 .unwrap_or_default();
 
-            state.project.objects.remove(idx);
+            if let Some(objects) = state.objects_mut() {
+                objects.remove(idx);
+            }
 
             // Update selected_object to point to a valid object
-            if state.project.objects.is_empty() {
-                state.project.selected_object = None;
-            } else if idx >= state.project.objects.len() {
+            if state.objects().is_empty() {
+                state.selected_object = None;
+            } else if idx >= state.objects().len() {
                 // Select the last object if we removed the last one
-                state.project.selected_object = Some(state.project.objects.len() - 1);
+                state.selected_object = Some(state.objects().len() - 1);
             }
             // If idx is still valid, keep it (now points to the next object)
 
@@ -5410,9 +5449,13 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
         if ctx.mouse.clicked(&cancel_rect) {
             state.rename_dialog = None;
         } else if ctx.mouse.clicked(&confirm_rect) {
-            if let Some((idx, name)) = &state.rename_dialog {
-                if !name.is_empty() && *idx < state.project.objects.len() {
-                    state.project.objects[*idx].name = name.clone();
+            // Extract values before mutable borrow
+            let rename_data = state.rename_dialog.clone();
+            if let Some((idx, name)) = rename_data {
+                if !name.is_empty() && idx < state.objects().len() {
+                    if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(idx)) {
+                        obj.name = name.clone();
+                    }
                     state.set_status(&format!("Renamed to '{}'", name), 1.0);
                 }
             }
@@ -5423,9 +5466,13 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
         if is_key_pressed(KeyCode::Escape) {
             state.rename_dialog = None;
         } else if is_key_pressed(KeyCode::Enter) {
-            if let Some((idx, name)) = &state.rename_dialog {
-                if !name.is_empty() && *idx < state.project.objects.len() {
-                    state.project.objects[*idx].name = name.clone();
+            // Extract values before mutable borrow
+            let rename_data = state.rename_dialog.clone();
+            if let Some((idx, name)) = rename_data {
+                if !name.is_empty() && idx < state.objects().len() {
+                    if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(idx)) {
+                        obj.name = name.clone();
+                    }
                     state.set_status(&format!("Renamed to '{}'", name), 1.0);
                 }
             }
@@ -5435,7 +5482,7 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
 
     // Handle delete confirmation dialog
     if let Some(idx) = state.delete_dialog {
-        let obj_name = state.project.objects.get(idx)
+        let obj_name = state.objects().get(idx)
             .map(|o| o.name.clone())
             .unwrap_or_default();
 
@@ -5482,16 +5529,18 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
             state.delete_dialog = None;
         } else if ctx.mouse.clicked(&delete_rect) {
             // Delete the object
-            if idx < state.project.objects.len() {
-                state.project.objects.remove(idx);
+            if idx < state.objects().len() {
+                if let Some(objects) = state.objects_mut() {
+                    objects.remove(idx);
+                }
                 // Update selected_object
-                if state.project.objects.is_empty() {
-                    state.project.selected_object = None;
-                } else if let Some(sel) = state.project.selected_object {
-                    if sel >= state.project.objects.len() {
-                        state.project.selected_object = Some(state.project.objects.len() - 1);
+                if state.objects().is_empty() {
+                    state.selected_object = None;
+                } else if let Some(sel) = state.selected_object {
+                    if sel >= state.objects().len() {
+                        state.selected_object = Some(state.objects().len() - 1);
                     } else if sel > idx {
-                        state.project.selected_object = Some(sel - 1);
+                        state.selected_object = Some(sel - 1);
                     }
                 }
                 state.selection.clear();

@@ -663,6 +663,10 @@ impl Texture15 {
     /// Handles negative UVs correctly using euclidean modulo for proper tiling
     #[inline]
     pub fn sample(&self, u: f32, v: f32) -> Color15 {
+        // Guard against zero-dimension textures
+        if self.width == 0 || self.height == 0 || self.pixels.is_empty() {
+            return Color15::TRANSPARENT;
+        }
         let u_wrapped = u.rem_euclid(1.0);
         let v_wrapped = v.rem_euclid(1.0);
         let tx = ((u_wrapped * self.width as f32) as usize).min(self.width - 1);
@@ -1213,6 +1217,10 @@ impl Texture {
     /// Sample texture at UV coordinates (no filtering - PS1 style)
     /// Handles negative UVs correctly using euclidean modulo for proper tiling
     pub fn sample(&self, u: f32, v: f32) -> Color {
+        // Guard against zero-dimension textures
+        if self.width == 0 || self.height == 0 || self.pixels.is_empty() {
+            return Color::TRANSPARENT;
+        }
         // Use rem_euclid to handle negative UVs correctly (proper tiling)
         let u_wrapped = u.rem_euclid(1.0);
         let v_wrapped = v.rem_euclid(1.0);

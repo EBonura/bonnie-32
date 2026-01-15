@@ -2291,6 +2291,10 @@ impl ObjectType {
 ///
 /// Objects are tied to sectors (tiles) using grid coordinates within the room.
 /// Height offset allows vertical positioning within the sector.
+///
+/// Objects can reference either:
+/// - An asset via `asset_id` (new component-based system)
+/// - A legacy `object_type` (Spawn, Light, Trigger, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LevelObject {
     /// Sector X coordinate within the room
@@ -2303,7 +2307,16 @@ pub struct LevelObject {
     /// Facing direction (yaw angle in radians, 0 = +Z)
     #[serde(default)]
     pub facing: f32,
-    /// The object type and its specific properties
+    /// Reference to an asset by its stable ID
+    ///
+    /// When set, this object represents an instance of that asset.
+    /// The asset's components define the object's behavior at runtime.
+    #[serde(default)]
+    pub asset_id: Option<u64>,
+    /// The object type and its specific properties (legacy system)
+    ///
+    /// Used for built-in types (PlayerStart, Light, etc.) and backward compatibility.
+    /// If `asset_id` is set, this is typically ignored.
     pub object_type: ObjectType,
     /// Optional name/identifier
     #[serde(default)]
@@ -2321,7 +2334,23 @@ impl LevelObject {
             sector_z,
             height: 0.0,
             facing: 0.0,
+            asset_id: None,
             object_type,
+            name: String::new(),
+            enabled: true,
+        }
+    }
+
+    /// Create a new object from an asset reference
+    pub fn from_asset(sector_x: usize, sector_z: usize, asset_id: u64) -> Self {
+        Self {
+            sector_x,
+            sector_z,
+            height: 0.0,
+            facing: 0.0,
+            asset_id: Some(asset_id),
+            // Use Prop with empty name as placeholder - runtime will use asset components instead
+            object_type: ObjectType::Prop(String::new()),
             name: String::new(),
             enabled: true,
         }

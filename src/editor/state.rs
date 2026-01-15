@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
 use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode, Color15};
 use crate::texture::{TextureLibrary, TextureEditorState};
+use crate::asset::AssetLibrary;
 use super::texture_pack::TexturePack;
 
 /// Frame timing breakdown for editor performance debugging
@@ -666,6 +667,12 @@ pub struct EditorState {
     pub textures_section_expanded: bool,
     pub properties_section_expanded: bool,
 
+    /// Asset library for object placement
+    pub asset_library: AssetLibrary,
+
+    /// Currently selected asset for placement (when PlaceObject tool is active)
+    /// This is the asset name, used alongside/instead of selected_object_type
+    pub selected_asset: Option<String>,
 }
 
 impl EditorState {
@@ -830,6 +837,16 @@ impl EditorState {
             // Collapsible sections (both can be open simultaneously)
             textures_section_expanded: true,
             properties_section_expanded: true,
+
+            // Asset library for object placement
+            asset_library: {
+                let mut lib = AssetLibrary::new();
+                if let Err(e) = lib.discover() {
+                    eprintln!("Failed to discover assets: {}", e);
+                }
+                lib
+            },
+            selected_asset: None,
         }
     }
 
