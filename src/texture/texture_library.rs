@@ -25,6 +25,9 @@ pub struct TextureLibrary {
     textures: HashMap<String, UserTexture>,
     /// List of discovered texture names (for iteration order)
     texture_names: Vec<String>,
+    /// Texture ID → texture name mapping for ID-based lookups
+    /// Unlike content hash, IDs are stable across edits
+    by_id: HashMap<u64, String>,
     /// Base directory for textures
     base_dir: PathBuf,
 }
@@ -35,6 +38,7 @@ impl TextureLibrary {
         Self {
             textures: HashMap::new(),
             texture_names: Vec::new(),
+            by_id: HashMap::new(),
             base_dir: PathBuf::from(TEXTURES_USER_DIR),
         }
     }
@@ -44,6 +48,7 @@ impl TextureLibrary {
         Self {
             textures: HashMap::new(),
             texture_names: Vec::new(),
+            by_id: HashMap::new(),
             base_dir: base_dir.into(),
         }
     }
@@ -55,6 +60,7 @@ impl TextureLibrary {
     pub fn discover(&mut self) -> Result<usize, TextureError> {
         self.textures.clear();
         self.texture_names.clear();
+        self.by_id.clear();
 
         if !self.base_dir.exists() {
             // Create directory if it doesn't exist
@@ -80,7 +86,9 @@ impl TextureLibrary {
             match UserTexture::load(&path) {
                 Ok(tex) => {
                     let name = tex.name.clone();
+                    let hash = tex.id;
                     self.texture_names.push(name.clone());
+                    self.by_id.insert(hash, name.clone());
                     self.textures.insert(name, tex);
                     loaded += 1;
                 }
@@ -112,6 +120,7 @@ impl TextureLibrary {
 
         self.textures.clear();
         self.texture_names.clear();
+        self.by_id.clear();
 
         let manifest_path = format!("{}/{}", TEXTURES_USER_DIR, MANIFEST_FILE);
         let manifest = match load_string(&manifest_path).await {
@@ -134,7 +143,9 @@ impl TextureLibrary {
                 Ok(bytes) => match UserTexture::load_from_bytes(&bytes) {
                     Ok(tex) => {
                         let name = tex.name.clone();
+                        let hash = tex.id;
                         self.texture_names.push(name.clone());
+                        self.by_id.insert(hash, name.clone());
                         self.textures.insert(name, tex);
                         loaded += 1;
                     }
@@ -156,6 +167,23 @@ impl TextureLibrary {
         self.textures.get(name)
     }
 
+    /// Get a texture by its stable ID
+    ///
+    /// Returns the texture with the given ID, if any.
+    /// IDs are stable across edits, unlike content hashes.
+    pub fn get_by_id(&self, id: u64) -> Option<&UserTexture> {
+        self.by_id
+            .get(&id)
+            .and_then(|name| self.textures.get(name))
+    }
+
+    /// Get texture name by stable ID
+    ///
+    /// Returns the name of the texture with the given ID.
+    pub fn get_name_by_id(&self, id: u64) -> Option<&str> {
+        self.by_id.get(&id).map(|s| s.as_str())
+    }
+
     /// Get a mutable reference to a texture by name
     pub fn get_mut(&mut self, name: &str) -> Option<&mut UserTexture> {
         self.textures.get_mut(name)
@@ -169,11 +197,19 @@ impl TextureLibrary {
     /// Add a texture to the library
     ///
     /// If a texture with the same name exists, it will be replaced.
+    /// Also updates the ID index.
     pub fn add(&mut self, texture: UserTexture) {
         let name = texture.name.clone();
-        if !self.textures.contains_key(&name) {
+        let id = texture.id;
+
+        // If replacing, remove old ID mapping
+        if let Some(old_tex) = self.textures.get(&name) {
+            self.by_id.remove(&old_tex.id);
+        } else {
             self.texture_names.push(name.clone());
         }
+
+        self.by_id.insert(id, name.clone());
         self.textures.insert(name, texture);
     }
 
@@ -181,6 +217,8 @@ impl TextureLibrary {
     pub fn remove(&mut self, name: &str) -> Option<UserTexture> {
         if let Some(tex) = self.textures.remove(name) {
             self.texture_names.retain(|n| n != name);
+            // Clean up ID index
+            self.by_id.remove(&tex.id);
             Some(tex)
         } else {
             None

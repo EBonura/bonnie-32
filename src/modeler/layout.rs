@@ -7,14 +7,14 @@ use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as Ras
 use crate::rasterizer::{ClutDepth, Clut, Color15};
 use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode, Axis, MirrorSettings};
 use crate::texture::{
-    UserTexture, TextureSize,
+    UserTexture, TextureSize, generate_texture_id,
     draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
     TextureEditorMode, UvOverlayData, UvVertex, UvFace,
     load_png_to_import_state, draw_import_dialog, ImportAction,
 };
 use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
-use super::mesh_editor::{EditableMesh, MeshObject};
+use super::mesh_editor::{EditableMesh, MeshObject, TextureRef};
 use super::actions::{create_modeler_actions, build_context};
 use crate::rasterizer::{Vec3, Vec2 as RastVec2};
 
@@ -957,6 +957,7 @@ fn create_editing_texture(state: &ModelerState) -> UserTexture {
         .unwrap_or_else(|| Clut::new_4bit("default".to_string()));
 
     UserTexture {
+        id: generate_texture_id(),
         name: "atlas".to_string(),
         width: indexed.width,
         height: indexed.height,
@@ -1370,13 +1371,9 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
     if let Some(name) = clicked_texture {
         state.selected_user_texture = Some(name.clone());
 
-        eprintln!("[DEBUG texture_click] Selected texture '{}', selected_object={:?}", name, state.project.selected_object);
-
         // Clone texture data to avoid borrow issues
         let tex_data = state.user_textures.get(&name).cloned();
         if let Some(tex) = tex_data {
-            eprintln!("[DEBUG texture_click] Applying texture to atlas...");
-
             // Create a new CLUT for this object with the texture's palette
             // This ensures each object has its own CLUT, not shared with other objects
             let obj_name = state.selected_object()
@@ -1389,16 +1386,17 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
             new_clut.depth = tex.depth;
             let new_clut_id = state.project.clut_pool.add_clut(new_clut);
 
-            eprintln!("[DEBUG texture_click] Created new CLUT '{}' with id {:?}", clut_name, new_clut_id);
-
-            // Update the selected object's atlas and texture_name
+            // Update the selected object's texture reference and atlas
+            let tex_id = tex.id;
             if let Some(obj) = state.selected_object_mut() {
+                // Set ID-based reference for persistence (survives texture edits)
+                obj.texture_ref = TextureRef::Id(tex_id);
+                // Also update atlas for runtime rendering
                 obj.atlas.width = tex.width;
                 obj.atlas.height = tex.height;
                 obj.atlas.depth = tex.depth;
                 obj.atlas.indices = tex.indices.clone();
                 obj.atlas.default_clut = new_clut_id;
-                obj.texture_name = Some(name.clone());
             }
 
             // Update the editing texture to match

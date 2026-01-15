@@ -10,6 +10,7 @@
 use crate::rasterizer::{Vec3, Vec2, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::OnceLock;
 use super::state::MirrorSettings;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;
@@ -132,6 +133,82 @@ impl EditFace {
 // PicoCAD-style Mesh Organization
 // ============================================================================
 
+/// ID-based texture reference for mesh objects
+///
+/// Instead of embedding texture data directly, objects reference textures
+/// by their stable ID. This enables:
+/// - Stable references that survive texture edits (ID never changes)
+/// - Resilience to file renames (ID stays the same)
+/// - Automatic UI sync (selecting object highlights matching texture)
+/// - Smaller save files (no duplicated texture data)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TextureRef {
+    /// No texture assigned (renders as white/grey)
+    None,
+    /// Built-in checkerboard pattern (code-generated, never saved as data)
+    Checkerboard,
+    /// Reference to a UserTexture by its stable ID
+    Id(u64),
+    /// Embedded texture data (fallback for OBJ imports without library texture)
+    Embedded(Box<IndexedAtlas>),
+}
+
+impl Default for TextureRef {
+    fn default() -> Self {
+        TextureRef::Checkerboard
+    }
+}
+
+impl TextureRef {
+    /// Check if this is an ID reference
+    pub fn is_id(&self) -> bool {
+        matches!(self, TextureRef::Id(_))
+    }
+
+    /// Get the ID if this is an Id variant
+    pub fn id(&self) -> Option<u64> {
+        match self {
+            TextureRef::Id(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Check if this is the default checkerboard
+    pub fn is_checkerboard(&self) -> bool {
+        matches!(self, TextureRef::Checkerboard)
+    }
+}
+
+// ============================================================================
+// Static Checkerboard Texture
+// ============================================================================
+
+/// Global static checkerboard atlas (code-generated, never serialized)
+static CHECKERBOARD_ATLAS: OnceLock<IndexedAtlas> = OnceLock::new();
+
+/// Global static checkerboard CLUT (grayscale palette)
+static CHECKERBOARD_CLUT: OnceLock<Clut> = OnceLock::new();
+
+/// Get the static checkerboard atlas
+pub fn checkerboard_atlas() -> &'static IndexedAtlas {
+    CHECKERBOARD_ATLAS.get_or_init(|| {
+        IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4)
+    })
+}
+
+/// Get the static checkerboard CLUT (grayscale palette)
+pub fn checkerboard_clut() -> &'static Clut {
+    CHECKERBOARD_CLUT.get_or_init(|| {
+        let mut clut = Clut::new_4bit("checkerboard_clut");
+        // Create grayscale palette
+        for i in 0..16u8 {
+            let v = (i * 2) as u8; // 0, 2, 4, ... 30 (5-bit grayscale)
+            clut.colors[i as usize] = Color15::new(v, v, v);
+        }
+        clut
+    })
+}
+
 /// A named mesh object (like picoCAD's Overview panel items)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeshObject {
@@ -139,7 +216,12 @@ pub struct MeshObject {
     pub name: String,
     /// The geometry
     pub mesh: EditableMesh,
-    /// Per-object texture atlas (stores palette indices)
+    /// Content-based texture reference (hash, embedded, checkerboard, or none)
+    #[serde(default)]
+    pub texture_ref: TextureRef,
+    /// Per-object texture atlas - runtime cache
+    /// Read from old files for migration, but not written to new files
+    #[serde(default, skip_serializing)]
     pub atlas: IndexedAtlas,
     /// Whether this object is visible in the viewport
     pub visible: bool,
@@ -153,23 +235,22 @@ pub struct MeshObject {
     /// Per-object mirror settings (replaces global mirror)
     #[serde(default)]
     pub mirror: Option<MirrorSettings>,
-    /// Name of user texture applied to this object (for UI selection sync)
-    #[serde(default)]
-    pub texture_name: Option<String>,
 }
 
 impl MeshObject {
     pub fn new(name: impl Into<String>) -> Self {
+        // Use checkerboard atlas for default objects (runtime rendering uses atlas field)
+        // TextureRef::Checkerboard indicates this is a built-in texture for serialization
         Self {
             name: name.into(),
             mesh: EditableMesh::new(),
+            texture_ref: TextureRef::Checkerboard,
             atlas: IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
             double_sided: false,
             mirror: None,
-            texture_name: None,
         }
     }
 
@@ -177,27 +258,28 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh,
+            texture_ref: TextureRef::Checkerboard,
             atlas: IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
             double_sided: false,
             mirror: None,
-            texture_name: None,
         }
     }
 
+    /// Create object with embedded atlas (for OBJ imports)
     pub fn with_mesh_and_atlas(name: impl Into<String>, mesh: EditableMesh, atlas: IndexedAtlas) -> Self {
         Self {
             name: name.into(),
             mesh,
+            texture_ref: TextureRef::Embedded(Box::new(atlas.clone())),
             atlas,
             visible: true,
             locked: false,
             color: None,
             double_sided: false,
             mirror: None,
-            texture_name: None,
         }
     }
 
@@ -343,6 +425,36 @@ impl MeshProject {
         let mut project: MeshProject = ron::from_str(ron_data)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
 
+        // Process each object: migrate old format and populate runtime atlas
+        for obj in &mut project.objects {
+            // MIGRATION: Old files have atlas data but no texture_ref
+            // If texture_ref is default (Checkerboard) but atlas was loaded from file,
+            // migrate to TextureRef::Embedded
+            if obj.texture_ref.is_checkerboard() && !obj.atlas.is_empty() {
+                obj.texture_ref = TextureRef::Embedded(Box::new(obj.atlas.clone()));
+                // atlas is already populated, no need to change it
+                continue;
+            }
+
+            // For new files: populate runtime atlas from texture_ref
+            match &obj.texture_ref {
+                TextureRef::None => {
+                    obj.atlas = IndexedAtlas::default();
+                }
+                TextureRef::Checkerboard => {
+                    obj.atlas = IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4);
+                }
+                TextureRef::Id(_) => {
+                    // Hash reference - atlas will be populated when texture is resolved
+                    // Use checkerboard as fallback until then
+                    obj.atlas = IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4);
+                }
+                TextureRef::Embedded(embedded_atlas) => {
+                    obj.atlas = embedded_atlas.as_ref().clone();
+                }
+            }
+        }
+
         // Select first object by default after loading
         if !project.objects.is_empty() {
             project.selected_object = Some(0);
@@ -465,7 +577,7 @@ impl Default for ClutPool {
 ///
 /// PS1-authentic texture format where each pixel is a palette index (4-bit or 8-bit).
 /// Colors are resolved at render time using a CLUT (Color Look-Up Table).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexedAtlas {
     pub width: usize,
     pub height: usize,
@@ -561,6 +673,13 @@ impl IndexedAtlas {
         self.width * self.height
     }
 
+    /// Check if this atlas is empty (no dimensions or indices)
+    ///
+    /// Used for serde skip_serializing_if - empty atlases are not serialized.
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0 || self.indices.is_empty()
+    }
+
     /// Get pixel color using a CLUT (for preview rendering)
     pub fn get_color(&self, x: usize, y: usize, clut: &Clut) -> Color15 {
         let index = self.get_index(x, y);
@@ -611,6 +730,18 @@ impl IndexedAtlas {
             pixels,
             name: name.to_string(),
             blend_mode: crate::rasterizer::BlendMode::Opaque,
+        }
+    }
+}
+
+impl Default for IndexedAtlas {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            depth: ClutDepth::Bpp4,
+            indices: Vec::new(),
+            default_clut: ClutId::NONE,
         }
     }
 }

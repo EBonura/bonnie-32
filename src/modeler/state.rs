@@ -7,12 +7,39 @@
 
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15};
-use crate::texture::{TextureLibrary, TextureEditorState};
-use super::mesh_editor::{EditableMesh, MeshProject, MeshObject, IndexedAtlas, EditFace};
+use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15, Clut};
+use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
+use super::mesh_editor::{
+    EditableMesh, MeshProject, MeshObject, IndexedAtlas, EditFace, TextureRef,
+    checkerboard_atlas, checkerboard_clut,
+};
 use super::model::Animation;
 use super::drag::DragManager;
 use super::tools::ModelerToolBox;
+
+// ============================================================================
+// Resolved Texture
+// ============================================================================
+
+/// Resolved texture data from a TextureRef
+///
+/// This enum provides access to the actual texture data after resolving
+/// a TextureRef through the texture library or embedded data.
+#[derive(Debug)]
+pub enum ResolvedTexture<'a> {
+    /// Static code-generated texture (checkerboard)
+    Static {
+        atlas: &'static IndexedAtlas,
+        clut: &'static Clut,
+    },
+    /// User texture from the library
+    UserTexture(&'a UserTexture),
+    /// Embedded texture data (from OBJ imports)
+    Embedded {
+        atlas: &'a IndexedAtlas,
+        clut: &'a Clut,
+    },
+}
 
 // ============================================================================
 // Camera Mode
@@ -1256,12 +1283,35 @@ impl ModelerState {
         let project = MeshProject::load_from_file(path)
             .map_err(|e| format!("{}", e))?;
         self.project = project;
+        // Resolve hash-based texture references using the texture library
+        self.resolve_all_texture_refs();
         // Project is single source of truth - mesh() will read from it
         self.current_file = Some(path.to_path_buf());
         self.selection.clear();
         self.dirty = false;
         self.set_status(&format!("Loaded: {}", path.display()), 2.0);
         Ok(())
+    }
+
+    /// Resolve all ID-based texture references in the project
+    ///
+    /// For objects with TextureRef::Id, looks up the texture in the library
+    /// and populates the runtime atlas with the texture data.
+    pub fn resolve_all_texture_refs(&mut self) {
+        for obj in &mut self.project.objects {
+            if let TextureRef::Id(id) = &obj.texture_ref {
+                if let Some(tex) = self.user_textures.get_by_id(*id) {
+                    // Found the texture - populate atlas with its data
+                    obj.atlas.width = tex.width;
+                    obj.atlas.height = tex.height;
+                    obj.atlas.depth = tex.depth;
+                    obj.atlas.indices = tex.indices.clone();
+                    // Note: CLUT needs to be added to clut_pool separately
+                    // For now, atlas will use whatever CLUT was set when texture was applied
+                }
+                // If texture not found, keep checkerboard fallback
+            }
+        }
     }
 
     // ========================================================================
@@ -1304,6 +1354,40 @@ impl ModelerState {
         self.project.objects.get_mut(idx).map(|o| &mut o.atlas)
     }
 
+    /// Resolve a TextureRef to actual texture data
+    ///
+    /// Returns None for TextureRef::None. For all other variants, returns
+    /// the appropriate resolved texture with atlas and CLUT data.
+    pub fn resolve_texture<'a>(&'a self, tex_ref: &'a TextureRef) -> Option<ResolvedTexture<'a>> {
+        match tex_ref {
+            TextureRef::None => None,
+            TextureRef::Checkerboard => {
+                Some(ResolvedTexture::Static {
+                    atlas: checkerboard_atlas(),
+                    clut: checkerboard_clut(),
+                })
+            }
+            TextureRef::Id(id) => {
+                self.user_textures.get_by_id(*id)
+                    .map(ResolvedTexture::UserTexture)
+            }
+            TextureRef::Embedded(atlas) => {
+                // Get CLUT from the project's CLUT pool
+                self.project.clut_pool.get(atlas.default_clut)
+                    .map(|clut| ResolvedTexture::Embedded {
+                        atlas: atlas.as_ref(),
+                        clut,
+                    })
+            }
+        }
+    }
+
+    /// Resolve texture for a specific object index
+    pub fn resolve_object_texture(&self, idx: usize) -> Option<ResolvedTexture<'_>> {
+        self.project.objects.get(idx)
+            .and_then(|obj| self.resolve_texture(&obj.texture_ref))
+    }
+
     /// Get all visible mesh objects
     pub fn visible_objects(&self) -> impl Iterator<Item = (usize, &MeshObject)> {
         self.project.objects.iter().enumerate().filter(|(_, o)| o.visible)
@@ -1326,14 +1410,30 @@ impl ModelerState {
             self.selection.clear();
 
             // Extract info before mutating self
-            let (obj_name, tex_name) = self.project.objects.get(index)
-                .map(|obj| (obj.name.clone(), obj.texture_name.clone()))
+            let (obj_name, tex_ref) = self.project.objects.get(index)
+                .map(|obj| (obj.name.clone(), obj.texture_ref.clone()))
                 .unwrap_or_default();
 
             self.set_status(&format!("Selected: {}", obj_name), 0.5);
-            // Sync texture selection to match this object's texture
-            if let Some(name) = tex_name {
-                self.selected_user_texture = Some(name);
+
+            // Sync texture selection to match this object's texture reference
+            match &tex_ref {
+                TextureRef::Id(id) => {
+                    // Look up texture name by ID
+                    if let Some(name) = self.user_textures.get_name_by_id(*id) {
+                        self.selected_user_texture = Some(name.to_string());
+                    } else {
+                        self.selected_user_texture = None;
+                    }
+                }
+                TextureRef::Checkerboard | TextureRef::None => {
+                    // Clear texture selection for built-in/no texture
+                    self.selected_user_texture = None;
+                }
+                TextureRef::Embedded(_) => {
+                    // Embedded textures don't have a library entry
+                    self.selected_user_texture = None;
+                }
             }
         }
     }
