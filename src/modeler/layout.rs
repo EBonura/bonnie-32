@@ -479,8 +479,7 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
         state.project.objects[i].visible = !state.project.objects[i].visible;
     }
     if let Some(i) = clicked_object {
-        state.project.selected_object = Some(i);
-        state.selection.clear();
+        state.select_object(i);
     }
 
     // Show selection info at bottom
@@ -646,12 +645,7 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         // Open delete confirmation dialog
         state.delete_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
-        // Clear editing state when switching objects to prevent texture bleeding
-        if state.project.selected_object != Some(idx) {
-            state.editing_indexed_atlas = false;
-            state.editing_texture = None;
-        }
-        state.project.selected_object = Some(idx);
+        state.select_object(idx);
     }
 }
 
@@ -1397,13 +1391,15 @@ fn draw_paint_texture_browser(ctx: &mut UiContext, rect: Rect, state: &mut Model
 
             eprintln!("[DEBUG texture_click] Created new CLUT '{}' with id {:?}", clut_name, new_clut_id);
 
-            // Update the selected object's atlas
-            let atlas = state.atlas_mut();
-            atlas.width = tex.width;
-            atlas.height = tex.height;
-            atlas.depth = tex.depth;
-            atlas.indices = tex.indices.clone();
-            atlas.default_clut = new_clut_id;
+            // Update the selected object's atlas and texture_name
+            if let Some(obj) = state.selected_object_mut() {
+                obj.atlas.width = tex.width;
+                obj.atlas.height = tex.height;
+                obj.atlas.depth = tex.depth;
+                obj.atlas.indices = tex.indices.clone();
+                obj.atlas.default_clut = new_clut_id;
+                obj.texture_name = Some(name.clone());
+            }
 
             // Update the editing texture to match
             state.editing_texture = Some(tex);

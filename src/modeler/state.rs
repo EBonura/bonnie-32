@@ -1317,10 +1317,23 @@ impl ModelerState {
     /// Select an object by index
     pub fn select_object(&mut self, index: usize) {
         if index < self.project.objects.len() {
+            // Clear editing state when switching objects
+            if self.project.selected_object != Some(index) {
+                self.editing_indexed_atlas = false;
+                self.editing_texture = None;
+            }
             self.project.selected_object = Some(index);
             self.selection.clear();
-            if let Some(obj) = self.project.objects.get(index) {
-                self.set_status(&format!("Selected: {}", obj.name), 0.5);
+
+            // Extract info before mutating self
+            let (obj_name, tex_name) = self.project.objects.get(index)
+                .map(|obj| (obj.name.clone(), obj.texture_name.clone()))
+                .unwrap_or_default();
+
+            self.set_status(&format!("Selected: {}", obj_name), 0.5);
+            // Sync texture selection to match this object's texture
+            if let Some(name) = tex_name {
+                self.selected_user_texture = Some(name);
             }
         }
     }

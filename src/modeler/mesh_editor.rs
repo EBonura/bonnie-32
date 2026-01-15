@@ -153,6 +153,9 @@ pub struct MeshObject {
     /// Per-object mirror settings (replaces global mirror)
     #[serde(default)]
     pub mirror: Option<MirrorSettings>,
+    /// Name of user texture applied to this object (for UI selection sync)
+    #[serde(default)]
+    pub texture_name: Option<String>,
 }
 
 impl MeshObject {
@@ -166,6 +169,7 @@ impl MeshObject {
             color: None,
             double_sided: false,
             mirror: None,
+            texture_name: None,
         }
     }
 
@@ -179,6 +183,7 @@ impl MeshObject {
             color: None,
             double_sided: false,
             mirror: None,
+            texture_name: None,
         }
     }
 
@@ -192,6 +197,7 @@ impl MeshObject {
             color: None,
             double_sided: false,
             mirror: None,
+            texture_name: None,
         }
     }
 
