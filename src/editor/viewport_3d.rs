@@ -7181,6 +7181,20 @@ fn render_asset_meshes(
             let cos_f = facing.cos();
             let sin_f = facing.sin();
 
+            // Build fog parameter from room settings (same as room geometry)
+            let fog = if room.fog.enabled {
+                let (r, g, b) = room.fog.color;
+                let fog_color = RasterColor::new(
+                    (r * 255.0) as u8,
+                    (g * 255.0) as u8,
+                    (b * 255.0) as u8,
+                );
+                let cull_distance = room.fog.start + room.fog.falloff + room.fog.cull_offset;
+                Some((room.fog.start, room.fog.falloff, cull_distance, fog_color))
+            } else {
+                None
+            };
+
             // Render each visible mesh part
             for part in mesh_parts.iter().filter(|p| p.visible) {
                 let (local_vertices, faces) = part.mesh.to_render_data_textured();
@@ -7217,11 +7231,11 @@ fn render_asset_meshes(
                 // Resolve texture: use UserTexture data for Id refs, otherwise use atlas
                 let (atlas, clut) = resolve_part_texture(part, state);
 
-                // Render the mesh
+                // Render the mesh with fog and distance culling
                 if use_rgb555 {
                     let tex15 = atlas.to_texture15(&clut, "asset_part");
                     let part_textures = [tex15];
-                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &state.camera_3d, &render_settings, None);
+                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &state.camera_3d, &render_settings, fog);
                 } else {
                     let tex = atlas.to_raster_texture(&clut, "asset_part");
                     let part_textures = [tex];
