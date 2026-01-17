@@ -14,7 +14,7 @@ use crate::texture::{
 };
 use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
-use super::mesh_editor::{EditableMesh, MeshObject, TextureRef};
+use super::mesh_editor::{EditableMesh, MeshPart, TextureRef};
 use super::actions::{create_modeler_actions, build_context};
 use crate::rasterizer::{Vec3, Vec2 as RastVec2};
 
@@ -5094,7 +5094,7 @@ fn paste_clipboard(state: &mut ModelerState) {
     }
 
     let name = state.generate_unique_object_name("Pasted");
-    let obj = MeshObject::with_mesh(&name, new_mesh);
+    let obj = MeshPart::with_mesh(&name, new_mesh);
     state.add_object(obj);
     state.set_status("Pasted as new object", 1.0);
 }
@@ -5124,7 +5124,7 @@ fn duplicate_selection(state: &mut ModelerState) {
             }
 
             let name = state.generate_unique_object_name("Duplicate");
-            let obj = MeshObject::with_mesh(&name, new_mesh);
+            let obj = MeshPart::with_mesh(&name, new_mesh);
             state.add_object(obj);
             state.set_status(&format!("Duplicated {} face(s)", face_indices.len()), 1.0);
         }
@@ -5141,7 +5141,7 @@ fn duplicate_selection(state: &mut ModelerState) {
             }
 
             let name = state.generate_unique_object_name("Duplicate");
-            let obj = MeshObject::with_mesh(&name, new_mesh);
+            let obj = MeshPart::with_mesh(&name, new_mesh);
             state.add_object(obj);
             state.set_status("Duplicated mesh", 1.0);
         }
@@ -5324,7 +5324,7 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
         // Create new object with unique name
         let base_name = prim.label().split_whitespace().next().unwrap_or("Object");
         let name = state.generate_unique_object_name(base_name);
-        let obj = MeshObject::with_mesh(&name, new_mesh);
+        let obj = MeshPart::with_mesh(&name, new_mesh);
         state.add_object(obj);
         state.set_status(&format!("Added {} as new object", prim.label()), 1.0);
         state.context_menu = None;
@@ -5350,7 +5350,7 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
             .map(|o| o.name.as_str())
             .unwrap_or("Object");
         let name = state.generate_unique_object_name(source_name);
-        let obj = MeshObject::with_mesh(&name, clone);
+        let obj = MeshPart::with_mesh(&name, clone);
         state.add_object(obj);
         state.set_status("Cloned as new object", 1.0);
         state.context_menu = None;

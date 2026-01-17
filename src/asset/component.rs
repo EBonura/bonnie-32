@@ -7,7 +7,7 @@
 //! not a special field. This enables mesh-less assets (pure triggers, lights, etc.)
 
 use serde::{Deserialize, Serialize};
-use crate::modeler::MeshObject;
+use crate::modeler::MeshPart;
 use crate::game::components::{EnemyType, ItemType};
 
 /// Components that can be attached to an asset
@@ -21,8 +21,8 @@ pub enum AssetComponent {
     /// Contains full geometry + TextureRef::Id pointing to shared textures.
     /// This is the visual representation of the asset.
     Mesh {
-        /// Mesh objects (each with geometry + texture reference)
-        objects: Vec<MeshObject>,
+        /// Mesh parts (each with geometry + texture reference)
+        parts: Vec<MeshPart>,
     },
 
     /// Collision shape for physics
@@ -152,6 +152,15 @@ pub enum AssetComponent {
         #[serde(default = "default_step_height")]
         step_height: f32,
     },
+
+    /// Spawn point for player or NPCs
+    ///
+    /// Defines where entities can spawn in the level.
+    SpawnPoint {
+        /// True for player start position, false for NPC/enemy spawns
+        #[serde(default)]
+        is_player_start: bool,
+    },
 }
 
 fn default_volume() -> f32 {
@@ -177,6 +186,7 @@ impl AssetComponent {
             AssetComponent::Audio { .. } => "Audio",
             AssetComponent::Particle { .. } => "Particle",
             AssetComponent::CharacterController { .. } => "CharacterController",
+            AssetComponent::SpawnPoint { .. } => "SpawnPoint",
         }
     }
 
@@ -194,6 +204,7 @@ impl AssetComponent {
             AssetComponent::Audio { .. } => '\u{E050}', // speaker icon
             AssetComponent::Particle { .. } => '\u{E3A5}', // sparkle icon
             AssetComponent::CharacterController { .. } => '\u{E7FD}', // person icon
+            AssetComponent::SpawnPoint { .. } => '\u{E566}', // location icon
         }
     }
 
@@ -215,6 +226,16 @@ impl AssetComponent {
     /// Check if this is an Enemy component
     pub fn is_enemy(&self) -> bool {
         matches!(self, AssetComponent::Enemy { .. })
+    }
+
+    /// Check if this is a Checkpoint component
+    pub fn is_checkpoint(&self) -> bool {
+        matches!(self, AssetComponent::Checkpoint { .. })
+    }
+
+    /// Check if this is a SpawnPoint component
+    pub fn is_spawn_point(&self) -> bool {
+        matches!(self, AssetComponent::SpawnPoint { .. })
     }
 }
 

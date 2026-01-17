@@ -16,7 +16,7 @@
 //! ├── id: u64 (stable reference)
 //! ├── name: String
 //! ├── components: Vec<AssetComponent>
-//! │   ├── Mesh { objects: Vec<MeshObject> }  // EMBEDDED mesh data
+//! │   ├── Mesh { parts: Vec<MeshPart> }  // EMBEDDED mesh data
 //! │   │   └── Each object has geometry + TextureRef::Id (points to shared textures)
 //! │   ├── Collision { shape: CollisionShapeDef }
 //! │   ├── Light { color, intensity, radius, offset }

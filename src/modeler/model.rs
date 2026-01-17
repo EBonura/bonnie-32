@@ -1,6 +1,6 @@
 //! Animation types for rigged models
 //!
-//! Note: The main model types (RiggedModel, RigBone, MeshPart) are in state.rs.
+//! Note: The main model types (RiggedModel, RigBone, RigPart) are in state.rs.
 //! IndexedAtlas is in mesh_editor.rs.
 
 use serde::{Deserialize, Serialize};

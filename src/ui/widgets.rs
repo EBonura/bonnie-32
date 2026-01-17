@@ -360,6 +360,74 @@ impl Toolbar {
         }
     }
 
+    /// Add an arrow picker widget with active state: "< label >" with clickable arrows
+    /// The label is also clickable (returns true when clicked).
+    /// When `is_active` is true, the label area is highlighted.
+    /// The callback receives -1 (left) or +1 (right) when arrows are clicked.
+    pub fn arrow_picker_active<F>(&mut self, ctx: &mut UiContext, icon_font: Option<&Font>, label: &str, is_active: bool, on_change: &mut F) -> bool
+    where
+        F: FnMut(i32),
+    {
+        let size = (self.rect.h - 4.0).round();
+        let arrow_size = size;
+        let y = (self.rect.y + 2.0).round();
+
+        // Measure label text
+        let font_size = 14.0;
+        let text_dims = measure_text(label, None, font_size as u16, 1.0);
+        let label_width = text_dims.width.max(60.0); // Minimum width for short labels
+
+        // Left arrow button "<"
+        let left_rect = Rect::new(self.cursor_x.round(), y, arrow_size, size);
+        self.cursor_x += arrow_size;
+
+        // Label area (centered text, clickable)
+        let label_rect = Rect::new(self.cursor_x.round(), y, label_width + 8.0, size);
+        self.cursor_x += label_width + 8.0;
+
+        // Right arrow button ">"
+        let right_rect = Rect::new(self.cursor_x.round(), y, arrow_size, size);
+        self.cursor_x += arrow_size + self.spacing;
+
+        // Draw left arrow
+        let left_clicked = draw_arrow_button(ctx, left_rect, icon_font, true);
+
+        // Draw label with background (highlighted when active)
+        let mouse = mouse_position();
+        let hovering_label = label_rect.contains(mouse.0, mouse.1);
+        let label_bg = if is_active {
+            Color::from_rgba(80, 120, 180, 255) // Blue highlight when active
+        } else if hovering_label {
+            Color::from_rgba(70, 70, 80, 255) // Subtle hover
+        } else {
+            Color::from_rgba(50, 50, 55, 255) // Default
+        };
+        draw_rectangle(
+            label_rect.x, label_rect.y, label_rect.w, label_rect.h,
+            label_bg,
+        );
+        // Center label text
+        let text_x = label_rect.x + (label_rect.w - text_dims.width) * 0.5;
+        let text_y = label_rect.y + (label_rect.h + text_dims.height) * 0.5 - 2.0;
+        draw_text(label, text_x.round(), text_y.round(), font_size, WHITE);
+
+        // Check if label was clicked (not if modal is active)
+        let label_clicked = hovering_label && is_mouse_button_pressed(MouseButton::Left) && !ctx.is_modal_active();
+
+        // Draw right arrow
+        let right_clicked = draw_arrow_button(ctx, right_rect, icon_font, false);
+
+        if left_clicked {
+            on_change(-1);
+            true
+        } else if right_clicked {
+            on_change(1);
+            true
+        } else {
+            label_clicked
+        }
+    }
+
     /// Reserve space in the toolbar and return a Rect for custom drawing
     pub fn reserve(&mut self, width: f32, height: f32) -> Rect {
         let y = self.rect.y + (self.rect.h - height) * 0.5;

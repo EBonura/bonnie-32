@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
-use crate::modeler::{MeshObject, MeshProject};
+use crate::modeler::{MeshPart, MeshProject};
 use crate::rasterizer::Vec3;
 use super::component::AssetComponent;
 
@@ -102,6 +102,12 @@ pub struct Asset {
     /// Tags for filtering in browser
     #[serde(default)]
     pub tags: Vec<String>,
+
+    /// Whether this is a built-in asset (player_spawn, point_light, checkpoint)
+    ///
+    /// Built-in assets cannot be deleted and are shown with a special icon in the browser.
+    #[serde(default)]
+    pub is_builtin: bool,
 }
 
 impl Asset {
@@ -112,11 +118,12 @@ impl Asset {
             id: generate_asset_id(),
             name: name.clone(),
             components: vec![AssetComponent::Mesh {
-                objects: vec![MeshObject::cube(format!("{}_cube", name), 1024.0)],
+                parts: vec![MeshPart::cube(format!("{}_cube", name), 1024.0)],
             }],
             category: String::new(),
             description: String::new(),
             tags: Vec::new(),
+            is_builtin: false,
         }
     }
 
@@ -129,6 +136,7 @@ impl Asset {
             category: String::new(),
             description: String::new(),
             tags: Vec::new(),
+            is_builtin: false,
         }
     }
 
@@ -138,17 +146,18 @@ impl Asset {
             id: generate_asset_id(),
             name: name.to_string(),
             components: vec![AssetComponent::Mesh {
-                objects: project.objects.clone(),
+                parts: project.objects.clone(),
             }],
             category: String::new(),
             description: String::new(),
             tags: Vec::new(),
+            is_builtin: false,
         }
     }
 
     /// Convert this asset to a MeshProject for editing in the modeler
     ///
-    /// This extracts the Mesh component's objects and creates a MeshProject.
+    /// This extracts the Mesh component's parts and creates a MeshProject.
     /// Note: Component metadata (collision, enemy, etc.) is not preserved
     /// in the MeshProject - use Asset directly when that data is needed.
     pub fn to_mesh_project(&self) -> MeshProject {
@@ -161,17 +170,17 @@ impl Asset {
     ///
     /// Returns the first Mesh component found. Assets can theoretically
     /// have multiple Mesh components, but this returns only the first.
-    pub fn mesh(&self) -> Option<&Vec<MeshObject>> {
+    pub fn mesh(&self) -> Option<&Vec<MeshPart>> {
         self.components.iter().find_map(|c| match c {
-            AssetComponent::Mesh { objects } => Some(objects),
+            AssetComponent::Mesh { parts } => Some(parts),
             _ => None,
         })
     }
 
     /// Get mutable reference to the Mesh component
-    pub fn mesh_mut(&mut self) -> Option<&mut Vec<MeshObject>> {
+    pub fn mesh_mut(&mut self) -> Option<&mut Vec<MeshPart>> {
         self.components.iter_mut().find_map(|c| match c {
-            AssetComponent::Mesh { objects } => Some(objects),
+            AssetComponent::Mesh { parts } => Some(parts),
             _ => None,
         })
     }
@@ -236,6 +245,16 @@ impl Asset {
         self.components
             .iter()
             .any(|c| matches!(c, AssetComponent::Door { .. }))
+    }
+
+    /// Check if this asset has a SpawnPoint component
+    ///
+    /// - `is_player_start: true` - checks for player start spawn point
+    /// - `is_player_start: false` - checks for NPC/enemy spawn point
+    pub fn has_spawn_point(&self, is_player_start: bool) -> bool {
+        self.components.iter().any(|c| {
+            matches!(c, AssetComponent::SpawnPoint { is_player_start: p } if *p == is_player_start)
+        })
     }
 
     /// Compute axis-aligned bounding box from mesh (if present)
@@ -340,7 +359,7 @@ impl Asset {
 
     /// Resolve texture references and populate atlas fields
     ///
-    /// After deserialization, the `atlas` field on MeshObjects is empty (skip_serializing).
+    /// After deserialization, the `atlas` field on MeshParts is empty (skip_serializing).
     /// This method populates it based on the `texture_ref` field:
     /// - Checkerboard → uses procedural checkerboard atlas
     /// - Embedded → copies from the embedded atlas data
@@ -350,22 +369,22 @@ impl Asset {
         use crate::modeler::{TextureRef, IndexedAtlas, checkerboard_atlas};
         use crate::rasterizer::ClutDepth;
 
-        if let Some(objects) = self.mesh_mut() {
-            for obj in objects.iter_mut() {
-                match &obj.texture_ref {
+        if let Some(parts) = self.mesh_mut() {
+            for part in parts.iter_mut() {
+                match &part.texture_ref {
                     TextureRef::Checkerboard | TextureRef::None => {
                         // Use procedural checkerboard
-                        obj.atlas = checkerboard_atlas().clone();
+                        part.atlas = checkerboard_atlas().clone();
                     }
                     TextureRef::Embedded(embedded_atlas) => {
                         // Copy from embedded data
-                        obj.atlas = embedded_atlas.as_ref().clone();
+                        part.atlas = embedded_atlas.as_ref().clone();
                     }
                     TextureRef::Id(_) => {
                         // ID-based refs need the texture library - set to checkerboard as placeholder
                         // The caller (ModelerState) should call resolve_all_texture_refs to properly resolve these
-                        if obj.atlas.width == 0 || obj.atlas.indices.is_empty() {
-                            obj.atlas = IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4);
+                        if part.atlas.width == 0 || part.atlas.indices.is_empty() {
+                            part.atlas = IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4);
                         }
                     }
                 }

@@ -10,6 +10,7 @@ use super::grid_view::draw_grid_view;
 use super::viewport_3d::draw_viewport_3d;
 use super::texture_palette::draw_texture_palette;
 use super::actions::{create_editor_actions, build_context, flags};
+use crate::modeler::{draw_asset_browser, AssetBrowserAction};
 
 /// Actions that can be triggered by the editor UI
 #[derive(Debug, Clone, PartialEq)]
@@ -462,6 +463,31 @@ pub fn draw_editor(
         }
     }
 
+    // Draw Asset Browser modal (if open)
+    let browser_action = draw_asset_browser(ctx, &mut state.asset_browser, icon_font, fb);
+    match browser_action {
+        AssetBrowserAction::SelectPreview(idx) => {
+            // Load the selected asset for preview (with texture resolution)
+            if let Some(asset_info) = state.asset_browser.assets.get(idx) {
+                if let Some(asset) = state.asset_library.get(&asset_info.name) {
+                    state.asset_browser.set_preview(asset.clone(), &state.user_textures);
+                }
+            }
+        }
+        AssetBrowserAction::OpenAsset => {
+            // User confirmed selection - set selected_asset and close browser
+            if let Some(asset_info) = state.asset_browser.selected_asset() {
+                state.selected_asset = Some(asset_info.name.clone());
+            }
+            state.asset_browser.close();
+        }
+        AssetBrowserAction::Cancel | AssetBrowserAction::NewAsset => {
+            // Close browser (NewAsset doesn't apply to World Editor)
+            state.asset_browser.close();
+        }
+        AssetBrowserAction::None => {}
+    }
+
     action
 }
 
@@ -537,80 +563,58 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
 
-    // Object type picker (only show when PlaceObject tool is active)
-    // Shows "< Type >" with arrows to cycle through object types
-    // Also shows "< Asset >" picker if assets are available
-    if state.tool == EditorTool::PlaceObject {
+    // Asset picker - always visible
+    // Shows "< asset_name [browse] >" - clicking name activates PlaceObject, chevrons cycle + activate
+    if !state.asset_library.is_empty() {
         toolbar.separator();
 
-        use crate::world::{ObjectType, SpawnPointType};
-        let object_types: [(&str, ObjectType); 6] = [
-            ("Player", ObjectType::Spawn(SpawnPointType::PlayerStart)),
-            ("Checkpoint", ObjectType::Spawn(SpawnPointType::Checkpoint)),
-            ("Enemy", ObjectType::Spawn(SpawnPointType::Enemy)),
-            ("Item", ObjectType::Spawn(SpawnPointType::Item)),
-            ("Light", ObjectType::Light {
-                color: crate::rasterizer::Color::new(255, 240, 200),
-                intensity: 1.0,
-                radius: 2048.0,
-            }),
-            ("Trigger", ObjectType::Trigger {
-                trigger_id: String::new(),
-                trigger_type: "on_enter".to_string(),
-            }),
-        ];
+        // Collect asset names
+        let asset_names: Vec<&str> = state.asset_library.names().collect();
 
-        // Find current index - need exact comparison for Spawn variants
-        // TODO: Simplify - maybe derive PartialEq on ObjectType or use index-based approach
-        let current_idx = object_types.iter().position(|(_, obj_type)| {
-            match (&state.selected_object_type, obj_type) {
-                (ObjectType::Spawn(a), ObjectType::Spawn(b)) => {
-                    std::mem::discriminant(a) == std::mem::discriminant(b)
-                }
-                _ => std::mem::discriminant(&state.selected_object_type) == std::mem::discriminant(obj_type)
-            }
-        }).unwrap_or(0);
-
-        // Draw "< Type >" navigation for built-in object types
-        if toolbar.arrow_picker(ctx, icon_font, object_types[current_idx].0, &mut |delta: i32| {
-            let new_idx = (current_idx as i32 + delta).rem_euclid(object_types.len() as i32) as usize;
-            state.selected_object_type = object_types[new_idx].1.clone();
-            // Clear asset selection when switching to built-in type
-            state.selected_asset = None;
-        }) {
-            // Arrow was clicked, selection already changed via callback
+        // Auto-select first asset if none selected
+        if state.selected_asset.is_none() && !asset_names.is_empty() {
+            state.selected_asset = Some(asset_names[0].to_string());
         }
 
-        // Asset picker (if assets are available)
-        if !state.asset_library.is_empty() {
-            toolbar.separator();
+        // Find current asset index
+        let (current_asset_idx, current_label) = if let Some(ref selected) = state.selected_asset {
+            let idx = asset_names.iter().position(|n| *n == selected.as_str()).unwrap_or(0);
+            (idx, asset_names.get(idx).copied().unwrap_or("(none)"))
+        } else {
+            (0, "(none)")
+        };
 
-            // Collect asset names
-            let asset_names: Vec<&str> = state.asset_library.names().collect();
+        let label = current_label.to_string();
 
-            // Find current asset index (or show "Asset" if none selected)
-            let (current_asset_idx, current_label) = if let Some(ref selected) = state.selected_asset {
-                let idx = asset_names.iter().position(|n| *n == selected.as_str()).unwrap_or(0);
-                (Some(idx), asset_names.get(idx).copied().unwrap_or("Asset"))
-            } else {
-                (None, "Asset")
-            };
+        // Highlight if PlaceObject mode is active
+        let is_active = state.tool == EditorTool::PlaceObject;
 
-            // Draw "< Asset >" navigation
-            if toolbar.arrow_picker(ctx, icon_font, current_label, &mut |delta: i32| {
-                if asset_names.is_empty() {
-                    return;
-                }
-                let new_idx = if let Some(idx) = current_asset_idx {
-                    (idx as i32 + delta).rem_euclid(asset_names.len() as i32) as usize
-                } else {
-                    // First selection - start at index 0 or last depending on direction
-                    if delta > 0 { 0 } else { asset_names.len() - 1 }
-                };
-                state.selected_asset = Some(asset_names[new_idx].to_string());
-            }) {
-                // Arrow was clicked, selection already changed via callback
+        // Draw "< Asset >" navigation - clicking arrows or label activates PlaceObject mode
+        let picker_clicked = toolbar.arrow_picker_active(ctx, icon_font, &label, is_active, &mut |delta: i32| {
+            // Activate PlaceObject mode when cycling
+            state.tool = EditorTool::PlaceObject;
+            if asset_names.is_empty() {
+                return;
             }
+            let new_idx = (current_asset_idx as i32 + delta).rem_euclid(asset_names.len() as i32) as usize;
+            state.selected_asset = Some(asset_names[new_idx].to_string());
+        });
+        if picker_clicked {
+            // Label was clicked - activate PlaceObject mode
+            state.tool = EditorTool::PlaceObject;
+        }
+
+        // Browse assets button (opens Asset Browser modal)
+        if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Assets") {
+            state.tool = EditorTool::PlaceObject;
+            // Open the asset browser with current assets
+            let assets: Vec<_> = state.asset_library.names()
+                .map(|name| crate::modeler::AssetInfo {
+                    name: name.to_string(),
+                    path: std::path::PathBuf::from(format!("assets/assets/{}.ron", name)),
+                })
+                .collect();
+            state.asset_browser.open(assets);
         }
     }
 
@@ -1043,8 +1047,8 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     action
 }
 
-/// Helper function to paste an object at the selected sector
-fn paste_object(state: &mut EditorState, copied: crate::world::LevelObject) {
+/// Helper function to paste an asset instance at the selected sector
+fn paste_object(state: &mut EditorState, copied: crate::world::AssetInstance) {
     // Get target sector from selection
     let target = match &state.selection {
         Selection::Sector { room, x, z } => Some((*room, *x, *z)),
@@ -3059,13 +3063,19 @@ fn draw_room_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     // Properties for selected room
     // Extract values first to avoid borrow conflicts with mutations
     let room_data = state.current_room().map(|room| {
+        // Count lights by checking asset components
+        let light_count = room.objects.iter().filter(|obj| {
+            state.asset_library.get_by_id(obj.asset_id)
+                .map(|asset| asset.has_light())
+                .unwrap_or(false)
+        }).count();
         (
             room.position,
             room.width,
             room.depth,
             room.iter_sectors().count(),
             room.portals.len(),
-            room.objects.iter().filter(|obj| obj.is_light()).count(),
+            light_count,
             room.ambient,
             room.fog.enabled,
             room.fog.color,
@@ -5544,7 +5554,7 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
             }
         }
         super::Selection::Object { room: room_idx, index } => {
-            // Object properties
+            // Object properties (asset-based)
             let obj_room_idx = *room_idx;
             let obj_idx = *index;
 
@@ -5553,8 +5563,13 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 .cloned();
 
             if let Some(obj) = obj_opt {
-                let obj_name = obj.object_type.display_name();
-                draw_text(obj_name, x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
+                // Get asset name from library
+                let asset_name = state.asset_library.get_name_by_id(obj.asset_id)
+                    .unwrap_or("Unknown");
+                let asset = state.asset_library.get_by_id(obj.asset_id);
+
+                // Header with asset name
+                draw_text(asset_name, x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
                 y += 20.0;
 
                 // Location
@@ -5569,222 +5584,139 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                     x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
                 y += 20.0;
 
-                // Type-specific properties
-                match &obj.object_type {
-                    crate::world::ObjectType::Light { color, intensity, radius } => {
-                        // Color picker
-                        let picker_height = ps1_color_picker_height();
-                        let picker_result = draw_ps1_color_picker(
-                            ctx,
+                // Show asset components
+                if let Some(asset) = asset {
+                    draw_text("Components:", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
+                    y += LINE_HEIGHT;
+                    for component in &asset.components {
+                        let comp_name = component.type_name();
+                        draw_text(&format!("  • {}", comp_name), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
+                        y += LINE_HEIGHT;
+                    }
+                    if asset.components.is_empty() {
+                        draw_text("  (none)", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
+                        y += LINE_HEIGHT;
+                    }
+                    y += 8.0;
+
+                    // Player spawn shows player settings
+                    if asset.has_spawn_point(true) {
+                        let section_color = Color::from_rgba(120, 150, 180, 255);
+                        let line_height = 20.0;
+                        let label_color = Color::from_rgba(180, 180, 190, 255);
+
+                        // === Collision Section ===
+                        draw_text("Collision", x, (y + 12.0).floor(), 11.0, section_color);
+                        y += 18.0;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Radius",
+                            state.level.player_settings.radius, 0,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.radius = v; }
+                        y = r.new_y;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
+                            state.level.player_settings.height, 1,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.height = v; }
+                        y = r.new_y;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Step",
+                            state.level.player_settings.step_height, 2,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.step_height = v; }
+                        y = r.new_y;
+
+                        y += 6.0;
+
+                        // === Movement Section ===
+                        draw_text("Movement", x, (y + 12.0).floor(), 11.0, section_color);
+                        y += 18.0;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Walk",
+                            state.level.player_settings.walk_speed, 3,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.walk_speed = v; }
+                        y = r.new_y;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Run",
+                            state.level.player_settings.run_speed, 4,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.run_speed = v; }
+                        y = r.new_y;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Gravity",
+                            state.level.player_settings.gravity, 5,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.gravity = v; }
+                        y = r.new_y;
+
+                        y += 6.0;
+
+                        // === Camera Section ===
+                        draw_text("Camera", x, (y + 12.0).floor(), 11.0, section_color);
+                        y += 18.0;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Distance",
+                            state.level.player_settings.camera_distance, 6,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.camera_distance = v; }
+                        y = r.new_y;
+
+                        let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Y Offset",
+                            state.level.player_settings.camera_vertical_offset, 7,
+                            &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
+                        if let Some(v) = r.new_value { state.level.player_settings.camera_vertical_offset = v; }
+                        y = r.new_y;
+
+                        y += 10.0;
+
+                        // === Camera Preview ===
+                        draw_text("Preview", x, (y + 12.0).floor(), 11.0, section_color);
+                        y += 18.0;
+
+                        // Calculate player world position
+                        let player_world_pos = if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                            obj.world_position(room)
+                        } else {
+                            Vec3::new(0.0, 0.0, 0.0)
+                        };
+
+                        // Camera position: behind and above the player (orbit style preview)
+                        let settings = &state.level.player_settings;
+                        let look_at = Vec3::new(
+                            player_world_pos.x,
+                            player_world_pos.y + settings.camera_vertical_offset,
+                            player_world_pos.z,
+                        );
+                        let cam_pos = Vec3::new(
+                            player_world_pos.x,
+                            player_world_pos.y + settings.camera_vertical_offset + settings.camera_distance * 0.2,
+                            player_world_pos.z - settings.camera_distance,
+                        );
+
+                        // Preview dimensions (4:3 aspect ratio)
+                        let preview_w = (container_width - 8.0).min(160.0);
+                        let preview_h = preview_w * 0.75;
+
+                        // Render camera preview
+                        draw_player_camera_preview(
                             x,
                             y,
-                            container_width - 8.0,
-                            *color,
-                            RasterColor::from_ps1(16, 16, 16),
-                            "Color",
-                            &mut state.light_color_slider,
-                        );
-                        if let Some(new_color) = picker_result.color {
-                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
-                                if let crate::world::ObjectType::Light { color: c, .. } = &mut obj_mut.object_type {
-                                    *c = new_color;
-                                }
-                            }
-                        }
-                        y += picker_height + 16.0;
-
-                        // Intensity knob
-                        let knob_radius = 18.0;
-                        let knob_center_x = x + container_width * 0.25;
-                        let knob_center_y = y + knob_radius + 12.0;
-
-                        // Convert intensity (0.0-2.0) to knob value (0-127)
-                        let intensity_value = ((*intensity / 2.0) * 127.0).round() as u8;
-                        let intensity_result = draw_knob(
-                            ctx,
-                            knob_center_x,
-                            knob_center_y,
-                            knob_radius,
-                            intensity_value.min(127),
-                            "Intensity",
-                            false,
-                            false,
+                            preview_w,
+                            preview_h,
+                            cam_pos,
+                            look_at,
+                            player_world_pos,
+                            settings.radius,
+                            settings.height,
+                            &state.level,
+                            &state.texture_packs,
+                            &state.user_textures,
+                            &state.asset_library,
                         );
 
-                        if let Some(new_val) = intensity_result.value {
-                            let new_intensity = (new_val as f32 / 127.0) * 2.0;
-                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
-                                if let crate::world::ObjectType::Light { intensity: i, .. } = &mut obj_mut.object_type {
-                                    *i = new_intensity;
-                                }
-                            }
-                        }
-
-                        // Radius knob
-                        let knob_center_x2 = x + container_width * 0.75;
-
-                        // Convert radius (0-16384) to knob value (0-127)
-                        // 16384 = 16 sectors worth of radius
-                        const MAX_LIGHT_RADIUS: f32 = 16384.0;
-                        let radius_value = ((*radius / MAX_LIGHT_RADIUS) * 127.0).round() as u8;
-                        let radius_result = draw_knob(
-                            ctx,
-                            knob_center_x2,
-                            knob_center_y,
-                            knob_radius,
-                            radius_value.min(127),
-                            "Radius",
-                            false,
-                            false,
-                        );
-
-                        if let Some(new_val) = radius_result.value {
-                            let new_radius = (new_val as f32 / 127.0) * MAX_LIGHT_RADIUS;
-                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
-                                if let crate::world::ObjectType::Light { radius: r, .. } = &mut obj_mut.object_type {
-                                    *r = new_radius;
-                                }
-                            }
-                        }
-
-                        y += knob_radius * 2.0 + 35.0;
-                    }
-                    crate::world::ObjectType::Spawn(spawn_type) => {
-                        use crate::world::SpawnPointType;
-
-                        match spawn_type {
-                            SpawnPointType::PlayerStart => {
-                                // Player settings - click to edit
-                                let section_color = Color::from_rgba(120, 150, 180, 255);
-                                let line_height = 20.0;
-                                let label_color = Color::from_rgba(180, 180, 190, 255);
-
-                                // === Collision Section ===
-                                draw_text("Collision", x, (y + 12.0).floor(), 11.0, section_color);
-                                y += 18.0;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Radius",
-                                    state.level.player_settings.radius, 0,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.radius = v; }
-                                y = r.new_y;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Height",
-                                    state.level.player_settings.height, 1,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.height = v; }
-                                y = r.new_y;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Step",
-                                    state.level.player_settings.step_height, 2,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.step_height = v; }
-                                y = r.new_y;
-
-                                y += 6.0;
-
-                                // === Movement Section ===
-                                draw_text("Movement", x, (y + 12.0).floor(), 11.0, section_color);
-                                y += 18.0;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Walk",
-                                    state.level.player_settings.walk_speed, 3,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.walk_speed = v; }
-                                y = r.new_y;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Run",
-                                    state.level.player_settings.run_speed, 4,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.run_speed = v; }
-                                y = r.new_y;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Gravity",
-                                    state.level.player_settings.gravity, 5,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.gravity = v; }
-                                y = r.new_y;
-
-                                y += 6.0;
-
-                                // === Camera Section ===
-                                draw_text("Camera", x, (y + 12.0).floor(), 11.0, section_color);
-                                y += 18.0;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Distance",
-                                    state.level.player_settings.camera_distance, 6,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.camera_distance = v; }
-                                y = r.new_y;
-
-                                let r = draw_player_prop_field(ctx, x, y, container_width, line_height, "Y Offset",
-                                    state.level.player_settings.camera_vertical_offset, 7,
-                                    &mut state.player_prop_editing, &mut state.player_prop_buffer, label_color);
-                                if let Some(v) = r.new_value { state.level.player_settings.camera_vertical_offset = v; }
-                                y = r.new_y;
-
-                                y += 10.0;
-
-                                // === Camera Preview ===
-                                draw_text("Preview", x, (y + 12.0).floor(), 11.0, section_color);
-                                y += 18.0;
-
-                                // Calculate player world position
-                                let player_world_pos = if let Some(room) = state.level.rooms.get(obj_room_idx) {
-                                    obj.world_position(room)
-                                } else {
-                                    Vec3::new(0.0, 0.0, 0.0)
-                                };
-
-                                // Camera position: behind and above the player (orbit style preview)
-                                let settings = &state.level.player_settings;
-                                let look_at = Vec3::new(
-                                    player_world_pos.x,
-                                    player_world_pos.y + settings.camera_vertical_offset,
-                                    player_world_pos.z,
-                                );
-                                let cam_pos = Vec3::new(
-                                    player_world_pos.x,
-                                    player_world_pos.y + settings.camera_vertical_offset + settings.camera_distance * 0.2,
-                                    player_world_pos.z - settings.camera_distance,
-                                );
-
-                                // Preview dimensions (4:3 aspect ratio)
-                                let preview_w = (container_width - 8.0).min(160.0);
-                                let preview_h = preview_w * 0.75;
-
-                                // Render camera preview
-                                draw_player_camera_preview(
-                                    x,
-                                    y,
-                                    preview_w,
-                                    preview_h,
-                                    cam_pos,
-                                    look_at,
-                                    player_world_pos,
-                                    settings.radius,
-                                    settings.height,
-                                    &state.level,
-                                    &state.texture_packs,
-                                    &state.user_textures,
-                                );
-
-                                y += preview_h + 8.0;
-                            }
-                            _ => {
-                                // Other spawn types - just show type
-                                draw_text(&format!("Type: {:?}", spawn_type), x, (y + 12.0).floor(), 13.0, WHITE);
-                                y += 24.0;
-                            }
-                        }
-                    }
-                    crate::world::ObjectType::Prop(model_name) => {
-                        draw_text(&format!("Model: {}", model_name), x, (y + 12.0).floor(), 13.0, WHITE);
-                        y += 24.0;
-                    }
-                    _ => {
-                        // Other object types - just show enabled status
-                        y += 8.0;
+                        y += preview_h + 8.0;
                     }
                 }
 
@@ -6008,25 +5940,22 @@ fn calculate_properties_content_height(selection: &super::Selection, state: &Edi
         }
         super::Selection::Object { room: room_idx, index } => {
             // Base height for all objects: header + location + enabled + delete
-            let mut height = 24.0 + 18.0 + 18.0 + 24.0 + 28.0 + 28.0; // header + location lines + type-specific + enabled + delete
+            let mut height = 24.0 + 18.0 + 18.0 + 24.0 + 28.0 + 28.0; // header + location lines + components + enabled + delete
 
             // Add extra height for objects with custom properties
             let obj_opt = state.level.rooms.get(*room_idx)
                 .and_then(|room| room.objects.get(*index));
             if let Some(obj) = obj_opt {
-                match &obj.object_type {
-                    crate::world::ObjectType::Light { .. } => {
-                        height += 18.0 + ps1_color_picker_height() + 16.0 + 18.0 * 2.0 + 35.0; // color label + picker + knobs
-                    }
-                    crate::world::ObjectType::Spawn(crate::world::SpawnPointType::PlayerStart) => {
+                // Add height for component list
+                if let Some(asset) = state.asset_library.get_by_id(obj.asset_id) {
+                    height += 18.0 + asset.components.len() as f32 * 18.0; // Components header + list
+
+                    if asset.has_spawn_point(true) {
                         // Player settings: 3 sections with scroll-to-edit rows
                         // Collision: header 18 + 3 rows at 20 = 78
                         // Movement: header 18 + 3 rows at 20 = 78 + 6 gap
                         // Camera: header 18 + 2 rows at 20 = 58 + 6 gap + 8 final
                         height += 78.0 + 6.0 + 78.0 + 6.0 + 58.0 + 8.0; // = 234
-                    }
-                    _ => {
-                        height += 24.0; // Just the type info line
                     }
                 }
             }
@@ -6116,6 +6045,7 @@ fn draw_player_camera_preview(
     level: &crate::world::Level,
     texture_packs: &[super::TexturePack],
     user_textures: &crate::texture::TextureLibrary,
+    asset_library: &crate::asset::AssetLibrary,
 ) {
     // Create a small framebuffer for the preview
     let fb_w = (width as usize).max(80);
@@ -6146,21 +6076,23 @@ fn draw_player_camera_preview(
     }
     camera.update_basis();
 
-    // Build lighting from level
+    // Build lighting from level - collect lights from any asset with Light component
     let mut lights = Vec::new();
     let mut total_ambient = 0.0;
     let mut room_count = 0;
     for room in &level.rooms {
         total_ambient += room.ambient;
         room_count += 1;
-        // Collect lights from room objects
-        for obj in room.objects.iter().filter(|o| o.enabled) {
-            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                let world_pos = obj.world_position(room);
-                let mut light = Light::point(world_pos, *radius, *intensity);
-                light.color = *color;
-                lights.push(light);
-            }
+        // Collect lights from room objects (any asset with Light component)
+        for obj in room.objects.iter().filter(|o| {
+            o.enabled && asset_library.get_by_id(o.asset_id)
+                .map(|a| a.has_light())
+                .unwrap_or(false)
+        }) {
+            // Use default light settings for preview
+            let world_pos = obj.world_position(room);
+            let light = Light::point(world_pos, 5000.0, 1.0);
+            lights.push(light);
         }
     }
     let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };

@@ -54,6 +54,7 @@ impl AssetLibrary {
     /// Discover and load all assets from the base directory (native only)
     ///
     /// On WASM, this is a no-op - use upload functionality instead.
+    /// Assets are keyed by filename (without extension).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover(&mut self) -> Result<usize, AssetError> {
         self.assets.clear();
@@ -79,16 +80,19 @@ impl AssetLibrary {
         // Sort by filename for consistent ordering
         entries.sort();
 
-        let mut loaded = 0;
         for path in entries {
             match Asset::load(&path) {
                 Ok(asset) => {
-                    let name = asset.name.clone();
+                    // Use filename (without extension) as the key
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&asset.name)
+                        .to_string();
                     let id = asset.id;
                     self.asset_names.push(name.clone());
                     self.by_id.insert(id, name.clone());
                     self.assets.insert(name, asset);
-                    loaded += 1;
                 }
                 Err(e) => {
                     eprintln!("Failed to load asset {:?}: {}", path, e);
@@ -96,22 +100,25 @@ impl AssetLibrary {
             }
         }
 
-        Ok(loaded)
+        Ok(self.assets.len())
     }
 
     /// Discover assets (WASM stub - no filesystem access)
     ///
-    /// On WASM, assets must be uploaded by the user. This returns Ok(0).
+    /// On WASM, assets must be uploaded by the user.
     /// Use `add()` to add uploaded assets to the library.
     #[cfg(target_arch = "wasm32")]
     pub fn discover(&mut self) -> Result<usize, AssetError> {
-        // No filesystem on WASM - assets must be uploaded by user
+        self.assets.clear();
+        self.asset_names.clear();
+        self.by_id.clear();
         Ok(0)
     }
 
     /// Load assets from manifest (for WASM)
     ///
     /// The manifest file should contain one asset filename per line (without path).
+    /// Assets are keyed by filename (without extension).
     #[cfg(target_arch = "wasm32")]
     pub async fn discover_from_manifest(&mut self) -> Result<usize, AssetError> {
         use macroquad::prelude::load_string;
@@ -124,12 +131,11 @@ impl AssetLibrary {
         let manifest = match load_string(&manifest_path).await {
             Ok(m) => m,
             Err(_) => {
-                // No manifest, no assets
+                // No manifest
                 return Ok(0);
             }
         };
 
-        let mut loaded = 0;
         for line in manifest.lines() {
             let filename = line.trim();
             if filename.is_empty() || filename.starts_with('#') {
@@ -140,12 +146,15 @@ impl AssetLibrary {
             match macroquad::prelude::load_file(&path).await {
                 Ok(bytes) => match Asset::load_from_bytes(&bytes) {
                     Ok(asset) => {
-                        let name = asset.name.clone();
+                        // Use filename (without extension) as the key
+                        let name = filename
+                            .strip_suffix(".ron")
+                            .unwrap_or(filename)
+                            .to_string();
                         let id = asset.id;
                         self.asset_names.push(name.clone());
                         self.by_id.insert(id, name.clone());
                         self.assets.insert(name, asset);
-                        loaded += 1;
                     }
                     Err(e) => {
                         eprintln!("Failed to parse asset {}: {}", filename, e);
@@ -157,7 +166,7 @@ impl AssetLibrary {
             }
         }
 
-        Ok(loaded)
+        Ok(self.assets.len())
     }
 
     /// Get an asset by name

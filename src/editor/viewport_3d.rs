@@ -3125,21 +3125,20 @@ pub fn draw_viewport_3d(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
-    // Collect all lights from room objects
+    // Collect all lights from room objects (any asset with a Light component)
     let lights: Vec<Light> = if state.raster_settings.shading != crate::rasterizer::ShadingMode::None {
         state.level.rooms.iter()
             .flat_map(|room| {
                 room.objects.iter()
-                    .filter(|obj| obj.enabled)
-                    .filter_map(|obj| {
-                        if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                            let world_pos = obj.world_position(room);
-                            let mut light = Light::point(world_pos, *radius, *intensity);
-                            light.color = *color;
-                            Some(light)
-                        } else {
-                            None
-                        }
+                    .filter(|obj| {
+                        obj.enabled && state.asset_library.get_by_id(obj.asset_id)
+                            .map(|a| a.has_light())
+                            .unwrap_or(false)
+                    })
+                    .map(|obj| {
+                        let world_pos = obj.world_position(room);
+                        // Use default light settings (can be expanded later with asset component data)
+                        Light::point(world_pos, 5000.0, 1.0)
                     })
             })
             .collect()
@@ -3805,7 +3804,7 @@ pub fn draw_viewport_3d(
         }
     }
 
-    // Draw LevelObject gizmos (spawns, object-based lights, triggers, etc.)
+    // Draw asset instance gizmos (spawns, lights, triggers, etc.)
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
         for (obj_idx, obj) in room.objects.iter().enumerate() {
             let world_pos = obj.world_position(room);
@@ -3820,38 +3819,40 @@ pub fn draw_viewport_3d(
                 fb.width,
                 fb.height,
             ) {
-                use crate::world::{ObjectType, SpawnPointType};
-
                 // Check if this object is selected
                 let is_selected = matches!(&state.selection, Selection::Object { room: r, index } if *r == room_idx && *index == obj_idx);
 
-                // Get color and radius based on object type (letter unused in 3D view)
-                let (color, _letter, draw_radius) = match &obj.object_type {
-                    ObjectType::Spawn(spawn_type) => {
-                        let (r, g, b, ch) = match spawn_type {
-                            SpawnPointType::PlayerStart => (100, 255, 100, 'P'),
-                            SpawnPointType::Checkpoint => (100, 200, 255, 'C'),
-                            SpawnPointType::Enemy => (255, 100, 100, 'E'),
-                            SpawnPointType::Item => (255, 200, 100, 'I'),
-                        };
-                        (RasterColor::new(r, g, b), ch, None)
-                    }
-                    ObjectType::Light { color: light_color, radius, .. } => {
-                        let c = if obj.enabled {
-                            RasterColor::new(light_color.r, light_color.g, light_color.b)
+                // Get color based on asset type
+                let asset = state.asset_library.get_by_id(obj.asset_id);
+                let is_light = asset.map(|a| a.has_light()).unwrap_or(false);
+                let is_player_spawn = asset.map(|a| a.has_spawn_point(true)).unwrap_or(false);
+
+                let color = if let Some(asset) = asset {
+                    if asset.has_spawn_point(true) {
+                        RasterColor::new(100, 255, 100)
+                    } else if asset.has_light() {
+                        if obj.enabled {
+                            RasterColor::new(255, 255, 100) // Yellow for lights
                         } else {
                             RasterColor::new(80, 80, 80)
-                        };
-                        (c, 'L', Some(*radius))
+                        }
+                    } else if asset.has_checkpoint() {
+                        RasterColor::new(100, 200, 255)
+                    } else if asset.has_enemy() {
+                        RasterColor::new(255, 100, 100)
+                    } else if asset.has_mesh() {
+                        RasterColor::new(180, 130, 255)
+                    } else if asset.has_trigger() {
+                        RasterColor::new(255, 100, 200)
+                    } else {
+                        RasterColor::new(100, 100, 100)
                     }
-                    ObjectType::Prop(_) => (RasterColor::new(180, 130, 255), 'M', None),
-                    ObjectType::Trigger { .. } => (RasterColor::new(255, 100, 200), 'T', None),
-                    ObjectType::Particle { .. } => (RasterColor::new(255, 180, 100), '*', None),
-                    ObjectType::Audio { .. } => (RasterColor::new(100, 200, 255), '~', None),
+                } else {
+                    RasterColor::new(100, 100, 100)
                 };
 
                 // For lights, draw 3D filled octahedron gizmo
-                if let Some(_radius) = draw_radius {
+                if is_light {
                     let octa_size = if is_selected { 80.0 } else { 50.0 };
                     let octa_color = if is_selected {
                         RasterColor::new(255, 255, 255) // White when selected
@@ -3859,7 +3860,7 @@ pub fn draw_viewport_3d(
                         color
                     };
                     draw_filled_octahedron(fb, &state.camera_3d, world_pos, octa_size, octa_color);
-                } else if matches!(&obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)) {
+                } else if is_player_spawn {
                     // PlayerStart: draw collision cylinder wireframe only (no dot)
                     let settings = &state.level.player_settings;
                     let cylinder_color = if is_selected {

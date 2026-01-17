@@ -236,13 +236,13 @@ impl GameToolState {
 
     /// Initialize camera from level's player start (if any)
     /// Call this once when entering the game tab or when level changes
-    pub fn init_from_level(&mut self, level: &Level) {
+    pub fn init_from_level(&mut self, level: &Level, asset_library: &crate::asset::AssetLibrary) {
         if self.camera_initialized {
             return;
         }
 
         // Try to get player start position from tile-based objects
-        if let Some((room_idx, spawn)) = level.get_player_start() {
+        if let Some((room_idx, spawn)) = level.get_player_start(asset_library) {
             // Get the room to calculate world position
             if let Some(room) = level.rooms.get(room_idx) {
                 let spawn_pos = spawn.world_position(room);

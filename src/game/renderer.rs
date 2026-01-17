@@ -25,6 +25,7 @@ pub fn draw_test_viewport(
     fb: &mut Framebuffer,
     input: &InputState,
     ctx: &crate::ui::UiContext,
+    asset_library: &crate::asset::AssetLibrary,
 ) {
     let frame_start = FrameTimings::start();
 
@@ -47,7 +48,7 @@ pub fn draw_test_viewport(
     fb.resize(fb_w, fb_h);
 
     // Initialize camera from level's player start (only once)
-    game.init_from_level(level);
+    game.init_from_level(level, asset_library);
 
     // Check for options menu toggle (Start button / Escape)
     if input.action_pressed(Action::OpenMenu) {
@@ -113,16 +114,15 @@ pub fn draw_test_viewport(
         level.rooms.iter()
             .flat_map(|room| {
                 room.objects.iter()
-                    .filter(|obj| obj.enabled)
-                    .filter_map(|obj| {
-                        if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                            let world_pos = obj.world_position(room);
-                            let mut light = Light::point(world_pos, *radius, *intensity);
-                            light.color = *color;
-                            Some(light)
-                        } else {
-                            None
-                        }
+                    .filter(|obj| {
+                        obj.enabled && asset_library.get_by_id(obj.asset_id)
+                            .map(|a| a.has_light())
+                            .unwrap_or(false)
+                    })
+                    .map(|obj| {
+                        let world_pos = obj.world_position(room);
+                        // Use default light settings (can be expanded later with asset data)
+                        Light::point(world_pos, 5000.0, 1.0)
                     })
             })
             .collect()
@@ -258,7 +258,7 @@ pub fn draw_test_viewport(
 
     // Draw debug menu overlay if open (top-left, blocks gameplay for D-pad navigation)
     if game.options_menu_open {
-        draw_debug_menu(game, &rect, input, level);
+        draw_debug_menu(game, &rect, input, level, asset_library);
     } else {
         // Show collapsed hint when menu is closed
         let hint = "[ESC] Menu";
@@ -271,7 +271,7 @@ pub fn draw_test_viewport(
     }
 
     // Show warning if no player start exists in level
-    if level.get_player_start().is_none() {
+    if level.get_player_start(asset_library).is_none() {
         let msg = "No Player Start in level";
         let hint = "Add a PlayerStart spawn point in World Editor";
         let font_size = 16.0;
@@ -524,7 +524,7 @@ fn handle_freefly_input(game: &mut GameToolState, rect: &Rect, input: &InputStat
 }
 
 /// Draw compact debug menu overlay (top-left, blocks gameplay for D-pad navigation)
-fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, level: &Level) {
+fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, level: &Level, asset_library: &crate::asset::AssetLibrary) {
     let menu_x = rect.x + 10.0;
     let menu_y = rect.y + 10.0;
     let menu_w = 180.0;
@@ -728,7 +728,7 @@ fn draw_debug_menu(game: &mut GameToolState, rect: &Rect, input: &InputState, le
                     if input.action_pressed(Action::Jump) || is_key_pressed(KeyCode::Enter) {
                         game.reset();
                         game.options_menu_open = false;
-                        if let Some((room_idx, spawn)) = level.get_player_start() {
+                        if let Some((room_idx, spawn)) = level.get_player_start(asset_library) {
                             if let Some(room) = level.rooms.get(room_idx) {
                                 let spawn_pos = spawn.world_position(room);
                                 game.spawn_player(spawn_pos, level);

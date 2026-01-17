@@ -11,7 +11,7 @@ use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Co
 use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
 use crate::asset::Asset;
 use super::mesh_editor::{
-    EditableMesh, MeshObject, IndexedAtlas, EditFace, TextureRef, ClutPool,
+    EditableMesh, MeshPart, IndexedAtlas, EditFace, TextureRef, ClutPool,
     checkerboard_atlas, checkerboard_clut,
 };
 use super::model::Animation;
@@ -201,7 +201,7 @@ impl RigSubMode {
 pub struct RiggedModel {
     pub name: String,
     pub skeleton: Vec<RigBone>,
-    pub parts: Vec<MeshPart>,
+    pub parts: Vec<RigPart>,
     pub animations: Vec<Animation>,
 }
 
@@ -220,7 +220,7 @@ impl RiggedModel {
         Self {
             name: name.to_string(),
             skeleton: Vec::new(),
-            parts: vec![MeshPart {
+            parts: vec![RigPart {
                 name: "root".to_string(),
                 bone_index: None,
                 mesh,
@@ -296,7 +296,7 @@ impl RigBone {
 
 /// A mesh piece that moves 100% with its bone (PS1-style rigid binding)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MeshPart {
+pub struct RigPart {
     pub name: String,
     /// Which bone this part follows (None = unassigned)
     pub bone_index: Option<usize>,
@@ -865,7 +865,7 @@ pub struct ModelerState {
     // Snap/quantization settings
     pub snap_settings: SnapSettings,
 
-    // Note: Mirror editing is now per-object (in MeshObject.mirror)
+    // Note: Mirror editing is now per-part (in MeshPart.mirror)
 
     /// Clipboard for copy/paste operations
     pub clipboard: Clipboard,
@@ -1251,12 +1251,12 @@ impl ModelerState {
     // ========================================================================
 
     /// Get all mesh objects as a slice
-    pub fn objects(&self) -> &[MeshObject] {
+    pub fn objects(&self) -> &[MeshPart] {
         self.asset.mesh().map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Get mutable access to mesh objects
-    pub fn objects_mut(&mut self) -> Option<&mut Vec<MeshObject>> {
+    pub fn objects_mut(&mut self) -> Option<&mut Vec<MeshPart>> {
         self.asset.mesh_mut()
     }
 
@@ -1442,7 +1442,7 @@ impl ModelerState {
     }
 
     /// Get all visible mesh objects
-    pub fn visible_objects(&self) -> impl Iterator<Item = (usize, &MeshObject)> {
+    pub fn visible_objects(&self) -> impl Iterator<Item = (usize, &MeshPart)> {
         self.objects().iter().enumerate().filter(|(_, o)| o.visible)
     }
 
@@ -1492,12 +1492,12 @@ impl ModelerState {
     }
 
     /// Get the currently selected mesh object
-    pub fn selected_object(&self) -> Option<&MeshObject> {
+    pub fn selected_object(&self) -> Option<&MeshPart> {
         self.selected_object.and_then(|i| self.objects().get(i))
     }
 
     /// Get the currently selected mesh object mutably
-    pub fn selected_object_mut(&mut self) -> Option<&mut MeshObject> {
+    pub fn selected_object_mut(&mut self) -> Option<&mut MeshPart> {
         let idx = self.selected_object?;
         self.objects_mut()?.get_mut(idx)
     }
@@ -1511,7 +1511,7 @@ impl ModelerState {
     }
 
     /// Add a new object to the asset
-    pub fn add_object(&mut self, obj: MeshObject) -> usize {
+    pub fn add_object(&mut self, obj: MeshPart) -> usize {
         if let Some(objects) = self.objects_mut() {
             let idx = objects.len();
             objects.push(obj);
@@ -1521,7 +1521,7 @@ impl ModelerState {
         } else {
             // No mesh component - create one with this object
             use crate::asset::AssetComponent;
-            self.asset.add_component(AssetComponent::Mesh { objects: vec![obj] });
+            self.asset.add_component(AssetComponent::Mesh { parts: vec![obj] });
             self.selected_object = Some(0);
             self.dirty = true;
             0

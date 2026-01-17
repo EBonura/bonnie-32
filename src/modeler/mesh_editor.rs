@@ -209,9 +209,13 @@ pub fn checkerboard_clut() -> &'static Clut {
     })
 }
 
-/// A named mesh object (like picoCAD's Overview panel items)
+/// A named mesh part within an asset (like picoCAD's Overview panel items)
+///
+/// Each MeshPart represents a distinct piece of geometry with its own
+/// texture reference, visibility, and settings. Assets can contain
+/// multiple MeshParts bundled together.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MeshObject {
+pub struct MeshPart {
     /// Display name (e.g., "hull", "wing 1", "cockpit")
     pub name: String,
     /// The geometry
@@ -219,25 +223,25 @@ pub struct MeshObject {
     /// Content-based texture reference (hash, embedded, checkerboard, or none)
     #[serde(default)]
     pub texture_ref: TextureRef,
-    /// Per-object texture atlas - runtime cache
+    /// Per-part texture atlas - runtime cache
     /// Read from old files for migration, but not written to new files
     #[serde(default, skip_serializing)]
     pub atlas: IndexedAtlas,
-    /// Whether this object is visible in the viewport
+    /// Whether this part is visible in the viewport
     pub visible: bool,
-    /// Whether this object is locked (can't be selected/edited)
+    /// Whether this part is locked (can't be selected/edited)
     pub locked: bool,
     /// Color tint for identification in viewport (optional)
     pub color: Option<[u8; 3]>,
     /// If true, backface culling is disabled (both sides render)
     #[serde(default)]
     pub double_sided: bool,
-    /// Per-object mirror settings (replaces global mirror)
+    /// Per-part mirror settings (replaces global mirror)
     #[serde(default)]
     pub mirror: Option<MirrorSettings>,
 }
 
-impl MeshObject {
+impl MeshPart {
     pub fn new(name: impl Into<String>) -> Self {
         // Use checkerboard atlas for default objects (runtime rendering uses atlas field)
         // TextureRef::Checkerboard indicates this is a built-in texture for serialization
@@ -288,13 +292,13 @@ impl MeshObject {
     }
 }
 
-/// A complete PicoCAD-style project with multiple objects and indexed texture atlas
+/// A complete PicoCAD-style project with multiple parts and indexed texture atlas
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeshProject {
     /// Project name
     pub name: String,
-    /// All mesh objects in the project (each has its own atlas)
-    pub objects: Vec<MeshObject>,
+    /// All mesh parts in the project (each has its own atlas)
+    pub objects: Vec<MeshPart>,
 
     /// Global CLUT pool (shared across all textures)
     #[serde(default)]
@@ -316,7 +320,7 @@ impl MeshProject {
         let first_clut_id = clut_pool.first_id().unwrap_or(ClutId::NONE);
 
         // Create default cube with atlas linked to pool's first CLUT
-        let mut cube = MeshObject::cube("Cube.00", 1024.0);
+        let mut cube = MeshPart::cube("Cube.00", 1024.0);
         cube.atlas.default_clut = first_clut_id;
 
         Self {
@@ -328,20 +332,20 @@ impl MeshProject {
         }
     }
 
-    /// Add a new object and return its index
-    pub fn add_object(&mut self, obj: MeshObject) -> usize {
+    /// Add a new part and return its index
+    pub fn add_object(&mut self, obj: MeshPart) -> usize {
         let idx = self.objects.len();
         self.objects.push(obj);
         idx
     }
 
-    /// Get the currently selected object
-    pub fn selected(&self) -> Option<&MeshObject> {
+    /// Get the currently selected part
+    pub fn selected(&self) -> Option<&MeshPart> {
         self.selected_object.and_then(|i| self.objects.get(i))
     }
 
-    /// Get the currently selected object mutably
-    pub fn selected_mut(&mut self) -> Option<&mut MeshObject> {
+    /// Get the currently selected part mutably
+    pub fn selected_mut(&mut self) -> Option<&mut MeshPart> {
         self.selected_object.and_then(|i| self.objects.get_mut(i))
     }
 

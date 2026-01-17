@@ -175,6 +175,7 @@ pub fn draw_example_browser(
     browser: &mut ExampleBrowser,
     icon_font: Option<&Font>,
     texture_packs: &[TexturePack],
+    asset_library: &crate::asset::AssetLibrary,
 ) -> BrowserAction {
     if !browser.open {
         return BrowserAction::None;
@@ -250,7 +251,7 @@ pub fn draw_example_browser(
 
     if has_preview {
         // Render 3D preview with orbit camera (uses browser's local framebuffer)
-        draw_orbit_preview(ctx, browser, preview_rect, texture_packs);
+        draw_orbit_preview(ctx, browser, preview_rect, texture_packs, asset_library);
 
         // Draw stats at bottom of preview
         if let Some(stats) = &browser.preview_stats {
@@ -307,6 +308,7 @@ fn draw_orbit_preview(
     browser: &mut ExampleBrowser,
     rect: Rect,
     texture_packs: &[TexturePack],
+    asset_library: &crate::asset::AssetLibrary,
 ) {
     use crate::rasterizer::WIDTH;
 
@@ -408,15 +410,17 @@ fn draw_orbit_preview(
         total_ambient += room.ambient;
         room_count += 1;
     }
-    // Collect lights from room objects
+    // Collect lights from room objects (any asset with Light component)
     for room in &level.rooms {
-        for obj in room.objects.iter().filter(|o| o.enabled) {
-            if let crate::world::ObjectType::Light { color, intensity, radius } = &obj.object_type {
-                let world_pos = obj.world_position(room);
-                let mut light = Light::point(world_pos, *radius, *intensity);
-                light.color = *color;
-                lights.push(light);
-            }
+        for obj in room.objects.iter().filter(|o| {
+            o.enabled && asset_library.get_by_id(o.asset_id)
+                .map(|a| a.has_light())
+                .unwrap_or(false)
+        }) {
+            let world_pos = obj.world_position(room);
+            // Use default light settings
+            let light = Light::point(world_pos, 5000.0, 1.0);
+            lights.push(light);
         }
     }
     let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
