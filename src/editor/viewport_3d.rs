@@ -3206,6 +3206,10 @@ pub fn draw_viewport_3d(
         vp_raster_ms += EditorFrameTimings::elapsed_ms(raster_start);
     }
 
+    // === ASSET MESH RENDERING PHASE ===
+    // Render 3D meshes from placed asset instances (after room geometry, shares z-buffer)
+    render_asset_meshes(fb, state, &lights, use_rgb555);
+
     let _render_total_ms = EditorFrameTimings::elapsed_ms(render_start);
 
     // === PREVIEW/SELECTION PHASE ===
@@ -3905,6 +3909,21 @@ pub fn draw_viewport_3d(
 
                     // Main circle
                     fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
+                }
+
+                // Draw bounding box for selected mesh objects
+                if is_selected {
+                    if let Some(asset) = asset {
+                        if let Some((min, max)) = asset.bounds() {
+                            let cos_f = obj.facing.cos();
+                            let sin_f = obj.facing.sin();
+                            draw_rotated_bounding_box(
+                                fb, &state.camera_3d,
+                                min, max, world_pos, cos_f, sin_f,
+                                RasterColor::new(255, 200, 50), // Yellow highlight
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -6798,28 +6817,72 @@ fn find_hovered_elements(
     }
 
     // Check objects (level objects like spawns, lights, triggers, etc.)
-    // Objects use screen distance for now (they're point markers)
+    // First check mesh geometry for assets with Mesh components,
+    // then fall back to gizmo-based screen distance for mesh-less assets
     const OBJECT_THRESHOLD: f32 = 12.0;
+    let mut best_object: Option<(usize, usize, f32)> = None; // (room_idx, obj_idx, depth)
+
     for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        // Skip hidden rooms
+        if state.hidden_rooms.contains(&room_idx) {
+            continue;
+        }
+
         for (obj_idx, obj) in room.objects.iter().enumerate() {
+            if !obj.enabled {
+                continue;
+            }
+
             let world_pos = obj.world_position(room);
-            if let Some((sx, sy)) = world_to_screen(
-                world_pos,
-                state.camera_3d.position,
-                state.camera_3d.basis_x,
-                state.camera_3d.basis_y,
-                state.camera_3d.basis_z,
-                fb_width,
-                fb_height,
-            ) {
-                let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-                if dist < OBJECT_THRESHOLD {
-                    if result.object.map_or(true, |(_, _, best_dist)| dist < best_dist) {
-                        result.object = Some((room_idx, obj_idx, dist));
+
+            // Try mesh-based picking first for assets with Mesh components
+            let mut found_mesh_hit = false;
+            if let Some(asset) = state.asset_library.get_by_id(obj.asset_id) {
+                if let Some(mesh_parts) = asset.mesh() {
+                    let (cos_f, sin_f) = (obj.facing.cos(), obj.facing.sin());
+
+                    for part in mesh_parts.iter().filter(|p| p.visible) {
+                        if let Some(depth) = check_mesh_hit(
+                            mouse_fb_x, mouse_fb_y,
+                            &part.mesh,
+                            world_pos, cos_f, sin_f,
+                            &state.camera_3d, fb_width, fb_height,
+                        ) {
+                            if best_object.map_or(true, |(_, _, d)| depth < d) {
+                                best_object = Some((room_idx, obj_idx, depth));
+                                found_mesh_hit = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fall back to gizmo-based picking for mesh-less assets or if no mesh hit
+            if !found_mesh_hit {
+                if let Some((sx, sy, depth)) = world_to_screen_with_depth(
+                    world_pos,
+                    state.camera_3d.position,
+                    state.camera_3d.basis_x,
+                    state.camera_3d.basis_y,
+                    state.camera_3d.basis_z,
+                    fb_width,
+                    fb_height,
+                ) {
+                    let screen_dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                    if screen_dist < OBJECT_THRESHOLD {
+                        // Use depth for comparison (closer objects win)
+                        if best_object.map_or(true, |(_, _, d)| depth < d) {
+                            best_object = Some((room_idx, obj_idx, depth));
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Set result.object from best_object (convert depth to screen_dist for API compatibility)
+    if let Some((room_idx, obj_idx, depth)) = best_object {
+        result.object = Some((room_idx, obj_idx, depth));
     }
 
     result
@@ -7070,4 +7133,240 @@ fn wall_center_in_rect(
     } else {
         false
     }
+}
+
+// =============================================================================
+// Asset Mesh Rendering
+// =============================================================================
+
+use crate::modeler::{IndexedAtlas, MeshPart, TextureRef, checkerboard_clut};
+use crate::rasterizer::ClutId;
+
+/// Render 3D meshes for all placed assets that have Mesh components
+fn render_asset_meshes(
+    fb: &mut Framebuffer,
+    state: &EditorState,
+    lights: &[Light],
+    use_rgb555: bool,
+) {
+    use crate::rasterizer::Vertex;
+
+    for (room_idx, room) in state.level.rooms.iter().enumerate() {
+        // Skip hidden rooms
+        if state.hidden_rooms.contains(&room_idx) {
+            continue;
+        }
+
+        for obj in &room.objects {
+            // Skip disabled objects
+            if !obj.enabled {
+                continue;
+            }
+
+            // Get asset from library
+            let asset = match state.asset_library.get_by_id(obj.asset_id) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            // Get mesh component
+            let mesh_parts = match asset.mesh() {
+                Some(parts) => parts,
+                None => continue, // No mesh component - will use gizmo rendering
+            };
+
+            // Calculate world transform
+            let world_pos = obj.world_position(room);
+            let facing = obj.facing;
+            let cos_f = facing.cos();
+            let sin_f = facing.sin();
+
+            // Render each visible mesh part
+            for part in mesh_parts.iter().filter(|p| p.visible) {
+                let (local_vertices, faces) = part.mesh.to_render_data_textured();
+                if local_vertices.is_empty() {
+                    continue;
+                }
+
+                // Per-room render settings with lights
+                // Disable backface culling for double-sided parts
+                let render_settings = RasterSettings {
+                    lights: lights.to_vec(),
+                    ambient: room.ambient,
+                    backface_cull: !part.double_sided && state.raster_settings.backface_cull,
+                    ..state.raster_settings.clone()
+                };
+
+                // Transform vertices: rotate around Y by facing, then translate
+                let transformed_vertices: Vec<Vertex> = local_vertices.iter().map(|v| {
+                    let rx = v.pos.x * cos_f - v.pos.z * sin_f;
+                    let rz = v.pos.x * sin_f + v.pos.z * cos_f;
+                    Vertex {
+                        pos: Vec3::new(rx + world_pos.x, v.pos.y + world_pos.y, rz + world_pos.z),
+                        uv: v.uv,
+                        normal: Vec3::new(
+                            v.normal.x * cos_f - v.normal.z * sin_f,
+                            v.normal.y,
+                            v.normal.x * sin_f + v.normal.z * cos_f,
+                        ),
+                        color: v.color,
+                        bone_index: v.bone_index,
+                    }
+                }).collect();
+
+                // Resolve texture: use UserTexture data for Id refs, otherwise use atlas
+                let (atlas, clut) = resolve_part_texture(part, state);
+
+                // Render the mesh
+                if use_rgb555 {
+                    let tex15 = atlas.to_texture15(&clut, "asset_part");
+                    let part_textures = [tex15];
+                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &state.camera_3d, &render_settings, None);
+                } else {
+                    let tex = atlas.to_raster_texture(&clut, "asset_part");
+                    let part_textures = [tex];
+                    render_mesh(fb, &transformed_vertices, &faces, &part_textures, &state.camera_3d, &render_settings);
+                }
+            }
+        }
+    }
+}
+
+/// Resolve atlas and CLUT for a mesh part based on its TextureRef
+///
+/// For TextureRef::Id, returns the actual texture data from the UserTexture,
+/// not the potentially stale atlas stored in the MeshPart.
+fn resolve_part_texture(part: &MeshPart, state: &EditorState) -> (IndexedAtlas, crate::rasterizer::Clut) {
+    use crate::rasterizer::Clut;
+
+    match &part.texture_ref {
+        TextureRef::Id(id) => {
+            // Find user texture by ID and create atlas + CLUT from it
+            if let Some(tex) = state.user_textures.get_by_id(*id) {
+                // Create atlas from UserTexture's indices
+                let atlas = IndexedAtlas {
+                    width: tex.width,
+                    height: tex.height,
+                    depth: tex.depth,
+                    indices: tex.indices.clone(),
+                    default_clut: ClutId::NONE,
+                };
+                // Create CLUT from UserTexture's palette
+                let mut clut = Clut::new_4bit("asset_texture");
+                clut.colors = tex.palette.clone();
+                clut.depth = tex.depth;
+                (atlas, clut)
+            } else {
+                (part.atlas.clone(), checkerboard_clut().clone())
+            }
+        }
+        TextureRef::Embedded(_embedded) => {
+            // For embedded textures, we'd need a CLUT pool - use checkerboard for now
+            (part.atlas.clone(), checkerboard_clut().clone())
+        }
+        TextureRef::Checkerboard | TextureRef::None => {
+            (part.atlas.clone(), checkerboard_clut().clone())
+        }
+    }
+}
+
+/// Draw a wireframe bounding box rotated around Y axis
+fn draw_rotated_bounding_box(
+    fb: &mut Framebuffer,
+    camera: &crate::rasterizer::Camera,
+    min: Vec3,
+    max: Vec3,
+    world_pos: Vec3,
+    cos_f: f32,
+    sin_f: f32,
+    color: RasterColor,
+) {
+    // 8 corners of the bounding box in local space
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+
+    // Transform corners to world space
+    let world_corners: Vec<Vec3> = corners.iter().map(|c| {
+        let rx = c.x * cos_f - c.z * sin_f;
+        let rz = c.x * sin_f + c.z * cos_f;
+        Vec3::new(rx + world_pos.x, c.y + world_pos.y, rz + world_pos.z)
+    }).collect();
+
+    // 12 edges of the box (pairs of corner indices)
+    let edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0), // Bottom
+        (4, 5), (5, 6), (6, 7), (7, 4), // Top
+        (0, 4), (1, 5), (2, 6), (3, 7), // Verticals
+    ];
+
+    for (a, b) in edges {
+        draw_3d_line(fb, world_corners[a], world_corners[b], camera, color);
+    }
+}
+
+/// Check if mouse hits any triangle in a mesh, return depth at hit point if hit
+fn check_mesh_hit(
+    mouse_x: f32,
+    mouse_y: f32,
+    mesh: &crate::modeler::EditableMesh,
+    world_pos: Vec3,
+    cos_f: f32,
+    sin_f: f32,
+    camera: &crate::rasterizer::Camera,
+    fb_width: usize,
+    fb_height: usize,
+) -> Option<f32> {
+    let mut closest: Option<f32> = None;
+
+    // Project all vertices to screen space with depth
+    let screen_verts: Vec<Option<(f32, f32, f32)>> = mesh.vertices.iter().map(|v| {
+        // Transform vertex by rotation and translation
+        let rx = v.pos.x * cos_f - v.pos.z * sin_f;
+        let rz = v.pos.x * sin_f + v.pos.z * cos_f;
+        let world = Vec3::new(rx + world_pos.x, v.pos.y + world_pos.y, rz + world_pos.z);
+        world_to_screen_with_depth(
+            world,
+            camera.position,
+            camera.basis_x,
+            camera.basis_y,
+            camera.basis_z,
+            fb_width,
+            fb_height,
+        )
+    }).collect();
+
+    // Check each face's triangles
+    for face in &mesh.faces {
+        for tri in face.triangulate() {
+            // Get projected vertices for this triangle
+            let v0 = screen_verts.get(tri[0]).and_then(|v| *v);
+            let v1 = screen_verts.get(tri[1]).and_then(|v| *v);
+            let v2 = screen_verts.get(tri[2]).and_then(|v| *v);
+
+            if let (Some((x0, y0, d0)), Some((x1, y1, d1)), Some((x2, y2, d2))) = (v0, v1, v2) {
+                // Check if mouse is inside this triangle
+                if point_in_triangle_2d(mouse_x, mouse_y, x0, y0, x1, y1, x2, y2) {
+                    let depth = interpolate_depth_in_triangle(
+                        mouse_x, mouse_y,
+                        x0, y0, d0,
+                        x1, y1, d1,
+                        x2, y2, d2,
+                    );
+                    if closest.map_or(true, |d| depth < d) {
+                        closest = Some(depth);
+                    }
+                }
+            }
+        }
+    }
+
+    closest
 }
