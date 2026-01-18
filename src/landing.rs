@@ -79,7 +79,7 @@ impl LandingState {
 
 /// Draw the landing page
 pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiContext) {
-    // DPI scale for high-DPI displays (layout only, not font sizes)
+    // DPI scale for scissor (uses physical pixels)
     let dpi = screen_dpi_scale();
 
     // Background
@@ -91,8 +91,6 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     state.scroll_y = state.scroll_y.clamp(state.max_scroll, 0.0);
 
     // Enable scissor clipping to prevent content from overflowing into tab bar
-    // Scissor uses physical pixels, so scale by DPI
-    gl_use_default_material();
     unsafe {
         get_internal_gl().quad_gl.scissor(
             Some((
@@ -103,6 +101,10 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
             ))
         );
     }
+
+    // Visible area for manual culling (optimization - skip fully offscreen sections)
+    let visible_top = rect.y;
+    let visible_bottom = rect.y + rect.h;
 
     // Content area with padding (all in logical pixels)
     let padding = 40.0;
@@ -146,17 +148,20 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
 
     // === INTRO SECTION ===
     y = draw_section(content_x, y, content_width, "What is BONNIE-32?",
-        "A complete toolkit for making low-poly 3D games targeting the PS1 aesthetic. Model, texture, compose music, and build levels in one place.\n\nEach tool is focused and lightweight, designed around the constraints and limitations of early 3D. The software rasterizer natively produces typical PS1 quirks: affine texture mapping, vertex snapping, limited color depth, and no sub-pixel precision. Each effect can be toggled on or off.\n\nBuilt in Rust, runs on Windows, Mac, Linux, and browser."
+        "A complete toolkit for making low-poly 3D games targeting the PS1 aesthetic. Model, texture, compose music, and build levels in one place.\n\nEach tool is focused and lightweight, designed around the constraints and limitations of early 3D. The software rasterizer natively produces typical PS1 quirks: affine texture mapping, vertex snapping, limited color depth, and no sub-pixel precision. Each effect can be toggled on or off.\n\nBuilt in Rust, runs on Windows, Mac, Linux, and browser.",
+        visible_top, visible_bottom,
     );
 
     // === WHY SECTION ===
     y = draw_section(content_x, y, content_width, "Why build this?",
-        "After making two games in PICO-8, I knew I wanted to jump to 3D. I've had this dream forever: how would a Souls-like have looked and controlled on PS1? Just grab the Souls formula we all know and love and try to make it work in 1999, would that have even been possible given the limitations?\n\nSo I began trying Godot, Love2D, Picotron, and each felt wrong. I felt more like I was bending the tool for something it wasn't designed for. I also tried targeting real PS1 hardware, but I couldn't deal with the primitive SDKs and the distribution nightmare that could have ensued. I missed the all-in-one feeling that PICO-8 gives, and how easy it is to have other people play your game. So I decided to build my own to fill the gap following the same principles."
+        "After making two games in PICO-8, I knew I wanted to jump to 3D. I've had this dream forever: how would a Souls-like have looked and controlled on PS1? Just grab the Souls formula we all know and love and try to make it work in 1999, would that have even been possible given the limitations?\n\nSo I began trying Godot, Love2D, Picotron, and each felt wrong. I felt more like I was bending the tool for something it wasn't designed for. I also tried targeting real PS1 hardware, but I couldn't deal with the primitive SDKs and the distribution nightmare that could have ensued. I missed the all-in-one feeling that PICO-8 gives, and how easy it is to have other people play your game. So I decided to build my own to fill the gap following the same principles.",
+        visible_top, visible_bottom,
     );
 
     // === WHERE TO START SECTION ===
     y = draw_section(content_x, y, content_width, "Where to start",
-        "Use the tabs at the top to switch between the available tools:\n\nWorld - Build levels using a sector-based editor in the style of the Tomb Raider Level Editor. Features a 2D grid view, 3D preview, and portals.\n\nAssets - A low-poly mesh modeler featuring Blender-style controls, extrusion, multi-object editing, and a shared texture atlas. Heavily influenced by PicoCAD.\n\nPaint - Create indexed textures with limited palettes. Draw with 4-bit or 8-bit color depth, apply dithering patterns, and manage a library of reusable textures.\n\nMusic - A pattern-based tracker for composing music. Supports SF2 soundfonts, up to 8 channels, and classic tracker effects like arpeggio and vibrato."
+        "Use the tabs at the top to switch between the available tools:\n\nWorld - Build levels using a sector-based editor in the style of the Tomb Raider Level Editor. Features a 2D grid view, 3D preview, and portals.\n\nAssets - A low-poly mesh modeler featuring Blender-style controls, extrusion, multi-object editing, and a shared texture atlas. Heavily influenced by PicoCAD.\n\nPaint - Create indexed textures with limited palettes. Draw with 4-bit or 8-bit color depth, apply dithering patterns, and manage a library of reusable textures.\n\nMusic - A pattern-based tracker for composing music. Supports SF2 soundfonts, up to 8 channels, and classic tracker effects like arpeggio and vibrato.",
+        visible_top, visible_bottom,
     );
 
     // === FAQ SECTION ===
@@ -166,36 +171,43 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     y = draw_faq_item(content_x, y, content_width,
         "Is this a game or a tool?",
         "Both! The primary goal is to ship a Souls-like game set in a PS1-style world. But BONNIE-32 and its creative tools are part of the package - think PICO-8, but for PS1-era 3D games. Everything you need to build, texture, and compose.",
+        visible_top, visible_bottom,
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Why not use Unity/Unreal/Godot?",
         "Those engines are designed for modern games. Getting true PS1-style rendering requires fighting against their design. Building from scratch lets me embrace the limitations rather than simulate them.",
+        visible_top, visible_bottom,
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Will this be on Steam?",
         "That's the plan! The native build is intended for Steam distribution. The web version serves as a free demo and development playground.\n\nThis will always be fully open source. Even if there's a paid Steam version, you can always clone the repo and build it yourself for free.",
+        visible_top, visible_bottom,
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Can I use this to make my own game?",
         "Absolutely - feel free to use BONNIE-32 however you like! Contributing assets or ideas would be awesome, but you're welcome to build your own thing too. Like any fantasy console, there are intentional constraints - embrace them! Note: Some code and assets have their own licenses. Please review THIRD_PARTY.md before distributing.",
+        visible_top, visible_bottom,
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Will you add scripting language support?",
         "Maybe, but it's not the immediate plan. The focus is on building a PS1-like platform with modern, flexible tools. Scripting might come later if there's a clear need for it.",
+        visible_top, visible_bottom,
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "Was this made with AI?",
         "Kinda - I use Claude Code extensively to speed up development. But this isn't \"vibe coding\" where you just accept whatever the AI generates. Every design decision, architecture choice, and feature is mine. I'm a software engineer by trade, so the AI is a tool that helps me write code faster, not a replacement for understanding what I'm building. I review, refactor, and often rewrite what it produces.",
+        visible_top, visible_bottom,
     );
 
     y = draw_faq_item(content_x, y, content_width,
         "What's with the name \"BONNIE-32\"?",
         "\"Bonnie\" comes from my last name - back in my music days, we jokingly called our makeshift recording setup \"Bonnie Studios\". The \"-32\" follows the fantasy console naming convention (like PICO-8) and hints at the 32-bit PS1 era this platform emulates.",
+        visible_top, visible_bottom,
     );
 
     // === FOOTER ===
@@ -234,7 +246,9 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
 }
 
 /// Draw a section with title and body text (auto-wrapping)
-fn draw_section(x: f32, y: f32, width: f32, title: &str, text: &str) -> f32 {
+/// Returns the y position after this section.
+/// Skips drawing if completely outside visible bounds (but still returns correct y).
+fn draw_section(x: f32, y: f32, width: f32, title: &str, text: &str, visible_top: f32, visible_bottom: f32) -> f32 {
     let x = x.round();
     let y = y.round();
     let padding = 16.0;
@@ -248,6 +262,12 @@ fn draw_section(x: f32, y: f32, width: f32, title: &str, text: &str) -> f32 {
     // Wrap the text to fit the available width
     let lines = wrap_text(text, font_size, text_width);
     let section_height = title_height + padding + (lines.len() as f32 * line_height) + padding;
+
+    // Skip drawing if completely outside visible area
+    let section_bottom = y + section_height;
+    if section_bottom < visible_top || y > visible_bottom {
+        return y + section_height + 20.0;
+    }
 
     draw_rectangle(x, y, width.round(), section_height, SECTION_BG);
 
@@ -263,7 +283,8 @@ fn draw_section(x: f32, y: f32, width: f32, title: &str, text: &str) -> f32 {
 }
 
 /// Draw an FAQ item (auto-wrapping)
-fn draw_faq_item(x: f32, y: f32, width: f32, question: &str, answer: &str) -> f32 {
+/// Skips drawing if completely outside visible bounds (but still returns correct y).
+fn draw_faq_item(x: f32, y: f32, width: f32, question: &str, answer: &str, visible_top: f32, visible_bottom: f32) -> f32 {
     let x = x.round();
     let y = y.round();
     let padding = 16.0;
@@ -276,6 +297,12 @@ fn draw_faq_item(x: f32, y: f32, width: f32, question: &str, answer: &str) -> f3
     // Wrap the answer text to fit the available width
     let answer_lines = wrap_text(answer, font_size, text_width);
     let section_height = 26.0 + padding + (answer_lines.len() as f32 * line_height) + padding;
+
+    // Skip drawing if completely outside visible area
+    let section_bottom = y + section_height;
+    if section_bottom < visible_top || y > visible_bottom {
+        return y + section_height + 12.0;
+    }
 
     draw_rectangle(x, y, width.round(), section_height, SECTION_BG);
 
