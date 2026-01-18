@@ -833,6 +833,11 @@ pub struct ModelerState {
     pub paint_section_expanded: bool, // Paint/texture editor section
     pub paint_texture_scroll: f32,    // Scroll position in paint texture browser
 
+    // Component management UI
+    pub selected_component: Option<usize>,      // Index in asset.components for editing
+    pub components_section_expanded: bool,      // Whether Components section is expanded
+    pub add_component_menu_open: bool,          // Whether the "Add Component" popup is open
+
     // CLUT editing state
     pub selected_clut: Option<crate::rasterizer::ClutId>, // Currently selected CLUT in pool
     pub selected_clut_entry: usize,                       // Selected palette index (0-15 or 0-255)
@@ -1082,6 +1087,11 @@ impl ModelerState {
             // Collapsible sections
             paint_section_expanded: true,
             paint_texture_scroll: 0.0,
+
+            // Component management UI
+            selected_component: None,
+            components_section_expanded: true,
+            add_component_menu_open: false,
 
             // CLUT editing defaults
             selected_clut: None,

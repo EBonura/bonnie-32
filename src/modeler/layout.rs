@@ -6,6 +6,7 @@ use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoP
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
 use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode, Axis, MirrorSettings};
+use crate::asset::AssetComponent;
 use crate::texture::{
     UserTexture, TextureSize, generate_texture_id,
     draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
@@ -540,28 +541,355 @@ fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, ic
     let width = rect.w;
     let x = rect.x;
 
-    // === OVERVIEW SECTION ===
-    draw_section_label(x, &mut y, width, "Overview");
-    let overview_height = (rect.h * 0.35).min(180.0);
-    let overview_rect = Rect::new(x, y, width, overview_height);
-    draw_overview_content(ctx, overview_rect, state, icon_font);
-    y += overview_height + 4.0;
-
-    // === SELECTION SECTION (per-object properties) ===
-    draw_section_label(x, &mut y, width, "Properties");
-    draw_selection_info(ctx, x, &mut y, width, state, icon_font);
+    // === COMPONENTS SECTION ===
+    draw_section_label(x, &mut y, width, "Components");
+    draw_components_section(ctx, x, &mut y, width, state, icon_font);
     y += 4.0;
+
+    // === PROPERTIES SECTION (component details or per-object properties) ===
+    if let Some(comp_idx) = state.selected_component {
+        // Show component details
+        let comp_name = state.asset.components.get(comp_idx)
+            .map(|c| c.type_name())
+            .unwrap_or("Component");
+        draw_section_label(x, &mut y, width, &format!("Properties: {}", comp_name));
+
+        // For Mesh, show embedded object list; for others, show property editor
+        let is_mesh = state.asset.components.get(comp_idx)
+            .map(|c| c.is_mesh())
+            .unwrap_or(false);
+
+        if is_mesh {
+            // Show mesh parts list with per-part properties
+            let remaining_h = rect.bottom() - y - 24.0; // Leave room for lights
+            let mesh_rect = Rect::new(x, y, width, remaining_h.max(100.0));
+            draw_mesh_editor_content(ctx, mesh_rect, state, icon_font);
+            y += remaining_h.max(100.0) + 4.0;
+        } else {
+            draw_component_editor(ctx, x, &mut y, width, state, icon_font);
+            y += 4.0;
+        }
+    } else {
+        // No component selected - prompt to select one
+        draw_section_label(x, &mut y, width, "Properties");
+        draw_text("Select a component", x + 4.0, y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
+        y += 18.0;
+    }
 
     // === LIGHTS SECTION ===
     draw_section_label(x, &mut y, width, "Lights");
     draw_lights_section(ctx, x, &mut y, width, state, icon_font);
 }
 
-/// Draw overview content (object list with visibility toggles)
-fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+/// Helper to get a Lucide icon for component types
+fn component_icon(comp: &AssetComponent) -> char {
+    match comp {
+        AssetComponent::Mesh { .. } => icon::BOX,
+        AssetComponent::Collision { .. } => icon::SCAN,
+        AssetComponent::Light { .. } => icon::SUN,
+        AssetComponent::Trigger { .. } => icon::MAP_PIN,
+        AssetComponent::Pickup { .. } => icon::PLUS,
+        AssetComponent::Enemy { .. } => icon::PERSON_STANDING,
+        AssetComponent::Checkpoint { .. } => icon::SKIP_BACK,
+        AssetComponent::Door { .. } => icon::DOOR_CLOSED,
+        AssetComponent::Audio { .. } => icon::MUSIC,
+        AssetComponent::Particle { .. } => icon::BLEND,
+        AssetComponent::CharacterController { .. } => icon::GAMEPAD_2,
+        AssetComponent::SpawnPoint { .. } => icon::FOOTPRINTS,
+    }
+}
+
+/// Draw components section (component list with add/remove)
+fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let line_height = 18.0;
+    let btn_size = 18.0;
+
+    // Component count and add/remove buttons
+    let comp_count = state.asset.components.len();
+    draw_text(&format!("{} component(s)", comp_count), x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
+
+    // Add button
+    let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
+    if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add component") {
+        state.add_component_menu_open = !state.add_component_menu_open;
+    }
+
+    // Remove button (disabled for Mesh, requires selection)
+    let rem_rect = Rect::new(x + width - btn_size - 4.0, *y, btn_size, btn_size);
+    let can_remove = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx))
+        .map(|c| !c.is_mesh())
+        .unwrap_or(false);
+
+    if can_remove {
+        if icon_button(ctx, rem_rect, icon::MINUS, icon_font, "Remove component") {
+            if let Some(idx) = state.selected_component {
+                state.asset.components.remove(idx);
+                state.selected_component = None;
+            }
+        }
+    } else {
+        // Draw disabled button
+        draw_rectangle(rem_rect.x, rem_rect.y, rem_rect.w, rem_rect.h, Color::from_rgba(40, 40, 45, 255));
+        draw_icon_centered(icon_font, icon::MINUS, &rem_rect, 12.0, TEXT_DIM);
+    }
+
+    *y += btn_size + 4.0;
+
+    // List components
+    let mut select_idx: Option<usize> = None;
+    for (i, comp) in state.asset.components.iter().enumerate() {
+        let is_selected = state.selected_component == Some(i);
+        let item_rect = Rect::new(x, *y, width, line_height);
+        let is_hovered = ctx.mouse.inside(&item_rect);
+
+        // Selection highlight
+        if is_selected {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+        } else if is_hovered {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
+        }
+
+        // Component icon
+        let icon_rect = Rect::new(x + 4.0, *y + 1.0, 16.0, 16.0);
+        let icon_char = component_icon(comp);
+        let icon_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+        draw_icon_centered(icon_font, icon_char, &icon_rect, 11.0, icon_color);
+
+        // Component type name
+        let type_name = comp.type_name();
+        let name_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+
+        // For Mesh, show object count
+        let label = if let AssetComponent::Mesh { parts } = comp {
+            format!("{} ({})", type_name, parts.len())
+        } else {
+            type_name.to_string()
+        };
+        draw_text(&label, x + 24.0, *y + 13.0, FONT_SIZE_CONTENT, name_color);
+
+        // Click to select
+        if ctx.mouse.inside(&item_rect) && ctx.mouse.left_pressed {
+            select_idx = Some(i);
+        }
+
+        *y += line_height;
+    }
+
+    // Apply selection
+    if let Some(idx) = select_idx {
+        state.selected_component = Some(idx);
+    }
+
+    // Draw add component popup menu if open
+    if state.add_component_menu_open {
+        let menu_x = x + width - btn_size * 2.0 - 8.0;
+        let menu_y = *y - (line_height * comp_count as f32) - btn_size - 4.0 + btn_size + 4.0;
+        draw_add_component_menu(ctx, menu_x, menu_y, state, icon_font);
+    }
+}
+
+/// Draw the "Add Component" popup menu
+fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    // Component types that can be added (exclude Mesh - managed via Overview)
+    let component_types = [
+        ("Collision", icon::SCAN),
+        ("Light", icon::SUN),
+        ("Trigger", icon::MAP_PIN),
+        ("Pickup", icon::PLUS),
+        ("Enemy", icon::PERSON_STANDING),
+        ("Checkpoint", icon::SKIP_BACK),
+        ("Door", icon::DOOR_CLOSED),
+        ("Audio", icon::MUSIC),
+        ("Particle", icon::BLEND),
+        ("CharacterController", icon::GAMEPAD_2),
+        ("SpawnPoint", icon::FOOTPRINTS),
+    ];
+
+    let item_height = 20.0;
+    let menu_width = 140.0;
+    let menu_height = component_types.len() as f32 * item_height + 4.0;
+
+    // Menu background
+    let menu_rect = Rect::new(x, y, menu_width, menu_height);
+    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
+    draw_rectangle_lines(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
+
+    // Close menu if clicking outside
+    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
+        state.add_component_menu_open = false;
+        return;
+    }
+
+    let mut item_y = y + 2.0;
+    for (type_name, icon_char) in component_types {
+        let item_rect = Rect::new(x + 2.0, item_y, menu_width - 4.0, item_height);
+        let hovered = ctx.mouse.inside(&item_rect);
+
+        if hovered {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+        }
+
+        // Icon
+        let icon_rect = Rect::new(item_rect.x + 2.0, item_y + 2.0, 16.0, 16.0);
+        draw_icon_centered(icon_font, icon_char, &icon_rect, 11.0, TEXT_COLOR);
+
+        // Label
+        draw_text(type_name, item_rect.x + 22.0, item_y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+        // Click to add component
+        if hovered && ctx.mouse.left_pressed {
+            let new_component = create_default_component(type_name);
+            state.asset.components.push(new_component);
+            state.selected_component = Some(state.asset.components.len() - 1);
+            state.add_component_menu_open = false;
+        }
+
+        item_y += item_height;
+    }
+}
+
+/// Create a default component of the given type
+fn create_default_component(type_name: &str) -> AssetComponent {
+    use crate::asset::CollisionShapeDef;
+    use crate::game::components::{EnemyType, ItemType};
+
+    match type_name {
+        "Collision" => AssetComponent::Collision {
+            shape: CollisionShapeDef::FromMesh,
+            is_trigger: false,
+        },
+        "Light" => AssetComponent::Light {
+            color: [255, 255, 200],
+            intensity: 1.0,
+            radius: 512.0,
+            offset: [0.0, 0.0, 0.0],
+        },
+        "Trigger" => AssetComponent::Trigger {
+            trigger_id: "trigger_1".to_string(),
+            on_enter: None,
+            on_exit: None,
+        },
+        "Pickup" => AssetComponent::Pickup {
+            item_type: ItemType::HealthPickup { amount: 25 },
+            respawn_time: Some(30.0),
+        },
+        "Enemy" => AssetComponent::Enemy {
+            enemy_type: EnemyType::Grunt,
+            health: 100,
+            damage: 10,
+            patrol_radius: 512.0,
+        },
+        "Checkpoint" => AssetComponent::Checkpoint {
+            respawn_offset: [0.0, 0.0, 0.0],
+        },
+        "Door" => AssetComponent::Door {
+            required_key: None,
+            start_open: false,
+        },
+        "Audio" => AssetComponent::Audio {
+            sound: "ambient".to_string(),
+            volume: 1.0,
+            radius: 512.0,
+            looping: true,
+        },
+        "Particle" => AssetComponent::Particle {
+            effect: "smoke".to_string(),
+            offset: [0.0, 0.0, 0.0],
+        },
+        "CharacterController" => AssetComponent::CharacterController {
+            height: 1536.0,
+            radius: 384.0,
+            step_height: 384.0,
+        },
+        "SpawnPoint" => AssetComponent::SpawnPoint {
+            is_player_start: false,
+        },
+        _ => AssetComponent::Collision {
+            shape: CollisionShapeDef::FromMesh,
+            is_trigger: false,
+        },
+    }
+}
+
+/// Draw component editor (dispatcher to type-specific editors)
+fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let comp_idx = match state.selected_component {
+        Some(idx) => idx,
+        None => {
+            draw_text("No component selected", x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
+            *y += 18.0;
+            return;
+        }
+    };
+
+    // Get a clone of the component to avoid borrow issues during editing
+    let mut component = match state.asset.components.get(comp_idx) {
+        Some(c) => c.clone(),
+        None => {
+            state.selected_component = None;
+            return;
+        }
+    };
+
+    let mut modified = false;
+
+    match &mut component {
+        AssetComponent::Mesh { .. } => {
+            // Mesh is handled specially by draw_mesh_editor_content, should not reach here
+            return;
+        }
+        AssetComponent::Collision { shape, is_trigger } => {
+            modified = draw_collision_editor(ctx, x, y, width, shape, is_trigger, icon_font);
+        }
+        AssetComponent::Light { color, intensity, radius, offset } => {
+            modified = draw_light_component_editor(ctx, x, y, width, color, intensity, radius, offset, icon_font);
+        }
+        AssetComponent::Trigger { trigger_id, on_enter, on_exit } => {
+            modified = draw_trigger_editor(ctx, x, y, width, trigger_id, on_enter, on_exit, icon_font);
+        }
+        AssetComponent::Pickup { item_type, respawn_time } => {
+            modified = draw_pickup_editor(ctx, x, y, width, item_type, respawn_time, icon_font);
+        }
+        AssetComponent::Enemy { enemy_type, health, damage, patrol_radius } => {
+            modified = draw_enemy_editor(ctx, x, y, width, enemy_type, health, damage, patrol_radius, icon_font);
+        }
+        AssetComponent::Checkpoint { respawn_offset } => {
+            modified = draw_checkpoint_editor(ctx, x, y, width, respawn_offset, icon_font);
+        }
+        AssetComponent::Door { required_key, start_open } => {
+            modified = draw_door_editor(ctx, x, y, width, required_key, start_open, icon_font);
+        }
+        AssetComponent::Audio { sound, volume, radius, looping } => {
+            modified = draw_audio_editor(ctx, x, y, width, sound, volume, radius, looping, icon_font);
+        }
+        AssetComponent::Particle { effect, offset } => {
+            modified = draw_particle_editor(ctx, x, y, width, effect, offset, icon_font);
+        }
+        AssetComponent::CharacterController { height, radius, step_height } => {
+            modified = draw_character_controller_editor(ctx, x, y, width, height, radius, step_height, icon_font);
+        }
+        AssetComponent::SpawnPoint { is_player_start } => {
+            modified = draw_spawn_point_editor(ctx, x, y, width, is_player_start, icon_font);
+        }
+    }
+
+    // Apply changes back to the asset
+    if modified {
+        if let Some(comp) = state.asset.components.get_mut(comp_idx) {
+            *comp = component;
+        }
+    }
+}
+
+/// Draw mesh component content (object list + per-object properties)
+fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
     let line_height = 18.0;
     let mut y = rect.y;
+    let x = rect.x;
+    let width = rect.w;
 
+    // --- OBJECT LIST ---
     // Collect click actions first (to avoid borrow issues)
     let mut select_idx: Option<usize> = None;
     let mut toggle_vis_idx: Option<usize> = None;
@@ -569,8 +897,14 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     let mut delete_idx: Option<usize> = None;
 
     let obj_count = state.objects().len();
+
+    // Calculate how much space for object list (leave room for properties if object selected)
+    let has_selection = state.selected_object.is_some();
+    let props_height = if has_selection { 80.0 } else { 0.0 };
+    let list_height = (rect.h - props_height - 4.0).max(60.0);
+
     for idx in 0..obj_count {
-        if y + line_height > rect.bottom() {
+        if y + line_height > rect.y + list_height {
             break;
         }
 
@@ -579,7 +913,7 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             None => continue,
         };
         let is_selected = state.selected_object == Some(idx);
-        let item_rect = Rect::new(rect.x, y, rect.w, line_height);
+        let item_rect = Rect::new(x, y, width, line_height);
         let is_hovered = ctx.mouse.inside(&item_rect);
 
         // Selection highlight
@@ -590,7 +924,7 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         }
 
         // Visibility toggle (eye icon)
-        let vis_rect = Rect::new(rect.x + 2.0, y + 1.0, 16.0, 16.0);
+        let vis_rect = Rect::new(x + 2.0, y + 1.0, 16.0, 16.0);
         let vis_icon = if obj.visible { icon::EYE } else { icon::EYE_OFF };
         let vis_color = if obj.visible { TEXT_COLOR } else { TEXT_DIM };
         draw_icon_centered(icon_font, vis_icon, &vis_rect, 11.0, vis_color);
@@ -623,14 +957,13 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             }
         }
 
-        // Object name with face count (account for icon space)
+        // Object name with face count
         let fc = obj.mesh.face_count();
         let name_color = poly_count_color(fc);
-        let name_width = if show_icons { rect.w - 60.0 } else { rect.w - 22.0 };
-        draw_text(&format!("{} ({})", obj.name, fc), rect.x + 20.0, y + 13.0, FONT_SIZE_HEADER, name_color);
+        draw_text(&format!("{} ({})", obj.name, fc), x + 20.0, y + 13.0, FONT_SIZE_HEADER, name_color);
 
         // Handle selection click (not on visibility toggle or icons)
-        let name_rect = Rect::new(rect.x + 20.0, y, name_width, line_height);
+        let name_rect = Rect::new(x + 20.0, y, width - 60.0, line_height);
         if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed
             && toggle_vis_idx.is_none() && rename_idx.is_none() && delete_idx.is_none() {
             select_idx = Some(idx);
@@ -645,153 +978,720 @@ fn draw_overview_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
             obj.visible = !obj.visible;
         }
     } else if let Some(idx) = rename_idx {
-        // Open rename dialog with current name
         let name = state.objects().get(idx).map(|o| o.name.clone()).unwrap_or_default();
         state.rename_dialog = Some((idx, name));
     } else if let Some(idx) = delete_idx {
-        // Open delete confirmation dialog
         state.delete_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
         state.select_object(idx);
     }
-}
 
-/// Draw per-object properties (double-sided, mirror settings)
-fn draw_selection_info(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
-    let line_height = 18.0;
-    let toggle_size = 16.0;
+    // --- PER-OBJECT PROPERTIES ---
+    if let Some(selected_idx) = state.selected_object {
+        y += 4.0;
 
-    // Check if any object is selected
-    let selected_idx = match state.selected_object {
-        Some(idx) => idx,
-        None => {
-            draw_text("No object selected", x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
-            *y += line_height;
-            return;
-        }
-    };
+        // Separator line
+        draw_rectangle(x + 4.0, y, width - 8.0, 1.0, Color::from_rgba(60, 60, 70, 255));
+        y += 4.0;
 
-    // Get object data for display (capture values to avoid borrow issues)
-    let (obj_name, double_sided, mirror) = match state.objects().get(selected_idx) {
-        Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror),
-        None => return,
-    };
-    draw_text(&obj_name, x + 4.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
-    *y += line_height;
-
-    // === Double-Sided Toggle ===
-    let ds_rect = Rect::new(x + 4.0, *y, toggle_size, toggle_size);
-    let ds_icon = if double_sided { icon::SQUARE_CHECK } else { icon::SQUARE };
-    let ds_color = if double_sided { ACCENT_COLOR } else { TEXT_DIM };
-    draw_icon_centered(icon_font, ds_icon, &ds_rect, 12.0, ds_color);
-    draw_text("Double-Sided", x + 24.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
-
-    if ctx.mouse.inside(&Rect::new(x, *y, width, line_height)) && ctx.mouse.left_pressed {
-        if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
-            obj.double_sided = !double_sided;
-        }
-        state.dirty = true;
-    }
-    *y += line_height;
-
-    // === Mirror Settings ===
-    let mirror_enabled = mirror.map(|m| m.enabled).unwrap_or(false);
-    let mirror_axis = mirror.map(|m| m.axis).unwrap_or(Axis::X);
-
-    // Mirror enable toggle
-    let mir_rect = Rect::new(x + 4.0, *y, toggle_size, toggle_size);
-    let mir_icon = if mirror_enabled { icon::SQUARE_CHECK } else { icon::SQUARE };
-    let mir_color = if mirror_enabled { ACCENT_COLOR } else { TEXT_DIM };
-    draw_icon_centered(icon_font, mir_icon, &mir_rect, 12.0, mir_color);
-    draw_text("Mirror", x + 24.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
-
-    if ctx.mouse.inside(&Rect::new(x, *y, 70.0, line_height)) && ctx.mouse.left_pressed {
-        // Toggle mirror enabled
-        let new_enabled = !mirror_enabled;
-        if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
-            if new_enabled {
-                obj.mirror = Some(MirrorSettings {
-                    enabled: true,
-                    axis: mirror_axis,
-                    threshold: 1.0,
-                });
-            } else if let Some(ref mut m) = obj.mirror {
-                m.enabled = false;
-            }
-        }
-        state.dirty = true;
-    }
-
-    // Axis buttons (X, Y, Z) - shown on same line
-    if mirror_enabled {
-        let btn_w = 20.0;
-        let btn_h = 16.0;
-        let btn_y = *y;
-        let mut btn_x = x + 75.0;
-
-        for axis in [Axis::X, Axis::Y, Axis::Z] {
-            let is_active = mirror_axis == axis;
-            let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
-            let bg_color = if is_active {
-                Color::from_rgba(60, 100, 140, 255)
-            } else if ctx.mouse.inside(&btn_rect) {
-                Color::from_rgba(60, 60, 70, 255)
-            } else {
-                Color::from_rgba(45, 45, 55, 255)
-            };
-            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg_color);
-            draw_text(axis.label(), btn_x + 6.0, btn_y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-
-            if ctx.mouse.inside(&btn_rect) && ctx.mouse.left_pressed {
-                if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
-                    if let Some(ref mut m) = obj.mirror {
-                        m.axis = axis;
-                    }
-                }
-                state.dirty = true;
-            }
-            btn_x += btn_w + 2.0;
-        }
-    }
-    *y += line_height;
-
-    // Apply Mirror button (only when mirror is enabled)
-    if mirror_enabled {
-        let apply_rect = Rect::new(x + 4.0, *y, width - 8.0, line_height);
-        let apply_hover = ctx.mouse.inside(&apply_rect);
-        let apply_bg = if apply_hover {
-            Color::from_rgba(70, 90, 110, 255)
-        } else {
-            Color::from_rgba(50, 60, 75, 255)
+        // Get object data (capture values to avoid borrow issues)
+        let (obj_name, double_sided, mirror) = match state.objects().get(selected_idx) {
+            Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror),
+            None => return,
         };
-        draw_rectangle(apply_rect.x, apply_rect.y, apply_rect.w, apply_rect.h, apply_bg);
-        draw_text("Apply Mirror", x + 8.0, *y + 12.0, FONT_SIZE_HEADER, TEXT_COLOR);
 
-        if apply_hover && ctx.mouse.left_pressed {
-            // Bake the virtual mirror into actual geometry
-            let axis = mirror_axis;
-            let threshold = mirror.map(|m| m.threshold).unwrap_or(1.0);
-            state.push_undo("Apply Mirror");
-            let mut merged_count = 0;
-            if let Some(mesh) = state.mesh_mut() {
-                mesh.apply_mirror(axis, threshold);
-                merged_count = mesh.merge_by_distance(threshold);
-            }
-            // Disable mirror after applying
+        // Object name header
+        draw_text(&obj_name, x + 4.0, y + 12.0, FONT_SIZE_HEADER, ACCENT_COLOR);
+        y += line_height;
+
+        // Double-Sided Toggle
+        let toggle_size = 16.0;
+        let ds_rect = Rect::new(x + 4.0, y, toggle_size, toggle_size);
+        let ds_icon = if double_sided { icon::SQUARE_CHECK } else { icon::SQUARE };
+        let ds_color = if double_sided { ACCENT_COLOR } else { TEXT_DIM };
+        draw_icon_centered(icon_font, ds_icon, &ds_rect, 12.0, ds_color);
+        draw_text("Double-Sided", x + 24.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+        if ctx.mouse.inside(&Rect::new(x, y, width, line_height)) && ctx.mouse.left_pressed {
             if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
-                if let Some(ref mut m) = obj.mirror {
-                    m.enabled = false;
-                }
-            }
-            if merged_count > 0 {
-                state.set_status(&format!("Mirror applied, {} vertices merged", merged_count), 2.5);
-            } else {
-                state.set_status("Mirror applied", 2.0);
+                obj.double_sided = !double_sided;
             }
             state.dirty = true;
         }
-        *y += line_height;
+        y += line_height;
+
+        // Mirror Toggle + Axis
+        let mirror_enabled = mirror.map(|m| m.enabled).unwrap_or(false);
+        let mirror_axis = mirror.map(|m| m.axis).unwrap_or(Axis::X);
+
+        let mir_rect = Rect::new(x + 4.0, y, toggle_size, toggle_size);
+        let mir_icon = if mirror_enabled { icon::SQUARE_CHECK } else { icon::SQUARE };
+        let mir_color = if mirror_enabled { ACCENT_COLOR } else { TEXT_DIM };
+        draw_icon_centered(icon_font, mir_icon, &mir_rect, 12.0, mir_color);
+        draw_text("Mirror", x + 24.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+        if ctx.mouse.inside(&Rect::new(x, y, 70.0, line_height)) && ctx.mouse.left_pressed {
+            let new_enabled = !mirror_enabled;
+            if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
+                if new_enabled {
+                    obj.mirror = Some(MirrorSettings {
+                        enabled: true,
+                        axis: mirror_axis,
+                        threshold: 1.0,
+                    });
+                } else if let Some(ref mut m) = obj.mirror {
+                    m.enabled = false;
+                }
+            }
+            state.dirty = true;
+        }
+
+        // Axis buttons (X, Y, Z) - shown on same line when enabled
+        if mirror_enabled {
+            let btn_w = 20.0;
+            let btn_h = 16.0;
+            let mut btn_x = x + 75.0;
+
+            for axis in [Axis::X, Axis::Y, Axis::Z] {
+                let is_active = mirror_axis == axis;
+                let btn_rect = Rect::new(btn_x, y, btn_w, btn_h);
+                let bg_color = if is_active {
+                    Color::from_rgba(60, 100, 140, 255)
+                } else if ctx.mouse.inside(&btn_rect) {
+                    Color::from_rgba(60, 60, 70, 255)
+                } else {
+                    Color::from_rgba(45, 45, 55, 255)
+                };
+                draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg_color);
+                draw_text(axis.label(), btn_x + 6.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+                if ctx.mouse.inside(&btn_rect) && ctx.mouse.left_pressed {
+                    if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(selected_idx)) {
+                        if let Some(ref mut m) = obj.mirror {
+                            m.axis = axis;
+                        }
+                    }
+                    state.dirty = true;
+                }
+                btn_x += btn_w + 2.0;
+            }
+        }
     }
+}
+
+/// Draw collision component editor
+fn draw_collision_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    shape: &mut crate::asset::CollisionShapeDef,
+    is_trigger: &mut bool,
+    _icon_font: Option<&Font>,
+) -> bool {
+    use crate::asset::CollisionShapeDef;
+    let mut modified = false;
+    let line_height = 20.0;
+
+    // Shape type dropdown (simplified - just show current)
+    draw_text("Shape:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let shape_desc = shape.description();
+    draw_text(&shape_desc, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Shape type buttons
+    let btn_w = (width - 12.0) / 5.0;
+    let shapes = [
+        ("Mesh", CollisionShapeDef::FromMesh),
+        ("Box", CollisionShapeDef::Box { half_extents: [256.0, 256.0, 256.0] }),
+        ("Sphere", CollisionShapeDef::Sphere { radius: 256.0 }),
+        ("Capsule", CollisionShapeDef::Capsule { radius: 128.0, height: 512.0 }),
+        ("Cylinder", CollisionShapeDef::Cylinder { radius: 128.0, height: 512.0 }),
+    ];
+
+    for (i, (name, default_shape)) in shapes.iter().enumerate() {
+        let btn_x = x + 4.0 + i as f32 * btn_w;
+        let btn_rect = Rect::new(btn_x, *y, btn_w - 2.0, 18.0);
+        let is_active = std::mem::discriminant(shape) == std::mem::discriminant(default_shape);
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            ACCENT_COLOR
+        } else if hovered {
+            Color::from_rgba(60, 60, 70, 255)
+        } else {
+            Color::from_rgba(45, 45, 50, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let text_color = if is_active { Color::from_rgba(20, 20, 25, 255) } else { TEXT_COLOR };
+        draw_text(name, btn_x + 4.0, *y + 13.0, 11.0, text_color);
+
+        if hovered && ctx.mouse.left_pressed && !is_active {
+            *shape = default_shape.clone();
+            modified = true;
+        }
+    }
+    *y += line_height;
+
+    // Is Trigger toggle
+    let _trigger_rect = Rect::new(x + 4.0, *y, width - 8.0, 18.0);
+    draw_text("Is Trigger:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+    let toggle_x = x + width - 40.0;
+    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let toggle_color = if *is_trigger { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+    draw_text(if *is_trigger { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
+
+    if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
+        *is_trigger = !*is_trigger;
+        modified = true;
+    }
+    *y += line_height;
+
+    modified
+}
+
+/// Draw light component editor
+fn draw_light_component_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    color: &mut [u8; 3],
+    intensity: &mut f32,
+    radius: &mut f32,
+    offset: &mut [f32; 3],
+    _icon_font: Option<&Font>,
+) -> bool {
+    let mut modified = false;
+    let line_height = 20.0;
+
+    // Color preview and RGB values
+    draw_text("Color:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let preview_rect = Rect::new(x + 50.0, *y + 2.0, 16.0, 14.0);
+    draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h,
+        Color::from_rgba(color[0], color[1], color[2], 255));
+
+    // RGB text
+    draw_text(&format!("R:{} G:{} B:{}", color[0], color[1], color[2]),
+        x + 70.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Intensity slider
+    draw_text("Intensity:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let slider_x = x + 70.0;
+    let slider_w = width - 110.0;
+    let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
+    draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let fill_w = (intensity.clamp(0.0, 2.0) / 2.0) * slider_w;
+    draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
+
+    draw_text(&format!("{:.1}", intensity), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+        let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
+        *intensity = t * 2.0;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Radius slider
+    draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
+    draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let max_radius = 2048.0;
+    let fill_w = (radius.clamp(0.0, max_radius) / max_radius) * slider_w;
+    draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
+
+    draw_text(&format!("{:.0}", radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+        let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
+        *radius = t * max_radius;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Offset XYZ
+    draw_text("Offset:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(&format!("X:{:.0} Y:{:.0} Z:{:.0}", offset[0], offset[1], offset[2]),
+        x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    modified
+}
+
+/// Draw trigger component editor
+fn draw_trigger_editor(
+    _ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    _width: f32,
+    trigger_id: &mut String,
+    on_enter: &mut Option<String>,
+    on_exit: &mut Option<String>,
+    _icon_font: Option<&Font>,
+) -> bool {
+    let line_height = 20.0;
+
+    draw_text("Trigger ID:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(trigger_id, x + 70.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    draw_text("On Enter:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(on_enter.as_deref().unwrap_or("(none)"), x + 70.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    draw_text("On Exit:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(on_exit.as_deref().unwrap_or("(none)"), x + 70.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // TODO: Add text input for editing
+    false
+}
+
+/// Draw pickup component editor
+fn draw_pickup_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    item_type: &mut crate::game::components::ItemType,
+    respawn_time: &mut Option<f32>,
+    _icon_font: Option<&Font>,
+) -> bool {
+    use crate::game::components::ItemType;
+    let mut modified = false;
+    let line_height = 20.0;
+
+    // Item type
+    draw_text("Type:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let type_name = match item_type {
+        ItemType::HealthPickup { amount } => format!("Health ({})", amount),
+        ItemType::Currency { amount } => format!("Currency ({})", amount),
+        ItemType::Key(_) => "Key".to_string(),
+        ItemType::Upgrade => "Upgrade".to_string(),
+    };
+    draw_text(&type_name, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Item type buttons (simplified)
+    let btn_w = (width - 12.0) / 4.0;
+    let types = [
+        ("Health", ItemType::HealthPickup { amount: 25 }),
+        ("Currency", ItemType::Currency { amount: 10 }),
+        ("Key", ItemType::Key(crate::game::components::KeyType::Generic(1))),
+        ("Upgrade", ItemType::Upgrade),
+    ];
+
+    for (i, (name, new_type)) in types.iter().enumerate() {
+        let btn_x = x + 4.0 + i as f32 * btn_w;
+        let btn_rect = Rect::new(btn_x, *y, btn_w - 2.0, 18.0);
+        let is_active = std::mem::discriminant(item_type) == std::mem::discriminant(new_type);
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            ACCENT_COLOR
+        } else if hovered {
+            Color::from_rgba(60, 60, 70, 255)
+        } else {
+            Color::from_rgba(45, 45, 50, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let text_color = if is_active { Color::from_rgba(20, 20, 25, 255) } else { TEXT_COLOR };
+        draw_text(name, btn_x + 2.0, *y + 13.0, 10.0, text_color);
+
+        if hovered && ctx.mouse.left_pressed && !is_active {
+            *item_type = new_type.clone();
+            modified = true;
+        }
+    }
+    *y += line_height;
+
+    // Respawn time
+    draw_text("Respawn:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let respawn_text = respawn_time.map(|t| format!("{:.0}s", t)).unwrap_or("Never".to_string());
+    draw_text(&respawn_text, x + 60.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    modified
+}
+
+/// Draw enemy component editor
+fn draw_enemy_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    enemy_type: &mut crate::game::components::EnemyType,
+    health: &mut i32,
+    damage: &mut i32,
+    patrol_radius: &mut f32,
+    _icon_font: Option<&Font>,
+) -> bool {
+    use crate::game::components::EnemyType;
+    let mut modified = false;
+    let line_height = 20.0;
+
+    // Enemy type
+    draw_text("Type:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let type_name = match enemy_type {
+        EnemyType::Grunt => "Grunt",
+        EnemyType::Archer => "Archer",
+        EnemyType::Heavy => "Heavy",
+        EnemyType::Swarm => "Swarm",
+        EnemyType::Elite => "Elite",
+        EnemyType::Boss => "Boss",
+    };
+    draw_text(type_name, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Enemy type buttons (first row)
+    let btn_w = (width - 12.0) / 3.0;
+    let types_row1 = [
+        ("Grunt", EnemyType::Grunt),
+        ("Archer", EnemyType::Archer),
+        ("Heavy", EnemyType::Heavy),
+    ];
+
+    for (i, (name, new_type)) in types_row1.iter().enumerate() {
+        let btn_x = x + 4.0 + i as f32 * btn_w;
+        let btn_rect = Rect::new(btn_x, *y, btn_w - 2.0, 18.0);
+        let is_active = enemy_type == new_type;
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            ACCENT_COLOR
+        } else if hovered {
+            Color::from_rgba(60, 60, 70, 255)
+        } else {
+            Color::from_rgba(45, 45, 50, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let text_color = if is_active { Color::from_rgba(20, 20, 25, 255) } else { TEXT_COLOR };
+        draw_text(name, btn_x + 4.0, *y + 13.0, 11.0, text_color);
+
+        if hovered && ctx.mouse.left_pressed && !is_active {
+            *enemy_type = *new_type;
+            modified = true;
+        }
+    }
+    *y += line_height;
+
+    // Enemy type buttons (second row)
+    let types_row2 = [
+        ("Swarm", EnemyType::Swarm),
+        ("Elite", EnemyType::Elite),
+        ("Boss", EnemyType::Boss),
+    ];
+
+    for (i, (name, new_type)) in types_row2.iter().enumerate() {
+        let btn_x = x + 4.0 + i as f32 * btn_w;
+        let btn_rect = Rect::new(btn_x, *y, btn_w - 2.0, 18.0);
+        let is_active = enemy_type == new_type;
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            ACCENT_COLOR
+        } else if hovered {
+            Color::from_rgba(60, 60, 70, 255)
+        } else {
+            Color::from_rgba(45, 45, 50, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let text_color = if is_active { Color::from_rgba(20, 20, 25, 255) } else { TEXT_COLOR };
+        draw_text(name, btn_x + 4.0, *y + 13.0, 11.0, text_color);
+
+        if hovered && ctx.mouse.left_pressed && !is_active {
+            *enemy_type = *new_type;
+            modified = true;
+        }
+    }
+    *y += line_height;
+
+    // Health
+    draw_text("Health:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(&format!("{}", health), x + 60.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Damage
+    draw_text("Damage:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(&format!("{}", damage), x + 60.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Patrol radius
+    draw_text("Patrol:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(&format!("{:.0}", patrol_radius), x + 60.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    modified
+}
+
+/// Draw checkpoint component editor
+fn draw_checkpoint_editor(
+    _ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    _width: f32,
+    respawn_offset: &mut [f32; 3],
+    _icon_font: Option<&Font>,
+) -> bool {
+    let line_height = 20.0;
+
+    draw_text("Respawn Offset:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    *y += line_height;
+
+    draw_text(&format!("X: {:.0}  Y: {:.0}  Z: {:.0}",
+        respawn_offset[0], respawn_offset[1], respawn_offset[2]),
+        x + 8.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    false
+}
+
+/// Draw door component editor
+fn draw_door_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    required_key: &mut Option<String>,
+    start_open: &mut bool,
+    _icon_font: Option<&Font>,
+) -> bool {
+    let mut modified = false;
+    let line_height = 20.0;
+
+    // Required key
+    draw_text("Key:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let key_text = required_key.as_deref().unwrap_or("(unlocked)");
+    draw_text(key_text, x + 40.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Start open toggle
+    draw_text("Start Open:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+    let toggle_x = x + width - 40.0;
+    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let toggle_color = if *start_open { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+    draw_text(if *start_open { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
+
+    if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
+        *start_open = !*start_open;
+        modified = true;
+    }
+    *y += line_height;
+
+    modified
+}
+
+/// Draw audio component editor
+fn draw_audio_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    sound: &mut String,
+    volume: &mut f32,
+    radius: &mut f32,
+    looping: &mut bool,
+    _icon_font: Option<&Font>,
+) -> bool {
+    let mut modified = false;
+    let line_height = 20.0;
+
+    // Sound name
+    draw_text("Sound:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(sound, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    // Volume slider
+    draw_text("Volume:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let slider_x = x + 60.0;
+    let slider_w = width - 100.0;
+    let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
+    draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let fill_w = volume.clamp(0.0, 1.0) * slider_w;
+    draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
+
+    draw_text(&format!("{:.0}%", *volume * 100.0), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+        let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
+        *volume = t;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Radius slider
+    draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
+    draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let max_radius = 2048.0;
+    let fill_w = (radius.clamp(0.0, max_radius) / max_radius) * slider_w;
+    draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
+
+    draw_text(&format!("{:.0}", radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+        let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
+        *radius = t * max_radius;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Looping toggle
+    draw_text("Looping:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+    let toggle_x = x + width - 40.0;
+    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let toggle_color = if *looping { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+    draw_text(if *looping { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
+
+    if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
+        *looping = !*looping;
+        modified = true;
+    }
+    *y += line_height;
+
+    modified
+}
+
+/// Draw particle component editor
+fn draw_particle_editor(
+    _ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    _width: f32,
+    effect: &mut String,
+    offset: &mut [f32; 3],
+    _icon_font: Option<&Font>,
+) -> bool {
+    let line_height = 20.0;
+
+    draw_text("Effect:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(effect, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    draw_text("Offset:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    draw_text(&format!("X:{:.0} Y:{:.0} Z:{:.0}", offset[0], offset[1], offset[2]),
+        x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    *y += line_height;
+
+    false
+}
+
+/// Draw character controller component editor
+fn draw_character_controller_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    height: &mut f32,
+    radius: &mut f32,
+    step_height: &mut f32,
+    _icon_font: Option<&Font>,
+) -> bool {
+    let mut modified = false;
+    let line_height = 20.0;
+    let slider_x = x + 70.0;
+    let slider_w = width - 110.0;
+    let max_val = 3072.0;
+
+    // Height slider
+    draw_text("Height:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
+    draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let fill_w = (height.clamp(0.0, max_val) / max_val) * slider_w;
+    draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
+
+    draw_text(&format!("{:.0}", height), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+        let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
+        *height = t * max_val;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Radius slider
+    draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
+    draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let fill_w = (radius.clamp(0.0, max_val) / max_val) * slider_w;
+    draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
+
+    draw_text(&format!("{:.0}", radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+        let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
+        *radius = t * max_val;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Step height slider
+    draw_text("Step:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
+    draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
+
+    let max_step = 1024.0;
+    let fill_w = (step_height.clamp(0.0, max_step) / max_step) * slider_w;
+    draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
+
+    draw_text(&format!("{:.0}", step_height), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+        let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
+        *step_height = t * max_step;
+        modified = true;
+    }
+    *y += line_height;
+
+    modified
+}
+
+/// Draw spawn point component editor
+fn draw_spawn_point_editor(
+    ctx: &mut UiContext,
+    x: f32,
+    y: &mut f32,
+    width: f32,
+    is_player_start: &mut bool,
+    _icon_font: Option<&Font>,
+) -> bool {
+    let mut modified = false;
+    let line_height = 20.0;
+
+    // Is player start toggle
+    draw_text("Player Start:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+    let toggle_x = x + width - 40.0;
+    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let toggle_color = if *is_player_start { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+    draw_text(if *is_player_start { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
+
+    if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
+        *is_player_start = !*is_player_start;
+        modified = true;
+    }
+    *y += line_height;
+
+    modified
 }
 
 /// Draw lights section
