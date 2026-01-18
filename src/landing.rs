@@ -64,11 +64,15 @@ const SECTION_BG: Color = Color::new(0.12, 0.12, 0.14, 1.0);
 /// State for the landing page (scroll position)
 pub struct LandingState {
     pub scroll_y: f32,
+    pub logo_texture: Option<Texture2D>,
 }
 
 impl LandingState {
-    pub fn new() -> Self {
-        Self { scroll_y: 0.0 }
+    pub fn new(logo_texture: Option<Texture2D>) -> Self {
+        Self {
+            scroll_y: 0.0,
+            logo_texture,
+        }
     }
 }
 
@@ -106,11 +110,37 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     let mut y = (rect.y + padding + state.scroll_y).round();
 
     // === HEADER ===
-    let title = format!("BONNIE-32 v{}", VERSION);
-    draw_text(&title, content_x, y + 32.0, 32.0, ACCENT_COLOR);
-    y += 44.0;
+    // Draw logo if available, otherwise fallback to text
+    if let Some(logo) = &state.logo_texture {
+        // Logo is 800x296 at native size, scale to fit content width nicely
+        let logo_max_width = content_width.min(500.0);
+        let logo_scale = logo_max_width / logo.width();
+        let logo_w = logo.width() * logo_scale;
+        let logo_h = logo.height() * logo_scale;
+        let logo_x = content_x + (content_width - logo_w) / 2.0;
 
-    draw_text("A Fantasy Console for PS1-Era 3D Games", content_x, y + 18.0, 18.0, MUTED_COLOR);
+        draw_texture_ex(
+            logo,
+            logo_x,
+            y,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(logo_w, logo_h)),
+                ..Default::default()
+            },
+        );
+        y += logo_h + 8.0;
+    } else {
+        // Fallback to text title
+        let title = format!("BONNIE-32 v{}", VERSION);
+        draw_text(&title, content_x, y + 32.0, 32.0, ACCENT_COLOR);
+        y += 44.0;
+    }
+
+    // Subtitle
+    let subtitle = "A Fantasy Console for PS1-Era 3D Games";
+    let subtitle_width = subtitle.len() as f32 * 18.0 * 0.55;
+    draw_text(subtitle, content_x + (content_width - subtitle_width) / 2.0, y + 18.0, 18.0, MUTED_COLOR);
     y += 54.0;
 
     // === INTRO SECTION ===

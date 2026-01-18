@@ -27,7 +27,7 @@ mod asset;
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level, save_level};
-use ui::{UiContext, MouseState, Rect, draw_fixed_tabs, TabEntry, layout as tab_layout, icon};
+use ui::{UiContext, MouseState, Rect, draw_fixed_tabs_with_version, TabEntry, layout as tab_layout, icon};
 use editor::{EditorAction, draw_editor, draw_example_browser, BrowserAction, discover_examples};
 use modeler::{ModelerAction, ModelBrowserAction, ObjImportAction, draw_model_browser, draw_obj_importer, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
@@ -73,6 +73,9 @@ async fn main() {
     let mut last_click_time = 0.0f64;
     let mut last_click_pos = (0.0f32, 0.0f32);
 
+    // Version highlight state (easter egg - click to toggle!)
+    let mut version_highlighted = false;
+
     // UI context
     let mut ui_ctx = UiContext::new();
 
@@ -88,8 +91,21 @@ async fn main() {
         }
     };
 
+    // Load logo texture
+    let logo_texture = match load_texture("assets/branding/logo.png").await {
+        Ok(tex) => {
+            tex.set_filter(FilterMode::Linear);
+            println!("Loaded logo texture");
+            Some(tex)
+        }
+        Err(e) => {
+            println!("Failed to load logo: {}", e);
+            None
+        }
+    };
+
     // App state with all tools
-    let mut app = AppState::new(level, None, icon_font);
+    let mut app = AppState::new(level, None, icon_font, logo_texture);
 
     // Track if this is the first time opening World Editor (to show browser)
     let mut world_editor_first_open = true;
@@ -182,7 +198,7 @@ async fn main() {
             TabEntry::new(icon::MUSIC, "Music"),
             TabEntry::new(icon::GAMEPAD_2, "Input"),
         ];
-        if let Some(clicked) = draw_fixed_tabs(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref()) {
+        if let Some(clicked) = draw_fixed_tabs_with_version(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref(), Some(VERSION), &mut version_highlighted) {
             if let Some(tool) = Tool::from_index(clicked) {
                 // Open browser on first World Editor visit
                 if tool == Tool::WorldEditor && world_editor_first_open {

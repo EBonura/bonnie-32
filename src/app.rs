@@ -11,7 +11,7 @@ use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, ObjImportBrowser
 use crate::project::ProjectData;
 use crate::tracker::TrackerState;
 use crate::world::Level;
-use macroquad::prelude::Font;
+use macroquad::prelude::{Font, Texture2D};
 use std::path::PathBuf;
 
 /// The available tools (fixed set, one tab each)
@@ -118,7 +118,7 @@ pub struct AppState {
 
 impl AppState {
     /// Create new app state with the given initial level for the world editor
-    pub fn new(level: Level, file_path: Option<PathBuf>, icon_font: Option<Font>) -> Self {
+    pub fn new(level: Level, file_path: Option<PathBuf>, icon_font: Option<Font>, logo_texture: Option<Texture2D>) -> Self {
         let editor_state = if let Some(path) = file_path {
             EditorState::with_file(level, path)
         } else {
@@ -129,7 +129,7 @@ impl AppState {
             active_tool: Tool::Home,
             prev_tool: Tool::Home,
             project: ProjectData::new(),
-            landing: LandingState::new(),
+            landing: LandingState::new(logo_texture),
             world_editor: WorldEditorState {
                 editor_state,
                 editor_layout: EditorLayout::new(),
