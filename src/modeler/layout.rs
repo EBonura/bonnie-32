@@ -706,7 +706,8 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             let delete_color = if delete_hover { Color::from_rgba(255, 100, 100, 255) } else { TEXT_DIM };
             draw_icon_centered(icon_font, icon::TRASH, &delete_rect, 11.0, delete_color);
 
-            if delete_hover && ctx.mouse.left_pressed {
+            // Use clicked() (press + release) to avoid triggering on same frame as add
+            if ctx.mouse.clicked(&delete_rect) {
                 delete_idx = Some(i);
             }
         }
