@@ -1,7 +1,7 @@
 // AudioWorklet processor for low-latency audio streaming
 // This runs on a dedicated audio thread, separate from the main thread
 
-class BonnieAudioProcessor extends AudioWorkletProcessor {
+class B32AudioProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
         // Ring buffer for audio samples
@@ -58,4 +58,4 @@ class BonnieAudioProcessor extends AudioWorkletProcessor {
     }
 }
 
-registerProcessor('bonnie-audio-processor', BonnieAudioProcessor);
+registerProcessor('b32-audio-processor', B32AudioProcessor);

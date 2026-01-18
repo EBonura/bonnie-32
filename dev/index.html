@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>[DEV] Bonnie Engine v0.1.6</title>
+    <title>[DEV] BONNIE-32 v0.1.8</title>
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -57,7 +57,7 @@
 </head>
 <body>
     <div id="loading">
-        <div>Loading Bonnie Engine (DEV) v0.1.6...</div>
+        <div>Loading BONNIE-32 (DEV) v0.1.8...</div>
         <div id="loading-bar-container">
             <div id="loading-bar"></div>
         </div>
@@ -113,9 +113,9 @@
                             if (!safeName.toLowerCase().endsWith('.ron')) {
                                 safeName = 'level.ron';
                             }
-                            localStorage.setItem('_bonnie_import_data', e.target.result);
-                            localStorage.setItem('_bonnie_import_filename', safeName);
-                            localStorage.setItem('_bonnie_import_ready', 'true');
+                            localStorage.setItem('_b32_import_data', e.target.result);
+                            localStorage.setItem('_b32_import_filename', safeName);
+                            localStorage.setItem('_b32_import_ready', 'true');
                         };
                         reader.readAsText(file);
                     }
@@ -124,44 +124,44 @@
             },
 
             checkImport: function() {
-                return localStorage.getItem('_bonnie_import_ready') === 'true' ? 1 : 0;
+                return localStorage.getItem('_b32_import_ready') === 'true' ? 1 : 0;
             },
 
             getImportDataLen: function() {
-                return (localStorage.getItem('_bonnie_import_data') || '').length;
+                return (localStorage.getItem('_b32_import_data') || '').length;
             },
 
             getImportFilenameLen: function() {
-                return (localStorage.getItem('_bonnie_import_filename') || '').length;
+                return (localStorage.getItem('_b32_import_filename') || '').length;
             },
 
             copyImportData: function(ptr, maxLen) {
-                var data = localStorage.getItem('_bonnie_import_data') || '';
+                var data = localStorage.getItem('_b32_import_data') || '';
                 return writeWasmBytes(ptr, new TextEncoder().encode(data), maxLen);
             },
 
             copyImportFilename: function(ptr, maxLen) {
-                var filename = localStorage.getItem('_bonnie_import_filename') || '';
+                var filename = localStorage.getItem('_b32_import_filename') || '';
                 return writeWasmBytes(ptr, new TextEncoder().encode(filename), maxLen);
             },
 
             clearImport: function() {
-                localStorage.removeItem('_bonnie_import_ready');
-                localStorage.removeItem('_bonnie_import_data');
-                localStorage.removeItem('_bonnie_import_filename');
+                localStorage.removeItem('_b32_import_ready');
+                localStorage.removeItem('_b32_import_data');
+                localStorage.removeItem('_b32_import_filename');
             },
 
             setExportData: function(ptr, len) {
-                localStorage.setItem('_bonnie_export_data', readWasmString(ptr, len));
+                localStorage.setItem('_b32_export_data', readWasmString(ptr, len));
             },
 
             setExportFilename: function(ptr, len) {
-                localStorage.setItem('_bonnie_export_filename', readWasmString(ptr, len));
+                localStorage.setItem('_b32_export_filename', readWasmString(ptr, len));
             },
 
             triggerDownload: function() {
-                var data = localStorage.getItem('_bonnie_export_data');
-                var filename = localStorage.getItem('_bonnie_export_filename') || 'level.ron';
+                var data = localStorage.getItem('_b32_export_data');
+                var filename = localStorage.getItem('_b32_export_filename') || 'level.ron';
                 if (data) {
                     var a = document.createElement('a');
                     a.href = URL.createObjectURL(new Blob([data], { type: 'text/plain' }));
@@ -169,8 +169,8 @@
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
-                    localStorage.removeItem('_bonnie_export_data');
-                    localStorage.removeItem('_bonnie_export_filename');
+                    localStorage.removeItem('_b32_export_data');
+                    localStorage.removeItem('_b32_export_filename');
                 }
             }
         };
@@ -224,7 +224,7 @@
                         console.log('AudioWorklet module loaded');
 
                         // Create the worklet node
-                        AudioOutput.workletNode = new AudioWorkletNode(AudioOutput.ctx, 'bonnie-audio-processor', {
+                        AudioOutput.workletNode = new AudioWorkletNode(AudioOutput.ctx, 'b32-audio-processor', {
                             outputChannelCount: [2]
                         });
                         AudioOutput.workletNode.connect(AudioOutput.ctx.destination);
@@ -622,6 +622,146 @@
         });
 
         // =============================================================================
+        // MIDI Input (Web MIDI API)
+        // =============================================================================
+
+        var MidiInput = {
+            access: null,
+            input: null,
+            deviceName: "",
+            // Ring buffer for messages (max 256 messages between polls)
+            // Each message: [type, note, velocity] where type: 0=off, 1=on, 2=cc
+            messages: new Uint8Array(256 * 3),
+            messageCount: 0,
+
+            // Request MIDI access (async, called on first poll)
+            requestAccess: async function() {
+                if (MidiInput.access) return true;
+
+                try {
+                    MidiInput.access = await navigator.requestMIDIAccess();
+                    console.log('Web MIDI access granted');
+
+                    // Auto-connect to first input
+                    MidiInput.access.inputs.forEach(function(input) {
+                        if (!MidiInput.input) {
+                            MidiInput.connectInput(input);
+                        }
+                    });
+
+                    // Listen for device changes
+                    MidiInput.access.onstatechange = function(e) {
+                        if (e.port.type === 'input' && e.port.state === 'connected' && !MidiInput.input) {
+                            MidiInput.connectInput(e.port);
+                        }
+                    };
+
+                    return true;
+                } catch (e) {
+                    console.warn('Web MIDI not available:', e);
+                    return false;
+                }
+            },
+
+            connectInput: function(input) {
+                if (MidiInput.input) {
+                    MidiInput.input.onmidimessage = null;
+                }
+                MidiInput.input = input;
+                MidiInput.deviceName = input.name || "MIDI Device";
+                input.onmidimessage = MidiInput.onMessage;
+                console.log('MIDI connected:', MidiInput.deviceName);
+            },
+
+            onMessage: function(event) {
+                var data = event.data;
+                if (data.length < 2) return;
+
+                var status = data[0] & 0xF0;
+                var note = data[1];
+                var velocity = data.length > 2 ? data[2] : 0;
+
+                // Convert to simple format: type (0=off, 1=on, 2=cc), note, velocity
+                var msgType;
+                if (status === 0x90 && velocity > 0) {
+                    msgType = 1; // Note on
+                } else if (status === 0x80 || (status === 0x90 && velocity === 0)) {
+                    msgType = 0; // Note off
+                } else if (status === 0xB0) {
+                    msgType = 2; // CC
+                } else {
+                    return; // Ignore other messages
+                }
+
+                // Add to ring buffer (drop if full)
+                if (MidiInput.messageCount < 256) {
+                    var offset = MidiInput.messageCount * 3;
+                    MidiInput.messages[offset] = msgType;
+                    MidiInput.messages[offset + 1] = note;
+                    MidiInput.messages[offset + 2] = velocity;
+                    MidiInput.messageCount++;
+                }
+            },
+
+            // FFI functions called from Rust
+
+            init: function() {
+                MidiInput.requestAccess();
+            },
+
+            isConnected: function() {
+                return MidiInput.input ? 1 : 0;
+            },
+
+            getMessageCount: function() {
+                return MidiInput.messageCount;
+            },
+
+            // Copy messages to WASM memory and clear buffer
+            copyMessages: function(destPtr, maxCount) {
+                var count = Math.min(MidiInput.messageCount, maxCount);
+                if (count > 0) {
+                    var dest = new Uint8Array(wasm_memory.buffer, destPtr, count * 3);
+                    dest.set(MidiInput.messages.subarray(0, count * 3));
+                }
+                MidiInput.messageCount = 0;
+                return count;
+            },
+
+            // Copy device name to WASM memory
+            copyDeviceName: function(destPtr, maxLen) {
+                var name = MidiInput.deviceName;
+                var encoder = new TextEncoder();
+                var bytes = encoder.encode(name);
+                var len = Math.min(bytes.length, maxLen);
+                var mem = new Uint8Array(wasm_memory.buffer, destPtr, len);
+                mem.set(bytes.subarray(0, len));
+                return len;
+            },
+
+            getDeviceCount: function() {
+                if (!MidiInput.access) return 0;
+                return MidiInput.access.inputs.size;
+            },
+
+            connectDevice: function(index) {
+                if (!MidiInput.access) return 0;
+
+                var i = 0;
+                var found = false;
+                MidiInput.access.inputs.forEach(function(input) {
+                    if (i === index && !found) {
+                        MidiInput.connectInput(input);
+                        found = true;
+                    }
+                    i++;
+                });
+
+                return found ? 1 : 0;
+            }
+        };
+
+        // =============================================================================
         // Register WASM imports
         // =============================================================================
 
@@ -630,50 +770,59 @@
                 var env = importObject.env;
 
                 // Gamepad input
-                env.bonnie_gamepad_has_gamepad = GamepadInput.hasGamepad;
-                env.bonnie_gamepad_get_button_mask = GamepadInput.getButtonMask;
-                env.bonnie_gamepad_get_button_pressed_mask = GamepadInput.getButtonPressedMask;
-                env.bonnie_gamepad_get_left_stick_x = GamepadInput.getLeftStickX;
-                env.bonnie_gamepad_get_left_stick_y = GamepadInput.getLeftStickY;
-                env.bonnie_gamepad_get_right_stick_x = GamepadInput.getRightStickX;
-                env.bonnie_gamepad_get_right_stick_y = GamepadInput.getRightStickY;
-                env.bonnie_gamepad_get_left_trigger = GamepadInput.getLeftTrigger;
-                env.bonnie_gamepad_get_right_trigger = GamepadInput.getRightTrigger;
-                env.bonnie_gamepad_copy_name = GamepadInput.copyName;
+                env.b32_gamepad_has_gamepad = GamepadInput.hasGamepad;
+                env.b32_gamepad_get_button_mask = GamepadInput.getButtonMask;
+                env.b32_gamepad_get_button_pressed_mask = GamepadInput.getButtonPressedMask;
+                env.b32_gamepad_get_left_stick_x = GamepadInput.getLeftStickX;
+                env.b32_gamepad_get_left_stick_y = GamepadInput.getLeftStickY;
+                env.b32_gamepad_get_right_stick_x = GamepadInput.getRightStickX;
+                env.b32_gamepad_get_right_stick_y = GamepadInput.getRightStickY;
+                env.b32_gamepad_get_left_trigger = GamepadInput.getLeftTrigger;
+                env.b32_gamepad_get_right_trigger = GamepadInput.getRightTrigger;
+                env.b32_gamepad_copy_name = GamepadInput.copyName;
+
+                // MIDI input
+                env.b32_midi_init = MidiInput.init;
+                env.b32_midi_is_connected = MidiInput.isConnected;
+                env.b32_midi_get_message_count = MidiInput.getMessageCount;
+                env.b32_midi_copy_messages = MidiInput.copyMessages;
+                env.b32_midi_copy_device_name = MidiInput.copyDeviceName;
+                env.b32_midi_get_device_count = MidiInput.getDeviceCount;
+                env.b32_midi_connect_device = MidiInput.connectDevice;
 
                 // File I/O
-                env.bonnie_import_file = FileIO.import;
-                env.bonnie_check_import = FileIO.checkImport;
-                env.bonnie_get_import_data_len = FileIO.getImportDataLen;
-                env.bonnie_get_import_filename_len = FileIO.getImportFilenameLen;
-                env.bonnie_copy_import_data = FileIO.copyImportData;
-                env.bonnie_copy_import_filename = FileIO.copyImportFilename;
-                env.bonnie_clear_import = FileIO.clearImport;
-                env.bonnie_set_export_data = FileIO.setExportData;
-                env.bonnie_set_export_filename = FileIO.setExportFilename;
-                env.bonnie_trigger_download = FileIO.triggerDownload;
+                env.b32_import_file = FileIO.import;
+                env.b32_check_import = FileIO.checkImport;
+                env.b32_get_import_data_len = FileIO.getImportDataLen;
+                env.b32_get_import_filename_len = FileIO.getImportFilenameLen;
+                env.b32_copy_import_data = FileIO.copyImportData;
+                env.b32_copy_import_filename = FileIO.copyImportFilename;
+                env.b32_clear_import = FileIO.clearImport;
+                env.b32_set_export_data = FileIO.setExportData;
+                env.b32_set_export_filename = FileIO.setExportFilename;
+                env.b32_trigger_download = FileIO.triggerDownload;
 
                 // Loading UI
-                env.bonnie_set_loading_progress = LoadingUI.setProgress;
-                env.bonnie_set_loading_status = LoadingUI.setStatus;
-                env.bonnie_hide_loading = LoadingUI.hide;
+                env.b32_set_loading_progress = LoadingUI.setProgress;
+                env.b32_set_loading_status = LoadingUI.setStatus;
+                env.b32_hide_loading = LoadingUI.hide;
 
                 // Texture cache
-                env.bonnie_is_prefetch_complete = TextureCache.isComplete;
-                env.bonnie_get_cached_texture_info = TextureCache.getInfo;
-                env.bonnie_copy_cached_texture = TextureCache.copyData;
+                env.b32_is_prefetch_complete = TextureCache.isComplete;
+                env.b32_get_cached_texture_info = TextureCache.getInfo;
+                env.b32_copy_cached_texture = TextureCache.copyData;
 
                 // Soundfont cache
-                env.bonnie_is_soundfont_loaded = SoundfontCache.isLoaded;
-                env.bonnie_get_soundfont_size = SoundfontCache.getSize;
-                env.bonnie_copy_soundfont = SoundfontCache.copyData;
+                env.b32_is_soundfont_loaded = SoundfontCache.isLoaded;
+                env.b32_get_soundfont_size = SoundfontCache.getSize;
+                env.b32_copy_soundfont = SoundfontCache.copyData;
 
                 // Audio output
-                env.bonnie_audio_init = AudioOutput.init;
-                env.bonnie_audio_write = AudioOutput.write;
+                env.b32_audio_init = AudioOutput.init;
+                env.b32_audio_write = AudioOutput.write;
 
                 // URL opening - only allow http/https protocols for security
-                env.bonnie_open_url = function(ptr, len) {
+                env.b32_open_url = function(ptr, len) {
                     var url = readWasmString(ptr, len);
                     if (url.startsWith('http://') || url.startsWith('https://')) {
                         window.open(url, '_blank');
@@ -693,7 +842,7 @@
             TextureCache.prefetchAll(),
             SoundfontCache.prefetch()
         ]).then(function() {
-            load('bonnie-engine.wasm');
+            load('bonnie-32.wasm');
         });
 
     })();
