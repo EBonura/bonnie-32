@@ -227,7 +227,8 @@ fn regenerate_user_texture_manifest(textures_user_dir: &Path) -> Result<()> {
         manifest.push_str(&format!("{}\n", file.file_name().to_string_lossy()));
     }
 
+    let file_count = manifest.lines().count();
     std::fs::write(textures_user_dir.join("manifest.txt"), manifest)?;
-    println!("Regenerated user texture manifest ({} files)", manifest.lines().count());
+    println!("Regenerated user texture manifest ({} files)", file_count);
     Ok(())
 }
