@@ -188,7 +188,7 @@ async fn main() {
         // Clear background
         clear_background(Color::from_rgba(30, 30, 35, 255));
 
-        // Draw tab bar at top
+        // Tab bar rect and tabs (drawn last so it's on top of any overflow)
         let tab_bar_rect = Rect::new(0.0, 0.0, screen_w, tab_layout::BAR_HEIGHT);
         let tabs = [
             TabEntry::new(icon::HOUSE, "Home"),
@@ -198,27 +198,6 @@ async fn main() {
             TabEntry::new(icon::MUSIC, "Music"),
             TabEntry::new(icon::GAMEPAD_2, "Input"),
         ];
-        if let Some(clicked) = draw_fixed_tabs_with_version(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref(), Some(VERSION), &mut version_highlighted) {
-            if let Some(tool) = Tool::from_index(clicked) {
-                // Open browser on first World Editor visit
-                if tool == Tool::WorldEditor && world_editor_first_open {
-                    world_editor_first_open = false;
-                    // Fresh scan to pick up any newly saved levels
-                    app.world_editor.example_browser.open(discover_examples());
-                    // On WASM, trigger async load of example list
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        app.world_editor.example_browser.pending_load_list = true;
-                    }
-                }
-                // Reset game state when switching to Test tab
-                // This ensures player spawns fresh from current level's PlayerStart
-                if tool == Tool::Test {
-                    app.game.reset();
-                }
-                app.set_active_tool(tool);
-            }
-        }
 
         // Keyboard shortcuts for tab cycling: Cmd+] (next), Cmd+[ (previous)
         let cmd = is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
@@ -1012,6 +991,25 @@ async fn main() {
                 } else {
                     ts.set_status("Failed to load song preview", 3.0);
                 }
+            }
+        }
+
+        // Draw tab bar LAST so it covers any content overflow (e.g., landing page scroll)
+        if let Some(clicked) = draw_fixed_tabs_with_version(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref(), Some(VERSION), &mut version_highlighted) {
+            if let Some(tool) = Tool::from_index(clicked) {
+                // Handle special cases for certain tabs
+                if tool == Tool::WorldEditor && world_editor_first_open {
+                    world_editor_first_open = false;
+                    app.world_editor.example_browser.open(discover_examples());
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        app.world_editor.example_browser.pending_load_list = true;
+                    }
+                }
+                if tool == Tool::Test {
+                    app.game.reset();
+                }
+                app.set_active_tool(tool);
             }
         }
 

@@ -79,9 +79,6 @@ impl LandingState {
 
 /// Draw the landing page
 pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiContext) {
-    // DPI scale for high-DPI displays (layout only, not font sizes)
-    let dpi = screen_dpi_scale();
-
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
@@ -89,20 +86,6 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     let scroll_delta = ctx.mouse.scroll * 3.0;
     state.scroll_y += scroll_delta;
     state.scroll_y = state.scroll_y.clamp(state.max_scroll, 0.0);
-
-    // Enable scissor clipping to prevent content from overflowing into tab bar
-    // Scissor uses physical pixels, so scale by DPI
-    gl_use_default_material();
-    unsafe {
-        get_internal_gl().quad_gl.scissor(
-            Some((
-                (rect.x * dpi) as i32,
-                (rect.y * dpi) as i32,
-                (rect.w * dpi) as i32,
-                (rect.h * dpi) as i32
-            ))
-        );
-    }
 
     // Content area with padding (all in logical pixels)
     let padding = 40.0;
@@ -226,11 +209,6 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     // Calculate and store max scroll for next frame
     let content_height = y - rect.y - state.scroll_y;
     state.max_scroll = -(content_height - rect.h + padding).max(0.0);
-
-    // Disable scissor clipping
-    unsafe {
-        get_internal_gl().quad_gl.scissor(None);
-    }
 }
 
 /// Draw a section with title and body text (auto-wrapping)
