@@ -7203,11 +7203,12 @@ fn render_asset_meshes(
                 }
 
                 // Per-room render settings with lights
-                // Disable backface culling for double-sided parts
+                // Disable backface culling for double-sided parts (same as modeler)
                 let render_settings = RasterSettings {
                     lights: lights.to_vec(),
                     ambient: room.ambient,
                     backface_cull: !part.double_sided && state.raster_settings.backface_cull,
+                    backface_wireframe: !part.double_sided && state.raster_settings.backface_wireframe,
                     ..state.raster_settings.clone()
                 };
 

@@ -115,6 +115,42 @@ impl AssetLibrary {
         Ok(0)
     }
 
+    /// Reload a single asset from disk by name (for hot-reload)
+    ///
+    /// Re-reads the asset file and updates the library entry.
+    /// Useful for picking up changes made in the modeler.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn reload_asset(&mut self, name: &str) -> Result<(), AssetError> {
+        let path = self.base_dir.join(format!("{}.ron", name));
+        let asset = Asset::load(&path)?;
+
+        // Update by_id mapping (in case ID changed, though unlikely)
+        if let Some(old_asset) = self.assets.get(name) {
+            self.by_id.remove(&old_asset.id);
+        }
+        self.by_id.insert(asset.id, name.to_string());
+
+        // Update the asset
+        self.assets.insert(name.to_string(), asset);
+        Ok(())
+    }
+
+    /// Reload all assets from disk (for hot-reload)
+    ///
+    /// Re-reads all known assets from disk. Returns the number of
+    /// successfully reloaded assets.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn reload_all(&mut self) -> Result<usize, AssetError> {
+        let names: Vec<String> = self.asset_names.clone();
+        let mut count = 0;
+        for name in names {
+            if self.reload_asset(&name).is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Load assets from manifest (for WASM)
     ///
     /// The manifest file should contain one asset filename per line (without path).

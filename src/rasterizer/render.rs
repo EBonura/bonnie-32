@@ -1969,26 +1969,27 @@ pub fn render_mesh(
             }
 
             // If backface culling is disabled or xray mode, also render as solid
+            // Swap v2/v3 to reverse winding order (makes area positive for rasterization)
             if !settings.backface_cull || settings.xray_mode {
                 surfaces.push(Surface {
                     v1,
-                    v2,
-                    v3,
+                    v2: v3,  // swapped
+                    v3: v2,  // swapped
                     w1: vertices[face.v0].pos,
-                    w2: vertices[face.v1].pos,
-                    w3: vertices[face.v2].pos,
+                    w2: vertices[face.v2].pos,  // swapped
+                    w3: vertices[face.v1].pos,  // swapped
                     vn1: cam_space_normals[face.v0].scale(-1.0),
-                    vn2: cam_space_normals[face.v1].scale(-1.0),
-                    vn3: cam_space_normals[face.v2].scale(-1.0),
+                    vn2: cam_space_normals[face.v2].scale(-1.0),  // swapped
+                    vn3: cam_space_normals[face.v1].scale(-1.0),  // swapped
                     wn1: vertices[face.v0].normal.scale(-1.0),
-                    wn2: vertices[face.v1].normal.scale(-1.0),
-                    wn3: vertices[face.v2].normal.scale(-1.0),
+                    wn2: vertices[face.v2].normal.scale(-1.0),  // swapped
+                    wn3: vertices[face.v1].normal.scale(-1.0),  // swapped
                     uv1: vertices[face.v0].uv,
-                    uv2: vertices[face.v1].uv,
-                    uv3: vertices[face.v2].uv,
+                    uv2: vertices[face.v2].uv,  // swapped
+                    uv3: vertices[face.v1].uv,  // swapped
                     vc1: vertices[face.v0].color,
-                    vc2: vertices[face.v1].color,
-                    vc3: vertices[face.v2].color,
+                    vc2: vertices[face.v2].color,  // swapped
+                    vc3: vertices[face.v1].color,  // swapped
                     normal: normal.scale(-1.0),
                     face_idx,
                     black_transparent: face.black_transparent,
@@ -2335,26 +2336,27 @@ pub fn render_mesh_15(
             }
 
             // If backface culling is disabled or xray mode, also render as solid
+            // Swap v2/v3 to reverse winding order (makes area positive for rasterization)
             if !settings.backface_cull || settings.xray_mode {
                 surfaces.push(Surface {
                     v1,
-                    v2,
-                    v3,
+                    v2: v3,  // swapped
+                    v3: v2,  // swapped
                     w1: vertices[face.v0].pos,
-                    w2: vertices[face.v1].pos,
-                    w3: vertices[face.v2].pos,
+                    w2: vertices[face.v2].pos,  // swapped
+                    w3: vertices[face.v1].pos,  // swapped
                     vn1: cam_space_normals[face.v0].scale(-1.0),
-                    vn2: cam_space_normals[face.v1].scale(-1.0),
-                    vn3: cam_space_normals[face.v2].scale(-1.0),
+                    vn2: cam_space_normals[face.v2].scale(-1.0),  // swapped
+                    vn3: cam_space_normals[face.v1].scale(-1.0),  // swapped
                     wn1: vertices[face.v0].normal.scale(-1.0),
-                    wn2: vertices[face.v1].normal.scale(-1.0),
-                    wn3: vertices[face.v2].normal.scale(-1.0),
+                    wn2: vertices[face.v2].normal.scale(-1.0),  // swapped
+                    wn3: vertices[face.v1].normal.scale(-1.0),  // swapped
                     uv1: vertices[face.v0].uv,
-                    uv2: vertices[face.v1].uv,
-                    uv3: vertices[face.v2].uv,
+                    uv2: vertices[face.v2].uv,  // swapped
+                    uv3: vertices[face.v1].uv,  // swapped
                     vc1,
-                    vc2,
-                    vc3,
+                    vc2: vc3,  // swapped
+                    vc3: vc2,  // swapped
                     normal: normal.scale(-1.0),
                     face_idx,
                     black_transparent: face.black_transparent,
