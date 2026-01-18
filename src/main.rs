@@ -122,7 +122,7 @@ async fn main() {
             Ok(count) => println!("WASM: Loaded {} user textures for editor", count),
             Err(e) => eprintln!("WASM: Failed to load user textures for editor: {}", e),
         }
-        match app.modeler.user_textures.discover_from_manifest().await {
+        match app.modeler.modeler_state.user_textures.discover_from_manifest().await {
             Ok(count) => println!("WASM: Loaded {} user textures for modeler", count),
             Err(e) => eprintln!("WASM: Failed to load user textures for modeler: {}", e),
         }
@@ -922,13 +922,13 @@ async fn main() {
                 ms.model_browser.pending_load_list = false;
                 use modeler::load_model_list;
                 let models = load_model_list().await;
-                ms.model_browser.models = models;
+                ms.model_browser.assets = models;
             }
             // Load individual model preview if pending
             if let Some(path) = ms.model_browser.pending_load_path.take() {
                 use modeler::load_model;
                 if let Some(project) = load_model(&path).await {
-                    ms.model_browser.set_preview(project);
+                    ms.model_browser.set_preview(project, &ms.modeler_state.user_textures);
                 } else {
                     ms.modeler_state.set_status("Failed to load model preview", 3.0);
                 }
