@@ -151,7 +151,8 @@ pub fn draw_modeler(
     let keyboard_action = handle_actions(&layout.actions, state, ctx);
     let action = if keyboard_action != ModelerAction::None { keyboard_action } else { action };
 
-    // Draw context menu (on top of everything)
+    // Draw popups and menus (on top of everything)
+    draw_add_component_popup(ctx, left_rect, state, icon_font);
     draw_context_menu(ctx, state);
 
     // Draw rename/delete dialogs (modal, on top of everything)
@@ -612,6 +613,9 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
     let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
     if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add component") {
         state.add_component_menu_open = !state.add_component_menu_open;
+        if state.add_component_menu_open {
+            state.add_component_btn_rect = Some(add_rect);
+        }
     }
 
     // Remove button (disabled for Mesh, requires selection)
@@ -638,8 +642,12 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
 
     // List components
     let mut select_idx: Option<usize> = None;
+    let mut toggle_vis_idx: Option<usize> = None;
+    let mut delete_idx: Option<usize> = None;
+
     for (i, comp) in state.asset.components.iter().enumerate() {
         let is_selected = state.selected_component == Some(i);
+        let is_hidden = state.hidden_components.contains(&i);
         let item_rect = Rect::new(x, *y, width, line_height);
         let is_hovered = ctx.mouse.inside(&item_rect);
 
@@ -650,15 +658,37 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
         }
 
+        // Visibility toggle (eye icon)
+        let vis_rect = Rect::new(x + 2.0, *y + 1.0, 16.0, 16.0);
+        let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
+        let vis_color = if is_hidden { TEXT_DIM } else { TEXT_COLOR };
+        draw_icon_centered(icon_font, vis_icon, &vis_rect, 11.0, vis_color);
+
+        if ctx.mouse.inside(&vis_rect) && ctx.mouse.left_pressed {
+            toggle_vis_idx = Some(i);
+        }
+
         // Component icon
-        let icon_rect = Rect::new(x + 4.0, *y + 1.0, 16.0, 16.0);
+        let icon_rect = Rect::new(x + 20.0, *y + 1.0, 16.0, 16.0);
         let icon_char = component_icon(comp);
-        let icon_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+        let icon_color = if is_hidden {
+            TEXT_DIM
+        } else if is_selected {
+            ACCENT_COLOR
+        } else {
+            TEXT_COLOR
+        };
         draw_icon_centered(icon_font, icon_char, &icon_rect, 11.0, icon_color);
 
         // Component type name
         let type_name = comp.type_name();
-        let name_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+        let name_color = if is_hidden {
+            TEXT_DIM
+        } else if is_selected {
+            ACCENT_COLOR
+        } else {
+            TEXT_COLOR
+        };
 
         // For Mesh, show object count
         let label = if let AssetComponent::Mesh { parts } = comp {
@@ -666,33 +696,52 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
         } else {
             type_name.to_string()
         };
-        draw_text(&label, x + 24.0, *y + 13.0, FONT_SIZE_CONTENT, name_color);
+        draw_text(&label, x + 40.0, *y + 13.0, FONT_SIZE_CONTENT, name_color);
 
-        // Click to select
-        if ctx.mouse.inside(&item_rect) && ctx.mouse.left_pressed {
+        // Delete button (show on hover/selection)
+        let show_delete = is_selected || is_hovered;
+        if show_delete {
+            let delete_rect = Rect::new(x + width - 18.0, *y + 1.0, 16.0, 16.0);
+            let delete_hover = ctx.mouse.inside(&delete_rect);
+            let delete_color = if delete_hover { Color::from_rgba(255, 100, 100, 255) } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::TRASH, &delete_rect, 11.0, delete_color);
+
+            if delete_hover && ctx.mouse.left_pressed {
+                delete_idx = Some(i);
+            }
+        }
+
+        // Click to select (not on visibility or delete)
+        let name_rect = Rect::new(x + 20.0, *y, width - 40.0, line_height);
+        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed
+            && toggle_vis_idx.is_none() && delete_idx.is_none() {
             select_idx = Some(i);
         }
 
         *y += line_height;
     }
 
-    // Apply selection
-    if let Some(idx) = select_idx {
+    // Apply actions
+    if let Some(idx) = toggle_vis_idx {
+        if state.hidden_components.contains(&idx) {
+            state.hidden_components.remove(&idx);
+        } else {
+            state.hidden_components.insert(idx);
+        }
+    } else if let Some(idx) = delete_idx {
+        // Open delete confirmation dialog
+        state.delete_component_dialog = Some(idx);
+    } else if let Some(idx) = select_idx {
         state.selected_component = Some(idx);
     }
 
-    // Draw add component popup menu if open
-    if state.add_component_menu_open {
-        let menu_x = x + width - btn_size * 2.0 - 8.0;
-        let menu_y = *y - (line_height * comp_count as f32) - btn_size - 4.0 + btn_size + 4.0;
-        draw_add_component_menu(ctx, menu_x, menu_y, state, icon_font);
-    }
 }
 
 /// Draw the "Add Component" popup menu
-fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
-    // Component types that can be added (exclude Mesh - managed via Overview)
+fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut ModelerState, icon_font: Option<&Font>, add_btn_rect: Rect) {
+    // All component types that can be added
     let component_types = [
+        ("Mesh", icon::BOX),
         ("Collision", icon::SCAN),
         ("Light", icon::SUN),
         ("Trigger", icon::MAP_PIN),
@@ -715,8 +764,8 @@ fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut Mode
     draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
     draw_rectangle_lines(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
 
-    // Close menu if clicking outside
-    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
+    // Close menu if clicking outside (but not on the add button that opened it)
+    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) && !ctx.mouse.inside(&add_btn_rect) {
         state.add_component_menu_open = false;
         return;
     }
@@ -755,6 +804,9 @@ fn create_default_component(type_name: &str) -> AssetComponent {
     use crate::game::components::{EnemyType, ItemType};
 
     match type_name {
+        "Mesh" => AssetComponent::Mesh {
+            parts: Vec::new(),
+        },
         "Collision" => AssetComponent::Collision {
             shape: CollisionShapeDef::FromMesh,
             is_trigger: false,
@@ -6128,6 +6180,24 @@ impl PrimitiveType {
     }
 }
 
+/// Draw the "Add Component" popup at the top level (above all panels)
+fn draw_add_component_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    if !state.add_component_menu_open {
+        return;
+    }
+
+    let add_btn_rect = match state.add_component_btn_rect {
+        Some(r) => r,
+        None => return,
+    };
+
+    // Position menu below the add button
+    let menu_x = add_btn_rect.x;
+    let menu_y = add_btn_rect.bottom() + 2.0;
+
+    draw_add_component_menu(ctx, menu_x, menu_y, state, icon_font, add_btn_rect);
+}
+
 /// Draw and handle context menu
 fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     // Note: Tab/Escape shortcuts are now handled through ActionRegistry in handle_actions()
@@ -6440,6 +6510,89 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
         // Handle Escape key
         if is_key_pressed(KeyCode::Escape) {
             state.delete_dialog = None;
+        }
+    }
+
+    // Handle component delete confirmation dialog
+    if let Some(idx) = state.delete_component_dialog {
+        let comp_name = state.asset.components.get(idx)
+            .map(|c| c.type_name().to_string())
+            .unwrap_or_default();
+
+        let dialog_w = 300.0;
+        let dialog_h = 120.0;
+        let dialog_x = (screen_width() - dialog_w) / 2.0;
+        let dialog_y = (screen_height() - dialog_h) / 2.0;
+
+        // Background
+        draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(100, 60, 60, 255));
+
+        // Warning icon and title
+        let icon_rect = Rect::new(dialog_x + 12.0, dialog_y + 12.0, 20.0, 20.0);
+        draw_icon_centered(icon_font, icon::TRASH, &icon_rect, 16.0, Color::from_rgba(255, 100, 100, 255));
+        draw_text("Delete Component?", dialog_x + 36.0, dialog_y + 26.0, 16.0, WHITE);
+
+        // Message
+        draw_text(&format!("Delete '{}' component?", comp_name), dialog_x + 12.0, dialog_y + 55.0, 14.0, TEXT_COLOR);
+        draw_text("This cannot be undone.", dialog_x + 12.0, dialog_y + 72.0, 12.0, TEXT_DIM);
+
+        // Buttons
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = dialog_y + dialog_h - btn_h - 12.0;
+
+        // Cancel button
+        let cancel_rect = Rect::new(dialog_x + dialog_w - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, TEXT_COLOR);
+
+        // Delete button (red)
+        let delete_rect = Rect::new(dialog_x + dialog_w - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let delete_hover = ctx.mouse.inside(&delete_rect);
+        draw_rectangle(delete_rect.x, delete_rect.y, delete_rect.w, delete_rect.h,
+            if delete_hover { Color::from_rgba(180, 60, 60, 255) } else { Color::from_rgba(140, 50, 50, 255) });
+        draw_text("Delete", delete_rect.x + 18.0, delete_rect.y + 18.0, 14.0, WHITE);
+
+        // Handle button clicks
+        if ctx.mouse.clicked(&cancel_rect) {
+            state.delete_component_dialog = None;
+        } else if ctx.mouse.clicked(&delete_rect) {
+            // Delete the component
+            if idx < state.asset.components.len() {
+                state.asset.components.remove(idx);
+
+                // Update selected_component
+                if state.asset.components.is_empty() {
+                    state.selected_component = None;
+                } else if let Some(sel) = state.selected_component {
+                    if sel >= state.asset.components.len() {
+                        state.selected_component = Some(state.asset.components.len() - 1);
+                    } else if sel > idx {
+                        state.selected_component = Some(sel - 1);
+                    }
+                }
+
+                // Update hidden_components indices (remove deleted, shift higher indices)
+                state.hidden_components.remove(&idx);
+                let new_hidden: std::collections::HashSet<usize> = state.hidden_components.iter()
+                    .filter_map(|&i| {
+                        if i > idx { Some(i - 1) } else { Some(i) }
+                    })
+                    .collect();
+                state.hidden_components = new_hidden;
+
+                state.dirty = true;
+                state.set_status(&format!("Deleted '{}' component", comp_name), 1.0);
+            }
+            state.delete_component_dialog = None;
+        }
+
+        // Handle Escape key
+        if is_key_pressed(KeyCode::Escape) {
+            state.delete_component_dialog = None;
         }
     }
 }

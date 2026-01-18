@@ -837,6 +837,9 @@ pub struct ModelerState {
     pub selected_component: Option<usize>,      // Index in asset.components for editing
     pub components_section_expanded: bool,      // Whether Components section is expanded
     pub add_component_menu_open: bool,          // Whether the "Add Component" popup is open
+    pub add_component_btn_rect: Option<crate::ui::Rect>, // Position of add button for popup positioning
+    pub hidden_components: std::collections::HashSet<usize>, // Hidden component indices
+    pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
 
     // CLUT editing state
     pub selected_clut: Option<crate::rasterizer::ClutId>, // Currently selected CLUT in pool
@@ -1092,6 +1095,9 @@ impl ModelerState {
             selected_component: None,
             components_section_expanded: true,
             add_component_menu_open: false,
+            add_component_btn_rect: None,
+            hidden_components: std::collections::HashSet::new(),
+            delete_component_dialog: None,
 
             // CLUT editing defaults
             selected_clut: None,
