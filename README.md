@@ -1,6 +1,6 @@
 # BONNIE-32
 
-[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](https://github.com/ebonura/bonnie-32/releases)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/ebonura/bonnie-32/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg)]()
 

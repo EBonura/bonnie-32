@@ -63,6 +63,7 @@ const SECTION_BG: Color = Color::new(0.12, 0.12, 0.14, 1.0);
 /// State for the landing page (scroll position)
 pub struct LandingState {
     pub scroll_y: f32,
+    pub max_scroll: f32,
     pub logo_texture: Option<Texture2D>,
 }
 
@@ -70,6 +71,7 @@ impl LandingState {
     pub fn new(logo_texture: Option<Texture2D>) -> Self {
         Self {
             scroll_y: 0.0,
+            max_scroll: 0.0,
             logo_texture,
         }
     }
@@ -83,10 +85,10 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
-    // Handle scrolling
+    // Handle scrolling - clamp immediately using previous frame's bounds
     let scroll_delta = ctx.mouse.scroll * 3.0;
     state.scroll_y += scroll_delta;
-    state.scroll_y = state.scroll_y.min(0.0); // Can't scroll above top
+    state.scroll_y = state.scroll_y.clamp(state.max_scroll, 0.0);
 
     // Enable scissor clipping to prevent content from overflowing into tab bar
     // Scissor uses physical pixels, so scale by DPI
@@ -221,10 +223,9 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     );
     y += 30.0;
 
-    // Clamp scroll to content
+    // Calculate and store max scroll for next frame
     let content_height = y - rect.y - state.scroll_y;
-    let max_scroll = -(content_height - rect.h + padding).max(0.0);
-    state.scroll_y = state.scroll_y.max(max_scroll);
+    state.max_scroll = -(content_height - rect.h + padding).max(0.0);
 
     // Disable scissor clipping
     unsafe {
