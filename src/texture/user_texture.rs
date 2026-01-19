@@ -21,16 +21,14 @@ static TEXTURE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn generate_texture_id() -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     let counter = TEXTURE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+
+    // Use macroquad's rand which works in WASM (avoids SystemTime::now() which panics in WASM)
+    let random_bits = macroquad::rand::rand() as u64;
 
     let mut hasher = DefaultHasher::new();
-    time.hash(&mut hasher);
+    random_bits.hash(&mut hasher);
     counter.hash(&mut hasher);
     hasher.finish()
 }

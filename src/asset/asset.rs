@@ -16,23 +16,20 @@ static ASSET_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Generate a stable unique ID for an asset
 ///
-/// Uses a combination of atomic counter and timestamp to ensure uniqueness.
+/// Uses a combination of atomic counter and random value to ensure uniqueness.
 /// This ID survives edits and renames - only changes if explicitly regenerated.
 pub fn generate_asset_id() -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     let counter = ASSET_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+
+    // Use macroquad's rand which works in WASM (avoids SystemTime::now() which panics in WASM)
+    let random_bits = macroquad::rand::rand() as u64;
 
     let mut hasher = DefaultHasher::new();
     counter.hash(&mut hasher);
-    timestamp.hash(&mut hasher);
-    std::process::id().hash(&mut hasher);
+    random_bits.hash(&mut hasher);
 
     hasher.finish()
 }
