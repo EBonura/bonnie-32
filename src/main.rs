@@ -22,13 +22,14 @@ mod game;
 mod project;
 mod input;
 mod texture;
+mod asset;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level, save_level};
-use ui::{UiContext, MouseState, Rect, draw_fixed_tabs, TabEntry, layout as tab_layout, icon};
+use ui::{UiContext, MouseState, Rect, draw_fixed_tabs_with_version, TabEntry, layout as tab_layout, icon};
 use editor::{EditorAction, draw_editor, draw_example_browser, BrowserAction, discover_examples};
-use modeler::{ModelerAction, ModelBrowserAction, MeshBrowserAction, draw_model_browser, draw_mesh_browser, discover_models, discover_meshes, ObjImporter, TextureImportResult};
+use modeler::{ModelerAction, ModelBrowserAction, ObjImportAction, draw_model_browser, draw_obj_importer, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
 use std::path::PathBuf;
 
@@ -72,6 +73,9 @@ async fn main() {
     let mut last_click_time = 0.0f64;
     let mut last_click_pos = (0.0f32, 0.0f32);
 
+    // Version highlight state (easter egg - click to toggle!)
+    let mut version_highlighted = false;
+
     // UI context
     let mut ui_ctx = UiContext::new();
 
@@ -87,8 +91,21 @@ async fn main() {
         }
     };
 
+    // Load logo texture
+    let logo_texture = match load_texture("assets/branding/logo.png").await {
+        Ok(tex) => {
+            tex.set_filter(FilterMode::Linear);
+            println!("Loaded logo texture");
+            Some(tex)
+        }
+        Err(e) => {
+            println!("Failed to load logo: {}", e);
+            None
+        }
+    };
+
     // App state with all tools
-    let mut app = AppState::new(level, None, icon_font);
+    let mut app = AppState::new(level, None, icon_font, logo_texture);
 
     // Track if this is the first time opening World Editor (to show browser)
     let mut world_editor_first_open = true;
@@ -105,7 +122,7 @@ async fn main() {
             Ok(count) => println!("WASM: Loaded {} user textures for editor", count),
             Err(e) => eprintln!("WASM: Failed to load user textures for editor: {}", e),
         }
-        match app.modeler.user_textures.discover_from_manifest().await {
+        match app.modeler.modeler_state.user_textures.discover_from_manifest().await {
             Ok(count) => println!("WASM: Loaded {} user textures for modeler", count),
             Err(e) => eprintln!("WASM: Failed to load user textures for modeler: {}", e),
         }
@@ -171,7 +188,7 @@ async fn main() {
         // Clear background
         clear_background(Color::from_rgba(30, 30, 35, 255));
 
-        // Draw tab bar at top
+        // Tab bar rect and tabs (drawn last so it's on top of any overflow)
         let tab_bar_rect = Rect::new(0.0, 0.0, screen_w, tab_layout::BAR_HEIGHT);
         let tabs = [
             TabEntry::new(icon::HOUSE, "Home"),
@@ -181,27 +198,6 @@ async fn main() {
             TabEntry::new(icon::MUSIC, "Music"),
             TabEntry::new(icon::GAMEPAD_2, "Input"),
         ];
-        if let Some(clicked) = draw_fixed_tabs(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref()) {
-            if let Some(tool) = Tool::from_index(clicked) {
-                // Open browser on first World Editor visit
-                if tool == Tool::WorldEditor && world_editor_first_open {
-                    world_editor_first_open = false;
-                    // Fresh scan to pick up any newly saved levels
-                    app.world_editor.example_browser.open(discover_examples());
-                    // On WASM, trigger async load of example list
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        app.world_editor.example_browser.pending_load_list = true;
-                    }
-                }
-                // Reset game state when switching to Test tab
-                // This ensures player spawns fresh from current level's PlayerStart
-                if tool == Tool::Test {
-                    app.game.reset();
-                }
-                app.set_active_tool(tool);
-            }
-        }
 
         // Keyboard shortcuts for tab cycling: Cmd+] (next), Cmd+[ (previous)
         let cmd = is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
@@ -369,6 +365,7 @@ async fn main() {
                         &mut ws.example_browser,
                         app.icon_font.as_ref(),
                         &ws.editor_state.texture_packs,
+                        &ws.editor_state.asset_library,
                     );
 
                     match browser_action {
@@ -464,7 +461,7 @@ async fn main() {
 
                 // Spawn player if playing and no player exists
                 if app.game.playing && app.game.player_entity.is_none() {
-                    if let Some((room_idx, spawn)) = app.project.level.get_player_start() {
+                    if let Some((room_idx, spawn)) = app.project.level.get_player_start(&app.world_editor.editor_state.asset_library) {
                         if let Some(room) = app.project.level.rooms.get(room_idx) {
                             let pos = spawn.world_position(room);
                             app.game.spawn_player(pos, &app.project.level);
@@ -485,6 +482,7 @@ async fn main() {
                     &mut fb,
                     &app.input,
                     &ui_ctx,
+                    &app.world_editor.editor_state.asset_library,
                 );
             }
 
@@ -493,7 +491,7 @@ async fn main() {
 
                 // Block background input if any browser is open
                 let real_mouse_modeler = mouse_state;
-                if ms.model_browser.open || ms.mesh_browser.open {
+                if ms.model_browser.open || ms.obj_importer.open {
                     ui_ctx.begin_modal();
                 }
 
@@ -508,7 +506,7 @@ async fn main() {
                 );
 
                 // Handle modeler actions
-                handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.mesh_browser);
+                handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.obj_importer);
 
                 // Draw model browser overlay if open
                 if ms.model_browser.open {
@@ -523,16 +521,16 @@ async fn main() {
 
                     match browser_action {
                         ModelBrowserAction::SelectPreview(index) => {
-                            if let Some(model_info) = ms.model_browser.models.get(index) {
-                                let path = model_info.path.clone();
+                            if let Some(asset_info) = ms.model_browser.assets.get(index) {
+                                let path = asset_info.path.clone();
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
-                                    match modeler::MeshProject::load_from_file(&path) {
-                                        Ok(project) => {
-                                            ms.model_browser.set_preview(project);
+                                    match asset::Asset::load(&path) {
+                                        Ok(asset) => {
+                                            ms.model_browser.set_preview(asset, &ms.modeler_state.user_textures);
                                         }
                                         Err(e) => {
-                                            eprintln!("Failed to load model: {}", e);
+                                            eprintln!("Failed to load asset: {}", e);
                                             ms.modeler_state.set_status(&format!("Failed to load: {}", e), 3.0);
                                         }
                                     }
@@ -543,13 +541,16 @@ async fn main() {
                                 }
                             }
                         }
-                        ModelBrowserAction::OpenModel => {
-                            if let Some(project) = ms.model_browser.preview_project.take() {
-                                let path = ms.model_browser.selected_model()
-                                    .map(|m| m.path.clone())
-                                    .unwrap_or_else(|| PathBuf::from("assets/models/untitled.ron"));
-                                ms.modeler_state.project = project;
-                                // Project is single source of truth - mesh() reads from it directly
+                        ModelBrowserAction::OpenAsset => {
+                            if let Some(asset) = ms.model_browser.preview_asset.take() {
+                                let path = ms.model_browser.selected_asset()
+                                    .map(|a| a.path.clone())
+                                    .unwrap_or_else(|| PathBuf::from("assets/assets/untitled.ron"));
+                                // Set the asset directly in the modeler
+                                ms.modeler_state.asset = asset;
+                                ms.modeler_state.selected_object = if ms.modeler_state.objects().is_empty() { None } else { Some(0) };
+                                // Resolve ID-based texture refs using the texture library
+                                ms.modeler_state.resolve_all_texture_refs();
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = false;
                                 ms.modeler_state.selection = modeler::ModelerSelection::None;
@@ -557,7 +558,7 @@ async fn main() {
                                 ms.model_browser.close();
                             }
                         }
-                        ModelBrowserAction::NewModel => {
+                        ModelBrowserAction::NewAsset => {
                             ms.modeler_state.new_mesh();
                             ms.model_browser.close();
                         }
@@ -569,27 +570,27 @@ async fn main() {
                 }
 
                 // Draw mesh browser overlay if open
-                if ms.mesh_browser.open {
+                if ms.obj_importer.open {
                     ui_ctx.end_modal(real_mouse_modeler);
 
-                    let browser_action = draw_mesh_browser(
+                    let browser_action = draw_obj_importer(
                         &mut ui_ctx,
-                        &mut ms.mesh_browser,
+                        &mut ms.obj_importer,
                         app.icon_font.as_ref(),
                         &mut fb,
                     );
 
                     match browser_action {
-                        MeshBrowserAction::SelectPreview(idx) => {
+                        ObjImportAction::SelectPreview(idx) => {
                             // Load preview for selected mesh
                             let index = idx;
 
-                            if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
+                            if let Some(mesh_info) = ms.obj_importer.meshes.get(index) {
                                 let path = mesh_info.path.clone();
                                 let texture_path = mesh_info.texture_path.clone();
                                 let additional_textures = mesh_info.additional_textures.clone();
-                                let scale = ms.mesh_browser.import_scale;
-                                let flip = ms.mesh_browser.flip_normals;
+                                let scale = ms.obj_importer.import_scale;
+                                let flip = ms.obj_importer.flip_normals;
 
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
@@ -615,7 +616,7 @@ async fn main() {
                                                 }
                                             }
 
-                                            ms.mesh_browser.set_preview(mesh);
+                                            ms.obj_importer.set_preview(mesh);
 
                                             // Load all textures (primary + additional)
                                             let mut textures = Vec::new();
@@ -636,7 +637,7 @@ async fn main() {
                                                 }
                                             }
 
-                                            ms.mesh_browser.set_preview_textures(textures);
+                                            ms.obj_importer.set_preview_textures(textures);
                                         }
                                         Err(e) => {
                                             eprintln!("Failed to load mesh: {}", e);
@@ -646,22 +647,22 @@ async fn main() {
                                 }
                                 #[cfg(target_arch = "wasm32")]
                                 {
-                                    ms.mesh_browser.pending_load_path = Some(path);
+                                    ms.obj_importer.pending_load_path = Some(path);
                                 }
                             }
                         }
-                        MeshBrowserAction::ReloadPreview => {
+                        ObjImportAction::ReloadPreview => {
                             // Reload with current scale/flip settings
-                            if let Some(index) = ms.mesh_browser.selected_index {
-                                if let Some(mesh_info) = ms.mesh_browser.meshes.get(index) {
+                            if let Some(index) = ms.obj_importer.selected_index {
+                                if let Some(mesh_info) = ms.obj_importer.meshes.get(index) {
                                     let path = mesh_info.path.clone();
 
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
-                                        let scale = ms.mesh_browser.import_scale;
-                                        let flip_normals = ms.mesh_browser.flip_normals;
-                                        let flip_h = ms.mesh_browser.flip_horizontal;
-                                        let flip_v = ms.mesh_browser.flip_vertical;
+                                        let scale = ms.obj_importer.import_scale;
+                                        let flip_normals = ms.obj_importer.flip_normals;
+                                        let flip_h = ms.obj_importer.flip_horizontal;
+                                        let flip_v = ms.obj_importer.flip_vertical;
 
                                         if let Ok(mut mesh) = ObjImporter::load_from_file(&path) {
                                             // Apply scale to preview
@@ -693,26 +694,26 @@ async fn main() {
                                             }
 
                                             // Use update_preview to preserve camera angles
-                                            ms.mesh_browser.update_preview(mesh);
+                                            ms.obj_importer.update_preview(mesh);
                                         }
                                     }
                                     #[cfg(target_arch = "wasm32")]
                                     {
                                         // Queue async reload with new settings
-                                        ms.mesh_browser.pending_load_path = Some(path);
+                                        ms.obj_importer.pending_load_path = Some(path);
                                     }
                                 }
                             }
                         }
-                        MeshBrowserAction::OpenMesh => {
-                            let path = ms.mesh_browser.selected_mesh()
+                        ObjImportAction::OpenMesh => {
+                            let path = ms.obj_importer.selected_mesh()
                                 .map(|m| m.path.clone())
                                 .unwrap_or_else(|| PathBuf::from("assets/meshes/untitled.obj"));
-                            let scale = ms.mesh_browser.import_scale;
-                            let flip_normals = ms.mesh_browser.flip_normals;
-                            let flip_h = ms.mesh_browser.flip_horizontal;
-                            let flip_v = ms.mesh_browser.flip_vertical;
-                            let clut_depth_override = ms.mesh_browser.clut_depth_override;
+                            let scale = ms.obj_importer.import_scale;
+                            let flip_normals = ms.obj_importer.flip_normals;
+                            let flip_h = ms.obj_importer.flip_horizontal;
+                            let flip_v = ms.obj_importer.flip_vertical;
+                            let clut_depth_override = ms.obj_importer.clut_depth_override;
 
                             #[cfg(not(target_arch = "wasm32"))]
                             {
@@ -763,12 +764,14 @@ async fn main() {
                                         if let Some(tex_result) = result.texture {
                                             let TextureImportResult { mut indexed, clut, color_count } = tex_result;
                                             // Clear existing CLUTs and add only the imported one
-                                            ms.modeler_state.project.clut_pool.clear();
-                                            let clut_id = ms.modeler_state.project.clut_pool.add_clut(clut);
+                                            ms.modeler_state.clut_pool.clear();
+                                            let clut_id = ms.modeler_state.clut_pool.add_clut(clut);
                                             indexed.default_clut = clut_id;
                                             let depth_label = indexed.depth.short_label();
-                                            // Set the indexed atlas as the project atlas
-                                            ms.modeler_state.project.atlas = indexed;
+                                            // Set the indexed atlas on the selected object
+                                            if let Some(atlas) = ms.modeler_state.atlas_mut() {
+                                                *atlas = indexed;
+                                            }
                                             ms.modeler_state.selected_clut = Some(clut_id);
                                             // Show "(forced)" if user manually selected the depth
                                             let forced = if clut_depth_override.is_some() { " forced" } else { "" };
@@ -804,7 +807,7 @@ async fn main() {
                             #[cfg(target_arch = "wasm32")]
                             {
                                 // WASM fallback - just use preview mesh (already has scale/flip applied from preview)
-                                if let Some(imported_mesh) = ms.mesh_browser.preview_mesh.take() {
+                                if let Some(imported_mesh) = ms.obj_importer.preview_mesh.take() {
                                     // Set mesh directly in project (single source of truth)
                                     if let Some(mesh) = ms.modeler_state.mesh_mut() {
                                         *mesh = imported_mesh;
@@ -820,12 +823,12 @@ async fn main() {
                                 }
                             }
 
-                            ms.mesh_browser.close();
+                            ms.obj_importer.close();
                         }
-                        MeshBrowserAction::Cancel => {
-                            ms.mesh_browser.close();
+                        ObjImportAction::Cancel => {
+                            ms.obj_importer.close();
                         }
-                        MeshBrowserAction::None => {}
+                        ObjImportAction::None => {}
                     }
                 }
             }
@@ -898,35 +901,35 @@ async fn main() {
                 ms.model_browser.pending_load_list = false;
                 use modeler::load_model_list;
                 let models = load_model_list().await;
-                ms.model_browser.models = models;
+                ms.model_browser.assets = models;
             }
             // Load individual model preview if pending
             if let Some(path) = ms.model_browser.pending_load_path.take() {
                 use modeler::load_model;
                 if let Some(project) = load_model(&path).await {
-                    ms.model_browser.set_preview(project);
+                    ms.model_browser.set_preview(project, &ms.modeler_state.user_textures);
                 } else {
                     ms.modeler_state.set_status("Failed to load model preview", 3.0);
                 }
             }
             // Load mesh list from manifest if pending
-            if ms.mesh_browser.pending_load_list {
-                ms.mesh_browser.pending_load_list = false;
+            if ms.obj_importer.pending_load_list {
+                ms.obj_importer.pending_load_list = false;
                 use modeler::load_mesh_list;
                 let meshes = load_mesh_list().await;
-                ms.mesh_browser.meshes = meshes;
+                ms.obj_importer.meshes = meshes;
             }
             // Load individual mesh preview if pending
-            if let Some(path) = ms.mesh_browser.pending_load_path.take() {
+            if let Some(path) = ms.obj_importer.pending_load_path.take() {
                 use modeler::load_mesh;
                 use modeler::{apply_mesh_flip_horizontal, apply_mesh_flip_vertical};
 
                 if let Some(mut mesh) = load_mesh(&path).await {
                     // Get transform settings from browser
-                    let scale = ms.mesh_browser.import_scale;
-                    let flip_normals = ms.mesh_browser.flip_normals;
-                    let flip_h = ms.mesh_browser.flip_horizontal;
-                    let flip_v = ms.mesh_browser.flip_vertical;
+                    let scale = ms.obj_importer.import_scale;
+                    let flip_normals = ms.obj_importer.flip_normals;
+                    let flip_h = ms.obj_importer.flip_horizontal;
+                    let flip_v = ms.obj_importer.flip_vertical;
 
                     // Apply scale to preview
                     for vertex in &mut mesh.vertices {
@@ -955,14 +958,14 @@ async fn main() {
                     }
 
                     // Update MeshInfo counts (since WASM loads async with initial 0 counts)
-                    if let Some(idx) = ms.mesh_browser.selected_index {
-                        if let Some(info) = ms.mesh_browser.meshes.get_mut(idx) {
+                    if let Some(idx) = ms.obj_importer.selected_index {
+                        if let Some(info) = ms.obj_importer.meshes.get_mut(idx) {
                             info.vertex_count = mesh.vertices.len();
                             info.face_count = mesh.faces.len();
                         }
                     }
 
-                    ms.mesh_browser.set_preview(mesh);
+                    ms.obj_importer.set_preview(mesh);
                 } else {
                     ms.modeler_state.set_status("Failed to load mesh preview", 3.0);
                 }
@@ -988,6 +991,25 @@ async fn main() {
                 } else {
                     ts.set_status("Failed to load song preview", 3.0);
                 }
+            }
+        }
+
+        // Draw tab bar LAST so it covers any content overflow (e.g., landing page scroll)
+        if let Some(clicked) = draw_fixed_tabs_with_version(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref(), Some(VERSION), &mut version_highlighted) {
+            if let Some(tool) = Tool::from_index(clicked) {
+                // Handle special cases for certain tabs
+                if tool == Tool::WorldEditor && world_editor_first_open {
+                    world_editor_first_open = false;
+                    app.world_editor.example_browser.open(discover_examples());
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        app.world_editor.example_browser.pending_load_list = true;
+                    }
+                }
+                if tool == Tool::Test {
+                    app.game.reset();
+                }
+                app.set_active_tool(tool);
             }
         }
 
@@ -1051,21 +1073,21 @@ fn next_available_level_name() -> PathBuf {
     levels_dir.join(format!("level_{:03}.ron", next_num))
 }
 
-/// Find the next available model filename with format "model_001", "model_002", etc.
-fn next_available_model_name() -> PathBuf {
-    let models_dir = PathBuf::from("assets/models");
+/// Find the next available asset filename with format "asset_001", "asset_002", etc.
+fn next_available_asset_path() -> PathBuf {
+    let assets_dir = PathBuf::from(asset::ASSETS_DIR);
 
     // Create directory if it doesn't exist
-    let _ = std::fs::create_dir_all(&models_dir);
+    let _ = std::fs::create_dir_all(&assets_dir);
 
-    // Find the highest existing model_XXX number
+    // Find the highest existing asset_XXX number
     let mut highest = 0;
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+    if let Ok(entries) = std::fs::read_dir(&assets_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                // Check for pattern "model_XXX"
-                if let Some(num_str) = stem.strip_prefix("model_") {
+                // Check for pattern "asset_XXX"
+                if let Some(num_str) = stem.strip_prefix("asset_") {
                     if let Ok(num) = num_str.parse::<u32>() {
                         highest = highest.max(num);
                     }
@@ -1076,7 +1098,7 @@ fn next_available_model_name() -> PathBuf {
 
     // Generate next filename
     let next_num = highest + 1;
-    models_dir.join(format!("model_{:03}.ron", next_num))
+    assets_dir.join(format!("asset_{:03}.ron", next_num))
 }
 
 fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, game: &mut game::GameToolState) {
@@ -1321,7 +1343,7 @@ fn handle_modeler_action(
     action: ModelerAction,
     state: &mut modeler::ModelerState,
     model_browser: &mut modeler::ModelBrowser,
-    mesh_browser: &mut modeler::MeshBrowser,
+    obj_importer: &mut modeler::ObjImportBrowser,
 ) {
     match action {
         ModelerAction::New => {
@@ -1335,15 +1357,15 @@ fn handle_modeler_action(
             {
                 model_browser.pending_load_list = true;
             }
-            state.set_status("Browse models", 2.0);
+            state.set_status("Browse assets", 2.0);
         }
         ModelerAction::BrowseMeshes => {
             let meshes = discover_meshes();
-            mesh_browser.open(meshes);
+            obj_importer.open(meshes);
             // On WASM, trigger async load of mesh list
             #[cfg(target_arch = "wasm32")]
             {
-                mesh_browser.pending_load_list = true;
+                obj_importer.pending_load_list = true;
             }
             state.set_status("Browse meshes", 2.0);
         }
@@ -1354,8 +1376,8 @@ fn handle_modeler_action(
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 }
             } else {
-                // No current file - save with auto-generated name (model_001, model_002, etc.)
-                let default_path = next_available_model_name();
+                // No current file - save with auto-generated name (asset_001, asset_002, etc.)
+                let default_path = next_available_asset_path();
                 if let Err(e) = state.save_project(&default_path) {
                     state.set_status(&format!("Save failed: {}", e), 5.0);
                 } else {
@@ -1369,13 +1391,13 @@ fn handle_modeler_action(
         }
         #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::SaveAs => {
-            let default_dir = PathBuf::from("assets/models");
+            let default_dir = PathBuf::from(asset::ASSETS_DIR);
             let _ = std::fs::create_dir_all(&default_dir);
 
             let dialog = rfd::FileDialog::new()
-                .add_filter("RON Model", &["ron"])
+                .add_filter("RON Asset", &["ron"])
                 .set_directory(&default_dir)
-                .set_file_name("model.ron");
+                .set_file_name("asset.ron");
 
             if let Some(save_path) = dialog.save_file() {
                 if let Err(e) = state.save_project(&save_path) {
@@ -1389,7 +1411,7 @@ fn handle_modeler_action(
         }
         #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::PromptLoad => {
-            let default_dir = PathBuf::from("assets/models");
+            let default_dir = PathBuf::from(asset::ASSETS_DIR);
             let _ = std::fs::create_dir_all(&default_dir);
 
             let dialog = rfd::FileDialog::new()

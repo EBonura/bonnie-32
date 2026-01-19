@@ -9,6 +9,7 @@ This document tracks planned features, known issues, and future improvements.
 ### Architecture
 
 - [ ] **Unified render pipeline**: Game and editor currently have separate render paths with duplicated code. Should create a shared scene renderer that both use, with hooks for editor-specific overlays (grid, selection, gizmos) and game-specific features (player, particles). This becomes critical as we add meshes, skeletal animation, particle systems, etc. Benefits: any optimization applies to both, WYSIWYG editing, single source of truth for rendering.
+- [ ] **Eliminate model folder**: The `model` folder can probably be removed since everything is now in `asset`
 
 
 ---
@@ -44,6 +45,8 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Environment/Objects switch**: Add a switch between environment and objects editing mode
 - [ ] **Smarter 2D diagonal display**: Only show diagonal lines in sectors when it matters (different textures or heights) for a cleaner 2D view
 - [ ] **Better fog defaults**: Default fog values should be color (5,5,5), start 8192, falloff 30k+, cull 9k. Sliders should work in sectors (1 sector = 1024)
+- [ ] **Assets not showing in level browser**: Assets are not appearing in the level browser
+
 ---
 
 ### Music Tracker
@@ -65,6 +68,7 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Color adjustments**: Add contrast/saturation/hue/brightness controls
 - [ ] **Multiple layers**: Full support for multiple layers
 - [ ] **Multiple frames**: Full support for animation frames
+- [ ] **Checkerboard for transparency**: Texture preview should show checkerboard pattern for transparent background instead of black
 
 ---
 
@@ -82,6 +86,7 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Rotation mouse movement unintuitive**: Currently only responds to left/right movement. Should follow the rotation axis precisely
 
 #### UX Improvements
+- [ ] **Full undo support**: Ctrl-Z should extend to palette changes, component creation/deletion, and generally every action in the asset editor
 - [ ] **Uniform scale from gizmo center**: Click center of gizmo to scale uniformly across all axes
 - [ ] **Configurable grid snap granularity**: Allow changing the Snap to Grid step size
 - [ ] **Rotation pivot from selection**: Allow selecting an edge as rotation pivot (secondary selection mode) - similar to Blender's 3D cursor but simpler

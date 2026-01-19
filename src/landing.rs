@@ -33,10 +33,9 @@ fn wrap_text(text: &str, font_size: f32, max_width: f32) -> Vec<String> {
                 format!("{} {}", current_line, word)
             };
 
-            // Measure text width (approximate: ~0.5 * font_size per character for monospace-ish)
-            // macroquad's measure_text can be slow, so use approximation
-            let char_width = font_size * 0.55;
-            let test_width = test_line.len() as f32 * char_width;
+            // Measure actual text width
+            let text_dims = measure_text(&test_line, None, font_size as u16, 1.0);
+            let test_width = text_dims.width;
 
             if test_width <= max_width || current_line.is_empty() {
                 current_line = test_line;
@@ -64,40 +63,29 @@ const SECTION_BG: Color = Color::new(0.12, 0.12, 0.14, 1.0);
 /// State for the landing page (scroll position)
 pub struct LandingState {
     pub scroll_y: f32,
+    pub max_scroll: f32,
+    pub logo_texture: Option<Texture2D>,
 }
 
 impl LandingState {
-    pub fn new() -> Self {
-        Self { scroll_y: 0.0 }
+    pub fn new(logo_texture: Option<Texture2D>) -> Self {
+        Self {
+            scroll_y: 0.0,
+            max_scroll: 0.0,
+            logo_texture,
+        }
     }
 }
 
 /// Draw the landing page
 pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiContext) {
-    // DPI scale for high-DPI displays (layout only, not font sizes)
-    let dpi = screen_dpi_scale();
-
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
-    // Handle scrolling
+    // Handle scrolling - clamp immediately using previous frame's bounds
     let scroll_delta = ctx.mouse.scroll * 3.0;
     state.scroll_y += scroll_delta;
-    state.scroll_y = state.scroll_y.min(0.0); // Can't scroll above top
-
-    // Enable scissor clipping to prevent content from overflowing into tab bar
-    // Scissor uses physical pixels, so scale by DPI
-    gl_use_default_material();
-    unsafe {
-        get_internal_gl().quad_gl.scissor(
-            Some((
-                (rect.x * dpi) as i32,
-                (rect.y * dpi) as i32,
-                (rect.w * dpi) as i32,
-                (rect.h * dpi) as i32
-            ))
-        );
-    }
+    state.scroll_y = state.scroll_y.clamp(state.max_scroll, 0.0);
 
     // Content area with padding (all in logical pixels)
     let padding = 40.0;
@@ -106,31 +94,52 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     let mut y = (rect.y + padding + state.scroll_y).round();
 
     // === HEADER ===
-    let title = format!("BONNIE-32 v{}", VERSION);
-    draw_text(&title, content_x, y + 32.0, 32.0, ACCENT_COLOR);
-    y += 44.0;
+    // Draw logo if available, otherwise fallback to text
+    if let Some(logo) = &state.logo_texture {
+        // Logo is 800x296 at native size, scale to fit content width nicely
+        let logo_max_width = content_width.min(500.0);
+        let logo_scale = logo_max_width / logo.width();
+        let logo_w = logo.width() * logo_scale;
+        let logo_h = logo.height() * logo_scale;
+        let logo_x = content_x + (content_width - logo_w) / 2.0;
 
-    draw_text("A Fantasy Console for PS1-Era 3D Games", content_x, y + 18.0, 18.0, MUTED_COLOR);
+        draw_texture_ex(
+            logo,
+            logo_x,
+            y,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(logo_w, logo_h)),
+                ..Default::default()
+            },
+        );
+        y += logo_h + 8.0;
+    } else {
+        // Fallback to text title
+        let title = format!("BONNIE-32 v{}", VERSION);
+        draw_text(&title, content_x, y + 32.0, 32.0, ACCENT_COLOR);
+        y += 44.0;
+    }
+
+    // Subtitle
+    let subtitle = "A Fantasy Console for PS1-Era 3D Games";
+    let subtitle_width = subtitle.len() as f32 * 18.0 * 0.55;
+    draw_text(subtitle, content_x + (content_width - subtitle_width) / 2.0, y + 18.0, 18.0, MUTED_COLOR);
     y += 54.0;
 
     // === INTRO SECTION ===
     y = draw_section(content_x, y, content_width, "What is BONNIE-32?",
-        "BONNIE-32 is a fantasy console for PS1-era 3D games. Think PICO-8, but for low-poly 3D.\n\nLike PICO-8 unlocked retro 2D gamedev with its constraints and all-in-one tooling, BONNIE-32 aims to do the same for late 90s-style 3D. Everything is built from scratch in Rust: the software rasterizer, the editor UI, the level format. The world-building system takes heavy inspiration from Tomb Raider.\n\nEverything runs as a single platform, both natively and in the browser. Same code, same tools, same experience."
-    );
-
-    // === PS1 FEATURES SECTION ===
-    y = draw_section(content_x, y, content_width, "Authentic PS1 rendering",
-        "The software rasterizer recreates the quirks that defined the PS1 look:\n\n- Affine texture mapping (no perspective correction = that signature warping)\n- Vertex snapping to integer coordinates (the subtle jitter on moving objects)\n- Limited color depth and dithering\n- No sub-pixel precision (polygons \"pop\" when they move)\n\nThese aren't post-processing effects - they're how the renderer actually works."
+        "A complete toolkit for making low-poly 3D games targeting the PS1 aesthetic. Model, texture, compose music, and build levels in one place.\n\nEach tool is focused and lightweight, designed around the constraints and limitations of early 3D. The software rasterizer natively produces typical PS1 quirks: affine texture mapping, vertex snapping, limited color depth, and no sub-pixel precision. Each effect can be toggled on or off.\n\nBuilt in Rust, runs on Windows, Mac, Linux, and browser."
     );
 
     // === WHY SECTION ===
     y = draw_section(content_x, y, content_width, "Why build this?",
-        "It started with a question: what would a Souls-like have looked like on a PS1?\n\nI tried Godot, Love2D, Picotron, even real PS1 hardware - nothing quite fit. Modern engines simulate the aesthetic with shaders. I wanted to embrace the limitations from the ground up with a real software rasterizer.\n\nThe result is something closer to a fantasy console than an engine. Fixed constraints, integrated tools, and a focus on making PS1-style games accessible to create and share."
+        "After making two games in PICO-8, I knew I wanted to jump to 3D. I've had this dream forever: how would a Souls-like have looked and controlled on PS1? Just grab the Souls formula we all know and love and try to make it work in 1999, would that have even been possible given the limitations?\n\nSo I began trying Godot, Love2D, Picotron, and each felt wrong. I felt more like I was bending the tool for something it wasn't designed for. I also tried targeting real PS1 hardware, but I couldn't deal with the primitive SDKs and the distribution nightmare that could have ensued. I missed the all-in-one feeling that PICO-8 gives, and how easy it is to have other people play your game. So I decided to build my own to fill the gap following the same principles."
     );
 
     // === WHERE TO START SECTION ===
     y = draw_section(content_x, y, content_width, "Where to start",
-        "Use the tabs at the top to switch between the available tools:\n\nWorld - Build levels using a sector-based editor inspired by classic tools like the Tomb Raider Level Editor. Features a 2D grid view, 3D preview, and portals.\n\nAssets - A low-poly mesh modeler designed for PS1-style models. Includes Blender-style controls (G/S/R for grab/scale/rotate), extrude, multi-object editing, and a shared texture atlas. PicoCAD was a major influence here.\n\nPaint - Create custom indexed textures with PS1-style palettes. Draw with 4-bit or 8-bit color depth, apply dithering patterns, and manage a library of reusable textures.\n\nMusic - A pattern-based tracker for composing music. Supports SF2 soundfonts, up to 8 channels, and classic tracker effects like arpeggio and vibrato."
+        "Use the tabs at the top to switch between the available tools:\n\nWorld - Build levels using a sector-based editor in the style of the Tomb Raider Level Editor. Features a 2D grid view, 3D preview, and portals.\n\nAssets - A low-poly mesh modeler featuring Blender-style controls, extrusion, multi-object editing, and a shared texture atlas. Heavily influenced by PicoCAD.\n\nPaint - Create indexed textures with limited palettes. Draw with 4-bit or 8-bit color depth, apply dithering patterns, and manage a library of reusable textures.\n\nMusic - A pattern-based tracker for composing music. Supports SF2 soundfonts, up to 8 channels, and classic tracker effects like arpeggio and vibrato."
     );
 
     // === FAQ SECTION ===
@@ -197,15 +206,9 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiCon
     );
     y += 30.0;
 
-    // Clamp scroll to content
+    // Calculate and store max scroll for next frame
     let content_height = y - rect.y - state.scroll_y;
-    let max_scroll = -(content_height - rect.h + padding).max(0.0);
-    state.scroll_y = state.scroll_y.max(max_scroll);
-
-    // Disable scissor clipping
-    unsafe {
-        get_internal_gl().quad_gl.scissor(None);
-    }
+    state.max_scroll = -(content_height - rect.h + padding).max(0.0);
 }
 
 /// Draw a section with title and body text (auto-wrapping)

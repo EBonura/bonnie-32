@@ -28,7 +28,7 @@ mod texture_library;
 mod texture_editor;
 mod import;
 
-pub use user_texture::{UserTexture, TextureSize, TextureError};
+pub use user_texture::{UserTexture, TextureSize, TextureError, generate_texture_id};
 pub use texture_library::{TextureLibrary, TEXTURES_USER_DIR};
 pub use texture_editor::{
     DrawTool, BrushShape, TextureEditorState, TextureUndoEntry,

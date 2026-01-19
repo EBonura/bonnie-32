@@ -618,27 +618,33 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             hovered_object = Some(obj_idx);
         }
 
-        // Color based on object type
-        let (fill_color, outline_color, icon_char) = match &obj.object_type {
-            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::PlayerStart) =>
-                (Color::from_rgba(50, 200, 50, 200), Color::from_rgba(100, 255, 100, 255), 'P'),
-            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::Checkpoint) =>
-                (Color::from_rgba(50, 50, 200, 200), Color::from_rgba(100, 100, 255, 255), 'C'),
-            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::Enemy) =>
-                (Color::from_rgba(200, 50, 50, 200), Color::from_rgba(255, 100, 100, 255), 'E'),
-            crate::world::ObjectType::Spawn(crate::world::SpawnPointType::Item) =>
-                (Color::from_rgba(200, 200, 50, 200), Color::from_rgba(255, 255, 100, 255), 'I'),
-            crate::world::ObjectType::Light { .. } =>
-                (Color::from_rgba(255, 200, 50, 200), Color::from_rgba(255, 255, 150, 255), 'L'),
-            crate::world::ObjectType::Prop(_) =>
-                (Color::from_rgba(150, 100, 200, 200), Color::from_rgba(200, 150, 255, 255), 'M'),
-            crate::world::ObjectType::Trigger { .. } =>
-                (Color::from_rgba(200, 100, 50, 200), Color::from_rgba(255, 150, 100, 255), 'T'),
-            crate::world::ObjectType::Particle { .. } =>
-                (Color::from_rgba(255, 150, 200, 200), Color::from_rgba(255, 200, 230, 255), '*'),
-            crate::world::ObjectType::Audio { .. } =>
-                (Color::from_rgba(100, 200, 200, 200), Color::from_rgba(150, 255, 255, 255), '~'),
+        // Color based on asset type (using asset library lookup)
+        let (fill_color, outline_color, icon_char) = if let Some(asset) = state.asset_library.get_by_id(obj.asset_id) {
+            // Determine color/icon based on asset components
+            if asset.has_spawn_point(true) {
+                (Color::from_rgba(50, 200, 50, 200), Color::from_rgba(100, 255, 100, 255), 'P')
+            } else if asset.has_light() {
+                (Color::from_rgba(255, 200, 50, 200), Color::from_rgba(255, 255, 150, 255), 'L')
+            } else if asset.has_checkpoint() {
+                (Color::from_rgba(50, 50, 200, 200), Color::from_rgba(100, 100, 255, 255), 'C')
+            } else if asset.has_enemy() {
+                (Color::from_rgba(200, 50, 50, 200), Color::from_rgba(255, 100, 100, 255), 'E')
+            } else if asset.has_mesh() {
+                (Color::from_rgba(150, 100, 200, 200), Color::from_rgba(200, 150, 255, 255), 'M')
+            } else if asset.has_trigger() {
+                (Color::from_rgba(200, 100, 50, 200), Color::from_rgba(255, 150, 100, 255), 'T')
+            } else {
+                (Color::from_rgba(100, 100, 100, 200), Color::from_rgba(150, 150, 150, 255), '?')
+            }
+        } else {
+            // Unknown asset - gray
+            (Color::from_rgba(100, 100, 100, 200), Color::from_rgba(150, 150, 150, 255), '?')
         };
+
+        // Determine if this is a spawn point (for drawing facing arrow)
+        let is_spawn = state.asset_library.get_by_id(obj.asset_id)
+            .map(|a| a.has_spawn_point(true))
+            .unwrap_or(false);
 
         // Draw object marker
         if obj.enabled {
@@ -646,7 +652,7 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
             draw_circle_lines(sx, sy, center_radius, 1.5, outline_color);
 
             // Draw facing direction arrow for spawns
-            if matches!(obj.object_type, crate::world::ObjectType::Spawn(_)) {
+            if is_spawn {
                 let arrow_len = center_radius + 6.0;
                 let angle = obj.facing;
                 // In our coordinate system: facing 0 = +Z = screen down
@@ -816,23 +822,25 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     let (plane_a, plane_b) = world_pos_to_plane(new_world_x, new_world_y, new_world_z);
                     let (gx, gy) = world_to_screen(plane_a, plane_b);
 
-                    // Draw ghost object (semi-transparent)
-                    use crate::world::ObjectType;
-                    let (color, letter) = match &obj.object_type {
-                        ObjectType::Spawn(spawn_type) => {
-                            use crate::world::SpawnPointType;
-                            match spawn_type {
-                                SpawnPointType::PlayerStart => (Color::from_rgba(100, 255, 100, 150), 'P'),
-                                SpawnPointType::Checkpoint => (Color::from_rgba(100, 200, 255, 150), 'C'),
-                                SpawnPointType::Enemy => (Color::from_rgba(255, 100, 100, 150), 'E'),
-                                SpawnPointType::Item => (Color::from_rgba(255, 200, 100, 150), 'I'),
-                            }
+                    // Draw ghost object (semi-transparent) - asset-based
+                    let (color, letter) = if let Some(asset) = state.asset_library.get_by_id(obj.asset_id) {
+                        if asset.has_spawn_point(true) {
+                            (Color::from_rgba(100, 255, 100, 150), 'P')
+                        } else if asset.has_light() {
+                            (Color::from_rgba(255, 255, 100, 150), 'L')
+                        } else if asset.has_checkpoint() {
+                            (Color::from_rgba(100, 200, 255, 150), 'C')
+                        } else if asset.has_enemy() {
+                            (Color::from_rgba(255, 100, 100, 150), 'E')
+                        } else if asset.has_mesh() {
+                            (Color::from_rgba(180, 130, 255, 150), 'M')
+                        } else if asset.has_trigger() {
+                            (Color::from_rgba(255, 100, 200, 150), 'T')
+                        } else {
+                            (Color::from_rgba(150, 150, 150, 150), '?')
                         }
-                        ObjectType::Light { .. } => (Color::from_rgba(255, 255, 100, 150), 'L'),
-                        ObjectType::Prop { .. } => (Color::from_rgba(180, 130, 255, 150), 'M'),
-                        ObjectType::Trigger { .. } => (Color::from_rgba(255, 100, 200, 150), 'T'),
-                        ObjectType::Particle { .. } => (Color::from_rgba(255, 180, 100, 150), '*'),
-                        ObjectType::Audio { .. } => (Color::from_rgba(100, 200, 255, 150), '~'),
+                    } else {
+                        (Color::from_rgba(150, 150, 150, 150), '?')
                     };
 
                     draw_circle(gx, gy, 10.0, color);
@@ -1459,27 +1467,36 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                     });
 
                     if let Some((gx, gz)) = sector_data {
-                        // Check if we can place this object type
-                        let can_place = state.level.can_add_object(
-                            current_room_idx, gx, gz, &state.selected_object_type
-                        );
-
-                        match can_place {
-                            Ok(()) => {
-                                state.save_undo();
-                                let new_object = crate::world::LevelObject::new(
-                                    gx, gz,
-                                    state.selected_object_type.clone()
-                                );
-                                let obj_name = state.selected_object_type.display_name();
-                                if let Ok(idx) = state.level.add_object(current_room_idx, new_object) {
-                                    state.set_selection(super::Selection::Object { room: current_room_idx, index: idx });
-                                    state.set_status(&format!("{} placed", obj_name), 1.0);
+                        // All object placement is now asset-based
+                        if let Some(asset_name) = state.selected_asset.clone() {
+                            if let Some(asset) = state.asset_library.get(&asset_name) {
+                                // Check PlayerStart uniqueness - only one allowed per level
+                                if asset.has_spawn_point(true) {
+                                    let has_existing_spawn = state.level.rooms.iter()
+                                        .flat_map(|r| r.objects.iter())
+                                        .any(|obj| {
+                                            state.asset_library.get_by_id(obj.asset_id)
+                                                .map(|a| a.has_spawn_point(true))
+                                                .unwrap_or(false)
+                                        });
+                                    if has_existing_spawn {
+                                        state.set_status("Only one player spawn allowed per level", 2.0);
+                                        return;
+                                    }
                                 }
+
+                                let asset_id = asset.id;
+                                let new_object = crate::world::AssetInstance::new(gx, gz, asset_id);
+                                state.save_undo();
+                                if let Some(idx) = state.level.add_object(current_room_idx, new_object) {
+                                    state.set_selection(super::Selection::Object { room: current_room_idx, index: idx });
+                                    state.set_status(&format!("{} placed", asset_name), 1.0);
+                                }
+                            } else {
+                                state.set_status(&format!("Asset '{}' not found", asset_name), 2.0);
                             }
-                            Err(msg) => {
-                                state.set_status(msg, 2.0);
-                            }
+                        } else {
+                            state.set_status("No asset selected", 2.0);
                         }
                     } else {
                         state.set_status("Click on a sector to place object", 2.0);

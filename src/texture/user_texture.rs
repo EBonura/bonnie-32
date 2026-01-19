@@ -7,8 +7,31 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::rasterizer::{BlendMode, ClutDepth, Color15};
+
+/// Counter for generating unique texture IDs
+static TEXTURE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a unique texture ID
+///
+/// Combines a timestamp-based seed with an atomic counter to ensure uniqueness
+/// even when creating multiple textures in quick succession.
+pub fn generate_texture_id() -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let counter = TEXTURE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+    // Use macroquad's rand which works in WASM (avoids SystemTime::now() which panics in WASM)
+    let random_bits = macroquad::rand::rand() as u64;
+
+    let mut hasher = DefaultHasher::new();
+    random_bits.hash(&mut hasher);
+    counter.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Valid texture sizes for user textures
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -148,6 +171,10 @@ impl std::fmt::Display for TextureError {
 /// Stored as `.ron` files with Brotli compression in `assets/textures-user/`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserTexture {
+    /// Stable unique identifier (survives edits and renames)
+    /// Generated once on creation, never changes
+    #[serde(default = "generate_texture_id")]
+    pub id: u64,
     /// Human-readable name (used as filename without extension)
     pub name: String,
     /// Texture width
@@ -169,6 +196,31 @@ pub struct UserTexture {
 }
 
 impl UserTexture {
+    /// Compute a content hash for this texture
+    ///
+    /// The hash is based on the texture's actual content (dimensions, depth, indices, palette),
+    /// NOT its name. This allows textures to be referenced by content rather than filename,
+    /// enabling features like:
+    /// - Automatic deduplication
+    /// - Resilience to file renames
+    /// - Hash-based references in mesh objects
+    pub fn content_hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        self.width.hash(&mut hasher);
+        self.height.hash(&mut hasher);
+        // Convert ClutDepth to numeric value for hashing
+        (self.depth as u8).hash(&mut hasher);
+        self.indices.hash(&mut hasher);
+        // Hash palette as raw u16 values for consistency
+        for color in &self.palette {
+            color.0.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Create a new texture with a default grayscale palette
     pub fn new(name: impl Into<String>, size: TextureSize, depth: ClutDepth) -> Self {
         let (width, height) = size.dimensions();
@@ -187,6 +239,7 @@ impl UserTexture {
         let indices = vec![0u8; pixel_count];
 
         Self {
+            id: generate_texture_id(),
             name: name.into(),
             width,
             height,
@@ -212,6 +265,7 @@ impl UserTexture {
     ) -> Self {
         let (width, height) = size.dimensions();
         Self {
+            id: generate_texture_id(),
             name: name.into(),
             width,
             height,

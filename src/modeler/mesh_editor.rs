@@ -7,9 +7,11 @@
 //! - Reading: Auto-detects format by checking for valid RON start
 //! - Writing: Always uses brotli compression
 
-use crate::rasterizer::{Vec3, Vec2, Vertex, Color as RasterColor, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
+use crate::rasterizer::{Vec3, Vec2, Vertex, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::OnceLock;
+use super::state::MirrorSettings;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;
 
@@ -131,32 +133,128 @@ impl EditFace {
 // PicoCAD-style Mesh Organization
 // ============================================================================
 
-/// A named mesh object (like picoCAD's Overview panel items)
+/// ID-based texture reference for mesh objects
+///
+/// Instead of embedding texture data directly, objects reference textures
+/// by their stable ID. This enables:
+/// - Stable references that survive texture edits (ID never changes)
+/// - Resilience to file renames (ID stays the same)
+/// - Automatic UI sync (selecting object highlights matching texture)
+/// - Smaller save files (no duplicated texture data)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TextureRef {
+    /// No texture assigned (renders as white/grey)
+    None,
+    /// Built-in checkerboard pattern (code-generated, never saved as data)
+    Checkerboard,
+    /// Reference to a UserTexture by its stable ID
+    Id(u64),
+    /// Embedded texture data (fallback for OBJ imports without library texture)
+    Embedded(Box<IndexedAtlas>),
+}
+
+impl Default for TextureRef {
+    fn default() -> Self {
+        TextureRef::Checkerboard
+    }
+}
+
+impl TextureRef {
+    /// Check if this is an ID reference
+    pub fn is_id(&self) -> bool {
+        matches!(self, TextureRef::Id(_))
+    }
+
+    /// Get the ID if this is an Id variant
+    pub fn id(&self) -> Option<u64> {
+        match self {
+            TextureRef::Id(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Check if this is the default checkerboard
+    pub fn is_checkerboard(&self) -> bool {
+        matches!(self, TextureRef::Checkerboard)
+    }
+}
+
+// ============================================================================
+// Static Checkerboard Texture
+// ============================================================================
+
+/// Global static checkerboard atlas (code-generated, never serialized)
+static CHECKERBOARD_ATLAS: OnceLock<IndexedAtlas> = OnceLock::new();
+
+/// Global static checkerboard CLUT (grayscale palette)
+static CHECKERBOARD_CLUT: OnceLock<Clut> = OnceLock::new();
+
+/// Get the static checkerboard atlas
+pub fn checkerboard_atlas() -> &'static IndexedAtlas {
+    CHECKERBOARD_ATLAS.get_or_init(|| {
+        IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4)
+    })
+}
+
+/// Get the static checkerboard CLUT (grayscale palette)
+pub fn checkerboard_clut() -> &'static Clut {
+    CHECKERBOARD_CLUT.get_or_init(|| {
+        let mut clut = Clut::new_4bit("checkerboard_clut");
+        // Create grayscale palette
+        for i in 0..16u8 {
+            let v = (i * 2) as u8; // 0, 2, 4, ... 30 (5-bit grayscale)
+            clut.colors[i as usize] = Color15::new(v, v, v);
+        }
+        clut
+    })
+}
+
+/// A named mesh part within an asset (like picoCAD's Overview panel items)
+///
+/// Each MeshPart represents a distinct piece of geometry with its own
+/// texture reference, visibility, and settings. Assets can contain
+/// multiple MeshParts bundled together.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MeshObject {
+pub struct MeshPart {
     /// Display name (e.g., "hull", "wing 1", "cockpit")
     pub name: String,
     /// The geometry
     pub mesh: EditableMesh,
-    /// Per-object texture atlas (stores palette indices)
+    /// Content-based texture reference (hash, embedded, checkerboard, or none)
+    #[serde(default)]
+    pub texture_ref: TextureRef,
+    /// Per-part texture atlas - runtime cache
+    /// Read from old files for migration, but not written to new files
+    #[serde(default, skip_serializing)]
     pub atlas: IndexedAtlas,
-    /// Whether this object is visible in the viewport
+    /// Whether this part is visible in the viewport
     pub visible: bool,
-    /// Whether this object is locked (can't be selected/edited)
+    /// Whether this part is locked (can't be selected/edited)
     pub locked: bool,
     /// Color tint for identification in viewport (optional)
     pub color: Option<[u8; 3]>,
+    /// If true, backface culling is disabled (both sides render)
+    #[serde(default)]
+    pub double_sided: bool,
+    /// Per-part mirror settings (replaces global mirror)
+    #[serde(default)]
+    pub mirror: Option<MirrorSettings>,
 }
 
-impl MeshObject {
+impl MeshPart {
     pub fn new(name: impl Into<String>) -> Self {
+        // Use checkerboard atlas for default objects (runtime rendering uses atlas field)
+        // TextureRef::Checkerboard indicates this is a built-in texture for serialization
         Self {
             name: name.into(),
             mesh: EditableMesh::new(),
-            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
+            texture_ref: TextureRef::Checkerboard,
+            atlas: IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
+            double_sided: false,
+            mirror: None,
         }
     }
 
@@ -164,21 +262,28 @@ impl MeshObject {
         Self {
             name: name.into(),
             mesh,
-            atlas: IndexedAtlas::new(128, 128, ClutDepth::Bpp4),
+            texture_ref: TextureRef::Checkerboard,
+            atlas: IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4),
             visible: true,
             locked: false,
             color: None,
+            double_sided: false,
+            mirror: None,
         }
     }
 
+    /// Create object with embedded atlas (for OBJ imports)
     pub fn with_mesh_and_atlas(name: impl Into<String>, mesh: EditableMesh, atlas: IndexedAtlas) -> Self {
         Self {
             name: name.into(),
             mesh,
+            texture_ref: TextureRef::Embedded(Box::new(atlas.clone())),
             atlas,
             visible: true,
             locked: false,
             color: None,
+            double_sided: false,
+            mirror: None,
         }
     }
 
@@ -187,15 +292,13 @@ impl MeshObject {
     }
 }
 
-/// A complete PicoCAD-style project with multiple objects and indexed texture atlas
+/// A complete PicoCAD-style project with multiple parts and indexed texture atlas
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeshProject {
     /// Project name
     pub name: String,
-    /// All mesh objects in the project
-    pub objects: Vec<MeshObject>,
-    /// The indexed texture atlas (stores palette indices)
-    pub atlas: IndexedAtlas,
+    /// All mesh parts in the project (each has its own atlas)
+    pub objects: Vec<MeshPart>,
 
     /// Global CLUT pool (shared across all textures)
     #[serde(default)]
@@ -212,39 +315,37 @@ pub struct MeshProject {
 
 impl MeshProject {
     pub fn new(name: impl Into<String>) -> Self {
-        // Create pool first so we can link its first CLUT to the atlas
+        // Create pool first so we can link its first CLUT to objects
         let clut_pool = ClutPool::default();
         let first_clut_id = clut_pool.first_id().unwrap_or(ClutId::NONE);
 
-        // Create atlas with default CLUT linked to pool's first CLUT
-        let mut atlas = IndexedAtlas::new(128, 128, ClutDepth::Bpp4);
-        atlas.default_clut = first_clut_id;
+        // Create default cube with atlas linked to pool's first CLUT
+        let mut cube = MeshPart::cube("Cube.00", 1024.0);
+        cube.atlas.default_clut = first_clut_id;
 
         Self {
             name: name.into(),
-            // Default cube: 1024 units = 1 meter (SECTOR_SIZE)
-            objects: vec![MeshObject::cube("Cube.00", 1024.0)],
-            atlas,
+            objects: vec![cube],
             clut_pool,
             preview_clut: None,
             selected_object: Some(0),
         }
     }
 
-    /// Add a new object and return its index
-    pub fn add_object(&mut self, obj: MeshObject) -> usize {
+    /// Add a new part and return its index
+    pub fn add_object(&mut self, obj: MeshPart) -> usize {
         let idx = self.objects.len();
         self.objects.push(obj);
         idx
     }
 
-    /// Get the currently selected object
-    pub fn selected(&self) -> Option<&MeshObject> {
+    /// Get the currently selected part
+    pub fn selected(&self) -> Option<&MeshPart> {
         self.selected_object.and_then(|i| self.objects.get(i))
     }
 
-    /// Get the currently selected object mutably
-    pub fn selected_mut(&mut self) -> Option<&mut MeshObject> {
+    /// Get the currently selected part mutably
+    pub fn selected_mut(&mut self) -> Option<&mut MeshPart> {
         self.selected_object.and_then(|i| self.objects.get_mut(i))
     }
 
@@ -258,7 +359,7 @@ impl MeshProject {
         self.objects.iter().map(|o| o.mesh.face_count()).sum()
     }
 
-    /// Get the effective CLUT for the atlas (preview_clut > default_clut > first in pool)
+    /// Get the effective CLUT for rendering (preview_clut > first object's clut > first in pool)
     pub fn effective_clut(&self) -> Option<&Clut> {
         // Try preview override first
         if let Some(preview_id) = self.preview_clut {
@@ -266,10 +367,12 @@ impl MeshProject {
                 return Some(clut);
             }
         }
-        // Try atlas default
-        if self.atlas.default_clut.is_valid() {
-            if let Some(clut) = self.clut_pool.get(self.atlas.default_clut) {
-                return Some(clut);
+        // Try first object's atlas default CLUT
+        if let Some(first_obj) = self.objects.first() {
+            if first_obj.atlas.default_clut.is_valid() {
+                if let Some(clut) = self.clut_pool.get(first_obj.atlas.default_clut) {
+                    return Some(clut);
+                }
             }
         }
         // Fall back to first CLUT in pool
@@ -325,6 +428,36 @@ impl MeshProject {
     pub fn load_from_str(ron_data: &str) -> Result<Self, MeshEditorError> {
         let mut project: MeshProject = ron::from_str(ron_data)
             .map_err(|e| MeshEditorError::Serialization(e.to_string()))?;
+
+        // Process each object: migrate old format and populate runtime atlas
+        for obj in &mut project.objects {
+            // MIGRATION: Old files have atlas data but no texture_ref
+            // If texture_ref is default (Checkerboard) but atlas was loaded from file,
+            // migrate to TextureRef::Embedded
+            if obj.texture_ref.is_checkerboard() && !obj.atlas.is_empty() {
+                obj.texture_ref = TextureRef::Embedded(Box::new(obj.atlas.clone()));
+                // atlas is already populated, no need to change it
+                continue;
+            }
+
+            // For new files: populate runtime atlas from texture_ref
+            match &obj.texture_ref {
+                TextureRef::None => {
+                    obj.atlas = IndexedAtlas::default();
+                }
+                TextureRef::Checkerboard => {
+                    obj.atlas = IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4);
+                }
+                TextureRef::Id(_) => {
+                    // Hash reference - atlas will be populated when texture is resolved
+                    // Use checkerboard as fallback until then
+                    obj.atlas = IndexedAtlas::new_checkerboard(128, 128, ClutDepth::Bpp4);
+                }
+                TextureRef::Embedded(embedded_atlas) => {
+                    obj.atlas = embedded_atlas.as_ref().clone();
+                }
+            }
+        }
 
         // Select first object by default after loading
         if !project.objects.is_empty() {
@@ -448,7 +581,7 @@ impl Default for ClutPool {
 ///
 /// PS1-authentic texture format where each pixel is a palette index (4-bit or 8-bit).
 /// Colors are resolved at render time using a CLUT (Color Look-Up Table).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexedAtlas {
     pub width: usize,
     pub height: usize,
@@ -468,6 +601,26 @@ impl IndexedAtlas {
             height,
             depth,
             indices: vec![0; width * height],
+            default_clut: ClutId::NONE,
+        }
+    }
+
+    /// Create a new indexed atlas with a checkerboard pattern (visible by default)
+    pub fn new_checkerboard(width: usize, height: usize, depth: ClutDepth) -> Self {
+        let mut indices = vec![0u8; width * height];
+        let cell_size = 8; // 8x8 checkerboard cells
+        for y in 0..height {
+            for x in 0..width {
+                let checker = ((x / cell_size) + (y / cell_size)) % 2 == 0;
+                // Use indices 7 and 15 for visible checkerboard (light/dark gray)
+                indices[y * width + x] = if checker { 7 } else { 15 };
+            }
+        }
+        Self {
+            width,
+            height,
+            depth,
+            indices,
             default_clut: ClutId::NONE,
         }
     }
@@ -524,6 +677,13 @@ impl IndexedAtlas {
         self.width * self.height
     }
 
+    /// Check if this atlas is empty (no dimensions or indices)
+    ///
+    /// Used for serde skip_serializing_if - empty atlases are not serialized.
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0 || self.indices.is_empty()
+    }
+
     /// Get pixel color using a CLUT (for preview rendering)
     pub fn get_color(&self, x: usize, y: usize, clut: &Clut) -> Color15 {
         let index = self.get_index(x, y);
@@ -574,6 +734,18 @@ impl IndexedAtlas {
             pixels,
             name: name.to_string(),
             blend_mode: crate::rasterizer::BlendMode::Opaque,
+        }
+    }
+}
+
+impl Default for IndexedAtlas {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            depth: ClutDepth::Bpp4,
+            indices: Vec::new(),
+            default_clut: ClutId::NONE,
         }
     }
 }
@@ -1909,69 +2081,48 @@ impl EditableMesh {
         let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
         visited.insert(start_face);
 
-        eprintln!("[FACE LOOP] Starting face {}, edge ({}, {})", start_face, edge_v0, edge_v1);
-
         // Get the opposite edge for the second direction
         let opposite_start_edge = self.opposite_edge_in_quad(start_face, edge_v0, edge_v1);
-        eprintln!("[FACE LOOP] Opposite start edge: {:?}", opposite_start_edge);
 
         // Traverse in both directions
         // Direction 0: use the original edge direction
         // Direction 1: use the opposite edge direction
         for direction in 0..2 {
-            eprintln!("[FACE LOOP] === Direction {} ===", direction);
-
             let mut current_face = start_face;
             let mut current_edge = if direction == 0 {
                 (edge_v0, edge_v1)
             } else {
                 match opposite_start_edge {
                     Some(e) => e,
-                    None => {
-                        eprintln!("[FACE LOOP] No opposite edge for direction 1, skipping");
-                        continue;
-                    }
+                    None => continue,
                 }
             };
 
             loop {
-                eprintln!("[FACE LOOP] Current face {}, edge ({}, {})", current_face, current_edge.0, current_edge.1);
-
                 // Find the opposite edge in the current face
                 let opposite = match self.opposite_edge_in_quad(current_face, current_edge.0, current_edge.1) {
                     Some(e) => e,
-                    None => {
-                        eprintln!("[FACE LOOP] Face {} is not a quad or edge not found, stopping", current_face);
-                        break;
-                    }
+                    None => break,
                 };
-
-                eprintln!("[FACE LOOP] Opposite edge: ({}, {})", opposite.0, opposite.1);
 
                 // Find the face on the other side of this edge
                 let adjacent_faces = self.faces_with_edge(opposite.0, opposite.1);
-                eprintln!("[FACE LOOP] Adjacent faces to opposite edge: {:?}", adjacent_faces);
 
                 let next_face = adjacent_faces.iter()
                     .find(|&&f| f != current_face && !visited.contains(&f));
 
                 match next_face {
                     Some(&face_idx) => {
-                        eprintln!("[FACE LOOP] Found next face: {}", face_idx);
                         visited.insert(face_idx);
                         loop_faces.push(face_idx);
                         current_face = face_idx;
                         current_edge = opposite;
                     }
-                    None => {
-                        eprintln!("[FACE LOOP] No unvisited adjacent face found, stopping");
-                        break;
-                    }
+                    None => break,
                 }
             }
         }
 
-        eprintln!("[FACE LOOP] Final result: {} faces", loop_faces.len());
         loop_faces
     }
 

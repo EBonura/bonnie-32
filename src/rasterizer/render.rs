@@ -1238,8 +1238,13 @@ fn rasterize_triangle(
             // Check if inside triangle (same threshold as original)
             const ERR: f32 = -0.0001;
             if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
-                // Interpolate depth
-                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+                // Perspective-correct depth interpolation
+                // In screen space after perspective divide, 1/z interpolates linearly, not z itself
+                let inv_z1 = 1.0 / v1.z;
+                let inv_z2 = 1.0 / v2.z;
+                let inv_z3 = 1.0 / v3.z;
+                let inv_z_interp = bc_x * inv_z1 + bc_y * inv_z2 + bc_z * inv_z3;
+                let z = 1.0 / inv_z_interp;
 
                 // Z-buffer test (skip in xray mode - render all faces regardless of depth)
                 if settings.use_zbuffer && !settings.xray_mode {
@@ -1258,17 +1263,15 @@ fn rasterize_triangle(
                     let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
                     (u, v)
                 } else {
-                    // Perspective-correct interpolation
-                    let bcc_x = bc_x / v1.z;
-                    let bcc_y = bc_y / v2.z;
-                    let bcc_z = bc_z / v3.z;
-                    let bd = bcc_x + bcc_y + bcc_z;
-                    let bcc_x = bcc_x / bd;
-                    let bcc_y = bcc_y / bd;
-                    let bcc_z = bcc_z / bd;
-
-                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
-                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    // Perspective-correct interpolation (reuse inv_z values)
+                    let u_over_z = bc_x * surface.uv1.x * inv_z1
+                                 + bc_y * surface.uv2.x * inv_z2
+                                 + bc_z * surface.uv3.x * inv_z3;
+                    let v_over_z = bc_x * surface.uv1.y * inv_z1
+                                 + bc_y * surface.uv2.y * inv_z2
+                                 + bc_z * surface.uv3.y * inv_z3;
+                    let u = u_over_z / inv_z_interp;
+                    let v = v_over_z / inv_z_interp;
                     (u, v)
                 };
 
@@ -1320,12 +1323,22 @@ fn rasterize_triangle(
                 }
 
                 // Write pixel
-                if color.blend == BlendMode::Opaque {
-                    fb.set_pixel_with_depth(x, y, z, color);
+                if settings.use_zbuffer {
+                    // Z-buffer mode: test depth before writing
+                    if color.blend == BlendMode::Opaque {
+                        fb.set_pixel_with_depth(x, y, z, color);
+                    } else {
+                        let idx = y * fb.width + x;
+                        if z < fb.zbuffer[idx] {
+                            fb.zbuffer[idx] = z;
+                            fb.set_pixel_blended(x, y, color, color.blend);
+                        }
+                    }
                 } else {
-                    let idx = y * fb.width + x;
-                    if z < fb.zbuffer[idx] {
-                        fb.zbuffer[idx] = z;
+                    // Painter's algorithm: just write (surfaces are pre-sorted)
+                    if color.blend == BlendMode::Opaque {
+                        fb.set_pixel(x, y, color);
+                    } else {
                         fb.set_pixel_blended(x, y, color, color.blend);
                     }
                 }
@@ -1441,8 +1454,14 @@ fn rasterize_triangle_15(
             // Check if inside triangle
             const ERR: f32 = -0.0001;
             if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
-                // Interpolate depth
-                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+                // Perspective-correct depth interpolation
+                // In screen space after perspective divide, 1/z interpolates linearly, not z itself
+                // z_correct = 1 / (bc_x/z1 + bc_y/z2 + bc_z/z3)
+                let inv_z1 = 1.0 / v1.z;
+                let inv_z2 = 1.0 / v2.z;
+                let inv_z3 = 1.0 / v3.z;
+                let inv_z_interp = bc_x * inv_z1 + bc_y * inv_z2 + bc_z * inv_z3;
+                let z = 1.0 / inv_z_interp;
 
                 // Z-buffer test (skip in xray mode - render all faces regardless of depth)
                 if settings.use_zbuffer && !settings.xray_mode {
@@ -1461,17 +1480,15 @@ fn rasterize_triangle_15(
                     let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
                     (u, v)
                 } else {
-                    // Perspective-correct interpolation
-                    let bcc_x = bc_x / v1.z;
-                    let bcc_y = bc_y / v2.z;
-                    let bcc_z = bc_z / v3.z;
-                    let bd = bcc_x + bcc_y + bcc_z;
-                    let bcc_x = bcc_x / bd;
-                    let bcc_y = bcc_y / bd;
-                    let bcc_z = bcc_z / bd;
-
-                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
-                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    // Perspective-correct interpolation using 1/z method (reuse inv_z values)
+                    let u_over_z = bc_x * surface.uv1.x * inv_z1
+                                 + bc_y * surface.uv2.x * inv_z2
+                                 + bc_z * surface.uv3.x * inv_z3;
+                    let v_over_z = bc_x * surface.uv1.y * inv_z1
+                                 + bc_y * surface.uv2.y * inv_z2
+                                 + bc_z * surface.uv3.y * inv_z3;
+                    let u = u_over_z / inv_z_interp;
+                    let v = v_over_z / inv_z_interp;
                     (u, v)
                 };
 
@@ -1560,8 +1577,8 @@ fn rasterize_triangle_15(
                 if settings.xray_mode {
                     // X-ray mode: always blend at 50% alpha, no z-buffer update
                     fb.set_pixel_xray_15(x, y, color);
-                } else {
-                    // Normal mode: PS1-authentic semi-transparency handling
+                } else if settings.use_zbuffer {
+                    // Z-buffer mode: test depth before writing
                     let idx = y * fb.width + x;
                     if z < fb.zbuffer[idx] {
                         // Only update z-buffer if not skipping (opaque pass updates, transparent pass doesn't)
@@ -1573,6 +1590,13 @@ fn rasterize_triangle_15(
                         } else {
                             fb.set_pixel_15(x, y, color);
                         }
+                    }
+                } else {
+                    // Painter's algorithm: just write (surfaces are pre-sorted)
+                    if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, blend_mode);
+                    } else {
+                        fb.set_pixel_15(x, y, color);
                     }
                 }
             }
@@ -1683,8 +1707,13 @@ fn rasterize_triangle_indexed(
             // Check if inside triangle
             const ERR: f32 = -0.0001;
             if bc_x >= ERR && bc_y >= ERR && bc_z >= ERR {
-                // Interpolate depth
-                let z = bc_x * v1.z + bc_y * v2.z + bc_z * v3.z;
+                // Perspective-correct depth interpolation
+                // In screen space after perspective divide, 1/z interpolates linearly, not z itself
+                let inv_z1 = 1.0 / v1.z;
+                let inv_z2 = 1.0 / v2.z;
+                let inv_z3 = 1.0 / v3.z;
+                let inv_z_interp = bc_x * inv_z1 + bc_y * inv_z2 + bc_z * inv_z3;
+                let z = 1.0 / inv_z_interp;
 
                 // Z-buffer test (skip in xray mode - render all faces regardless of depth)
                 if settings.use_zbuffer && !settings.xray_mode {
@@ -1703,17 +1732,15 @@ fn rasterize_triangle_indexed(
                     let v = bc_x * surface.uv1.y + bc_y * surface.uv2.y + bc_z * surface.uv3.y;
                     (u, v)
                 } else {
-                    // Perspective-correct interpolation
-                    let bcc_x = bc_x / v1.z;
-                    let bcc_y = bc_y / v2.z;
-                    let bcc_z = bc_z / v3.z;
-                    let bd = bcc_x + bcc_y + bcc_z;
-                    let bcc_x = bcc_x / bd;
-                    let bcc_y = bcc_y / bd;
-                    let bcc_z = bcc_z / bd;
-
-                    let u = bcc_x * surface.uv1.x + bcc_y * surface.uv2.x + bcc_z * surface.uv3.x;
-                    let v = bcc_x * surface.uv1.y + bcc_y * surface.uv2.y + bcc_z * surface.uv3.y;
+                    // Perspective-correct interpolation (reuse inv_z values)
+                    let u_over_z = bc_x * surface.uv1.x * inv_z1
+                                 + bc_y * surface.uv2.x * inv_z2
+                                 + bc_z * surface.uv3.x * inv_z3;
+                    let v_over_z = bc_x * surface.uv1.y * inv_z1
+                                 + bc_y * surface.uv2.y * inv_z2
+                                 + bc_z * surface.uv3.y * inv_z3;
+                    let u = u_over_z / inv_z_interp;
+                    let v = v_over_z / inv_z_interp;
                     (u, v)
                 };
 
@@ -1798,8 +1825,8 @@ fn rasterize_triangle_indexed(
                 if settings.xray_mode {
                     // X-ray mode: always blend at 50% alpha, no z-buffer update
                     fb.set_pixel_xray_15(x, y, color);
-                } else {
-                    // Normal mode
+                } else if settings.use_zbuffer {
+                    // Z-buffer mode: test depth before writing
                     let idx = y * fb.width + x;
                     if z < fb.zbuffer[idx] {
                         fb.zbuffer[idx] = z;
@@ -1808,6 +1835,13 @@ fn rasterize_triangle_indexed(
                         } else {
                             fb.set_pixel_15(x, y, color);
                         }
+                    }
+                } else {
+                    // Painter's algorithm: just write (surfaces are pre-sorted)
+                    if color.is_semi_transparent() && face_blend_mode != BlendMode::Opaque {
+                        fb.set_pixel_blended_15(x, y, color, face_blend_mode);
+                    } else {
+                        fb.set_pixel_15(x, y, color);
                     }
                 }
             }
@@ -1851,7 +1885,7 @@ pub fn render_mesh(
             (screen, cam_pos)
         } else if settings.use_fixed_point {
             // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
-            let (sx, sy, depth) = super::fixed::project_fixed(
+            let (sx, sy, _fixed_depth) = super::fixed::project_fixed(
                 v.pos,
                 camera.position,
                 camera.basis_x,
@@ -1860,10 +1894,12 @@ pub fn render_mesh(
                 fb.width,
                 fb.height,
             );
-            // Still need cam_pos for culling/shading (use float for this)
+            // Store cam_pos.z + 5.0 (perspective divide denominator) for correct interpolation
+            // This matches the float path's project() which returns z = denom = cam_z + DISTANCE
             let rel_pos = v.pos - camera.position;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
+            const DISTANCE: f32 = 5.0;
+            (Vec3::new(sx as f32, sy as f32, cam_pos.z + DISTANCE), cam_pos)
         } else {
             // Standard float path
             let rel_pos = v.pos - camera.position;
@@ -1933,26 +1969,27 @@ pub fn render_mesh(
             }
 
             // If backface culling is disabled or xray mode, also render as solid
+            // Swap v2/v3 to reverse winding order (makes area positive for rasterization)
             if !settings.backface_cull || settings.xray_mode {
                 surfaces.push(Surface {
                     v1,
-                    v2,
-                    v3,
+                    v2: v3,  // swapped
+                    v3: v2,  // swapped
                     w1: vertices[face.v0].pos,
-                    w2: vertices[face.v1].pos,
-                    w3: vertices[face.v2].pos,
+                    w2: vertices[face.v2].pos,  // swapped
+                    w3: vertices[face.v1].pos,  // swapped
                     vn1: cam_space_normals[face.v0].scale(-1.0),
-                    vn2: cam_space_normals[face.v1].scale(-1.0),
-                    vn3: cam_space_normals[face.v2].scale(-1.0),
+                    vn2: cam_space_normals[face.v2].scale(-1.0),  // swapped
+                    vn3: cam_space_normals[face.v1].scale(-1.0),  // swapped
                     wn1: vertices[face.v0].normal.scale(-1.0),
-                    wn2: vertices[face.v1].normal.scale(-1.0),
-                    wn3: vertices[face.v2].normal.scale(-1.0),
+                    wn2: vertices[face.v2].normal.scale(-1.0),  // swapped
+                    wn3: vertices[face.v1].normal.scale(-1.0),  // swapped
                     uv1: vertices[face.v0].uv,
-                    uv2: vertices[face.v1].uv,
-                    uv3: vertices[face.v2].uv,
+                    uv2: vertices[face.v2].uv,  // swapped
+                    uv3: vertices[face.v1].uv,  // swapped
                     vc1: vertices[face.v0].color,
-                    vc2: vertices[face.v1].color,
-                    vc3: vertices[face.v2].color,
+                    vc2: vertices[face.v2].color,  // swapped
+                    vc3: vertices[face.v1].color,  // swapped
                     normal: normal.scale(-1.0),
                     face_idx,
                     black_transparent: face.black_transparent,
@@ -2001,9 +2038,10 @@ pub fn render_mesh(
     // Sort by depth if not using Z-buffer (painter's algorithm)
     if !settings.use_zbuffer {
         surfaces.sort_by(|a, b| {
-            let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
-            let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
-            b_max_z.partial_cmp(&a_max_z).unwrap()
+            // Use center point (average z) for more accurate depth sorting
+            let a_center_z = (a.v1.z + a.v2.z + a.v3.z) / 3.0;
+            let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
+            b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
     }
 
@@ -2175,7 +2213,7 @@ pub fn render_mesh_15(
             (screen, cam_pos)
         } else if settings.use_fixed_point {
             // PS1-style: entire transform+project pipeline in fixed-point (1.3.12 format + UNR division)
-            let (sx, sy, depth) = super::fixed::project_fixed(
+            let (sx, sy, _fixed_depth) = super::fixed::project_fixed(
                 v.pos,
                 camera.position,
                 camera.basis_x,
@@ -2184,10 +2222,12 @@ pub fn render_mesh_15(
                 fb.width,
                 fb.height,
             );
-            // Still need cam_pos for culling/shading (use float for this)
+            // Store cam_pos.z + 5.0 (perspective divide denominator) for correct interpolation
+            // This matches the float path's project() which returns z = denom = cam_z + DISTANCE
             let rel_pos = v.pos - camera.position;
             let cam_pos = perspective_transform(rel_pos, camera.basis_x, camera.basis_y, camera.basis_z);
-            (Vec3::new(sx as f32, sy as f32, depth), cam_pos)
+            const DISTANCE: f32 = 5.0;
+            (Vec3::new(sx as f32, sy as f32, cam_pos.z + DISTANCE), cam_pos)
         } else {
             // Standard float path
             let rel_pos = v.pos - camera.position;
@@ -2296,26 +2336,27 @@ pub fn render_mesh_15(
             }
 
             // If backface culling is disabled or xray mode, also render as solid
+            // Swap v2/v3 to reverse winding order (makes area positive for rasterization)
             if !settings.backface_cull || settings.xray_mode {
                 surfaces.push(Surface {
                     v1,
-                    v2,
-                    v3,
+                    v2: v3,  // swapped
+                    v3: v2,  // swapped
                     w1: vertices[face.v0].pos,
-                    w2: vertices[face.v1].pos,
-                    w3: vertices[face.v2].pos,
+                    w2: vertices[face.v2].pos,  // swapped
+                    w3: vertices[face.v1].pos,  // swapped
                     vn1: cam_space_normals[face.v0].scale(-1.0),
-                    vn2: cam_space_normals[face.v1].scale(-1.0),
-                    vn3: cam_space_normals[face.v2].scale(-1.0),
+                    vn2: cam_space_normals[face.v2].scale(-1.0),  // swapped
+                    vn3: cam_space_normals[face.v1].scale(-1.0),  // swapped
                     wn1: vertices[face.v0].normal.scale(-1.0),
-                    wn2: vertices[face.v1].normal.scale(-1.0),
-                    wn3: vertices[face.v2].normal.scale(-1.0),
+                    wn2: vertices[face.v2].normal.scale(-1.0),  // swapped
+                    wn3: vertices[face.v1].normal.scale(-1.0),  // swapped
                     uv1: vertices[face.v0].uv,
-                    uv2: vertices[face.v1].uv,
-                    uv3: vertices[face.v2].uv,
+                    uv2: vertices[face.v2].uv,  // swapped
+                    uv3: vertices[face.v1].uv,  // swapped
                     vc1,
-                    vc2,
-                    vc3,
+                    vc2: vc3,  // swapped
+                    vc3: vc2,  // swapped
                     normal: normal.scale(-1.0),
                     face_idx,
                     black_transparent: face.black_transparent,
@@ -2367,17 +2408,19 @@ pub fn render_mesh_15(
     // Sort transparent surfaces back-to-front (always, regardless of z-buffer mode)
     // This is required for correct blending order (PS1 Ordering Table style)
     transparent_surfaces.sort_by(|a, b| {
-        let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
-        let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
-        b_max_z.partial_cmp(&a_max_z).unwrap()  // Back-to-front (far first)
+        // Use center point (average z) for more accurate depth sorting
+        let a_center_z = (a.v1.z + a.v2.z + a.v3.z) / 3.0;
+        let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
+        b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
     });
 
     // Sort opaque surfaces only if using painter's algorithm (no z-buffer)
     if !settings.use_zbuffer {
         opaque_surfaces.sort_by(|a, b| {
-            let a_max_z = a.v1.z.max(a.v2.z).max(a.v3.z);
-            let b_max_z = b.v1.z.max(b.v2.z).max(b.v3.z);
-            b_max_z.partial_cmp(&a_max_z).unwrap()  // Back-to-front
+            // Use center point (average z) for more accurate depth sorting
+            let a_center_z = (a.v1.z + a.v2.z + a.v3.z) / 3.0;
+            let b_center_z = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
+            b_center_z.partial_cmp(&a_center_z).unwrap()  // Back-to-front (far first)
         });
     }
 

@@ -65,6 +65,22 @@ pub fn draw_fixed_tabs(
     active_index: usize,
     icon_font: Option<&Font>,
 ) -> Option<usize> {
+    let mut dummy = false;
+    draw_fixed_tabs_with_version(ctx, rect, tabs, active_index, icon_font, None, &mut dummy)
+}
+
+/// Draw a fixed tab bar with icons, labels, and optional version string
+/// Returns the index of the clicked tab, or None if no click
+/// The version_highlighted parameter toggles color when version is clicked (easter egg!)
+pub fn draw_fixed_tabs_with_version(
+    ctx: &mut UiContext,
+    rect: Rect,
+    tabs: &[TabEntry],
+    active_index: usize,
+    icon_font: Option<&Font>,
+    version: Option<&str>,
+    version_highlighted: &mut bool,
+) -> Option<usize> {
     // Draw bar background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, style::BAR_BG);
 
@@ -76,6 +92,85 @@ pub fn draw_fixed_tabs(
         1.0,
         style::TAB_BORDER,
     );
+
+    // Draw version at far right if provided
+    if let Some(ver) = version {
+        let version_text = format!("v{}", ver);
+        let font_size = 18.0;
+        let text_dims = measure_text(&version_text, None, font_size as u16, 1.0);
+        let padding_right = 16.0;
+        let text_x = rect.x + rect.w - text_dims.width - padding_right;
+        let text_y = rect.y + (rect.h + text_dims.height) * 0.5 - 1.0;
+
+        // Create clickable rect for the version
+        let version_rect = Rect::new(text_x - 4.0, rect.y, text_dims.width + 8.0, rect.h);
+
+        // Toggle highlight on click (easter egg!)
+        if ctx.mouse.clicked(&version_rect) {
+            *version_highlighted = !*version_highlighted;
+        }
+
+        if *version_highlighted {
+            // Knight Rider scanner effect!
+            let time = get_time() as f32;
+            let char_count = version_text.chars().count() as f32;
+
+            // Scanner position oscillates back and forth (0 to char_count-1)
+            let speed = 3.0; // cycles per second
+            let phase = (time * speed) % 2.0; // 0-2 range for ping-pong
+            let scanner_pos = if phase < 1.0 {
+                phase * (char_count - 1.0) // forward
+            } else {
+                (2.0 - phase) * (char_count - 1.0) // backward
+            };
+
+            // Draw each character with glow based on distance from scanner
+            let mut char_x = text_x;
+            for (i, ch) in version_text.chars().enumerate() {
+                let char_str = ch.to_string();
+                let char_dims = measure_text(&char_str, None, font_size as u16, 1.0);
+
+                // Distance from scanner (0 = at scanner, higher = further)
+                let distance = (i as f32 - scanner_pos).abs();
+
+                // Glow intensity: bright at scanner, fades with distance
+                let glow = (1.0 - distance / 2.0).max(0.0).powf(0.5);
+
+                // Interpolate between gray and cyan based on glow
+                let gray = Color::new(0.4, 0.4, 0.45, 1.0);
+                let r = gray.r + (style::ACCENT.r - gray.r) * glow;
+                let g = gray.g + (style::ACCENT.g - gray.g) * glow;
+                let b = gray.b + (style::ACCENT.b - gray.b) * glow;
+                let char_color = Color::new(r, g, b, 1.0);
+
+                draw_text_ex(
+                    &char_str,
+                    char_x.round(),
+                    text_y.round(),
+                    TextParams {
+                        font: None,
+                        font_size: font_size as u16,
+                        color: char_color,
+                        ..Default::default()
+                    },
+                );
+                char_x += char_dims.width;
+            }
+        } else {
+            // Static gray text
+            draw_text_ex(
+                &version_text,
+                text_x.round(),
+                text_y.round(),
+                TextParams {
+                    font: None,
+                    font_size: font_size as u16,
+                    color: Color::new(0.5, 0.5, 0.55, 1.0),
+                    ..Default::default()
+                },
+            );
+        }
+    }
 
     if tabs.is_empty() {
         return None;

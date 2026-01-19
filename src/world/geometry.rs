@@ -2146,18 +2146,9 @@ impl Aabb {
     }
 }
 
-/// Types of spawn points in the level
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SpawnPointType {
-    /// Player start position
-    PlayerStart,
-    /// Checkpoint / bonfire / save point
-    Checkpoint,
-    /// Enemy spawn location
-    Enemy,
-    /// Item pickup location
-    Item,
-}
+// NOTE: SpawnPointType and ObjectType have been removed as part of the migration
+// to the asset-based object system. Objects now use asset_id to reference
+// assets from the AssetLibrary, which contain component definitions.
 
 /// Player settings for the level (TR-style character controller parameters)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -2212,87 +2203,18 @@ impl Default for PlayerSettings {
 }
 
 // ============================================================================
-// Unified Tile-Based Object System (TR-style)
+// Asset-Based Object System
 // ============================================================================
 
-/// Object types that can be placed on tiles
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ObjectType {
-    /// Spawn point (player start, checkpoint, enemy, item)
-    Spawn(SpawnPointType),
-    /// Point light source
-    Light {
-        /// Light color (RGB)
-        color: Color,
-        /// Light intensity (0.0-2.0+)
-        intensity: f32,
-        /// Falloff radius in world units
-        radius: f32,
-    },
-    /// Static prop/decoration (references model by name)
-    Prop(String),
-    /// Trigger zone (for scripting)
-    Trigger {
-        /// Trigger identifier for scripting
-        trigger_id: String,
-        /// Trigger type (e.g., "on_enter", "on_leave", "on_use")
-        trigger_type: String,
-    },
-    /// Particle emitter
-    Particle {
-        /// Particle effect name
-        effect: String,
-    },
-    /// Audio source (ambient sound)
-    Audio {
-        /// Sound asset name
-        sound: String,
-        /// Volume (0.0-1.0)
-        volume: f32,
-        /// Radius for 3D falloff
-        radius: f32,
-        /// Loop the sound?
-        looping: bool,
-    },
-}
-
-impl ObjectType {
-    /// Get a display name for the object type
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            ObjectType::Spawn(SpawnPointType::PlayerStart) => "Player Start",
-            ObjectType::Spawn(SpawnPointType::Checkpoint) => "Checkpoint",
-            ObjectType::Spawn(SpawnPointType::Enemy) => "Enemy Spawn",
-            ObjectType::Spawn(SpawnPointType::Item) => "Item Spawn",
-            ObjectType::Light { .. } => "Light",
-            ObjectType::Prop(_) => "Prop",
-            ObjectType::Trigger { .. } => "Trigger",
-            ObjectType::Particle { .. } => "Particle",
-            ObjectType::Audio { .. } => "Audio",
-        }
-    }
-
-    /// Check if this object type is unique per tile (only one allowed)
-    pub fn is_unique_per_tile(&self) -> bool {
-        matches!(self,
-            ObjectType::Spawn(SpawnPointType::PlayerStart) |
-            ObjectType::Spawn(SpawnPointType::Checkpoint) |
-            ObjectType::Light { .. }
-        )
-    }
-
-    /// Check if this object type is unique per level (only one in entire level)
-    pub fn is_unique_per_level(&self) -> bool {
-        matches!(self, ObjectType::Spawn(SpawnPointType::PlayerStart))
-    }
-}
-
-/// A tile-based object placed in a room
+/// An instance of an asset placed in a room
 ///
-/// Objects are tied to sectors (tiles) using grid coordinates within the room.
+/// Asset instances are tied to sectors (tiles) using grid coordinates within the room.
 /// Height offset allows vertical positioning within the sector.
+///
+/// All instances reference an asset by `asset_id`. The asset's components
+/// (from the AssetLibrary) define the instance's appearance and behavior at runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LevelObject {
+pub struct AssetInstance {
     /// Sector X coordinate within the room
     pub sector_x: usize,
     /// Sector Z coordinate within the room
@@ -2303,43 +2225,33 @@ pub struct LevelObject {
     /// Facing direction (yaw angle in radians, 0 = +Z)
     #[serde(default)]
     pub facing: f32,
-    /// The object type and its specific properties
-    pub object_type: ObjectType,
-    /// Optional name/identifier
+    /// Reference to an asset by its stable ID
+    ///
+    /// This is the primary (and only) way to identify what the instance is.
+    /// The asset's components define the instance's behavior at runtime.
+    /// Default of 0 used for migration from legacy levels (filtered out on load).
+    #[serde(default)]
+    pub asset_id: u64,
+    /// Optional name/identifier for this instance
     #[serde(default)]
     pub name: String,
-    /// Is this object active/enabled?
+    /// Is this instance active/enabled?
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
-impl LevelObject {
-    /// Create a new object at a sector position
-    pub fn new(sector_x: usize, sector_z: usize, object_type: ObjectType) -> Self {
+impl AssetInstance {
+    /// Create a new instance from an asset reference
+    pub fn new(sector_x: usize, sector_z: usize, asset_id: u64) -> Self {
         Self {
             sector_x,
             sector_z,
             height: 0.0,
             facing: 0.0,
-            object_type,
+            asset_id,
             name: String::new(),
             enabled: true,
         }
-    }
-
-    /// Create a player start object
-    pub fn player_start(sector_x: usize, sector_z: usize) -> Self {
-        Self::new(sector_x, sector_z, ObjectType::Spawn(SpawnPointType::PlayerStart))
-    }
-
-    /// Create a light object
-    pub fn light(sector_x: usize, sector_z: usize, color: Color, intensity: f32, radius: f32) -> Self {
-        Self::new(sector_x, sector_z, ObjectType::Light { color, intensity, radius })
-    }
-
-    /// Create a prop object
-    pub fn prop(sector_x: usize, sector_z: usize, model_name: impl Into<String>) -> Self {
-        Self::new(sector_x, sector_z, ObjectType::Prop(model_name.into()))
     }
 
     /// Set height offset
@@ -2360,7 +2272,7 @@ impl LevelObject {
         self
     }
 
-    /// Calculate world-space position of this object
+    /// Calculate world-space position of this instance
     /// Requires the room to calculate the sector's floor height
     pub fn world_position(&self, room: &Room) -> Vec3 {
         let base_x = room.position.x + (self.sector_x as f32) * SECTOR_SIZE + SECTOR_SIZE * 0.5;
@@ -2373,24 +2285,6 @@ impl LevelObject {
             .unwrap_or(room.position.y);
 
         Vec3::new(base_x, base_y + self.height, base_z)
-    }
-
-    /// Check if this object is a spawn point
-    pub fn is_spawn(&self) -> bool {
-        matches!(self.object_type, ObjectType::Spawn(_))
-    }
-
-    /// Check if this object is a light
-    pub fn is_light(&self) -> bool {
-        matches!(self.object_type, ObjectType::Light { .. })
-    }
-
-    /// Get spawn type if this is a spawn object
-    pub fn spawn_type(&self) -> Option<SpawnPointType> {
-        match &self.object_type {
-            ObjectType::Spawn(t) => Some(*t),
-            _ => None,
-        }
     }
 }
 
@@ -2484,9 +2378,9 @@ pub struct Room {
     /// Ambient light level (0.0 = dark, 1.0 = bright)
     #[serde(default = "default_ambient")]
     pub ambient: f32,
-    /// Tile-based objects in this room (spawns, lights, props, triggers, etc.)
+    /// Asset instances in this room (spawns, lights, props, triggers, etc.)
     #[serde(default)]
-    pub objects: Vec<LevelObject>,
+    pub objects: Vec<AssetInstance>,
     /// Per-room fog settings (PS1-style depth cueing)
     #[serde(default)]
     pub fog: RoomFog,
@@ -3473,10 +3367,16 @@ impl Level {
     // ========================================================================
 
     /// Get the player start object and its room index
-    pub fn get_player_start(&self) -> Option<(usize, &LevelObject)> {
+    ///
+    /// Requires the AssetLibrary to determine which objects are player spawns.
+    pub fn get_player_start(&self, asset_library: &crate::asset::AssetLibrary) -> Option<(usize, &AssetInstance)> {
         for (room_idx, room) in self.rooms.iter().enumerate() {
             if let Some(obj) = room.objects.iter()
-                .find(|obj| obj.enabled && matches!(obj.object_type, ObjectType::Spawn(SpawnPointType::PlayerStart)))
+                .find(|obj| {
+                    obj.enabled && asset_library.get_by_id(obj.asset_id)
+                        .map(|a| a.has_spawn_point(true))
+                        .unwrap_or(false)
+                })
             {
                 return Some((room_idx, obj));
             }
@@ -3485,7 +3385,7 @@ impl Level {
     }
 
     /// Get all objects at a specific sector in a room
-    pub fn objects_at(&self, room_idx: usize, sector_x: usize, sector_z: usize) -> impl Iterator<Item = &LevelObject> {
+    pub fn objects_at(&self, room_idx: usize, sector_x: usize, sector_z: usize) -> impl Iterator<Item = &AssetInstance> {
         self.rooms.get(room_idx)
             .map(|room| room.objects.iter()
                 .filter(move |obj| obj.sector_x == sector_x && obj.sector_z == sector_z))
@@ -3494,61 +3394,18 @@ impl Level {
     }
 
     /// Get all objects in a room
-    pub fn objects_in_room(&self, room_idx: usize) -> impl Iterator<Item = &LevelObject> {
+    pub fn objects_in_room(&self, room_idx: usize) -> impl Iterator<Item = &AssetInstance> {
         self.rooms.get(room_idx)
             .map(|room| room.objects.iter())
             .into_iter()
             .flatten()
     }
 
-    /// Check if an object can be added at a sector (validates restrictions)
-    pub fn can_add_object(&self, room_idx: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Result<(), &'static str> {
-        // Check per-level uniqueness (e.g., only one PlayerStart)
-        if object_type.is_unique_per_level() {
-            for room in &self.rooms {
-                let exists = room.objects.iter().any(|obj| {
-                    std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type)
-                });
-                if exists {
-                    return Err("Only one of this object type allowed per level");
-                }
-            }
-        }
-
-        // Check per-tile uniqueness (e.g., only one light per tile)
-        if object_type.is_unique_per_tile() {
-            let tile_objects = self.objects_at(room_idx, sector_x, sector_z);
-            for obj in tile_objects {
-                // Check if same category exists
-                let same_category = match (&obj.object_type, object_type) {
-                    (ObjectType::Light { .. }, ObjectType::Light { .. }) => true,
-                    (ObjectType::Spawn(SpawnPointType::PlayerStart), ObjectType::Spawn(SpawnPointType::PlayerStart)) => true,
-                    (ObjectType::Spawn(SpawnPointType::Checkpoint), ObjectType::Spawn(SpawnPointType::Checkpoint)) => true,
-                    _ => false,
-                };
-                if same_category {
-                    return Err("Only one of this object type allowed per tile");
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Add an object to a room (validates restrictions)
-    pub fn add_object(&mut self, room_idx: usize, object: LevelObject) -> Result<usize, &'static str> {
-        self.can_add_object(room_idx, object.sector_x, object.sector_z, &object.object_type)?;
-        if let Some(room) = self.rooms.get_mut(room_idx) {
-            let idx = room.objects.len();
-            room.objects.push(object);
-            Ok(idx)
-        } else {
-            Err("Invalid room index")
-        }
-    }
-
-    /// Add an object without validation (for internal use or loading)
-    pub fn add_object_unchecked(&mut self, room_idx: usize, object: LevelObject) -> Option<usize> {
+    /// Add an object to a room
+    ///
+    /// Note: Validation (e.g., only one player spawn per level) should be done
+    /// by the caller using the AssetLibrary to check asset properties.
+    pub fn add_object(&mut self, room_idx: usize, object: AssetInstance) -> Option<usize> {
         if let Some(room) = self.rooms.get_mut(room_idx) {
             let idx = room.objects.len();
             room.objects.push(object);
@@ -3559,7 +3416,7 @@ impl Level {
     }
 
     /// Remove an object by room and index
-    pub fn remove_object(&mut self, room_idx: usize, object_idx: usize) -> Option<LevelObject> {
+    pub fn remove_object(&mut self, room_idx: usize, object_idx: usize) -> Option<AssetInstance> {
         if let Some(room) = self.rooms.get_mut(room_idx) {
             if object_idx < room.objects.len() {
                 return Some(room.objects.remove(object_idx));
@@ -3575,25 +3432,25 @@ impl Level {
         }
     }
 
-    /// Find object index by position and type in a room
-    pub fn find_object(&self, room_idx: usize, sector_x: usize, sector_z: usize, object_type: &ObjectType) -> Option<usize> {
+    /// Find object index by position and asset ID in a room
+    pub fn find_object(&self, room_idx: usize, sector_x: usize, sector_z: usize, asset_id: u64) -> Option<usize> {
         self.rooms.get(room_idx)?.objects.iter().position(|obj| {
             obj.sector_x == sector_x
                 && obj.sector_z == sector_z
-                && std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type)
+                && obj.asset_id == asset_id
         })
     }
 
     /// Get mutable reference to an object by room and index
-    pub fn get_object_mut(&mut self, room_idx: usize, object_idx: usize) -> Option<&mut LevelObject> {
+    pub fn get_object_mut(&mut self, room_idx: usize, object_idx: usize) -> Option<&mut AssetInstance> {
         self.rooms.get_mut(room_idx)?.objects.get_mut(object_idx)
     }
 
-    /// Count objects of a specific type across all rooms
-    pub fn count_objects_of_type(&self, object_type: &ObjectType) -> usize {
+    /// Count objects with a specific asset ID across all rooms
+    pub fn count_objects_with_asset(&self, asset_id: u64) -> usize {
         self.rooms.iter()
             .flat_map(|room| room.objects.iter())
-            .filter(|obj| std::mem::discriminant(&obj.object_type) == std::mem::discriminant(object_type))
+            .filter(|obj| obj.asset_id == asset_id)
             .count()
     }
 

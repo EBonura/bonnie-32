@@ -239,7 +239,7 @@ impl QColor {
         }
     }
 
-    fn from_color15_lab(c: Color15, opts: &QuantizeOptions) -> Self {
+    fn from_color15_lab(c: Color15, _opts: &QuantizeOptions) -> Self {
         let lab = LabColor::from_color15(&c);
 
         // Calculate saturation from original RGB

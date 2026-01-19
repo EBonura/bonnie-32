@@ -294,6 +294,11 @@ pub fn load_level<P: AsRef<Path>>(path: P) -> Result<Level, LevelError> {
     // Validate level to prevent malicious files
     validate_level(&level)?;
 
+    // Strip legacy objects (objects without asset_id) - migration to asset-based system
+    for room in &mut level.rooms {
+        room.objects.retain(|obj| obj.asset_id != 0);
+    }
+
     // Recalculate bounds for all rooms (not serialized)
     for room in &mut level.rooms {
         room.recalculate_bounds();
@@ -331,6 +336,11 @@ pub fn load_level_from_str(s: &str) -> Result<Level, LevelError> {
 
     // Validate level to prevent malicious files
     validate_level(&level)?;
+
+    // Strip legacy objects (objects without asset_id) - migration to asset-based system
+    for room in &mut level.rooms {
+        room.objects.retain(|obj| obj.asset_id != 0);
+    }
 
     for room in &mut level.rooms {
         room.recalculate_bounds();

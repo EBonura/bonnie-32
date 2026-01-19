@@ -131,7 +131,7 @@ pub fn project(v: Vec3, width: usize, height: usize) -> Vec3 {
     Vec3 {
         x: (v.x * us) / denom * vs + (width as f32 / 2.0),
         y: (v.y * us) / denom * vs + (height as f32 / 2.0),
-        z: v.z, // Store ORIGINAL camera-space Z for perspective-correct interpolation
+        z: denom, // Store the actual perspective divide value (z+DISTANCE) for correct interpolation
     }
 }
 

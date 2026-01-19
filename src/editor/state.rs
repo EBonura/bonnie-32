@@ -1,9 +1,11 @@
 //! Editor state and data
 
 use std::path::PathBuf;
-use crate::world::{Level, ObjectType, SpawnPointType, LevelObject, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
+use crate::world::{Level, AssetInstance, TextureRef, FaceNormalMode, UvProjection, SplitDirection, HorizontalFace, VerticalFace};
 use crate::rasterizer::{Camera, Vec3, Vec2, Texture, Texture15, RasterSettings, Color, BlendMode, Color15};
 use crate::texture::{TextureLibrary, TextureEditorState};
+use crate::asset::AssetLibrary;
+use crate::modeler::AssetBrowser;
 use super::texture_pack::TexturePack;
 
 /// Frame timing breakdown for editor performance debugging
@@ -604,16 +606,13 @@ pub struct EditorState {
     /// Portals need recalculation (set when geometry changes)
     pub portals_dirty: bool,
 
-    /// Selected object type to place (when PlaceObject tool is active)
-    pub selected_object_type: ObjectType,
-
     /// Player property editing state (for click-to-edit numeric fields)
     /// Field IDs: 0=radius, 1=height, 2=step, 3=walk, 4=run, 5=gravity, 6=camera_distance, 7=camera_height
     pub player_prop_editing: Option<usize>,
     pub player_prop_buffer: String,
 
-    /// Clipboard for copy/paste operations (stores copied object)
-    pub clipboard: Option<LevelObject>,
+    /// Clipboard for copy/paste operations (stores copied asset instance)
+    pub clipboard: Option<AssetInstance>,
 
     /// Face clipboard for copy/paste face properties (texture, UV, colors, etc.)
     pub face_clipboard: Option<FaceClipboard>,
@@ -666,6 +665,15 @@ pub struct EditorState {
     pub textures_section_expanded: bool,
     pub properties_section_expanded: bool,
 
+    /// Asset library for object placement
+    pub asset_library: AssetLibrary,
+
+    /// Currently selected asset for placement (when PlaceObject tool is active)
+    /// This is the asset name. All objects are now asset-based.
+    pub selected_asset: Option<String>,
+
+    /// Asset browser modal for selecting assets to place
+    pub asset_browser: AssetBrowser,
 }
 
 impl EditorState {
@@ -801,7 +809,6 @@ impl EditorState {
             skybox_selected_mountain_range: 0,
             hidden_rooms: std::collections::HashSet::new(),
             portals_dirty: true, // Recalculate on first frame
-            selected_object_type: ObjectType::Spawn(SpawnPointType::PlayerStart), // Default to player start
             player_prop_editing: None,
             player_prop_buffer: String::new(),
             clipboard: None,
@@ -830,6 +837,18 @@ impl EditorState {
             // Collapsible sections (both can be open simultaneously)
             textures_section_expanded: true,
             properties_section_expanded: true,
+
+            // Asset library for object placement
+            asset_library: {
+                let mut lib = AssetLibrary::new();
+                if let Err(e) = lib.discover() {
+                    eprintln!("Failed to discover assets: {}", e);
+                }
+                lib
+            },
+            // Auto-select first available asset (populated below after library is built)
+            selected_asset: None,
+            asset_browser: AssetBrowser::default(),
         }
     }
 

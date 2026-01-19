@@ -132,7 +132,7 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
     }
 
     // Second pass: apply movements (mutable)
-    let mirror_settings = state.mirror_settings;
+    let mirror_settings = state.current_mirror_settings();
     if let Some(mesh) = state.mesh_mut() {
         let mut already_moved = std::collections::HashSet::new();
         for (idx, old_pos, new_pos) in &movements {
@@ -190,7 +190,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
 
     // Apply the updated positions
     let mut made_changes = false;
-    let mirror_settings = state.mirror_settings;
+    let mirror_settings = state.current_mirror_settings();
     if let Some(mesh) = state.mesh_mut() {
         match result {
             DragUpdateResult::Move { positions, .. } => {
@@ -943,12 +943,12 @@ pub fn draw_modeler_viewport_ext(
     }
 
     // Draw mirror plane indicator when mirror mode is enabled
-    if state.mirror_settings.enabled {
+    if state.current_mirror_settings().enabled {
         let mirror_color = RasterColor::new(255, 100, 100); // Pinkish-red for mirror plane
         let extent = crate::world::SECTOR_SIZE * 5.0; // Large enough to be visible
 
         // Draw cross lines along the mirror plane
-        match state.mirror_settings.axis {
+        match state.current_mirror_settings().axis {
             Axis::X => {
                 // X mirror: plane at X=0, draw vertical line in YZ plane
                 draw_3d_line_clipped(fb, &state.camera, Vec3::new(0.0, -extent, 0.0), Vec3::new(0.0, extent, 0.0), mirror_color);
@@ -967,180 +967,155 @@ pub fn draw_modeler_viewport_ext(
         }
     }
 
-    // Render all visible objects
-    // Use RGB555 or RGB888 based on settings
+    // Render all visible objects using combined geometry
+    // This ensures proper depth sorting across all objects (painter's algorithm and z-buffer)
     let use_rgb555 = state.raster_settings.use_rgb555;
 
-    // Log once per render frame (use frame counter if available, or static counter)
-    static mut FRAME_COUNTER: u32 = 0;
-    let frame_num = unsafe { FRAME_COUNTER += 1; FRAME_COUNTER };
-
-    // Only log every 60 frames to reduce spam
-    let should_log = frame_num % 60 == 0;
-
     // Fallback CLUT for objects with no assigned CLUT
-    let fallback_clut = state.project.clut_pool.first_id()
-        .and_then(|id| state.project.clut_pool.get(id));
+    let fallback_clut = state.clut_pool.first_id()
+        .and_then(|id| state.clut_pool.get(id));
 
-    for (obj_idx, obj) in state.project.objects.iter().enumerate() {
+    // Collect all geometry from all objects into combined lists
+    let mut all_vertices: Vec<RasterVertex> = Vec::new();
+    let mut all_faces: Vec<RasterFace> = Vec::new();
+    let mut all_textures: Vec<crate::rasterizer::Texture> = Vec::new();
+    let mut all_textures_15: Vec<crate::rasterizer::Texture15> = Vec::new();
+    let mut all_blend_modes: Vec<crate::rasterizer::BlendMode> = Vec::new();
+
+    // Track if any object needs backface culling disabled
+    let mut any_double_sided = false;
+
+    for (obj_idx, obj) in state.objects().iter().enumerate() {
         // Skip hidden objects
         if !obj.visible {
             continue;
         }
 
-        // Get this object's CLUT from the shared pool (per-object atlas.default_clut)
+        if obj.double_sided {
+            any_double_sided = true;
+        }
+
+        // Get this object's CLUT from the shared pool
         let obj_clut = if obj.atlas.default_clut.is_valid() {
-            state.project.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
+            state.clut_pool.get(obj.atlas.default_clut).or(fallback_clut)
         } else {
             fallback_clut
         };
 
-        if should_log {
-            // Log first 8 indices to see if atlas data differs between objects
-            let indices_preview: Vec<u8> = obj.atlas.indices.iter().take(8).copied().collect();
-            eprintln!("[DEBUG render] obj[{}] '{}': atlas {}x{} depth={:?} clut={:?} indices[0..8]={:?}",
-                obj_idx, obj.name, obj.atlas.width, obj.atlas.height, obj.atlas.depth,
-                obj.atlas.default_clut, indices_preview);
+        // Convert this object's atlas to rasterizer texture
+        let texture_idx = all_textures.len();
+        if let Some(clut) = obj_clut {
+            all_textures.push(obj.atlas.to_raster_texture(clut, &format!("atlas_{}", obj_idx)));
+            if use_rgb555 {
+                all_textures_15.push(obj.atlas.to_texture15(clut, &format!("atlas_{}", obj_idx)));
+            }
         }
 
-        // Convert this object's atlas to rasterizer texture using its own CLUT
-        let atlas_texture = obj_clut.map(|c| obj.atlas.to_raster_texture(c, &format!("atlas_{}", obj_idx)));
-        let atlas_texture_15 = if use_rgb555 {
-            obj_clut.map(|c| obj.atlas.to_texture15(c, &format!("atlas_{}", obj_idx)))
-        } else {
-            None
-        };
-
-        // Use project mesh directly (mesh() accessor returns selected object's mesh)
         let mesh = &obj.mesh;
 
         // Dim non-selected objects slightly
-        let base_color = if state.project.selected_object == Some(obj_idx) {
+        let base_color = if state.selected_object == Some(obj_idx) {
             180u8
         } else {
             140u8
         };
 
-        let vertices: Vec<RasterVertex> = mesh.vertices.iter().map(|v| {
-            RasterVertex {
+        // Track vertex offset for this object
+        let vertex_offset = all_vertices.len();
+
+        // Add vertices from this object
+        for v in &mesh.vertices {
+            all_vertices.push(RasterVertex {
                 pos: v.pos,
                 normal: v.normal,
                 uv: v.uv,
                 color: RasterColor::new(base_color, base_color, base_color),
                 bone_index: None,
-            }
-        }).collect();
+            });
+        }
 
-        // Triangulate n-gon faces for rendering (all use texture 0 - the atlas)
-        let mut faces: Vec<RasterFace> = Vec::new();
+        // Add mirrored vertices if mirror mode is enabled for selected object
+        let mirror_vertex_offset = if state.current_mirror_settings().enabled && state.selected_object == Some(obj_idx) {
+            let offset = all_vertices.len();
+            for v in &mesh.vertices {
+                all_vertices.push(RasterVertex {
+                    pos: state.current_mirror_settings().mirror_position(v.pos),
+                    normal: state.current_mirror_settings().mirror_normal(v.normal),
+                    uv: v.uv,
+                    color: RasterColor::new(
+                        (base_color as f32 * 0.85) as u8,
+                        (base_color as f32 * 0.85) as u8,
+                        (base_color as f32 * 0.85) as u8,
+                    ),
+                    bone_index: None,
+                });
+            }
+            Some(offset)
+        } else {
+            None
+        };
+
+        // Add faces from this object (with adjusted vertex indices and texture ID)
         for edit_face in &mesh.faces {
             for [v0, v1, v2] in edit_face.triangulate() {
-                faces.push(RasterFace {
-                    v0,
-                    v1,
-                    v2,
-                    texture_id: Some(0),
+                all_faces.push(RasterFace {
+                    v0: vertex_offset + v0,
+                    v1: vertex_offset + v1,
+                    v2: vertex_offset + v2,
+                    texture_id: Some(texture_idx),
                     black_transparent: edit_face.black_transparent,
                     blend_mode: edit_face.blend_mode,
                 });
+                all_blend_modes.push(edit_face.blend_mode);
+
+                // Add mirrored face if mirror mode enabled
+                if let Some(mirror_offset) = mirror_vertex_offset {
+                    all_faces.push(RasterFace {
+                        v0: mirror_offset + v0,
+                        v1: mirror_offset + v2,  // Swap to reverse winding
+                        v2: mirror_offset + v1,
+                        texture_id: Some(texture_idx),
+                        black_transparent: edit_face.black_transparent,
+                        blend_mode: edit_face.blend_mode,
+                    });
+                    all_blend_modes.push(edit_face.blend_mode);
+                }
             }
         }
+    }
 
-        if !vertices.is_empty() && !faces.is_empty() {
-            // Collect per-face blend modes
-            let blend_modes: Vec<crate::rasterizer::BlendMode> = faces.iter()
-                .map(|f| f.blend_mode)
-                .collect();
+    // Render all combined geometry in one pass
+    if !all_vertices.is_empty() && !all_faces.is_empty() {
+        // Use combined raster settings
+        let combined_settings = if any_double_sided {
+            let mut settings = state.raster_settings.clone();
+            settings.backface_cull = false;
+            settings.backface_wireframe = false;
+            settings
+        } else {
+            state.raster_settings.clone()
+        };
 
-            if use_rgb555 {
-                // RGB555 rendering path
-                // Per-face blend modes + per-pixel STP bit (PS1-authentic)
-                if let Some(ref tex15) = atlas_texture_15 {
-                    let textures_15 = [tex15.clone()];
-                    render_mesh_15(
-                        fb,
-                        &vertices,
-                        &faces,
-                        &textures_15,
-                        Some(&blend_modes),
-                        &state.camera,
-                        &state.raster_settings,
-                        None,
-                    );
-                }
-            } else {
-                // RGB888 rendering path (original)
-                if let Some(ref tex) = atlas_texture {
-                    let textures = [tex.clone()];
-                    render_mesh(
-                        fb,
-                        &vertices,
-                        &faces,
-                        &textures,
-                        &state.camera,
-                        &state.raster_settings,
-                    );
-                }
-            }
-
-            // Render mirrored geometry if mirror mode is enabled
-            if state.mirror_settings.enabled {
-                // Create mirrored vertices
-                let mirrored_vertices: Vec<RasterVertex> = vertices.iter().map(|v| {
-                    RasterVertex {
-                        pos: state.mirror_settings.mirror_position(v.pos),
-                        normal: state.mirror_settings.mirror_normal(v.normal),
-                        uv: v.uv,
-                        // Slightly dim the mirrored side to indicate it's generated
-                        color: RasterColor::new(
-                            (base_color as f32 * 0.85) as u8,
-                            (base_color as f32 * 0.85) as u8,
-                            (base_color as f32 * 0.85) as u8,
-                        ),
-                        bone_index: None,
-                    }
-                }).collect();
-
-                // Create mirrored faces with reversed winding order
-                let mirrored_faces: Vec<RasterFace> = faces.iter().map(|f| {
-                    RasterFace {
-                        v0: f.v0,
-                        v1: f.v2,  // Swap v1 and v2 to reverse winding
-                        v2: f.v1,
-                        texture_id: f.texture_id,
-                        black_transparent: f.black_transparent,
-                        blend_mode: f.blend_mode,
-                    }
-                }).collect();
-
-                if use_rgb555 {
-                    if let Some(ref tex15) = atlas_texture_15 {
-                        let textures_15 = [tex15.clone()];
-                        render_mesh_15(
-                            fb,
-                            &mirrored_vertices,
-                            &mirrored_faces,
-                            &textures_15,
-                            Some(&blend_modes),
-                            &state.camera,
-                            &state.raster_settings,
-                            None,
-                        );
-                    }
-                } else {
-                    if let Some(ref tex) = atlas_texture {
-                        let textures = [tex.clone()];
-                        render_mesh(
-                            fb,
-                            &mirrored_vertices,
-                            &mirrored_faces,
-                            &textures,
-                            &state.camera,
-                            &state.raster_settings,
-                        );
-                    }
-                }
-            }
+        if use_rgb555 {
+            render_mesh_15(
+                fb,
+                &all_vertices,
+                &all_faces,
+                &all_textures_15,
+                Some(&all_blend_modes),
+                &state.camera,
+                &combined_settings,
+                None,
+            );
+        } else {
+            render_mesh(
+                fb,
+                &all_vertices,
+                &all_faces,
+                &all_textures,
+                &state.camera,
+                &combined_settings,
+            );
         }
     }
 
@@ -1917,6 +1892,11 @@ fn find_hovered_element(
     let mesh = state.mesh();
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
+    // Check if current object is double-sided (allow selecting backfaces)
+    let double_sided = state.selected_object()
+        .map(|obj| obj.double_sided)
+        .unwrap_or(false);
+
     const VERTEX_THRESHOLD: f32 = 6.0;
     const EDGE_THRESHOLD: f32 = 4.0;
 
@@ -1964,13 +1944,13 @@ fn find_hovered_element(
         }
     }
 
-    // Check vertices first (highest priority) - only if on front-facing face (unless X-ray mode)
+    // Check vertices first (highest priority) - only if on front-facing face (unless X-ray or double-sided)
     for (idx, vert) in mesh.vertices.iter().enumerate() {
-        if !state.xray_mode && !vertex_on_front_face[idx] {
-            continue; // Skip vertices only on backfaces (X-ray allows selecting through)
+        if !state.xray_mode && !double_sided && !vertex_on_front_face[idx] {
+            continue; // Skip vertices only on backfaces (X-ray/double-sided allows selecting through)
         }
         // Skip vertices on the non-editable side when mirror is enabled
-        if !state.mirror_settings.is_editable_side(vert.pos) {
+        if !state.current_mirror_settings().is_editable_side(vert.pos) {
             continue;
         }
         if let Some((sx, sy)) = world_to_screen_with_ortho(
@@ -2000,14 +1980,14 @@ fn find_hovered_element(
                 // Normalize edge order for consistency
                 let edge = if v0_idx < v1_idx { (v0_idx, v1_idx) } else { (v1_idx, v0_idx) };
 
-                // Skip edges only on backfaces (unless X-ray mode)
-                if !state.xray_mode && !edge_on_front_face.contains(&edge) {
+                // Skip edges only on backfaces (unless X-ray or double-sided)
+                if !state.xray_mode && !double_sided && !edge_on_front_face.contains(&edge) {
                     continue;
                 }
 
                 if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
                     // Skip edges with any vertex on non-editable side when mirror is enabled
-                    if !state.mirror_settings.is_editable_side(v0.pos) || !state.mirror_settings.is_editable_side(v1.pos) {
+                    if !state.current_mirror_settings().is_editable_side(v0.pos) || !state.current_mirror_settings().is_editable_side(v1.pos) {
                         continue;
                     }
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
@@ -2032,7 +2012,7 @@ fn find_hovered_element(
             // Skip faces with any vertex on non-editable side when mirror is enabled
             let face_on_editable_side = face.vertices.iter().all(|&vi| {
                 mesh.vertices.get(vi)
-                    .map(|v| state.mirror_settings.is_editable_side(v.pos))
+                    .map(|v| state.current_mirror_settings().is_editable_side(v.pos))
                     .unwrap_or(false)
             });
             if !face_on_editable_side {
@@ -2053,8 +2033,8 @@ fn find_hovered_element(
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
-                        if !state.xray_mode && signed_area <= 0.0 {
-                            continue; // Backface - skip (X-ray allows selecting through)
+                        if !state.xray_mode && !double_sided && signed_area <= 0.0 {
+                            continue; // Backface - skip (X-ray/double-sided allows selecting through)
                         }
 
                         // Check if mouse is inside the triangle
@@ -2441,7 +2421,7 @@ fn handle_move_gizmo(
                             .map(|(idx, start_pos)| (*idx, *start_pos + delta))
                             .collect();
 
-                        let mirror_settings = state.mirror_settings;
+                        let mirror_settings = state.current_mirror_settings();
                         if let Some(mesh) = state.mesh_mut() {
                             for (idx, mut new_pos) in updates {
                                 if snap_enabled {
@@ -2477,7 +2457,7 @@ fn handle_move_gizmo(
                     let snap_disabled = is_key_down(KeyCode::Z);
                     let snap_enabled = state.snap_settings.enabled && !snap_disabled;
                     let snap_settings = state.snap_settings.clone();
-                    let mirror_settings = state.mirror_settings;
+                    let mirror_settings = state.current_mirror_settings();
                     if let Some(mesh) = state.mesh_mut() {
                         for (vert_idx, new_pos) in positions {
                             if let Some(vert) = mesh.vertices.get_mut(vert_idx) {
