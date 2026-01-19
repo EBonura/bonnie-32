@@ -168,7 +168,7 @@ impl std::fmt::Display for TextureError {
 /// - RGB555 color palette (CLUT)
 /// - Size and depth information
 ///
-/// Stored as `.ron` files with Brotli compression in `assets/textures-user/`
+/// Stored as `.ron` files with Brotli compression in `assets/userdata/textures/`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserTexture {
     /// Stable unique identifier (survives edits and renames)

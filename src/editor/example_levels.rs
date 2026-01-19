@@ -20,7 +20,7 @@ pub struct ExampleLevelInfo {
 /// Discover all levels in the levels directory (native)
 #[cfg(not(target_arch = "wasm32"))]
 pub fn discover_examples() -> Vec<ExampleLevelInfo> {
-    let levels_dir = PathBuf::from("assets/levels");
+    let levels_dir = PathBuf::from("assets/userdata/levels");
     let mut levels = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&levels_dir) {
@@ -53,7 +53,7 @@ pub async fn load_example_list() -> Vec<ExampleLevelInfo> {
     use macroquad::prelude::*;
 
     // Load and parse manifest
-    let manifest = match load_string("assets/levels/manifest.txt").await {
+    let manifest = match load_string("assets/userdata/levels/manifest.txt").await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to load levels manifest: {}", e);
@@ -73,7 +73,7 @@ pub async fn load_example_list() -> Vec<ExampleLevelInfo> {
             .strip_suffix(".ron")
             .unwrap_or(line)
             .to_string();
-        let path = PathBuf::from(format!("assets/levels/{}", line));
+        let path = PathBuf::from(format!("assets/userdata/levels/{}", line));
 
         levels.push(ExampleLevelInfo { name, path });
     }

@@ -1,7 +1,7 @@
 //! Texture library - discovery and caching of user textures
 //!
 //! Manages the collection of user-created indexed textures stored in
-//! `assets/textures-user/`. Handles both native filesystem discovery
+//! `assets/userdata/textures/`. Handles both native filesystem discovery
 //! and WASM manifest-based loading.
 
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::user_texture::{TextureError, UserTexture};
 
 /// Directory where user textures are stored
-pub const TEXTURES_USER_DIR: &str = "assets/textures-user";
+pub const TEXTURES_USER_DIR: &str = "assets/userdata/textures";
 
 /// Manifest file for WASM texture loading
 pub const MANIFEST_FILE: &str = "manifest.txt";
@@ -18,7 +18,7 @@ pub const MANIFEST_FILE: &str = "manifest.txt";
 /// A library of user-created textures
 ///
 /// Provides discovery, loading, and caching of textures from the
-/// `assets/textures-user/` directory.
+/// `assets/userdata/textures/` directory.
 #[derive(Debug, Default)]
 pub struct TextureLibrary {
     /// Loaded textures keyed by name (without extension)

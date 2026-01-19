@@ -141,10 +141,10 @@ fn build_web(dev: bool) -> Result<()> {
     copy_dir_recursive_filtered(&root.join("assets"), &dist.join("assets"), EXCLUDED_ASSET_DIRS)?;
 
     // Regenerate texture manifest without excluded packs
-    regenerate_texture_manifest(&dist.join("assets/textures"))?;
+    regenerate_texture_manifest(&dist.join("assets/samples/textures"))?;
 
     // Generate manifest for user textures (for WASM loading)
-    regenerate_user_texture_manifest(&dist.join("assets/textures-user"))?;
+    regenerate_user_texture_manifest(&dist.join("assets/userdata/textures"))?;
 
     // Apply dev modifications if requested
     if dev {

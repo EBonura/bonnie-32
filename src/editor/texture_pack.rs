@@ -48,10 +48,10 @@ impl TexturePack {
         }
     }
 
-    /// Discover all texture packs in the assets/textures directory (native only)
+    /// Discover all texture packs in the assets/samples/textures directory (native only)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover_all() -> Vec<Self> {
-        let textures_dir = PathBuf::from("assets/textures");
+        let textures_dir = PathBuf::from("assets/samples/textures");
         let mut packs = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(&textures_dir) {
@@ -84,7 +84,7 @@ impl TexturePack {
         use macroquad::prelude::*;
 
         // Load and parse manifest
-        let manifest = match load_string("assets/textures/manifest.txt").await {
+        let manifest = match load_string("assets/samples/textures/manifest.txt").await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("Failed to load texture manifest: {}", e);
@@ -111,7 +111,7 @@ impl TexturePack {
             if !textures.is_empty() {
                 packs.push(TexturePack {
                     name: pack_name.clone(),
-                    path: PathBuf::from(format!("assets/textures/{}", pack_name)),
+                    path: PathBuf::from(format!("assets/samples/textures/{}", pack_name)),
                     textures,
                 });
             }
@@ -162,7 +162,7 @@ fn parse_manifest(manifest: &str) -> Vec<(String, Vec<String>)> {
 /// Load a single texture from pack
 #[allow(dead_code)]
 async fn load_single_texture(pack_name: &str, filename: &str) -> Option<Texture> {
-    let tex_path = format!("assets/textures/{}/{}", pack_name, filename);
+    let tex_path = format!("assets/samples/textures/{}/{}", pack_name, filename);
     let tex_name = filename
         .strip_suffix(".png")
         .or_else(|| filename.strip_suffix(".PNG"))

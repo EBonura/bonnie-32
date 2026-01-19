@@ -598,9 +598,9 @@ f 1/1 2/2 3/3
 
     #[test]
     fn test_load_ps1_mesh_gen_files() {
-        // Test with all OBJ files in assets/meshes
+        // Test with all OBJ files in assets/samples/meshes
         let base_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/meshes");
+            .join("assets/samples/meshes");
 
         let mut count = 0;
         for entry in std::fs::read_dir(&base_path).expect("meshes dir should exist") {

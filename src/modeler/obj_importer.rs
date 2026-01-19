@@ -31,7 +31,7 @@ pub struct MeshInfo {
 /// Discover mesh files in a directory
 #[cfg(not(target_arch = "wasm32"))]
 pub fn discover_meshes() -> Vec<MeshInfo> {
-    let meshes_dir = PathBuf::from("assets/meshes");
+    let meshes_dir = PathBuf::from("assets/samples/meshes");
     let mut meshes = Vec::new();
 
     // Helper to find associated textures for an OBJ file
@@ -116,7 +116,7 @@ pub async fn load_mesh_list() -> Vec<MeshInfo> {
     use macroquad::prelude::*;
 
     // Load and parse manifest
-    let manifest = match load_string("assets/meshes/manifest.txt").await {
+    let manifest = match load_string("assets/samples/meshes/manifest.txt").await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to load meshes manifest: {}", e);
@@ -136,7 +136,7 @@ pub async fn load_mesh_list() -> Vec<MeshInfo> {
             .strip_suffix(".obj")
             .unwrap_or(line)
             .to_string();
-        let path = PathBuf::from(format!("assets/meshes/{}", line));
+        let path = PathBuf::from(format!("assets/samples/meshes/{}", line));
 
         // We don't have vertex/face counts until we load the mesh
         // For WASM, texture path is discovered at load time
@@ -465,7 +465,7 @@ pub fn draw_obj_importer(
     } else if has_selection {
         draw_text("Loading preview...", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
     } else if browser.meshes.is_empty() {
-        draw_text("No meshes found in assets/meshes/", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
+        draw_text("No meshes found in assets/samples/meshes/", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
         draw_text("Add OBJ files to that folder!", preview_rect.x + 20.0, preview_rect.y + 60.0, 14.0, Color::from_rgba(80, 80, 80, 255));
     } else {
         draw_text("Select a mesh to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));

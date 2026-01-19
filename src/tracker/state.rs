@@ -123,11 +123,11 @@ const SOUNDFONT_NAME: &str = "TimGM6mb.sf2";
 fn find_soundfont() -> Option<PathBuf> {
     let candidates = [
         // Development: relative to cwd
-        PathBuf::from(format!("assets/soundfonts/{}", SOUNDFONT_NAME)),
+        PathBuf::from(format!("assets/runtime/soundfonts/{}", SOUNDFONT_NAME)),
         // Deployed: next to executable
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("assets/soundfonts").join(SOUNDFONT_NAME))).unwrap_or_default(),
+        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("assets/runtime/soundfonts").join(SOUNDFONT_NAME))).unwrap_or_default(),
         // macOS app bundle: Contents/Resources
-        std::env::current_exe().ok().and_then(|p| p.parent().and_then(|d| d.parent()).map(|d| d.join("Resources/assets/soundfonts").join(SOUNDFONT_NAME))).unwrap_or_default(),
+        std::env::current_exe().ok().and_then(|p| p.parent().and_then(|d| d.parent()).map(|d| d.join("Resources/assets/runtime/soundfonts").join(SOUNDFONT_NAME))).unwrap_or_default(),
         // Fallback: just the filename in cwd
         PathBuf::from(SOUNDFONT_NAME),
     ];

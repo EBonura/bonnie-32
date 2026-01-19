@@ -150,7 +150,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
             // Open file dialog to load .ron song file
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Song", &["ron"])
-                .set_directory("assets/songs")
+                .set_directory("assets/userdata/songs")
                 .pick_file()
             {
                 if let Err(e) = state.load_from_file(&path) {
@@ -178,7 +178,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
         if toolbar.icon_button(ctx, icon::SAVE_AS, icon_font, "Save As") {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Song", &["ron"])
-                .set_directory("assets/songs")
+                .set_directory("assets/userdata/songs")
                 .set_file_name(&format!("{}.ron", state.song.name))
                 .save_file()
             {

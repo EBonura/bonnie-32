@@ -1,6 +1,6 @@
 //! Asset Library - Discovery and caching of assets
 //!
-//! Manages the collection of assets stored in `assets/assets/`.
+//! Manages the collection of assets stored in `assets/userdata/assets/`.
 //! Handles both native filesystem discovery and WASM manifest-based loading.
 
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::asset::{Asset, AssetError};
 
 /// Directory where assets are stored
-pub const ASSETS_DIR: &str = "assets/assets";
+pub const ASSETS_DIR: &str = "assets/userdata/assets";
 
 /// Manifest file for WASM asset loading
 pub const MANIFEST_FILE: &str = "manifest.txt";
@@ -17,7 +17,7 @@ pub const MANIFEST_FILE: &str = "manifest.txt";
 /// A library of assets
 ///
 /// Provides discovery, loading, and caching of assets from the
-/// `assets/assets/` directory.
+/// `assets/userdata/assets/` directory.
 #[derive(Debug, Default)]
 pub struct AssetLibrary {
     /// Loaded assets keyed by name (without extension)

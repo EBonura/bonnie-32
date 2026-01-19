@@ -1,8 +1,8 @@
 //! Texture Palette - Grid of available textures with folder selection
 //!
 //! Supports two modes:
-//! - Source PNGs: Read-only textures from assets/textures/
-//! - User Textures: Editable indexed textures from assets/textures-user/
+//! - Source PNGs: Read-only textures from assets/samples/textures/
+//! - User Textures: Editable indexed textures from assets/userdata/textures/
 
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, icon, draw_icon_centered};

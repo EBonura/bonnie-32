@@ -7,7 +7,7 @@
 //! ## Overview
 //!
 //! - **UserTexture**: The core texture asset type containing palette indices and a CLUT
-//! - **TextureLibrary**: Discovery and caching of user textures from `assets/textures-user/`
+//! - **TextureLibrary**: Discovery and caching of user textures from `assets/userdata/textures/`
 //!
 //! ## Size Rules
 //!

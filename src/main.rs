@@ -44,9 +44,9 @@ fn window_conf() -> Conf {
         #[cfg(not(target_arch = "wasm32"))]
         fullscreen: true,
         icon: Some(miniquad::conf::Icon {
-            small: *include_bytes!("../assets/icons/icon16.rgba"),
-            medium: *include_bytes!("../assets/icons/icon32.rgba"),
-            big: *include_bytes!("../assets/icons/icon64.rgba"),
+            small: *include_bytes!("../assets/runtime/icons/icon16.rgba"),
+            medium: *include_bytes!("../assets/runtime/icons/icon32.rgba"),
+            big: *include_bytes!("../assets/runtime/icons/icon64.rgba"),
         }),
         ..Default::default()
     }
@@ -80,7 +80,7 @@ async fn main() {
     let mut ui_ctx = UiContext::new();
 
     // Load icon font (Lucide)
-    let icon_font = match load_ttf_font("assets/fonts/lucide.ttf").await {
+    let icon_font = match load_ttf_font("assets/runtime/fonts/lucide.ttf").await {
         Ok(font) => {
             println!("Loaded Lucide icon font");
             Some(font)
@@ -92,7 +92,7 @@ async fn main() {
     };
 
     // Load logo texture
-    let logo_texture = match load_texture("assets/branding/logo.png").await {
+    let logo_texture = match load_texture("assets/runtime/branding/logo.png").await {
         Ok(tex) => {
             tex.set_filter(FilterMode::Linear);
             println!("Loaded logo texture");
@@ -398,7 +398,7 @@ async fn main() {
                             if let Some(level) = ws.example_browser.preview_level.take() {
                                 let (name, path) = ws.example_browser.selected_example()
                                     .map(|e| (e.name.clone(), e.path.clone()))
-                                    .unwrap_or_else(|| ("example".to_string(), PathBuf::from("assets/levels/untitled.ron")));
+                                    .unwrap_or_else(|| ("example".to_string(), PathBuf::from("assets/userdata/levels/untitled.ron")));
                                 ws.editor_layout.apply_config(&level.editor_layout);
                                 ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
                                 ws.editor_state.grid_offset_y = level.editor_layout.grid_offset_y;
@@ -436,7 +436,7 @@ async fn main() {
                             ws.editor_state.orbit_azimuth = new_level.editor_layout.orbit_azimuth;
                             ws.editor_state.orbit_elevation = new_level.editor_layout.orbit_elevation;
                             ws.editor_state.sync_camera_from_orbit();
-                            ws.editor_state.load_level(new_level, PathBuf::from("assets/levels/untitled.ron"));
+                            ws.editor_state.load_level(new_level, PathBuf::from("assets/userdata/levels/untitled.ron"));
                             ws.editor_state.current_file = None; // New level has no file yet
                             // Reset game state for the new level
                             app.game.reset_for_new_level();
@@ -545,7 +545,7 @@ async fn main() {
                             if let Some(asset) = ms.model_browser.preview_asset.take() {
                                 let path = ms.model_browser.selected_asset()
                                     .map(|a| a.path.clone())
-                                    .unwrap_or_else(|| PathBuf::from("assets/assets/untitled.ron"));
+                                    .unwrap_or_else(|| PathBuf::from("assets/userdata/assets/untitled.ron"));
                                 // Set the asset directly in the modeler
                                 ms.modeler_state.asset = asset;
                                 ms.modeler_state.selected_object = if ms.modeler_state.objects().is_empty() { None } else { Some(0) };
@@ -708,7 +708,7 @@ async fn main() {
                         ObjImportAction::OpenMesh => {
                             let path = ms.obj_importer.selected_mesh()
                                 .map(|m| m.path.clone())
-                                .unwrap_or_else(|| PathBuf::from("assets/meshes/untitled.obj"));
+                                .unwrap_or_else(|| PathBuf::from("assets/samples/meshes/untitled.obj"));
                             let scale = ms.obj_importer.import_scale;
                             let flip_normals = ms.obj_importer.flip_normals;
                             let flip_h = ms.obj_importer.flip_horizontal;
@@ -1050,7 +1050,7 @@ async fn main() {
 
 /// Find the next available level filename with format "level_001", "level_002", etc.
 fn next_available_level_name() -> PathBuf {
-    let levels_dir = PathBuf::from("assets/levels");
+    let levels_dir = PathBuf::from("assets/userdata/levels");
 
     // Find the highest existing level_XXX number
     let mut highest = 0;
@@ -1176,7 +1176,7 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
                 ws.editor_state.orbit_azimuth,
                 ws.editor_state.orbit_elevation,
             );
-            let default_dir = PathBuf::from("assets/levels");
+            let default_dir = PathBuf::from("assets/userdata/levels");
             let _ = std::fs::create_dir_all(&default_dir);
 
             let dialog = rfd::FileDialog::new()
@@ -1203,7 +1203,7 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
         }
         #[cfg(not(target_arch = "wasm32"))]
         EditorAction::PromptLoad => {
-            let default_dir = PathBuf::from("assets/levels");
+            let default_dir = PathBuf::from("assets/userdata/levels");
             let _ = std::fs::create_dir_all(&default_dir);
 
             let dialog = rfd::FileDialog::new()

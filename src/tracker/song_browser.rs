@@ -217,7 +217,7 @@ impl SongBrowser {
             }
         } else if self.songs.is_empty() {
             draw_text("No songs found", info_rect.x + 12.0, info_rect.y + 30.0, 16.0, TEXT_DIM);
-            draw_text("in assets/songs/", info_rect.x + 12.0, info_rect.y + 52.0, 14.0, TEXT_DIM);
+            draw_text("in assets/userdata/songs/", info_rect.x + 12.0, info_rect.y + 52.0, 14.0, TEXT_DIM);
         } else {
             draw_text("Select a song", info_rect.x + 12.0, info_rect.y + 30.0, 16.0, TEXT_DIM);
             draw_text("to preview", info_rect.x + 12.0, info_rect.y + 52.0, 14.0, TEXT_DIM);
@@ -270,10 +270,10 @@ impl SongBrowser {
     }
 }
 
-/// Discover songs in the assets/songs/ directory
+/// Discover songs in the assets/userdata/songs/ directory
 #[cfg(not(target_arch = "wasm32"))]
 pub fn discover_songs() -> Vec<SongInfo> {
-    let songs_dir = std::path::Path::new("assets/songs");
+    let songs_dir = std::path::Path::new("assets/userdata/songs");
     let mut songs = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(songs_dir) {
@@ -297,7 +297,7 @@ pub fn discover_songs() -> Vec<SongInfo> {
 
 /// Generate the next available song filename (song_001.ron, song_002.ron, etc.)
 pub fn next_available_song_name() -> PathBuf {
-    let songs_dir = PathBuf::from("assets/songs");
+    let songs_dir = PathBuf::from("assets/userdata/songs");
     let _ = std::fs::create_dir_all(&songs_dir);
 
     let mut highest = 0;
@@ -324,7 +324,7 @@ pub fn next_available_song_name() -> PathBuf {
 pub async fn load_song_list() -> Vec<SongInfo> {
     use macroquad::prelude::*;
 
-    let manifest = match load_string("assets/songs/manifest.txt").await {
+    let manifest = match load_string("assets/userdata/songs/manifest.txt").await {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -336,7 +336,7 @@ pub async fn load_song_list() -> Vec<SongInfo> {
             continue;
         }
         let name = line.strip_suffix(".ron").unwrap_or(line).to_string();
-        let path = PathBuf::from(format!("assets/songs/{}", line));
+        let path = PathBuf::from(format!("assets/userdata/songs/{}", line));
         songs.push(SongInfo { name, path });
     }
     songs

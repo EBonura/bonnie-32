@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/logo.png" alt="BONNIE-32" width="500">
+  <img src="assets/runtime/branding/logo.png" alt="BONNIE-32" width="500">
 </p>
 
 <p align="center">

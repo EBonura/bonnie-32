@@ -611,7 +611,7 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
             let assets: Vec<_> = state.asset_library.names()
                 .map(|name| crate::modeler::AssetInfo {
                     name: name.to_string(),
-                    path: std::path::PathBuf::from(format!("assets/assets/{}.ron", name)),
+                    path: std::path::PathBuf::from(format!("assets/userdata/assets/{}.ron", name)),
                 })
                 .collect();
             state.asset_browser.open(assets);

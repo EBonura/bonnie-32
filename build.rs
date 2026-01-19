@@ -1,19 +1,18 @@
 //! Build script to generate manifests for WASM builds
 //!
-//! Scans assets/textures/, assets/levels/, assets/models/, and assets/meshes/
-//! and creates manifests listing all files, since WASM can't enumerate
-//! directories at runtime.
+//! Scans asset directories and creates manifests listing all files, since WASM
+//! can't enumerate directories at runtime.
 
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/textures");
-    println!("cargo:rerun-if-changed=assets/levels");
-    println!("cargo:rerun-if-changed=assets/models");
-    println!("cargo:rerun-if-changed=assets/meshes");
-    println!("cargo:rerun-if-changed=assets/songs");
+    println!("cargo:rerun-if-changed=assets/samples/textures");
+    println!("cargo:rerun-if-changed=assets/userdata/levels");
+    println!("cargo:rerun-if-changed=assets/userdata/assets");
+    println!("cargo:rerun-if-changed=assets/samples/meshes");
+    println!("cargo:rerun-if-changed=assets/userdata/songs");
 
     generate_texture_manifest();
     generate_levels_manifest();
@@ -24,8 +23,8 @@ fn main() {
 
 /// Generate manifest for texture packs
 fn generate_texture_manifest() {
-    let textures_dir = Path::new("assets/textures");
-    let manifest_path = Path::new("assets/textures/manifest.txt");
+    let textures_dir = Path::new("assets/samples/textures");
+    let manifest_path = Path::new("assets/samples/textures/manifest.txt");
 
     let mut manifest = String::new();
 
@@ -71,14 +70,17 @@ fn generate_texture_manifest() {
     }
 
     // Write manifest file
+    if let Some(parent) = manifest_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let mut file = fs::File::create(manifest_path).unwrap();
     file.write_all(manifest.as_bytes()).unwrap();
 }
 
 /// Generate manifest for levels (for WASM builds)
 fn generate_levels_manifest() {
-    let levels_dir = Path::new("assets/levels");
-    let manifest_path = Path::new("assets/levels/manifest.txt");
+    let levels_dir = Path::new("assets/userdata/levels");
+    let manifest_path = Path::new("assets/userdata/levels/manifest.txt");
 
     let mut manifest = String::new();
 
@@ -105,14 +107,17 @@ fn generate_levels_manifest() {
     }
 
     // Write manifest file
+    if let Some(parent) = manifest_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let mut file = fs::File::create(manifest_path).unwrap();
     file.write_all(manifest.as_bytes()).unwrap();
 }
 
-/// Generate manifest for models (for WASM builds)
+/// Generate manifest for models/assets (for WASM builds)
 fn generate_models_manifest() {
-    let models_dir = Path::new("assets/models");
-    let manifest_path = Path::new("assets/models/manifest.txt");
+    let models_dir = Path::new("assets/userdata/assets");
+    let manifest_path = Path::new("assets/userdata/assets/manifest.txt");
 
     let mut manifest = String::new();
 
@@ -140,14 +145,17 @@ fn generate_models_manifest() {
     }
 
     // Write manifest file
+    if let Some(parent) = manifest_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let mut file = fs::File::create(manifest_path).unwrap();
     file.write_all(manifest.as_bytes()).unwrap();
 }
 
 /// Generate manifest for meshes (for WASM builds)
 fn generate_meshes_manifest() {
-    let meshes_dir = Path::new("assets/meshes");
-    let manifest_path = Path::new("assets/meshes/manifest.txt");
+    let meshes_dir = Path::new("assets/samples/meshes");
+    let manifest_path = Path::new("assets/samples/meshes/manifest.txt");
 
     let mut manifest = String::new();
 
@@ -175,14 +183,17 @@ fn generate_meshes_manifest() {
     }
 
     // Write manifest file
+    if let Some(parent) = manifest_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let mut file = fs::File::create(manifest_path).unwrap();
     file.write_all(manifest.as_bytes()).unwrap();
 }
 
 /// Generate manifest for songs (for WASM builds)
 fn generate_songs_manifest() {
-    let songs_dir = Path::new("assets/songs");
-    let manifest_path = Path::new("assets/songs/manifest.txt");
+    let songs_dir = Path::new("assets/userdata/songs");
+    let manifest_path = Path::new("assets/userdata/songs/manifest.txt");
 
     let mut manifest = String::new();
 
