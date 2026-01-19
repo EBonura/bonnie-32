@@ -318,7 +318,7 @@
         var SoundfontCache = {
             data: null,
             loaded: false,
-            path: 'assets/soundfonts/TimGM6mb.sf2',
+            path: 'assets/runtime/soundfonts/TimGM6mb.sf2',
 
             isLoaded: function() {
                 return SoundfontCache.loaded ? 1 : 0;
@@ -415,7 +415,7 @@
                 TextureCache.timings.startTime = performance.now();
 
                 try {
-                    var manifest = await (await fetch('assets/textures/manifest.txt')).text();
+                    var manifest = await (await fetch('assets/samples/textures/manifest.txt')).text();
 
                     // Parse manifest
                     var paths = [];
@@ -426,7 +426,7 @@
                         if (line[0] === '[' && line[line.length - 1] === ']') {
                             currentPack = line.slice(1, -1);
                         } else if (currentPack) {
-                            paths.push('assets/textures/' + currentPack + '/' + line);
+                            paths.push('assets/samples/textures/' + currentPack + '/' + line);
                         }
                     });
 
