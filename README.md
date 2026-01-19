@@ -1,23 +1,32 @@
-# BONNIE-32
+<p align="center">
+  <img src="assets/branding/logo.png" alt="BONNIE-32" width="500">
+</p>
 
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/ebonura/bonnie-32/releases)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg)]()
+<p align="center">
+  <a href="https://github.com/ebonura/bonnie-32/releases"><img src="https://img.shields.io/badge/version-0.1.8-blue.svg" alt="Version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg" alt="Platform">
+</p>
 
-A fantasy console for making PS1-era 3D games.
+<p align="center">
+  <b>A Fantasy Console for PS1-Era 3D Games</b>
+</p>
 
-**[Try it in your browser](https://ebonura.github.io/bonnie-32)** | **[itch.io](https://bonnie-games.itch.io/)** | **[Buy Me a Coffee](https://buymeacoffee.com/bonniegames)**
+<p align="center">
+  <a href="https://ebonura.github.io/bonnie-32"><b>Try in Browser</b></a> ·
+  <a href="https://bonnie-games.itch.io/"><b>itch.io</b></a> ·
+  <a href="https://buymeacoffee.com/bonniegames"><b>Buy Me a Coffee</b></a>
+</p>
 
 ---
 
-## Why This Exists
+## What is BONNIE-32?
 
-I always imagined how a Souls-like would have been as if it were a late PS1 title. Tried Godot, Love2D, Picotron, even targeting real hardware, but nothing quite fit so I built my own.
+A complete toolkit for making low-poly 3D games targeting the PS1 aesthetic. Model, texture, compose music, and build levels in one place.
 
-BONNIE-32 is a fantasy console that gives you:
-- PS1 hardware constraints (320×240, affine textures, vertex snapping)
-- Integrated tools for modeling, texturing, music, and level design
-- Works the same in browser and native (Windows, macOS, Linux)
+Each tool is focused and lightweight, designed around the constraints of early 3D. The software rasterizer natively produces typical PS1 quirks: affine texture mapping, vertex snapping, limited color depth, and no sub-pixel precision.
+
+Built in Rust, runs on Windows, Mac, Linux, and browser.
 
 
 
@@ -35,40 +44,40 @@ The renderer is a software rasterizer written in Rust. It recreates PS1 visuals 
 
 The renderer implements these natively as actual rendering techniques, not post-processing.
 
-## Integrated tools
+## Integrated Tools
 
-Built-in editors for the full workflow:
+Use the tabs at the top to switch between tools:
 
-### World Editor
-<img src="docs/screenshot-world-editor.png" width="600" alt="World Editor">
+### World
+<img src="docs/screenshot-world-editor.png" width="600" alt="World">
 
-Room-based level editor with a Tomb Raider-style sector grid.
+Build levels using a sector-based editor in the style of the Tomb Raider Level Editor.
 - 2D grid views (top/front/side) and 3D preview
 - Texture painting with palette support
 - Portal system for connecting rooms
-- Object placement
+- Asset placement with component system
 
-### Asset Editor
-<img src="docs/screenshot-asset-editor.png" width="600" alt="Asset Editor">
+### Assets
+<img src="docs/screenshot-asset-editor.png" width="600" alt="Assets">
 
-Low-poly mesh modeler inspired by PicoCAD and Blender.
+Low-poly mesh modeler featuring Blender-style controls, extrusion, multi-object editing, and a shared texture atlas. Heavily influenced by PicoCAD.
 - 4-panel viewport (perspective + orthographic)
 - G/R/T for grab, rotate, scale
 - Texture atlas editor with indexed color
 - UV editor
 - OBJ import
 
-### Music Tracker
-<img src="docs/screenshot-music-tracker.png" width="600" alt="Music Tracker">
+### Music
+<img src="docs/screenshot-music-tracker.png" width="600" alt="Music">
 
-Pattern-based tracker with PS1 audio emulation.
+A pattern-based tracker for composing music. Supports SF2 soundfonts, up to 8 channels, and classic tracker effects like arpeggio and vibrato.
 - 8 channels, SF2 soundfont support
 - PsyQ SDK reverb presets (Room, Studio, Hall, Space Echo...)
 - MIDI keyboard input
 - Tracker effects (arpeggio, vibrato, portamento)
 
-### Game Mode
-To test level being worked on.
+### Game
+Test the level you're working on.
 - Third-person or free-fly camera
 - Gamepad support
 - Debug overlay
