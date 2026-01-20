@@ -3,12 +3,14 @@
 //! Fixed set of tools, each with its own persistent state.
 //! Switch between tools via the tab bar - all tools stay alive in background.
 
+use crate::auth::AuthState;
 use crate::editor::{EditorState, EditorLayout, ExampleBrowser};
 use crate::game::GameToolState;
 use crate::input::InputState;
 use crate::landing::LandingState;
 use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, ObjImportBrowser};
 use crate::project::ProjectData;
+use crate::storage::Storage;
 use crate::tracker::TrackerState;
 use crate::world::Level;
 use macroquad::prelude::{Font, Texture2D};
@@ -89,6 +91,9 @@ pub struct AppState {
     /// Previous active tool (for detecting tab switches)
     prev_tool: Tool,
 
+    /// Storage context (local filesystem or cloud storage)
+    pub storage: Storage,
+
     /// Shared project data (single source of truth for all editors)
     /// This enables live editing: changes in any editor are immediately
     /// visible in all other views including the game preview.
@@ -114,6 +119,9 @@ pub struct AppState {
 
     /// Unified input state (keyboard + gamepad)
     pub input: InputState,
+
+    /// Authentication state (for cloud storage)
+    pub auth: AuthState,
 }
 
 impl AppState {
@@ -128,6 +136,7 @@ impl AppState {
         Self {
             active_tool: Tool::Home,
             prev_tool: Tool::Home,
+            storage: Storage::new(),
             project: ProjectData::new(),
             landing: LandingState::new(logo_texture),
             world_editor: WorldEditorState {
@@ -145,6 +154,24 @@ impl AppState {
             tracker: TrackerState::new(),
             icon_font,
             input: InputState::new(),
+            auth: AuthState::new(),
+        }
+    }
+
+    /// Update authentication state and switch storage backend if needed
+    ///
+    /// Call this periodically (e.g., once per frame) to detect auth state changes.
+    /// Returns true if auth state changed.
+    pub fn update_auth(&mut self) -> bool {
+        let was_authenticated = self.auth.authenticated;
+        self.auth.update();
+
+        if self.auth.authenticated != was_authenticated {
+            // Auth state changed, update storage backend
+            self.storage.update_for_auth();
+            true
+        } else {
+            false
         }
     }
 

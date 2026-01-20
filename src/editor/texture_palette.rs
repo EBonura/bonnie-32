@@ -5,6 +5,7 @@
 //! - User Textures: Editable indexed textures from assets/userdata/textures/
 
 use macroquad::prelude::*;
+use crate::storage::Storage;
 use crate::ui::{Rect, UiContext, icon, draw_icon_centered};
 use crate::rasterizer::{Texture as RasterTexture, ClutDepth};
 use crate::texture::{
@@ -25,6 +26,7 @@ pub fn draw_texture_palette(
     rect: Rect,
     state: &mut EditorState,
     icon_font: Option<&Font>,
+    storage: &Storage,
 ) {
     // Set focus on click anywhere in this panel
     if ctx.mouse.inside(&rect) && ctx.mouse.left_pressed {
@@ -49,7 +51,7 @@ pub fn draw_texture_palette(
 
     // If editing a texture, show the texture editor instead
     if state.editing_texture.is_some() {
-        draw_texture_editor_panel(ctx, content_rect, state, icon_font);
+        draw_texture_editor_panel(ctx, content_rect, state, icon_font, storage);
         return;
     }
 
@@ -88,7 +90,7 @@ pub fn draw_texture_palette(
                 state.user_textures.add(texture);
                 // Save to disk immediately (native only)
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Err(e) = state.user_textures.save_texture(&name) {
+                if let Err(e) = state.user_textures.save_texture_with_storage(&name, storage) {
                     eprintln!("Failed to save imported texture: {}", e);
                 }
                 state.set_status(&format!("Imported '{}' ({}x{})", name, size_w, size_w), 2.0);
@@ -995,6 +997,7 @@ fn draw_texture_editor_panel(
     rect: Rect,
     state: &mut EditorState,
     icon_font: Option<&Font>,
+    storage: &Storage,
 ) {
     let texture_name = match &state.editing_texture {
         Some(name) => name.clone(),
@@ -1148,8 +1151,8 @@ fn draw_texture_editor_panel(
     if save_clicked {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // Native: save to disk
-            if let Err(e) = state.user_textures.save_texture(&texture_name) {
+            // Native: save via storage
+            if let Err(e) = state.user_textures.save_texture_with_storage(&texture_name, storage) {
                 eprintln!("Failed to save texture: {}", e);
             } else {
                 state.texture_editor.dirty = false;

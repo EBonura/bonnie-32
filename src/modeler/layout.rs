@@ -1,6 +1,7 @@
 //! Modeler UI layout and rendering
 
 use macroquad::prelude::*;
+use crate::storage::Storage;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
@@ -100,6 +101,7 @@ pub fn draw_modeler(
     fb: &mut Framebuffer,
     bounds: Rect,
     icon_font: Option<&Font>,
+    storage: &Storage,
 ) -> ModelerAction {
     let screen = bounds;
 
@@ -136,7 +138,7 @@ pub fn draw_modeler(
 
     // Right panel: Atlas + UV Tools + Paint Tools + CLUT
     draw_panel(right_rect, None, Color::from_rgba(35, 35, 40, 255));
-    draw_right_panel(ctx, panel_content_rect(right_rect, false), state, icon_font);
+    draw_right_panel(ctx, panel_content_rect(right_rect, false), state, icon_font, storage);
 
     // Draw timeline if in animate mode
     if let Some(tl_rect) = timeline_rect {
@@ -1810,7 +1812,7 @@ fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, sta
 // Right Panel (Atlas + UV Tools + Paint Tools + CLUT)
 // ============================================================================
 
-fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>, storage: &Storage) {
     let mut y = rect.y + 4.0;
 
     // === UNIFIED TEXTURE EDITOR (collapsible) ===
@@ -1845,7 +1847,7 @@ fn draw_right_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, i
             state.active_panel = super::state::ActivePanel::TextureEditor;
         }
 
-        draw_paint_section(ctx, editor_rect, state, icon_font);
+        draw_paint_section(ctx, editor_rect, state, icon_font, storage);
     }
 }
 
@@ -1991,10 +1993,10 @@ fn draw_zoom_buttons(ctx: &mut UiContext, x: f32, y: f32, btn_size: f32, icon_fo
 }
 
 /// Draw the paint section with unified texture editor
-fn draw_paint_section(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+fn draw_paint_section(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>, storage: &Storage) {
     // If editing a texture, show the texture editor
     if state.editing_indexed_atlas {
-        draw_paint_texture_editor(ctx, rect, state, icon_font);
+        draw_paint_texture_editor(ctx, rect, state, icon_font, storage);
     } else {
         // Show the texture browser with New/Edit buttons
         draw_paint_texture_browser(ctx, rect, state, icon_font);
@@ -2016,9 +2018,9 @@ fn draw_paint_section(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState,
                     import.preview_palette.clone(),
                 );
                 state.user_textures.add(texture);
-                // Save to disk immediately (native only)
+                // Save via storage (native only)
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Err(e) = state.user_textures.save_texture(&name) {
+                if let Err(e) = state.user_textures.save_texture_with_storage(&name, storage) {
                     eprintln!("Failed to save imported texture: {}", e);
                 }
                 state.set_status(&format!("Imported '{}' ({}x{})", name, size_w, size_w), 2.0);
@@ -2403,7 +2405,7 @@ fn user_texture_to_mq_texture(texture: &UserTexture) -> Texture2D {
 }
 
 /// Draw the texture editor panel (when editing a texture)
-fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>, storage: &Storage) {
     // Early return if no texture being edited
     if state.editing_texture.is_none() {
         state.editing_indexed_atlas = false;
@@ -2566,8 +2568,8 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
                 lib_tex.height = editing_tex.height;
             }
         }
-        // Now save to disk
-        if let Err(e) = state.user_textures.save_texture(&tex_name) {
+        // Now save via storage
+        if let Err(e) = state.user_textures.save_texture_with_storage(&tex_name, storage) {
             eprintln!("Failed to save texture: {}", e);
         } else {
             // Clear dirty flag on successful save

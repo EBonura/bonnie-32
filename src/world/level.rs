@@ -348,3 +348,88 @@ pub fn load_level_from_str(s: &str) -> Result<Level, LevelError> {
 
     Ok(level)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Storage-aware methods (use Storage abstraction for I/O)
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::storage::Storage;
+
+/// Load a level using the storage backend
+pub fn load_level_with_storage(path: &str, storage: &Storage) -> Result<Level, LevelError> {
+    let bytes = storage
+        .read_sync(path)
+        .map_err(|e| LevelError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))?;
+
+    // Detect format: RON files start with '(' or whitespace, brotli is binary
+    let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+    let contents = if is_plain_ron {
+        // Plain RON text
+        String::from_utf8(bytes)
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid UTF-8: {}", e)
+            )))?
+    } else {
+        // Brotli compressed - decompress first
+        let mut decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed)
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("brotli decompression failed: {}", e)
+            )))?;
+        String::from_utf8(decompressed)
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid UTF-8 after decompression: {}", e)
+            )))?
+    };
+
+    let mut level: Level = ron::from_str(&contents)?;
+
+    // Validate level to prevent malicious files
+    validate_level(&level)?;
+
+    // Strip legacy objects (objects without asset_id) - migration to asset-based system
+    for room in &mut level.rooms {
+        room.objects.retain(|obj| obj.asset_id != 0);
+    }
+
+    // Recalculate bounds for all rooms (not serialized)
+    for room in &mut level.rooms {
+        room.recalculate_bounds();
+    }
+
+    Ok(level)
+}
+
+/// Save a level using the storage backend
+pub fn save_level_with_storage(level: &Level, path: &str, storage: &Storage) -> Result<(), LevelError> {
+    let config = ron::ser::PrettyConfig::new()
+        .depth_limit(4)
+        .indentor("  ".to_string());
+
+    let ron_string = ron::ser::to_string_pretty(level, config)?;
+
+    // Compress with brotli (quality 6, window 22 - good balance of speed/ratio)
+    let mut compressed = Vec::new();
+    brotli::BrotliCompress(&mut Cursor::new(ron_string.as_bytes()), &mut compressed, &brotli::enc::BrotliEncoderParams {
+        quality: 6,
+        lgwin: 22,
+        ..Default::default()
+    }).map_err(|e| LevelError::IoError(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("brotli compression failed: {}", e)
+    )))?;
+
+    storage
+        .write_sync(path, &compressed)
+        .map_err(|e| LevelError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))
+}

@@ -23,12 +23,15 @@ mod project;
 mod input;
 mod texture;
 mod asset;
+mod storage;
+mod auth;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
-use world::{create_empty_level, load_level, save_level};
+use world::{create_empty_level, load_level_with_storage, save_level_with_storage};
+use storage::Storage;
 use ui::{UiContext, MouseState, Rect, draw_fixed_tabs_with_version, TabEntry, layout as tab_layout, icon};
-use editor::{EditorAction, draw_editor, draw_example_browser, BrowserAction, discover_examples};
+use editor::{EditorAction, draw_editor, draw_level_browser, BrowserAction, LevelCategory, discover_examples, discover_user_levels};
 use modeler::{ModelerAction, ModelBrowserAction, ObjImportAction, draw_model_browser, draw_obj_importer, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
 use std::path::PathBuf;
@@ -107,6 +110,9 @@ async fn main() {
     // App state with all tools
     let mut app = AppState::new(level, None, icon_font, logo_texture);
 
+    // Initialize GCP authentication (loads Google Identity Services on WASM)
+    auth::init();
+
     // Track if this is the first time opening World Editor (to show browser)
     let mut world_editor_first_open = true;
 
@@ -133,6 +139,9 @@ async fn main() {
     loop {
         // Track frame start time for FPS limiting
         let frame_start = get_time();
+
+        // Update authentication state (checks for sign-in/sign-out)
+        app.update_auth();
 
         // Update UI context with mouse state
         let mouse_pos = mouse_position();
@@ -218,7 +227,9 @@ async fn main() {
                 // Handle special cases for certain tabs
                 if tool == Tool::WorldEditor && world_editor_first_open {
                     world_editor_first_open = false;
-                    app.world_editor.example_browser.open(discover_examples());
+                    let samples = discover_examples();
+                    let user_levels = discover_user_levels(&app.storage);
+                    app.world_editor.example_browser.open_with_levels(samples, user_levels);
                     #[cfg(target_arch = "wasm32")]
                     {
                         app.world_editor.example_browser.pending_load_list = true;
@@ -241,7 +252,19 @@ async fn main() {
         // Draw active tool content
         match app.active_tool {
             Tool::Home => {
-                landing::draw_landing(content_rect, &mut app.landing, &ui_ctx);
+                let action = landing::draw_landing(
+                    content_rect,
+                    &mut app.landing,
+                    &app.auth,
+                    app.storage.mode(),
+                    app.storage.can_write(),
+                    &ui_ctx,
+                );
+                match action {
+                    landing::LandingAction::SignIn => auth::sign_in(),
+                    landing::LandingAction::SignOut => auth::sign_out(),
+                    landing::LandingAction::None => {}
+                }
             }
 
             Tool::WorldEditor => {
@@ -350,38 +373,46 @@ async fn main() {
                     content_rect,
                     app.icon_font.as_ref(),
                     &app.input,
+                    &app.storage,
                 );
 
                 // Handle editor actions (including opening example browser)
-                handle_editor_action(action, ws, &mut app.game);
+                handle_editor_action(action, ws, &mut app.game, &app.storage);
 
-                // Draw example browser overlay if open
+                // Draw level browser overlay if open
                 if ws.example_browser.open {
                     // End modal blocking so the browser itself can receive input
                     ui_ctx.end_modal(real_mouse);
 
-                    let browser_action = draw_example_browser(
+                    let browser_action = draw_level_browser(
                         &mut ui_ctx,
                         &mut ws.example_browser,
+                        &app.storage,
                         app.icon_font.as_ref(),
                         &ws.editor_state.texture_packs,
                         &ws.editor_state.asset_library,
                     );
 
                     match browser_action {
-                        BrowserAction::SelectPreview(index) => {
-                            if let Some(example) = ws.example_browser.examples.get(index) {
-                                let path = example.path.clone();
+                        BrowserAction::SelectPreview(category, index) => {
+                            // Get level from the appropriate list
+                            let level_info = match category {
+                                LevelCategory::Sample => ws.example_browser.samples.get(index),
+                                LevelCategory::User => ws.example_browser.user_levels.get(index),
+                            };
+                            if let Some(info) = level_info {
+                                let path = info.path.clone();
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
-                                    // Native: load synchronously
-                                    match load_level(&path) {
+                                    // Native: load synchronously via storage
+                                    let path_str = path.to_string_lossy();
+                                    match load_level_with_storage(&path_str, &app.storage) {
                                         Ok(level) => {
-                                            println!("Loaded example level with {} rooms", level.rooms.len());
+                                            println!("Loaded level with {} rooms", level.rooms.len());
                                             ws.example_browser.set_preview(level);
                                         }
                                         Err(e) => {
-                                            eprintln!("Failed to load example {}: {}", path.display(), e);
+                                            eprintln!("Failed to load level {}: {}", path.display(), e);
                                             ws.editor_state.set_status(&format!("Failed to load: {}", e), 3.0);
                                         }
                                     }
@@ -396,9 +427,9 @@ async fn main() {
                         BrowserAction::OpenLevel => {
                             // Load the selected level, preserving texture packs and other state
                             if let Some(level) = ws.example_browser.preview_level.take() {
-                                let (name, path) = ws.example_browser.selected_example()
+                                let (name, path) = ws.example_browser.selected_level()
                                     .map(|e| (e.name.clone(), e.path.clone()))
-                                    .unwrap_or_else(|| ("example".to_string(), PathBuf::from("assets/userdata/levels/untitled.ron")));
+                                    .unwrap_or_else(|| ("level".to_string(), PathBuf::from("assets/userdata/levels/untitled.ron")));
                                 ws.editor_layout.apply_config(&level.editor_layout);
                                 ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
                                 ws.editor_state.grid_offset_y = level.editor_layout.grid_offset_y;
@@ -418,6 +449,57 @@ async fn main() {
                                 app.game.reset_for_new_level();
                                 ws.editor_state.set_status(&format!("Opened: {}", name), 3.0);
                                 ws.example_browser.close();
+                            }
+                        }
+                        BrowserAction::OpenCopy => {
+                            // Copy sample level to user levels and open it
+                            if let Some(level) = ws.example_browser.preview_level.take() {
+                                let name = ws.example_browser.selected_level()
+                                    .map(|e| e.name.clone())
+                                    .unwrap_or_else(|| "copy".to_string());
+                                // Generate a new path in userdata
+                                let new_path = PathBuf::from(format!("assets/userdata/levels/{}-copy.ron", name));
+                                ws.editor_layout.apply_config(&level.editor_layout);
+                                ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
+                                ws.editor_state.grid_offset_y = level.editor_layout.grid_offset_y;
+                                ws.editor_state.grid_zoom = level.editor_layout.grid_zoom;
+                                ws.editor_state.orbit_target = rasterizer::Vec3::new(
+                                    level.editor_layout.orbit_target_x,
+                                    level.editor_layout.orbit_target_y,
+                                    level.editor_layout.orbit_target_z,
+                                );
+                                ws.editor_state.orbit_distance = level.editor_layout.orbit_distance;
+                                ws.editor_state.orbit_azimuth = level.editor_layout.orbit_azimuth;
+                                ws.editor_state.orbit_elevation = level.editor_layout.orbit_elevation;
+                                ws.editor_state.sync_camera_from_orbit();
+                                ws.editor_state.load_level(level, new_path.clone());
+                                // Mark as unsaved (no current file) so user must save
+                                ws.editor_state.current_file = None;
+                                app.game.reset_for_new_level();
+                                ws.editor_state.set_status(&format!("Copied: {} (save to keep)", name), 3.0);
+                                ws.example_browser.close();
+                            }
+                        }
+                        BrowserAction::DeleteLevel => {
+                            // Delete user level (only enabled for user levels)
+                            if let Some(info) = ws.example_browser.selected_level() {
+                                let path_str = info.path.to_string_lossy().to_string();
+                                let name = info.name.clone();
+                                match app.storage.delete_sync(&path_str) {
+                                    Ok(()) => {
+                                        ws.editor_state.set_status(&format!("Deleted: {}", name), 3.0);
+                                        // Refresh user levels list
+                                        ws.example_browser.user_levels = discover_user_levels(&app.storage);
+                                        // Clear selection
+                                        ws.example_browser.selected_category = None;
+                                        ws.example_browser.selected_index = None;
+                                        ws.example_browser.preview_level = None;
+                                        ws.example_browser.preview_stats = None;
+                                    }
+                                    Err(e) => {
+                                        ws.editor_state.set_status(&format!("Delete failed: {}", e), 3.0);
+                                    }
+                                }
                             }
                         }
                         BrowserAction::NewLevel => {
@@ -442,6 +524,16 @@ async fn main() {
                             app.game.reset_for_new_level();
                             ws.editor_state.set_status("New level created", 3.0);
                             ws.example_browser.close();
+                        }
+                        BrowserAction::Refresh => {
+                            // Refresh level lists from storage
+                            ws.example_browser.samples = discover_examples();
+                            ws.example_browser.user_levels = discover_user_levels(&app.storage);
+                            ws.example_browser.selected_category = None;
+                            ws.example_browser.selected_index = None;
+                            ws.example_browser.preview_level = None;
+                            ws.example_browser.preview_stats = None;
+                            ws.editor_state.set_status("Level list refreshed", 2.0);
                         }
                         BrowserAction::Cancel => {
                             ws.example_browser.close();
@@ -503,6 +595,7 @@ async fn main() {
                     &mut fb,
                     content_rect,
                     app.icon_font.as_ref(),
+                    &app.storage,
                 );
 
                 // Handle modeler actions
@@ -845,7 +938,7 @@ async fn main() {
                 }
 
                 // Draw tracker UI
-                tracker::draw_tracker(&mut ui_ctx, content_rect, &mut app.tracker, app.icon_font.as_ref());
+                tracker::draw_tracker(&mut ui_ctx, content_rect, &mut app.tracker, app.icon_font.as_ref(), &app.storage);
 
                 // Draw song browser overlay if open
                 if app.tracker.song_browser.open {
@@ -856,6 +949,7 @@ async fn main() {
                         &mut ui_ctx,
                         &mut app.tracker,
                         app.icon_font.as_ref(),
+                        &app.storage,
                     );
                     // Actions are handled internally by draw_song_browser
                 }
@@ -874,12 +968,13 @@ async fn main() {
         #[cfg(target_arch = "wasm32")]
         if let Tool::WorldEditor = app.active_tool {
             let ws = &mut app.world_editor;
-            // Load example list from manifest if pending
+            // Load sample list from manifest if pending
             if ws.example_browser.pending_load_list {
                 ws.example_browser.pending_load_list = false;
                 use editor::load_example_list;
-                let examples = load_example_list().await;
-                ws.example_browser.examples = examples;
+                let samples = load_example_list().await;
+                ws.example_browser.samples = samples;
+                // Note: user levels are loaded synchronously via storage (cloud or empty)
             }
             // Load individual level preview if pending
             if let Some(path) = ws.example_browser.pending_load_path.take() {
@@ -1000,7 +1095,9 @@ async fn main() {
                 // Handle special cases for certain tabs
                 if tool == Tool::WorldEditor && world_editor_first_open {
                     world_editor_first_open = false;
-                    app.world_editor.example_browser.open(discover_examples());
+                    let samples = discover_examples();
+                    let user_levels = discover_user_levels(&app.storage);
+                    app.world_editor.example_browser.open_with_levels(samples, user_levels);
                     #[cfg(target_arch = "wasm32")]
                     {
                         app.world_editor.example_browser.pending_load_list = true;
@@ -1101,7 +1198,7 @@ fn next_available_asset_path() -> PathBuf {
     assets_dir.join(format!("asset_{:03}.ron", next_num))
 }
 
-fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, game: &mut game::GameToolState) {
+fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, game: &mut game::GameToolState, storage: &Storage) {
     match action {
         EditorAction::Play => {
             ws.editor_state.set_status("Game preview coming soon", 2.0);
@@ -1138,10 +1235,12 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
             );
 
             if let Some(path) = &ws.editor_state.current_file.clone() {
-                match save_level(&ws.editor_state.level, path) {
+                let path_str = path.to_string_lossy();
+                match save_level_with_storage(&ws.editor_state.level, &path_str, storage) {
                     Ok(()) => {
                         ws.editor_state.dirty = false;
-                        ws.editor_state.set_status(&format!("Saved to {}", path.display()), 3.0);
+                        let mode_label = storage.mode().label();
+                        ws.editor_state.set_status(&format!("Saved ({}) {}", mode_label, path.display()), 3.0);
                     }
                     Err(e) => {
                         ws.editor_state.set_status(&format!("Save failed: {}", e), 5.0);
@@ -1153,11 +1252,13 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
                 if let Some(parent) = default_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                match save_level(&ws.editor_state.level, &default_path) {
+                let path_str = default_path.to_string_lossy();
+                match save_level_with_storage(&ws.editor_state.level, &path_str, storage) {
                     Ok(()) => {
                         ws.editor_state.current_file = Some(default_path.clone());
                         ws.editor_state.dirty = false;
-                        ws.editor_state.set_status(&format!("Saved to {}", default_path.display()), 3.0);
+                        let mode_label = storage.mode().label();
+                        ws.editor_state.set_status(&format!("Saved ({}) {}", mode_label, default_path.display()), 3.0);
                     }
                     Err(e) => {
                         ws.editor_state.set_status(&format!("Save failed: {}", e), 5.0);
@@ -1185,11 +1286,13 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
                 .set_file_name("level.ron");
 
             if let Some(save_path) = dialog.save_file() {
-                match save_level(&ws.editor_state.level, &save_path) {
+                let path_str = save_path.to_string_lossy();
+                match save_level_with_storage(&ws.editor_state.level, &path_str, storage) {
                     Ok(()) => {
                         ws.editor_state.current_file = Some(save_path.clone());
                         ws.editor_state.dirty = false;
-                        ws.editor_state.set_status(&format!("Saved as {}", save_path.display()), 3.0);
+                        let mode_label = storage.mode().label();
+                        ws.editor_state.set_status(&format!("Saved ({}) {}", mode_label, save_path.display()), 3.0);
                     }
                     Err(e) => {
                         ws.editor_state.set_status(&format!("Save failed: {}", e), 5.0);
@@ -1211,7 +1314,8 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
                 .set_directory(&default_dir);
 
             if let Some(path) = dialog.pick_file() {
-                match load_level(&path) {
+                let path_str = path.to_string_lossy();
+                match load_level_with_storage(&path_str, storage) {
                     Ok(level) => {
                         ws.editor_layout.apply_config(&level.editor_layout);
                         ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
@@ -1300,7 +1404,7 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
         }
         EditorAction::Load(path_str) => {
             let path = PathBuf::from(&path_str);
-            match load_level(&path) {
+            match load_level_with_storage(&path_str, storage) {
                 Ok(level) => {
                     ws.editor_layout.apply_config(&level.editor_layout);
                     ws.editor_state.grid_offset_x = level.editor_layout.grid_offset_x;
@@ -1327,7 +1431,9 @@ fn handle_editor_action(action: EditorAction, ws: &mut app::WorldEditorState, ga
         }
         EditorAction::BrowseExamples => {
             // Open the level browser - fresh scan to pick up newly saved levels
-            ws.example_browser.open(discover_examples());
+            let samples = discover_examples();
+            let user_levels = discover_user_levels(storage);
+            ws.example_browser.open_with_levels(samples, user_levels);
             // On WASM, trigger async load of example list
             #[cfg(target_arch = "wasm32")]
             {

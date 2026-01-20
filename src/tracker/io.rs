@@ -64,6 +64,59 @@ pub fn load_song_from_str(contents: &str) -> Result<Song, String> {
     Ok(song)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Storage-aware methods (use Storage abstraction for I/O)
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::storage::Storage;
+
+/// Save a song using the storage backend
+pub fn save_song_with_storage(song: &Song, path: &str, storage: &Storage) -> Result<(), String> {
+    let config = ron::ser::PrettyConfig::new()
+        .depth_limit(8)
+        .indentor("  ".to_string());
+
+    let contents = ron::ser::to_string_pretty(song, config)
+        .map_err(|e| format!("Failed to serialize song: {}", e))?;
+
+    // Compress with brotli
+    let mut compressed = Vec::new();
+    brotli::BrotliCompress(&mut Cursor::new(contents.as_bytes()), &mut compressed, &brotli::enc::BrotliEncoderParams {
+        quality: 6,
+        lgwin: 22,
+        ..Default::default()
+    }).map_err(|e| format!("Failed to compress: {}", e))?;
+
+    storage
+        .write_sync(path, &compressed)
+        .map_err(|e| format!("Failed to write file: {}", e))
+}
+
+/// Load a song using the storage backend
+pub fn load_song_with_storage(path: &str, storage: &Storage) -> Result<Song, String> {
+    let bytes = storage
+        .read_sync(path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    // Detect format: RON files start with '(' or whitespace, brotli is binary
+    let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+    let contents = if is_plain_ron {
+        // Plain RON text
+        String::from_utf8(bytes)
+            .map_err(|e| format!("Invalid UTF-8: {}", e))?
+    } else {
+        // Brotli compressed - decompress first
+        let mut decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut Cursor::new(&bytes), &mut decompressed)
+            .map_err(|e| format!("Failed to decompress: {}", e))?;
+        String::from_utf8(decompressed)
+            .map_err(|e| format!("Invalid UTF-8 after decompression: {}", e))?
+    };
+
+    load_song_from_str(&contents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

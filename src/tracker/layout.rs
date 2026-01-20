@@ -1,6 +1,7 @@
 //! Tracker UI layout and rendering
 
 use macroquad::prelude::*;
+use crate::storage::Storage;
 use crate::ui::{
     Rect, UiContext, Toolbar, icon, draw_knob, draw_mini_knob,
     // Theme colors
@@ -29,7 +30,7 @@ const FXPARAM_WIDTH: f32 = 28.0;
 const STATUS_BAR_HEIGHT: f32 = 22.0;
 
 /// Draw the tracker interface
-pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_font: Option<&Font>) {
+pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_font: Option<&Font>, storage: &Storage) {
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
@@ -40,7 +41,7 @@ pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, i
     let main_rect = Rect::new(rect.x, rect.y + header_height, rect.w, rect.h - header_height - STATUS_BAR_HEIGHT);
 
     // Draw header (transport, info)
-    draw_header(ctx, header_rect, state, icon_font);
+    draw_header(ctx, header_rect, state, icon_font, storage);
 
     // Draw main content based on view
     match state.view {
@@ -53,13 +54,13 @@ pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, i
 
     // Handle input (but not if browser is open)
     if !state.song_browser.open {
-        handle_input(ctx, state);
+        handle_input(ctx, state, storage);
     }
 }
 
 /// Draw song browser dialog and handle actions
 /// Call this separately from draw_tracker so modal input blocking works correctly
-pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_font: Option<&Font>) -> SongBrowserAction {
+pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_font: Option<&Font>, storage: &Storage) -> SongBrowserAction {
     let screen_rect = Rect::new(0.0, 0.0, screen_width(), screen_height());
     let browser_action = state.song_browser.draw(ctx, screen_rect, icon_font);
 
@@ -74,7 +75,8 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
             if let Some(path) = path {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Ok(song) = super::io::load_song(&path) {
+                    let path_str = path.to_string_lossy();
+                    if let Ok(song) = super::io::load_song_with_storage(&path_str, storage) {
                         state.song_browser.set_preview(song);
                     }
                 }
@@ -91,7 +93,7 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
             if let Some(path) = path {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Err(e) = state.load_from_file(&path) {
+                    if let Err(e) = state.load_from_file(&path, storage) {
                         state.set_status(&format!("Load failed: {}", e), 3.0);
                     }
                 }
@@ -132,7 +134,7 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
 }
 
 /// Draw the header with transport controls and song info
-fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_font: Option<&Font>) {
+fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_font: Option<&Font>, storage: &Storage) {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, HEADER_COLOR);
 
     // First row: toolbar with icons (36.0 height to match World Editor)
@@ -153,7 +155,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
                 .set_directory("assets/userdata/songs")
                 .pick_file()
             {
-                if let Err(e) = state.load_from_file(&path) {
+                if let Err(e) = state.load_from_file(&path, storage) {
                     state.set_status(&format!("Load failed: {}", e), 3.0);
                 }
             }
@@ -161,7 +163,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
         // Save button - save to current file or auto-generate name
         if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Save (Ctrl+S)") {
             if let Some(path) = state.current_file.clone() {
-                if let Err(e) = state.save_to_file(&path) {
+                if let Err(e) = state.save_to_file(&path, storage) {
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
             } else {
@@ -170,7 +172,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if let Err(e) = state.save_to_file(&path) {
+                if let Err(e) = state.save_to_file(&path, storage) {
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
             }
@@ -182,7 +184,7 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
                 .set_file_name(&format!("{}.ron", state.song.name))
                 .save_file()
             {
-                if let Err(e) = state.save_to_file(&path) {
+                if let Err(e) = state.save_to_file(&path, storage) {
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
             }
@@ -1481,7 +1483,7 @@ fn draw_status_bar(rect: Rect, state: &TrackerState) {
 }
 
 /// Handle keyboard and mouse input
-fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
+fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState, storage: &Storage) {
     // Build action context
     // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param
     let column_type = match state.current_column {
@@ -1516,7 +1518,7 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
     // Ctrl+S - Save song (auto-name if new)
     if ctrl_held && is_key_pressed(KeyCode::S) {
         if let Some(path) = state.current_file.clone() {
-            if let Err(e) = state.save_to_file(&path) {
+            if let Err(e) = state.save_to_file(&path, storage) {
                 state.set_status(&format!("Save failed: {}", e), 3.0);
             }
         } else {
@@ -1527,7 +1529,7 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState) {
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if let Err(e) = state.save_to_file(&path) {
+                if let Err(e) = state.save_to_file(&path, storage) {
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
             }

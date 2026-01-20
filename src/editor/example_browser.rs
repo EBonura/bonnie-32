@@ -1,21 +1,31 @@
-//! Example Level Browser
+//! Level Browser
 //!
-//! Modal dialog for browsing and previewing bundled example levels.
+//! Modal dialog for browsing and previewing levels - both bundled samples
+//! and user-created levels from storage.
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
+use crate::storage::Storage;
+use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::world::Level;
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
-use super::example_levels::{ExampleLevelInfo, LevelStats, get_level_stats};
+use super::example_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
 
-/// State for the example browser dialog
-pub struct ExampleBrowser {
+/// State for the level browser dialog
+pub struct LevelBrowser {
     /// Whether the browser is open
     pub open: bool,
-    /// List of available example levels
-    pub examples: Vec<ExampleLevelInfo>,
-    /// Currently selected index
+    /// Bundled sample levels (read-only)
+    pub samples: Vec<LevelInfo>,
+    /// User-created levels (editable)
+    pub user_levels: Vec<LevelInfo>,
+    /// Whether samples section is collapsed
+    pub samples_collapsed: bool,
+    /// Whether user levels section is collapsed
+    pub user_collapsed: bool,
+    /// Currently selected category
+    pub selected_category: Option<LevelCategory>,
+    /// Currently selected index within category
     pub selected_index: Option<usize>,
     /// Currently loaded preview level
     pub preview_level: Option<Level>,
@@ -33,17 +43,24 @@ pub struct ExampleBrowser {
     pub scroll_offset: f32,
     /// Path pending async load (WASM)
     pub pending_load_path: Option<std::path::PathBuf>,
-    /// Whether we need to async load the example list (WASM)
+    /// Whether we need to async load the sample list (WASM)
     pub pending_load_list: bool,
     /// Local framebuffer for preview rendering (avoids resizing main fb)
     preview_fb: Framebuffer,
 }
 
-impl Default for ExampleBrowser {
+/// Legacy alias for backward compatibility
+pub type ExampleBrowser = LevelBrowser;
+
+impl Default for LevelBrowser {
     fn default() -> Self {
         Self {
             open: false,
-            examples: Vec::new(),
+            samples: Vec::new(),
+            user_levels: Vec::new(),
+            samples_collapsed: false,
+            user_collapsed: false,
+            selected_category: None,
             selected_index: None,
             preview_level: None,
             preview_stats: None,
@@ -61,21 +78,47 @@ impl Default for ExampleBrowser {
     }
 }
 
-impl ExampleBrowser {
-    /// Open the browser with the given list of examples
-    pub fn open(&mut self, examples: Vec<ExampleLevelInfo>) {
+impl LevelBrowser {
+    /// Open the browser with sample and user levels
+    pub fn open_with_levels(&mut self, samples: Vec<LevelInfo>, user_levels: Vec<LevelInfo>) {
         self.open = true;
-        self.examples = examples;
+        self.samples = samples;
+        self.user_levels = user_levels;
+        self.selected_category = None;
         self.selected_index = None;
         self.preview_level = None;
         self.preview_stats = None;
         self.scroll_offset = 0.0;
     }
 
+    /// Open the browser with just sample levels (legacy compatibility)
+    pub fn open(&mut self, samples: Vec<LevelInfo>) {
+        self.open_with_levels(samples, Vec::new());
+    }
+
     /// Close the browser
     pub fn close(&mut self) {
         self.open = false;
         self.preview_level = None;
+    }
+
+    /// Get the currently selected level info
+    pub fn selected_level(&self) -> Option<&LevelInfo> {
+        match (self.selected_category, self.selected_index) {
+            (Some(LevelCategory::Sample), Some(i)) => self.samples.get(i),
+            (Some(LevelCategory::User), Some(i)) => self.user_levels.get(i),
+            _ => None,
+        }
+    }
+
+    /// Check if the selected level is a sample (read-only)
+    pub fn is_sample_selected(&self) -> bool {
+        self.selected_category == Some(LevelCategory::Sample)
+    }
+
+    /// Check if the selected level is a user level (editable)
+    pub fn is_user_selected(&self) -> bool {
+        self.selected_category == Some(LevelCategory::User)
     }
 
     /// Set the preview level (called after async load)
@@ -149,30 +192,37 @@ impl ExampleBrowser {
         self.orbit_pitch = 0.4;
     }
 
-    /// Get the currently selected example info
-    pub fn selected_example(&self) -> Option<&ExampleLevelInfo> {
-        self.selected_index.and_then(|i| self.examples.get(i))
+    /// Get the currently selected example info (legacy compatibility)
+    pub fn selected_example(&self) -> Option<&LevelInfo> {
+        self.selected_level()
     }
 }
 
-/// Result from drawing the example browser
+/// Result from drawing the level browser
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrowserAction {
     None,
     /// User selected a level to preview (need to load it async)
-    SelectPreview(usize),
+    SelectPreview(LevelCategory, usize),
     /// User wants to open the selected level
     OpenLevel,
+    /// User wants to create a copy of the sample as a user level
+    OpenCopy,
+    /// User wants to delete the selected user level
+    DeleteLevel,
     /// User wants to start with a new empty level
     NewLevel,
+    /// User wants to refresh the level list
+    Refresh,
     /// User cancelled
     Cancel,
 }
 
-/// Draw the example browser modal dialog
-pub fn draw_example_browser(
+/// Draw the level browser modal dialog
+pub fn draw_level_browser(
     ctx: &mut UiContext,
-    browser: &mut ExampleBrowser,
+    browser: &mut LevelBrowser,
+    storage: &Storage,
     icon_font: Option<&Font>,
     texture_packs: &[TexturePack],
     asset_library: &crate::asset::AssetLibrary,
@@ -191,7 +241,6 @@ pub fn draw_example_browser(
     let dialog_h = (screen_height() * 0.8).min(600.0);
     let dialog_x = (screen_width() - dialog_w) / 2.0;
     let dialog_y = (screen_height() - dialog_h) / 2.0;
-    let _dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
     // Draw dialog background
     draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(35, 35, 40, 255));
@@ -200,7 +249,7 @@ pub fn draw_example_browser(
     // Header
     let header_h = 40.0;
     draw_rectangle(dialog_x, dialog_y, dialog_w, header_h, Color::from_rgba(45, 45, 55, 255));
-    draw_text("Browse Levels", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
+    draw_text("Level Browser", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
 
     // Close button
     let close_rect = Rect::new(dialog_x + dialog_w - 36.0, dialog_y + 4.0, 32.0, 32.0);
@@ -211,30 +260,32 @@ pub fn draw_example_browser(
     // Content area
     let content_y = dialog_y + header_h + 8.0;
     let content_h = dialog_h - header_h - 60.0; // Leave room for footer
-    let list_w = 200.0;
+    let list_w = 220.0;
 
-    // List panel (left) - use reusable scrollable list widget
+    // List panel (left) - custom two-section list
     let list_rect = Rect::new(dialog_x + 8.0, content_y, list_w, content_h);
-    let item_h = 28.0;
+    draw_rectangle(list_rect.x, list_rect.y, list_rect.w, list_rect.h, Color::from_rgba(25, 25, 30, 255));
 
-    // Convert examples to string labels
-    let items: Vec<String> = browser.examples.iter().map(|e| e.name.clone()).collect();
+    let item_h = 26.0;
+    let section_h = 28.0;
+    let has_cloud = storage.has_cloud();
 
-    let list_result = draw_scrollable_list(
+    // Draw two-section list
+    let list_action = draw_two_section_list(
         ctx,
         list_rect,
-        &items,
-        browser.selected_index,
-        &mut browser.scroll_offset,
+        browser,
         item_h,
-        None, // Use default colors
+        section_h,
+        has_cloud,
     );
 
-    // Handle list click
-    if let Some(clicked_idx) = list_result.clicked {
-        if browser.selected_index != Some(clicked_idx) {
-            browser.selected_index = Some(clicked_idx);
-            action = BrowserAction::SelectPreview(clicked_idx);
+    // Handle list actions
+    if let Some((category, idx)) = list_action {
+        if browser.selected_category != Some(category) || browser.selected_index != Some(idx) {
+            browser.selected_category = Some(category);
+            browser.selected_index = Some(idx);
+            action = BrowserAction::SelectPreview(category, idx);
         }
     }
 
@@ -247,7 +298,7 @@ pub fn draw_example_browser(
 
     // Draw preview content
     let has_preview = browser.preview_level.is_some();
-    let has_selection = browser.selected_index.is_some();
+    let has_selection = browser.selected_category.is_some();
 
     if has_preview {
         // Render 3D preview with orbit camera (uses browser's local framebuffer)
@@ -276,18 +327,38 @@ pub fn draw_example_browser(
     draw_rectangle(dialog_x, footer_y, dialog_w, 44.0, Color::from_rgba(40, 40, 48, 255));
 
     // New button (left side) - start with empty level
-    let new_rect = Rect::new(dialog_x + 10.0, footer_y + 8.0, 80.0, 28.0);
+    let new_rect = Rect::new(dialog_x + 10.0, footer_y + 8.0, 70.0, 28.0);
     if draw_text_button(ctx, new_rect, "New", Color::from_rgba(60, 60, 70, 255)) {
         action = BrowserAction::NewLevel;
     }
 
+    // Delete button (only for user levels)
+    let delete_rect = Rect::new(dialog_x + 90.0, footer_y + 8.0, 70.0, 28.0);
+    let delete_enabled = browser.is_user_selected() && browser.preview_level.is_some();
+    if draw_text_button_enabled(ctx, delete_rect, "Delete", Color::from_rgba(120, 50, 50, 255), delete_enabled) {
+        action = BrowserAction::DeleteLevel;
+    }
+
+    // Refresh button - reload level lists from storage
+    let refresh_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    if draw_text_button(ctx, refresh_rect, "Refresh", Color::from_rgba(60, 60, 70, 255)) {
+        action = BrowserAction::Refresh;
+    }
+
     // Cancel button
-    let cancel_rect = Rect::new(dialog_x + dialog_w - 180.0, footer_y + 8.0, 80.0, 28.0);
+    let cancel_rect = Rect::new(dialog_x + dialog_w - 270.0, footer_y + 8.0, 70.0, 28.0);
     if draw_text_button(ctx, cancel_rect, "Cancel", Color::from_rgba(60, 60, 70, 255)) {
         action = BrowserAction::Cancel;
     }
 
-    // Open button (only enabled if something is selected)
+    // Open Copy button (only for samples - copies sample to user level)
+    let copy_rect = Rect::new(dialog_x + dialog_w - 190.0, footer_y + 8.0, 90.0, 28.0);
+    let copy_enabled = browser.is_sample_selected() && browser.preview_level.is_some() && storage.can_write();
+    if draw_text_button_enabled(ctx, copy_rect, "Open Copy", Color::from_rgba(60, 80, 60, 255), copy_enabled) {
+        action = BrowserAction::OpenCopy;
+    }
+
+    // Open button (enabled if something is selected and loaded)
     let open_rect = Rect::new(dialog_x + dialog_w - 90.0, footer_y + 8.0, 80.0, 28.0);
     let open_enabled = browser.preview_level.is_some();
     if draw_text_button_enabled(ctx, open_rect, "Open", ACCENT_COLOR, open_enabled) {
@@ -300,6 +371,168 @@ pub fn draw_example_browser(
     }
 
     action
+}
+
+/// Legacy alias for backward compatibility
+pub fn draw_example_browser(
+    ctx: &mut UiContext,
+    browser: &mut LevelBrowser,
+    icon_font: Option<&Font>,
+    texture_packs: &[TexturePack],
+    asset_library: &crate::asset::AssetLibrary,
+) -> BrowserAction {
+    // Create a temporary storage for legacy calls (local-only)
+    let storage = Storage::new();
+    draw_level_browser(ctx, browser, &storage, icon_font, texture_packs, asset_library)
+}
+
+/// Draw the two-section list (Samples + My Levels)
+fn draw_two_section_list(
+    ctx: &mut UiContext,
+    rect: Rect,
+    browser: &mut LevelBrowser,
+    item_h: f32,
+    section_h: f32,
+    has_cloud: bool,
+) -> Option<(LevelCategory, usize)> {
+    let mut clicked: Option<(LevelCategory, usize)> = None;
+    let mut y = rect.y - browser.scroll_offset;
+
+    let section_bg = Color::from_rgba(40, 40, 50, 255);
+    let item_bg = Color::from_rgba(30, 30, 38, 255);
+    let item_hover = Color::from_rgba(50, 50, 60, 255);
+    let item_selected = Color::from_rgba(60, 80, 120, 255);
+    let text_color = Color::from_rgba(200, 200, 200, 255);
+    let text_dim = Color::from_rgba(140, 140, 140, 255);
+    let cloud_color = Color::from_rgba(100, 180, 255, 255);
+
+    // Calculate total content height for scroll
+    let samples_content_h = if browser.samples_collapsed { 0.0 } else { browser.samples.len() as f32 * item_h };
+    let user_content_h = if browser.user_collapsed { 0.0 } else { browser.user_levels.len() as f32 * item_h };
+    let total_h = section_h * 2.0 + samples_content_h + user_content_h;
+
+    // Handle scroll within list bounds
+    if ctx.mouse.inside(&rect) && ctx.mouse.scroll != 0.0 {
+        browser.scroll_offset = (browser.scroll_offset - ctx.mouse.scroll * 30.0)
+            .clamp(0.0, (total_h - rect.h).max(0.0));
+    }
+
+    // SAMPLES section header
+    let samples_header_rect = Rect::new(rect.x, y, rect.w, section_h);
+    if y + section_h > rect.y && y < rect.bottom() {
+        draw_rectangle(samples_header_rect.x, samples_header_rect.y.max(rect.y),
+                      samples_header_rect.w, section_h.min(rect.bottom() - samples_header_rect.y.max(rect.y)), section_bg);
+
+        let arrow = if browser.samples_collapsed { ">" } else { "v" };
+        draw_text(&format!("{} SAMPLES ({})", arrow, browser.samples.len()),
+                 rect.x + 8.0, y + 18.0, 14.0, text_color);
+
+        // Toggle collapse on click
+        if ctx.mouse.inside(&samples_header_rect) && ctx.mouse.left_pressed {
+            browser.samples_collapsed = !browser.samples_collapsed;
+        }
+    }
+    y += section_h;
+
+    // SAMPLES items
+    if !browser.samples_collapsed {
+        for (i, level) in browser.samples.iter().enumerate() {
+            let item_rect = Rect::new(rect.x, y, rect.w, item_h);
+
+            if y + item_h > rect.y && y < rect.bottom() {
+                let is_selected = browser.selected_category == Some(LevelCategory::Sample)
+                    && browser.selected_index == Some(i);
+                let is_hovered = ctx.mouse.inside(&item_rect) && item_rect.y >= rect.y;
+
+                let bg = if is_selected { item_selected }
+                        else if is_hovered { item_hover }
+                        else { item_bg };
+
+                // Clip to list bounds
+                let draw_y = item_rect.y.max(rect.y);
+                let draw_h = item_h.min(rect.bottom() - draw_y);
+                if draw_h > 0.0 {
+                    draw_rectangle(item_rect.x + 2.0, draw_y, item_rect.w - 4.0, draw_h, bg);
+
+                    if y >= rect.y {
+                        draw_text(&level.name, rect.x + 20.0, y + 17.0, 13.0, text_color);
+                    }
+                }
+
+                // Handle click
+                if is_hovered && ctx.mouse.left_pressed && item_rect.y >= rect.y {
+                    clicked = Some((LevelCategory::Sample, i));
+                }
+            }
+            y += item_h;
+        }
+    }
+
+    // MY LEVELS section header
+    let user_header_rect = Rect::new(rect.x, y, rect.w, section_h);
+    if y + section_h > rect.y && y < rect.bottom() {
+        draw_rectangle(user_header_rect.x, user_header_rect.y.max(rect.y),
+                      user_header_rect.w, section_h.min(rect.bottom() - user_header_rect.y.max(rect.y)), section_bg);
+
+        let arrow = if browser.user_collapsed { ">" } else { "v" };
+        let cloud_indicator = if has_cloud { " [cloud]" } else { "" };
+        draw_text(&format!("{} MY LEVELS ({}){}", arrow, browser.user_levels.len(), cloud_indicator),
+                 rect.x + 8.0, y + 18.0, 14.0, text_color);
+
+        // Toggle collapse on click
+        if ctx.mouse.inside(&user_header_rect) && ctx.mouse.left_pressed && user_header_rect.y >= rect.y {
+            browser.user_collapsed = !browser.user_collapsed;
+        }
+    }
+    y += section_h;
+
+    // MY LEVELS items
+    if !browser.user_collapsed {
+        if browser.user_levels.is_empty() {
+            // Show empty state message
+            if y + item_h > rect.y && y < rect.bottom() {
+                draw_text("  (no saved levels)", rect.x + 8.0, y + 17.0, 12.0, text_dim);
+            }
+        } else {
+            for (i, level) in browser.user_levels.iter().enumerate() {
+                let item_rect = Rect::new(rect.x, y, rect.w, item_h);
+
+                if y + item_h > rect.y && y < rect.bottom() {
+                    let is_selected = browser.selected_category == Some(LevelCategory::User)
+                        && browser.selected_index == Some(i);
+                    let is_hovered = ctx.mouse.inside(&item_rect) && item_rect.y >= rect.y;
+
+                    let bg = if is_selected { item_selected }
+                            else if is_hovered { item_hover }
+                            else { item_bg };
+
+                    // Clip to list bounds
+                    let draw_y = item_rect.y.max(rect.y);
+                    let draw_h = item_h.min(rect.bottom() - draw_y);
+                    if draw_h > 0.0 {
+                        draw_rectangle(item_rect.x + 2.0, draw_y, item_rect.w - 4.0, draw_h, bg);
+
+                        if y >= rect.y {
+                            draw_text(&level.name, rect.x + 20.0, y + 17.0, 13.0, text_color);
+
+                            // Cloud icon for user levels when cloud storage is active
+                            if has_cloud {
+                                draw_text("*", rect.x + rect.w - 20.0, y + 17.0, 13.0, cloud_color);
+                            }
+                        }
+                    }
+
+                    // Handle click
+                    if is_hovered && ctx.mouse.left_pressed && item_rect.y >= rect.y {
+                        clicked = Some((LevelCategory::User, i));
+                    }
+                }
+                y += item_h;
+            }
+        }
+    }
+
+    clicked
 }
 
 /// Draw the orbit preview of a level (uses browser's local framebuffer)

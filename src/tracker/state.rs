@@ -5,6 +5,7 @@ use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
 use super::psx_reverb::ReverbType;
 use super::actions::create_tracker_actions;
 use super::song_browser::SongBrowser;
+use crate::storage::Storage;
 use crate::ui::{ActionRegistry, SplitPanel};
 use crate::input::MidiInput;
 use std::path::PathBuf;
@@ -1303,13 +1304,14 @@ impl Default for TrackerState {
 
 impl TrackerState {
     /// Save the current song to a file
-    pub fn save_to_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+    pub fn save_to_file(&mut self, path: &std::path::Path, storage: &Storage) -> Result<(), String> {
         // Capture current audio settings from audio engine before saving
         self.song.reverb.preset = self.audio.reverb_type().to_index();
         self.song.reverb.wet = (self.audio.reverb_wet_level() * 127.0) as u8;
         self.song.master_volume = (self.audio.master_volume() * 100.0) as u8;
 
-        super::io::save_song(&self.song, path)?;
+        let path_str = path.to_string_lossy();
+        super::io::save_song_with_storage(&self.song, &path_str, storage)?;
         self.current_file = Some(path.to_path_buf());
         self.dirty = false;
         self.set_status(&format!("Saved: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
@@ -1317,8 +1319,9 @@ impl TrackerState {
     }
 
     /// Load a song from a file
-    pub fn load_from_file(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let song = super::io::load_song(path)?;
+    pub fn load_from_file(&mut self, path: &std::path::Path, storage: &Storage) -> Result<(), String> {
+        let path_str = path.to_string_lossy();
+        let song = super::io::load_song_with_storage(&path_str, storage)?;
         self.song = song;
         self.current_file = Some(path.to_path_buf());
         self.dirty = false;

@@ -1,26 +1,42 @@
 //! Level browser for the editor
 //!
-//! Handles loading bundled levels from disk (native) or via manifest (WASM).
+//! Handles loading bundled levels from disk (native) or via manifest (WASM),
+//! as well as discovering user-created levels from storage.
 
 use std::path::PathBuf;
+use crate::storage::Storage;
 use crate::world::{Level, load_level};
 
 #[cfg(target_arch = "wasm32")]
 use crate::world::load_level_from_str;
 
+/// Category of level (for UI grouping)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelCategory {
+    /// Bundled sample levels (read-only)
+    Sample,
+    /// User-created levels (editable, cloud-synced when authenticated)
+    User,
+}
+
 /// Metadata about a level (without loading the full level)
 #[derive(Debug, Clone)]
-pub struct ExampleLevelInfo {
+pub struct LevelInfo {
     /// Display name (filename without extension)
     pub name: String,
     /// Full path to the level file
     pub path: PathBuf,
+    /// Category (sample or user)
+    pub category: LevelCategory,
 }
 
-/// Discover all levels in the levels directory (native)
+/// Legacy alias for backward compatibility
+pub type ExampleLevelInfo = LevelInfo;
+
+/// Discover all sample levels in the levels directory (native)
 #[cfg(not(target_arch = "wasm32"))]
-pub fn discover_examples() -> Vec<ExampleLevelInfo> {
-    let levels_dir = PathBuf::from("assets/userdata/levels");
+pub fn discover_examples() -> Vec<LevelInfo> {
+    let levels_dir = PathBuf::from("assets/samples/levels");
     let mut levels = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&levels_dir) {
@@ -32,7 +48,11 @@ pub fn discover_examples() -> Vec<ExampleLevelInfo> {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unnamed".to_string());
-                levels.push(ExampleLevelInfo { name, path });
+                levels.push(LevelInfo {
+                    name,
+                    path,
+                    category: LevelCategory::Sample,
+                });
             }
         }
     }
@@ -41,19 +61,53 @@ pub fn discover_examples() -> Vec<ExampleLevelInfo> {
     levels
 }
 
-/// Discover all levels from manifest (WASM)
+/// Discover all sample levels from manifest (WASM)
 #[cfg(target_arch = "wasm32")]
-pub fn discover_examples() -> Vec<ExampleLevelInfo> {
+pub fn discover_examples() -> Vec<LevelInfo> {
     // On WASM, we return empty here and load async later
     Vec::new()
 }
 
-/// Load level list from manifest asynchronously (for WASM)
-pub async fn load_example_list() -> Vec<ExampleLevelInfo> {
+/// Discover user-created levels from storage
+///
+/// Returns empty if storage is not available or has no user levels.
+pub fn discover_user_levels(storage: &Storage) -> Vec<LevelInfo> {
+    const USER_LEVELS_DIR: &str = "assets/userdata/levels";
+
+    match storage.list_sync(USER_LEVELS_DIR) {
+        Ok(files) => {
+            let mut levels: Vec<LevelInfo> = files
+                .iter()
+                .filter(|f| f.ends_with(".ron"))
+                .map(|f| {
+                    // API returns full paths like "assets/userdata/levels/level_001.ron"
+                    // Extract just the filename for display name
+                    let name = f
+                        .rsplit('/')
+                        .next()
+                        .and_then(|n| n.strip_suffix(".ron"))
+                        .unwrap_or(f)
+                        .to_string();
+                    LevelInfo {
+                        name,
+                        path: PathBuf::from(f), // Use full path as returned
+                        category: LevelCategory::User,
+                    }
+                })
+                .collect();
+            levels.sort_by(|a, b| a.name.cmp(&b.name));
+            levels
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Load sample level list from manifest asynchronously (for WASM)
+pub async fn load_example_list() -> Vec<LevelInfo> {
     use macroquad::prelude::*;
 
     // Load and parse manifest
-    let manifest = match load_string("assets/userdata/levels/manifest.txt").await {
+    let manifest = match load_string("assets/samples/levels/manifest.txt").await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to load levels manifest: {}", e);
@@ -73,9 +127,13 @@ pub async fn load_example_list() -> Vec<ExampleLevelInfo> {
             .strip_suffix(".ron")
             .unwrap_or(line)
             .to_string();
-        let path = PathBuf::from(format!("assets/userdata/levels/{}", line));
+        let path = PathBuf::from(format!("assets/samples/levels/{}", line));
 
-        levels.push(ExampleLevelInfo { name, path });
+        levels.push(LevelInfo {
+            name,
+            path,
+            category: LevelCategory::Sample,
+        });
     }
 
     levels

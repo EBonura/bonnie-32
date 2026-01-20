@@ -9,10 +9,10 @@ use std::path::Path;
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/samples/textures");
-    println!("cargo:rerun-if-changed=assets/userdata/levels");
-    println!("cargo:rerun-if-changed=assets/userdata/assets");
+    println!("cargo:rerun-if-changed=assets/samples/levels");
+    println!("cargo:rerun-if-changed=assets/samples/assets");
     println!("cargo:rerun-if-changed=assets/samples/meshes");
-    println!("cargo:rerun-if-changed=assets/userdata/songs");
+    println!("cargo:rerun-if-changed=assets/samples/songs");
 
     generate_texture_manifest();
     generate_levels_manifest();
@@ -79,8 +79,8 @@ fn generate_texture_manifest() {
 
 /// Generate manifest for levels (for WASM builds)
 fn generate_levels_manifest() {
-    let levels_dir = Path::new("assets/userdata/levels");
-    let manifest_path = Path::new("assets/userdata/levels/manifest.txt");
+    let levels_dir = Path::new("assets/samples/levels");
+    let manifest_path = Path::new("assets/samples/levels/manifest.txt");
 
     let mut manifest = String::new();
 
@@ -116,8 +116,8 @@ fn generate_levels_manifest() {
 
 /// Generate manifest for models/assets (for WASM builds)
 fn generate_models_manifest() {
-    let models_dir = Path::new("assets/userdata/assets");
-    let manifest_path = Path::new("assets/userdata/assets/manifest.txt");
+    let models_dir = Path::new("assets/samples/assets");
+    let manifest_path = Path::new("assets/samples/assets/manifest.txt");
 
     let mut manifest = String::new();
 
@@ -192,8 +192,8 @@ fn generate_meshes_manifest() {
 
 /// Generate manifest for songs (for WASM builds)
 fn generate_songs_manifest() {
-    let songs_dir = Path::new("assets/userdata/songs");
-    let manifest_path = Path::new("assets/userdata/songs/manifest.txt");
+    let songs_dir = Path::new("assets/samples/songs");
+    let manifest_path = Path::new("assets/samples/songs/manifest.txt");
 
     let mut manifest = String::new();
 

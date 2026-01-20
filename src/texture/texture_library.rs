@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::user_texture::{TextureError, UserTexture};
+use crate::storage::Storage;
 
 /// Directory where user textures are stored
 pub const TEXTURES_USER_DIR: &str = "assets/userdata/textures";
@@ -364,6 +365,131 @@ impl TextureLibrary {
     /// Get the base directory path
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Storage-aware methods (use Storage abstraction for I/O)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Discover and load all textures using the storage backend
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn discover_with_storage(&mut self, storage: &Storage) -> Result<usize, TextureError> {
+        use crate::storage::StorageError;
+
+        self.textures.clear();
+        self.texture_names.clear();
+        self.by_id.clear();
+
+        let base_dir_str = self.base_dir.to_string_lossy().to_string();
+
+        // List all files in the directory
+        let files = match storage.list_sync(&base_dir_str) {
+            Ok(files) => files,
+            Err(StorageError::NotFound(_)) => {
+                // Directory doesn't exist - nothing to discover
+                return Ok(0);
+            }
+            Err(e) => return Err(TextureError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))),
+        };
+
+        // Filter for .ron files and sort
+        let mut ron_files: Vec<_> = files
+            .into_iter()
+            .filter(|f| f.ends_with(".ron"))
+            .collect();
+        ron_files.sort();
+
+        // Load each texture
+        let mut loaded = 0;
+        for filename in ron_files {
+            let path = format!("{}/{}", base_dir_str, filename);
+            match storage.read_sync(&path) {
+                Ok(bytes) => {
+                    match UserTexture::load_from_bytes(&bytes) {
+                        Ok(tex) => {
+                            let name = tex.name.clone();
+                            let id = tex.id;
+                            self.texture_names.push(name.clone());
+                            self.by_id.insert(id, name.clone());
+                            self.textures.insert(name, tex);
+                            loaded += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse texture {}: {}", filename, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to read texture {}: {}", filename, e);
+                }
+            }
+        }
+
+        Ok(loaded)
+    }
+
+    /// Discover textures using storage (WASM stub)
+    #[cfg(target_arch = "wasm32")]
+    pub fn discover_with_storage(&mut self, _storage: &Storage) -> Result<usize, TextureError> {
+        self.textures.clear();
+        self.texture_names.clear();
+        self.by_id.clear();
+        Ok(0)
+    }
+
+    /// Save a texture using the storage backend
+    pub fn save_texture_with_storage(&self, name: &str, storage: &Storage) -> Result<(), TextureError> {
+        let tex = self
+            .textures
+            .get(name)
+            .ok_or_else(|| TextureError::ValidationError(format!("texture '{}' not found", name)))?;
+
+        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+
+        // Serialize the texture
+        let content = tex.to_ron_string()?;
+
+        storage
+            .write_sync(&path, content.as_bytes())
+            .map_err(|e| TextureError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )))
+    }
+
+    /// Delete a texture file using the storage backend
+    pub fn delete_texture_with_storage(&mut self, name: &str, storage: &Storage) -> Result<(), TextureError> {
+        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+
+        storage
+            .delete_sync(&path)
+            .map_err(|e| TextureError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )))?;
+
+        self.remove(name);
+        Ok(())
+    }
+
+    /// Regenerate manifest using storage backend
+    pub fn regenerate_manifest_with_storage(&self, storage: &Storage) -> Result<(), TextureError> {
+        let manifest_path = format!("{}/{}", self.base_dir.to_string_lossy(), MANIFEST_FILE);
+
+        let mut manifest = String::new();
+        for name in &self.texture_names {
+            manifest.push_str(&format!("{}.ron\n", name));
+        }
+
+        storage
+            .write_sync(&manifest_path, manifest.as_bytes())
+            .map_err(|e| TextureError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )))
     }
 }
 

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::asset::{Asset, AssetError};
+use crate::storage::Storage;
 
 /// Directory where assets are stored
 pub const ASSETS_DIR: &str = "assets/userdata/assets";
@@ -442,6 +443,146 @@ impl AssetLibrary {
         cats.sort();
         cats.dedup();
         cats
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Storage-aware methods (use Storage abstraction for I/O)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Discover and load all assets using the storage backend
+    ///
+    /// This method uses the Storage abstraction for I/O, allowing it to work
+    /// with both local filesystem and cloud storage backends.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn discover_with_storage(&mut self, storage: &Storage) -> Result<usize, AssetError> {
+        use crate::storage::StorageError;
+
+        self.assets.clear();
+        self.asset_names.clear();
+        self.by_id.clear();
+
+        let base_dir_str = self.base_dir.to_string_lossy().to_string();
+
+        // List all files in the directory
+        let files = match storage.list_sync(&base_dir_str) {
+            Ok(files) => files,
+            Err(StorageError::NotFound(_)) => {
+                // Directory doesn't exist - nothing to discover
+                return Ok(0);
+            }
+            Err(e) => return Err(AssetError::Io(e.to_string())),
+        };
+
+        // Filter for .ron files and sort
+        let mut ron_files: Vec<_> = files
+            .into_iter()
+            .filter(|f| f.ends_with(".ron"))
+            .collect();
+        ron_files.sort();
+
+        // Load each asset
+        for filename in ron_files {
+            let path = format!("{}/{}", base_dir_str, filename);
+            match storage.read_sync(&path) {
+                Ok(bytes) => {
+                    match Asset::load_from_bytes(&bytes) {
+                        Ok(asset) => {
+                            // Use filename (without extension) as the key
+                            let name = filename
+                                .strip_suffix(".ron")
+                                .unwrap_or(&filename)
+                                .to_string();
+                            let id = asset.id;
+                            self.asset_names.push(name.clone());
+                            self.by_id.insert(id, name.clone());
+                            self.assets.insert(name, asset);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse asset {}: {}", filename, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to read asset {}: {}", filename, e);
+                }
+            }
+        }
+
+        Ok(self.assets.len())
+    }
+
+    /// Discover assets using storage (WASM stub)
+    #[cfg(target_arch = "wasm32")]
+    pub fn discover_with_storage(&mut self, _storage: &Storage) -> Result<usize, AssetError> {
+        // On WASM, use manifest-based discovery or cloud storage
+        self.assets.clear();
+        self.asset_names.clear();
+        self.by_id.clear();
+        Ok(0)
+    }
+
+    /// Save an asset using the storage backend
+    pub fn save_asset_with_storage(&self, name: &str, storage: &Storage) -> Result<(), AssetError> {
+        let asset = self
+            .assets
+            .get(name)
+            .ok_or_else(|| AssetError::Io(format!("asset '{}' not found", name)))?;
+
+        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+
+        // Serialize and compress the asset
+        let bytes = asset.to_bytes()?;
+
+        storage
+            .write_sync(&path, &bytes)
+            .map_err(|e| AssetError::Io(e.to_string()))
+    }
+
+    /// Delete an asset file using the storage backend
+    pub fn delete_asset_with_storage(&mut self, name: &str, storage: &Storage) -> Result<(), AssetError> {
+        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+
+        storage
+            .delete_sync(&path)
+            .map_err(|e| AssetError::Io(e.to_string()))?;
+
+        self.remove(name);
+        Ok(())
+    }
+
+    /// Reload a single asset using storage backend
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn reload_asset_with_storage(&mut self, name: &str, storage: &Storage) -> Result<(), AssetError> {
+        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+
+        let bytes = storage
+            .read_sync(&path)
+            .map_err(|e| AssetError::Io(e.to_string()))?;
+
+        let asset = Asset::load_from_bytes(&bytes)?;
+
+        // Update by_id mapping (in case ID changed)
+        if let Some(old_asset) = self.assets.get(name) {
+            self.by_id.remove(&old_asset.id);
+        }
+        self.by_id.insert(asset.id, name.to_string());
+
+        self.assets.insert(name.to_string(), asset);
+        Ok(())
+    }
+
+    /// Regenerate manifest using storage backend
+    pub fn regenerate_manifest_with_storage(&self, storage: &Storage) -> Result<(), AssetError> {
+        let manifest_path = format!("{}/{}", self.base_dir.to_string_lossy(), MANIFEST_FILE);
+
+        let mut manifest = String::new();
+        for name in &self.asset_names {
+            manifest.push_str(&format!("{}.ron\n", name));
+        }
+
+        storage
+            .write_sync(&manifest_path, manifest.as_bytes())
+            .map_err(|e| AssetError::Io(e.to_string()))
     }
 }
 

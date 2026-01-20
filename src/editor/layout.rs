@@ -1,6 +1,7 @@
 //! Editor layout - TRLE-inspired panel arrangement
 
 use macroquad::prelude::*;
+use crate::storage::Storage;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, COLLAPSED_PANEL_HEIGHT, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
@@ -235,6 +236,7 @@ pub fn draw_editor(
     bounds: Rect,
     icon_font: Option<&Font>,
     input: &InputState,
+    storage: &Storage,
 ) -> EditorAction {
     use super::state::EditorFrameTimings;
     let frame_start = EditorFrameTimings::start();
@@ -401,7 +403,7 @@ pub fn draw_editor(
         state.active_panel = super::state::ActivePanel::TexturePalette;
     }
     if let Some(content) = textures_content {
-        draw_texture_palette(ctx, content, state, icon_font);
+        draw_texture_palette(ctx, content, state, icon_font, storage);
     }
     y += textures_h;
 
