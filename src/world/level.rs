@@ -407,8 +407,64 @@ pub fn load_level_with_storage(path: &str, storage: &Storage) -> Result<Level, L
     Ok(level)
 }
 
+/// Parse level data from bytes (for async loading)
+pub fn parse_level_data(bytes: &[u8]) -> Result<Level, LevelError> {
+    // Detect format: RON files start with '(' or whitespace, brotli is binary
+    let is_plain_ron = bytes.first().map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t').unwrap_or(false);
+
+    let contents = if is_plain_ron {
+        // Plain RON text
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid UTF-8: {}", e)
+            )))?
+    } else {
+        // Brotli compressed - decompress first
+        let mut decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut Cursor::new(bytes), &mut decompressed)
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("brotli decompression failed: {}", e)
+            )))?;
+        String::from_utf8(decompressed)
+            .map_err(|e| LevelError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid UTF-8 after decompression: {}", e)
+            )))?
+    };
+
+    let mut level: Level = ron::from_str(&contents)?;
+
+    // Validate level to prevent malicious files
+    validate_level(&level)?;
+
+    // Strip legacy objects (objects without asset_id) - migration to asset-based system
+    for room in &mut level.rooms {
+        room.objects.retain(|obj| obj.asset_id != 0);
+    }
+
+    // Recalculate bounds for all rooms (not serialized)
+    for room in &mut level.rooms {
+        room.recalculate_bounds();
+    }
+
+    Ok(level)
+}
+
 /// Save a level using the storage backend
 pub fn save_level_with_storage(level: &Level, path: &str, storage: &Storage) -> Result<(), LevelError> {
+    let data = serialize_level(level)?;
+    storage
+        .write_sync(path, &data)
+        .map_err(|e| LevelError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))
+}
+
+/// Serialize a level to compressed bytes (for async saving)
+pub fn serialize_level(level: &Level) -> Result<Vec<u8>, LevelError> {
     let config = ron::ser::PrettyConfig::new()
         .depth_limit(4)
         .indentor("  ".to_string());
@@ -426,10 +482,5 @@ pub fn save_level_with_storage(level: &Level, path: &str, storage: &Storage) -> 
         format!("brotli compression failed: {}", e)
     )))?;
 
-    storage
-        .write_sync(path, &compressed)
-        .map_err(|e| LevelError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        )))
+    Ok(compressed)
 }

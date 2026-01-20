@@ -80,17 +80,26 @@ pub fn discover_user_levels(storage: &Storage) -> Vec<LevelInfo> {
                 .iter()
                 .filter(|f| f.ends_with(".ron"))
                 .map(|f| {
-                    // API returns full paths like "assets/userdata/levels/level_001.ron"
+                    // Cloud API returns full paths like "assets/userdata/levels/level_001.ron"
+                    // Local storage returns just filenames like "level_001.ron"
+                    // Handle both cases:
+                    let full_path = if f.contains('/') {
+                        f.clone() // Already a full path
+                    } else {
+                        format!("{}/{}", USER_LEVELS_DIR, f) // Prepend directory
+                    };
+
                     // Extract just the filename for display name
-                    let name = f
+                    let name = full_path
                         .rsplit('/')
                         .next()
                         .and_then(|n| n.strip_suffix(".ron"))
-                        .unwrap_or(f)
+                        .unwrap_or(&full_path)
                         .to_string();
+
                     LevelInfo {
                         name,
-                        path: PathBuf::from(f), // Use full path as returned
+                        path: PathBuf::from(full_path),
                         category: LevelCategory::User,
                     }
                 })

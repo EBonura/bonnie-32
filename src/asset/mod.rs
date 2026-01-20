@@ -43,4 +43,4 @@ mod library;
 
 pub use asset::{Asset, AssetError, generate_asset_id};
 pub use component::{AssetComponent, CollisionShapeDef};
-pub use library::{AssetLibrary, ASSETS_DIR};
+pub use library::{AssetLibrary, AssetSource, ASSETS_DIR, SAMPLES_ASSETS_DIR, USER_ASSETS_DIR};

@@ -1,6 +1,9 @@
 //! Asset Library - Discovery and caching of assets
 //!
-//! Manages the collection of assets stored in `assets/userdata/assets/`.
+//! Manages the collection of assets from two directories:
+//! - `assets/samples/assets/` - Bundled sample assets (read-only)
+//! - `assets/userdata/assets/` - User-created assets (editable, cloud-synced)
+//!
 //! Handles both native filesystem discovery and WASM manifest-based loading.
 
 use std::collections::HashMap;
@@ -9,26 +12,43 @@ use std::path::{Path, PathBuf};
 use super::asset::{Asset, AssetError};
 use crate::storage::Storage;
 
-/// Directory where assets are stored
-pub const ASSETS_DIR: &str = "assets/userdata/assets";
+/// Directory for bundled sample assets (read-only)
+pub const SAMPLES_ASSETS_DIR: &str = "assets/samples/assets";
+
+/// Directory for user-created assets (editable, cloud-synced)
+pub const USER_ASSETS_DIR: &str = "assets/userdata/assets";
+
+/// Legacy constant for backwards compatibility
+pub const ASSETS_DIR: &str = USER_ASSETS_DIR;
 
 /// Manifest file for WASM asset loading
 pub const MANIFEST_FILE: &str = "manifest.txt";
 
+/// Source/origin of an asset (determines editability and storage location)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssetSource {
+    /// Bundled sample asset from assets/samples/assets/ (read-only)
+    Sample,
+    /// User-created asset from assets/userdata/assets/ (editable, cloud-synced)
+    #[default]
+    User,
+}
+
 /// A library of assets
 ///
-/// Provides discovery, loading, and caching of assets from the
-/// `assets/userdata/assets/` directory.
+/// Provides discovery, loading, and caching of assets from two directories:
+/// - `assets/samples/assets/` - Bundled sample assets (read-only)
+/// - `assets/userdata/assets/` - User-created assets (editable, cloud-synced)
 #[derive(Debug, Default)]
 pub struct AssetLibrary {
     /// Loaded assets keyed by name (without extension)
     assets: HashMap<String, Asset>,
-    /// List of discovered asset names (for iteration order)
-    asset_names: Vec<String>,
+    /// List of discovered sample asset names (for iteration order)
+    sample_names: Vec<String>,
+    /// List of discovered user asset names (for iteration order)
+    user_names: Vec<String>,
     /// Asset ID -> asset name mapping for ID-based lookups
     by_id: HashMap<u64, String>,
-    /// Base directory for assets
-    base_dir: PathBuf,
 }
 
 impl AssetLibrary {
@@ -36,39 +56,52 @@ impl AssetLibrary {
     pub fn new() -> Self {
         Self {
             assets: HashMap::new(),
-            asset_names: Vec::new(),
+            sample_names: Vec::new(),
+            user_names: Vec::new(),
             by_id: HashMap::new(),
-            base_dir: PathBuf::from(ASSETS_DIR),
         }
     }
 
-    /// Create a library with a custom base directory
-    pub fn with_dir(base_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            assets: HashMap::new(),
-            asset_names: Vec::new(),
-            by_id: HashMap::new(),
-            base_dir: base_dir.into(),
-        }
-    }
-
-    /// Discover and load all assets from the base directory (native only)
+    /// Discover and load all assets from both directories (native only)
+    ///
+    /// Scans:
+    /// - `assets/samples/assets/` for bundled sample assets (read-only)
+    /// - `assets/userdata/assets/` for user-created assets (editable)
     ///
     /// On WASM, this is a no-op - use upload functionality instead.
     /// Assets are keyed by filename (without extension).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover(&mut self) -> Result<usize, AssetError> {
         self.assets.clear();
-        self.asset_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
 
-        if !self.base_dir.exists() {
-            // Create directory if it doesn't exist
-            std::fs::create_dir_all(&self.base_dir)?;
+        let mut count = 0;
+
+        // Discover sample assets (read-only)
+        count += self.discover_from_dir(SAMPLES_ASSETS_DIR, AssetSource::Sample)?;
+
+        // Discover user assets (editable)
+        count += self.discover_from_dir(USER_ASSETS_DIR, AssetSource::User)?;
+
+        Ok(count)
+    }
+
+    /// Discover assets from a specific directory
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discover_from_dir(&mut self, dir: &str, source: AssetSource) -> Result<usize, AssetError> {
+        let base_dir = PathBuf::from(dir);
+
+        if !base_dir.exists() {
+            // Create user directory if it doesn't exist, skip samples if missing
+            if source == AssetSource::User {
+                std::fs::create_dir_all(&base_dir)?;
+            }
             return Ok(0);
         }
 
-        let mut entries: Vec<_> = std::fs::read_dir(&self.base_dir)?
+        let mut entries: Vec<_> = std::fs::read_dir(&base_dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
@@ -81,9 +114,13 @@ impl AssetLibrary {
         // Sort by filename for consistent ordering
         entries.sort();
 
+        let mut count = 0;
         for path in entries {
             match Asset::load(&path) {
-                Ok(asset) => {
+                Ok(mut asset) => {
+                    // Set the source
+                    asset.source = source;
+
                     // Use filename (without extension) as the key
                     let name = path
                         .file_stem()
@@ -91,9 +128,16 @@ impl AssetLibrary {
                         .unwrap_or(&asset.name)
                         .to_string();
                     let id = asset.id;
-                    self.asset_names.push(name.clone());
+
+                    // Track in the appropriate list
+                    match source {
+                        AssetSource::Sample => self.sample_names.push(name.clone()),
+                        AssetSource::User => self.user_names.push(name.clone()),
+                    }
+
                     self.by_id.insert(id, name.clone());
                     self.assets.insert(name, asset);
+                    count += 1;
                 }
                 Err(e) => {
                     eprintln!("Failed to load asset {:?}: {}", path, e);
@@ -101,7 +145,7 @@ impl AssetLibrary {
             }
         }
 
-        Ok(self.assets.len())
+        Ok(count)
     }
 
     /// Discover assets (WASM stub - no filesystem access)
@@ -111,7 +155,8 @@ impl AssetLibrary {
     #[cfg(target_arch = "wasm32")]
     pub fn discover(&mut self) -> Result<usize, AssetError> {
         self.assets.clear();
-        self.asset_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
         Ok(0)
     }
@@ -122,11 +167,22 @@ impl AssetLibrary {
     /// Useful for picking up changes made in the modeler.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reload_asset(&mut self, name: &str) -> Result<(), AssetError> {
-        let path = self.base_dir.join(format!("{}.ron", name));
-        let asset = Asset::load(&path)?;
+        // Determine directory from existing asset source
+        let dir = if let Some(asset) = self.assets.get(name) {
+            match asset.source {
+                AssetSource::Sample => SAMPLES_ASSETS_DIR,
+                AssetSource::User => USER_ASSETS_DIR,
+            }
+        } else {
+            USER_ASSETS_DIR // Default to user directory
+        };
 
-        // Update by_id mapping (in case ID changed, though unlikely)
+        let path = PathBuf::from(dir).join(format!("{}.ron", name));
+        let mut asset = Asset::load(&path)?;
+
+        // Preserve the source
         if let Some(old_asset) = self.assets.get(name) {
+            asset.source = old_asset.source;
             self.by_id.remove(&old_asset.id);
         }
         self.by_id.insert(asset.id, name.to_string());
@@ -142,7 +198,7 @@ impl AssetLibrary {
     /// successfully reloaded assets.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reload_all(&mut self) -> Result<usize, AssetError> {
-        let names: Vec<String> = self.asset_names.clone();
+        let names: Vec<String> = self.all_names().map(|s| s.to_string()).collect();
         let mut count = 0;
         for name in names {
             if self.reload_asset(&name).is_ok() {
@@ -156,42 +212,69 @@ impl AssetLibrary {
     ///
     /// The manifest file should contain one asset filename per line (without path).
     /// Assets are keyed by filename (without extension).
+    /// Loads from both samples and user assets directories.
     #[cfg(target_arch = "wasm32")]
     pub async fn discover_from_manifest(&mut self) -> Result<usize, AssetError> {
         use macroquad::prelude::load_string;
 
         self.assets.clear();
-        self.asset_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
 
-        let manifest_path = format!("{}/{}", ASSETS_DIR, MANIFEST_FILE);
+        let mut count = 0;
+
+        // Load sample assets
+        count += self.load_manifest_from_dir(SAMPLES_ASSETS_DIR, AssetSource::Sample).await?;
+
+        // Load user assets
+        count += self.load_manifest_from_dir(USER_ASSETS_DIR, AssetSource::User).await?;
+
+        Ok(count)
+    }
+
+    /// Load assets from manifest in a specific directory (WASM)
+    #[cfg(target_arch = "wasm32")]
+    async fn load_manifest_from_dir(&mut self, dir: &str, source: AssetSource) -> Result<usize, AssetError> {
+        use macroquad::prelude::load_string;
+
+        let manifest_path = format!("{}/{}", dir, MANIFEST_FILE);
         let manifest = match load_string(&manifest_path).await {
             Ok(m) => m,
             Err(_) => {
-                // No manifest
+                // No manifest for this directory
                 return Ok(0);
             }
         };
 
+        let mut count = 0;
         for line in manifest.lines() {
             let filename = line.trim();
             if filename.is_empty() || filename.starts_with('#') {
                 continue;
             }
 
-            let path = format!("{}/{}", ASSETS_DIR, filename);
+            let path = format!("{}/{}", dir, filename);
             match macroquad::prelude::load_file(&path).await {
                 Ok(bytes) => match Asset::load_from_bytes(&bytes) {
-                    Ok(asset) => {
+                    Ok(mut asset) => {
+                        asset.source = source;
+
                         // Use filename (without extension) as the key
                         let name = filename
                             .strip_suffix(".ron")
                             .unwrap_or(filename)
                             .to_string();
                         let id = asset.id;
-                        self.asset_names.push(name.clone());
+
+                        match source {
+                            AssetSource::Sample => self.sample_names.push(name.clone()),
+                            AssetSource::User => self.user_names.push(name.clone()),
+                        }
+
                         self.by_id.insert(id, name.clone());
                         self.assets.insert(name, asset);
+                        count += 1;
                     }
                     Err(e) => {
                         eprintln!("Failed to parse asset {}: {}", filename, e);
@@ -203,7 +286,7 @@ impl AssetLibrary {
             }
         }
 
-        Ok(self.assets.len())
+        Ok(count)
     }
 
     /// Get an asset by name
@@ -239,16 +322,35 @@ impl AssetLibrary {
     /// Add an asset to the library
     ///
     /// If an asset with the same name exists, it will be replaced.
-    /// Also updates the ID index.
+    /// Also updates the ID index. New assets are added to the appropriate
+    /// list based on their source field.
     pub fn add(&mut self, asset: Asset) {
         let name = asset.name.clone();
         let id = asset.id;
+        let source = asset.source;
 
-        // If replacing, remove old ID mapping
+        // If replacing, remove old ID mapping and from old list
         if let Some(old_asset) = self.assets.get(&name) {
             self.by_id.remove(&old_asset.id);
-        } else {
-            self.asset_names.push(name.clone());
+            // Remove from appropriate list
+            match old_asset.source {
+                AssetSource::Sample => self.sample_names.retain(|n| n != &name),
+                AssetSource::User => self.user_names.retain(|n| n != &name),
+            }
+        }
+
+        // Add to appropriate list
+        match source {
+            AssetSource::Sample => {
+                if !self.sample_names.contains(&name) {
+                    self.sample_names.push(name.clone());
+                }
+            }
+            AssetSource::User => {
+                if !self.user_names.contains(&name) {
+                    self.user_names.push(name.clone());
+                }
+            }
         }
 
         self.by_id.insert(id, name.clone());
@@ -258,7 +360,11 @@ impl AssetLibrary {
     /// Remove an asset by name
     pub fn remove(&mut self, name: &str) -> Option<Asset> {
         if let Some(asset) = self.assets.remove(name) {
-            self.asset_names.retain(|n| n != name);
+            // Remove from appropriate list
+            match asset.source {
+                AssetSource::Sample => self.sample_names.retain(|n| n != name),
+                AssetSource::User => self.user_names.retain(|n| n != name),
+            }
             // Clean up ID index
             self.by_id.remove(&asset.id);
             Some(asset)
@@ -277,15 +383,65 @@ impl AssetLibrary {
         self.assets.is_empty()
     }
 
-    /// Iterate over asset names in discovery order
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.asset_names.iter().map(|s| s.as_str())
+    /// Get the number of sample assets
+    pub fn sample_count(&self) -> usize {
+        self.sample_names.len()
     }
 
-    /// Iterate over all assets
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Asset)> {
-        self.asset_names
+    /// Get the number of user assets
+    pub fn user_count(&self) -> usize {
+        self.user_names.len()
+    }
+
+    /// Check if there are any sample assets
+    pub fn has_samples(&self) -> bool {
+        !self.sample_names.is_empty()
+    }
+
+    /// Check if there are any user assets
+    pub fn has_user_assets(&self) -> bool {
+        !self.user_names.is_empty()
+    }
+
+    /// Iterate over sample asset names in discovery order
+    pub fn sample_names(&self) -> impl Iterator<Item = &str> {
+        self.sample_names.iter().map(|s| s.as_str())
+    }
+
+    /// Iterate over user asset names in discovery order
+    pub fn user_asset_names(&self) -> impl Iterator<Item = &str> {
+        self.user_names.iter().map(|s| s.as_str())
+    }
+
+    /// Iterate over all asset names (samples first, then user assets)
+    pub fn all_names(&self) -> impl Iterator<Item = &str> {
+        self.sample_names.iter().chain(self.user_names.iter()).map(|s| s.as_str())
+    }
+
+    /// Iterate over asset names in discovery order (alias for all_names for backwards compatibility)
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.all_names()
+    }
+
+    /// Iterate over sample assets
+    pub fn samples(&self) -> impl Iterator<Item = (&str, &Asset)> {
+        self.sample_names
             .iter()
+            .filter_map(|name| self.assets.get(name).map(|asset| (name.as_str(), asset)))
+    }
+
+    /// Iterate over user assets
+    pub fn user_assets(&self) -> impl Iterator<Item = (&str, &Asset)> {
+        self.user_names
+            .iter()
+            .filter_map(|name| self.assets.get(name).map(|asset| (name.as_str(), asset)))
+    }
+
+    /// Iterate over all assets (samples first, then user assets)
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Asset)> {
+        self.sample_names
+            .iter()
+            .chain(self.user_names.iter())
             .filter_map(|name| self.assets.get(name).map(|asset| (name.as_str(), asset)))
     }
 
@@ -326,6 +482,10 @@ impl AssetLibrary {
     }
 
     /// Save an asset to disk (native only)
+    ///
+    /// Assets are saved to their appropriate directory based on source:
+    /// - Sample assets cannot be saved (read-only)
+    /// - User assets are saved to assets/userdata/assets/
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_asset(&self, name: &str) -> Result<(), AssetError> {
         let asset = self
@@ -333,10 +493,18 @@ impl AssetLibrary {
             .get(name)
             .ok_or_else(|| AssetError::ValidationError(format!("asset '{}' not found", name)))?;
 
-        // Ensure directory exists
-        std::fs::create_dir_all(&self.base_dir)?;
+        // Sample assets are read-only
+        if asset.source == AssetSource::Sample {
+            return Err(AssetError::ValidationError(
+                "cannot save sample assets (read-only)".into(),
+            ));
+        }
 
-        let path = self.base_dir.join(format!("{}.ron", name));
+        // Ensure user directory exists
+        let base_dir = PathBuf::from(USER_ASSETS_DIR);
+        std::fs::create_dir_all(&base_dir)?;
+
+        let path = base_dir.join(format!("{}.ron", name));
         asset.save(&path)
     }
 
@@ -350,24 +518,40 @@ impl AssetLibrary {
         Ok(())
     }
 
-    /// Save all assets to disk (native only)
+    /// Save all user assets to disk (native only)
+    ///
+    /// Only saves user assets (sample assets are read-only).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_all(&self) -> Result<usize, AssetError> {
-        std::fs::create_dir_all(&self.base_dir)?;
+        let base_dir = PathBuf::from(USER_ASSETS_DIR);
+        std::fs::create_dir_all(&base_dir)?;
 
         let mut saved = 0;
-        for (name, asset) in &self.assets {
-            let path = self.base_dir.join(format!("{}.ron", name));
-            asset.save(&path)?;
-            saved += 1;
+        for name in &self.user_names {
+            if let Some(asset) = self.assets.get(name) {
+                let path = base_dir.join(format!("{}.ron", name));
+                asset.save(&path)?;
+                saved += 1;
+            }
         }
         Ok(saved)
     }
 
     /// Delete an asset file from disk (native only)
+    ///
+    /// Only user assets can be deleted (sample assets are read-only).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn delete_asset_file(&mut self, name: &str) -> Result<(), AssetError> {
-        let path = self.base_dir.join(format!("{}.ron", name));
+        // Check if asset exists and is a user asset
+        if let Some(asset) = self.assets.get(name) {
+            if asset.source == AssetSource::Sample {
+                return Err(AssetError::ValidationError(
+                    "cannot delete sample assets (read-only)".into(),
+                ));
+            }
+        }
+
+        let path = PathBuf::from(USER_ASSETS_DIR).join(format!("{}.ron", name));
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -378,10 +562,11 @@ impl AssetLibrary {
     /// Generate the next available asset name with format "asset_001", "asset_002", etc.
     ///
     /// Follows the same numbering convention as levels and textures.
+    /// Checks both sample and user assets to avoid conflicts.
     pub fn next_available_name(&self) -> String {
-        // Find the highest existing asset_XXX number
+        // Find the highest existing asset_XXX number across all assets
         let mut highest = 0u32;
-        for name in self.asset_names.iter() {
+        for name in self.sample_names.iter().chain(self.user_names.iter()) {
             if let Some(num_str) = name.strip_prefix("asset_") {
                 if let Ok(num) = num_str.parse::<u32>() {
                     highest = highest.max(num);
@@ -409,27 +594,44 @@ impl AssetLibrary {
         }
     }
 
-    /// Regenerate the manifest file (native only)
+    /// Regenerate the manifest files (native only)
     ///
-    /// Creates a manifest.txt file listing all assets for WASM loading.
+    /// Creates manifest.txt files listing all assets for WASM loading.
+    /// Creates separate manifests for samples and user directories.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn regenerate_manifest(&self) -> Result<(), AssetError> {
-        std::fs::create_dir_all(&self.base_dir)?;
-
-        let manifest_path = self.base_dir.join(MANIFEST_FILE);
-        let mut manifest = String::new();
-
-        for name in &self.asset_names {
-            manifest.push_str(&format!("{}.ron\n", name));
+        // Regenerate sample manifest
+        let samples_dir = PathBuf::from(SAMPLES_ASSETS_DIR);
+        if samples_dir.exists() {
+            let manifest_path = samples_dir.join(MANIFEST_FILE);
+            let mut manifest = String::new();
+            for name in &self.sample_names {
+                manifest.push_str(&format!("{}.ron\n", name));
+            }
+            std::fs::write(manifest_path, manifest)?;
         }
 
+        // Regenerate user manifest
+        let user_dir = PathBuf::from(USER_ASSETS_DIR);
+        std::fs::create_dir_all(&user_dir)?;
+        let manifest_path = user_dir.join(MANIFEST_FILE);
+        let mut manifest = String::new();
+        for name in &self.user_names {
+            manifest.push_str(&format!("{}.ron\n", name));
+        }
         std::fs::write(manifest_path, manifest)?;
+
         Ok(())
     }
 
-    /// Get the base directory path
-    pub fn base_dir(&self) -> &Path {
-        &self.base_dir
+    /// Get the user assets directory path
+    pub fn user_dir(&self) -> &Path {
+        Path::new(USER_ASSETS_DIR)
+    }
+
+    /// Get the samples assets directory path
+    pub fn samples_dir(&self) -> &Path {
+        Path::new(SAMPLES_ASSETS_DIR)
     }
 
     /// Get all unique categories in the library
@@ -453,18 +655,37 @@ impl AssetLibrary {
     ///
     /// This method uses the Storage abstraction for I/O, allowing it to work
     /// with both local filesystem and cloud storage backends.
+    /// Discovers from both samples and user directories.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover_with_storage(&mut self, storage: &Storage) -> Result<usize, AssetError> {
-        use crate::storage::StorageError;
-
         self.assets.clear();
-        self.asset_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
 
-        let base_dir_str = self.base_dir.to_string_lossy().to_string();
+        let mut count = 0;
+
+        // Discover sample assets (read-only, local only)
+        count += self.discover_from_dir_with_storage(SAMPLES_ASSETS_DIR, AssetSource::Sample, storage)?;
+
+        // Discover user assets (editable, may be cloud-synced)
+        count += self.discover_from_dir_with_storage(USER_ASSETS_DIR, AssetSource::User, storage)?;
+
+        Ok(count)
+    }
+
+    /// Discover assets from a specific directory using storage backend
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discover_from_dir_with_storage(
+        &mut self,
+        dir: &str,
+        source: AssetSource,
+        storage: &Storage,
+    ) -> Result<usize, AssetError> {
+        use crate::storage::StorageError;
 
         // List all files in the directory
-        let files = match storage.list_sync(&base_dir_str) {
+        let files = match storage.list_sync(dir) {
             Ok(files) => files,
             Err(StorageError::NotFound(_)) => {
                 // Directory doesn't exist - nothing to discover
@@ -480,22 +701,40 @@ impl AssetLibrary {
             .collect();
         ron_files.sort();
 
+        let mut count = 0;
         // Load each asset
         for filename in ron_files {
-            let path = format!("{}/{}", base_dir_str, filename);
+            // Handle both full paths (from cloud) and filenames (from local)
+            let path = if filename.contains('/') {
+                filename.clone()
+            } else {
+                format!("{}/{}", dir, filename)
+            };
+
             match storage.read_sync(&path) {
                 Ok(bytes) => {
                     match Asset::load_from_bytes(&bytes) {
-                        Ok(asset) => {
+                        Ok(mut asset) => {
+                            asset.source = source;
+
                             // Use filename (without extension) as the key
                             let name = filename
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&filename)
                                 .strip_suffix(".ron")
                                 .unwrap_or(&filename)
                                 .to_string();
                             let id = asset.id;
-                            self.asset_names.push(name.clone());
+
+                            match source {
+                                AssetSource::Sample => self.sample_names.push(name.clone()),
+                                AssetSource::User => self.user_names.push(name.clone()),
+                            }
+
                             self.by_id.insert(id, name.clone());
                             self.assets.insert(name, asset);
+                            count += 1;
                         }
                         Err(e) => {
                             eprintln!("Failed to parse asset {}: {}", filename, e);
@@ -508,7 +747,7 @@ impl AssetLibrary {
             }
         }
 
-        Ok(self.assets.len())
+        Ok(count)
     }
 
     /// Discover assets using storage (WASM stub)
@@ -516,19 +755,29 @@ impl AssetLibrary {
     pub fn discover_with_storage(&mut self, _storage: &Storage) -> Result<usize, AssetError> {
         // On WASM, use manifest-based discovery or cloud storage
         self.assets.clear();
-        self.asset_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
         Ok(0)
     }
 
     /// Save an asset using the storage backend
+    ///
+    /// Only user assets can be saved (sample assets are read-only).
     pub fn save_asset_with_storage(&self, name: &str, storage: &Storage) -> Result<(), AssetError> {
         let asset = self
             .assets
             .get(name)
             .ok_or_else(|| AssetError::Io(format!("asset '{}' not found", name)))?;
 
-        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+        // Sample assets are read-only
+        if asset.source == AssetSource::Sample {
+            return Err(AssetError::ValidationError(
+                "cannot save sample assets (read-only)".into(),
+            ));
+        }
+
+        let path = format!("{}/{}.ron", USER_ASSETS_DIR, name);
 
         // Serialize and compress the asset
         let bytes = asset.to_bytes()?;
@@ -539,8 +788,19 @@ impl AssetLibrary {
     }
 
     /// Delete an asset file using the storage backend
+    ///
+    /// Only user assets can be deleted (sample assets are read-only).
     pub fn delete_asset_with_storage(&mut self, name: &str, storage: &Storage) -> Result<(), AssetError> {
-        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+        // Check if asset exists and is a user asset
+        if let Some(asset) = self.assets.get(name) {
+            if asset.source == AssetSource::Sample {
+                return Err(AssetError::ValidationError(
+                    "cannot delete sample assets (read-only)".into(),
+                ));
+            }
+        }
+
+        let path = format!("{}/{}.ron", USER_ASSETS_DIR, name);
 
         storage
             .delete_sync(&path)
@@ -553,16 +813,27 @@ impl AssetLibrary {
     /// Reload a single asset using storage backend
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reload_asset_with_storage(&mut self, name: &str, storage: &Storage) -> Result<(), AssetError> {
-        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+        // Determine directory from existing asset source
+        let dir = if let Some(asset) = self.assets.get(name) {
+            match asset.source {
+                AssetSource::Sample => SAMPLES_ASSETS_DIR,
+                AssetSource::User => USER_ASSETS_DIR,
+            }
+        } else {
+            USER_ASSETS_DIR // Default to user directory
+        };
+
+        let path = format!("{}/{}.ron", dir, name);
 
         let bytes = storage
             .read_sync(&path)
             .map_err(|e| AssetError::Io(e.to_string()))?;
 
-        let asset = Asset::load_from_bytes(&bytes)?;
+        let mut asset = Asset::load_from_bytes(&bytes)?;
 
-        // Update by_id mapping (in case ID changed)
+        // Preserve the source
         if let Some(old_asset) = self.assets.get(name) {
+            asset.source = old_asset.source;
             self.by_id.remove(&old_asset.id);
         }
         self.by_id.insert(asset.id, name.to_string());
@@ -572,11 +843,13 @@ impl AssetLibrary {
     }
 
     /// Regenerate manifest using storage backend
+    ///
+    /// Only regenerates the user assets manifest (sample manifest is read-only).
     pub fn regenerate_manifest_with_storage(&self, storage: &Storage) -> Result<(), AssetError> {
-        let manifest_path = format!("{}/{}", self.base_dir.to_string_lossy(), MANIFEST_FILE);
+        let manifest_path = format!("{}/{}", USER_ASSETS_DIR, MANIFEST_FILE);
 
         let mut manifest = String::new();
-        for name in &self.asset_names {
+        for name in &self.user_names {
             manifest.push_str(&format!("{}.ron\n", name));
         }
 

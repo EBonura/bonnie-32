@@ -4,7 +4,7 @@
 //! and user-created levels from storage.
 
 use macroquad::prelude::*;
-use crate::storage::Storage;
+use crate::storage::{Storage, PendingLoad, PendingList};
 use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::world::Level;
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
@@ -45,6 +45,10 @@ pub struct LevelBrowser {
     pub pending_load_path: Option<std::path::PathBuf>,
     /// Whether we need to async load the sample list (WASM)
     pub pending_load_list: bool,
+    /// Pending async preview load (native cloud storage)
+    pub pending_preview_load: Option<PendingLoad>,
+    /// Pending async user level list (native cloud storage)
+    pub pending_user_list: Option<PendingList>,
     /// Local framebuffer for preview rendering (avoids resizing main fb)
     preview_fb: Framebuffer,
 }
@@ -73,6 +77,8 @@ impl Default for LevelBrowser {
             scroll_offset: 0.0,
             pending_load_path: None,
             pending_load_list: false,
+            pending_preview_load: None,
+            pending_user_list: None,
             preview_fb: Framebuffer::new(320, 240), // Initial size, will resize as needed
         }
     }
@@ -119,6 +125,16 @@ impl LevelBrowser {
     /// Check if the selected level is a user level (editable)
     pub fn is_user_selected(&self) -> bool {
         self.selected_category == Some(LevelCategory::User)
+    }
+
+    /// Check if a preview is currently being loaded
+    pub fn is_loading_preview(&self) -> bool {
+        self.pending_preview_load.is_some() || self.pending_load_path.is_some()
+    }
+
+    /// Check if user levels are being loaded
+    pub fn is_loading_user_levels(&self) -> bool {
+        self.pending_user_list.is_some()
     }
 
     /// Set the preview level (called after async load)
@@ -314,9 +330,16 @@ pub fn draw_level_browser(
             );
             draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
         }
+    } else if browser.is_loading_preview() {
+        // Loading indicator with animated spinner
+        let time = get_time() as f32;
+        let spinner_chars = ['|', '/', '-', '\\'];
+        let spinner_idx = (time * 8.0) as usize % spinner_chars.len();
+        let loading_text = format!("{} Loading preview...", spinner_chars[spinner_idx]);
+        draw_text(&loading_text, preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 180, 255));
     } else if has_selection {
-        // Loading indicator
-        draw_text("Loading preview...", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
+        // Selection but no preview loaded yet (shouldn't normally happen)
+        draw_text("Select to load preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
     } else {
         // No selection
         draw_text("Select a level to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
@@ -488,7 +511,16 @@ fn draw_two_section_list(
 
     // MY LEVELS items
     if !browser.user_collapsed {
-        if browser.user_levels.is_empty() {
+        if browser.is_loading_user_levels() {
+            // Show loading indicator
+            if y + item_h > rect.y && y < rect.bottom() {
+                let time = get_time() as f32;
+                let spinner_chars = ['|', '/', '-', '\\'];
+                let spinner_idx = (time * 8.0) as usize % spinner_chars.len();
+                let loading_text = format!("  {} Loading...", spinner_chars[spinner_idx]);
+                draw_text(&loading_text, rect.x + 8.0, y + 17.0, 12.0, text_dim);
+            }
+        } else if browser.user_levels.is_empty() {
             // Show empty state message
             if y + item_h > rect.y && y < rect.bottom() {
                 draw_text("  (no saved levels)", rect.x + 8.0, y + 17.0, 12.0, text_dim);

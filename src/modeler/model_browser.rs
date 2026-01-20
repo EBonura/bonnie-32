@@ -2,13 +2,27 @@
 //!
 //! Modal dialog for browsing and previewing saved assets.
 //! Assets are component-based 3D objects with embedded mesh + component definitions.
+//!
+//! Two-section layout matching the level browser:
+//! - SAMPLES: bundled read-only sample assets
+//! - MY ASSETS: user-created assets (editable, cloud-synced)
 
 use macroquad::prelude::*;
-use crate::ui::{Rect, UiContext, draw_icon_centered, draw_scrollable_list, ACCENT_COLOR};
+use crate::storage::{Storage, PendingLoad, PendingList};
+use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
 use crate::world::SECTOR_SIZE;
-use crate::asset::{Asset, ASSETS_DIR};
+use crate::asset::{Asset, SAMPLES_ASSETS_DIR, USER_ASSETS_DIR};
 use std::path::PathBuf;
+
+/// Category of asset (sample or user-created)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetCategory {
+    /// Bundled sample asset (read-only)
+    Sample,
+    /// User-created asset (editable, cloud-synced)
+    User,
+}
 
 /// Info about an asset file
 #[derive(Debug, Clone)]
@@ -17,12 +31,35 @@ pub struct AssetInfo {
     pub name: String,
     /// Full path to the file
     pub path: PathBuf,
+    /// Category (sample or user)
+    pub category: AssetCategory,
 }
 
-/// Discover asset files in the assets directory
+/// Discover sample asset files (read-only bundled assets)
+#[cfg(not(target_arch = "wasm32"))]
+pub fn discover_sample_assets() -> Vec<AssetInfo> {
+    discover_assets_from_dir(SAMPLES_ASSETS_DIR, AssetCategory::Sample)
+}
+
+/// Discover user asset files (editable, cloud-synced)
+#[cfg(not(target_arch = "wasm32"))]
+pub fn discover_user_assets() -> Vec<AssetInfo> {
+    discover_assets_from_dir(USER_ASSETS_DIR, AssetCategory::User)
+}
+
+/// Discover asset files from both sample and user directories (legacy compatibility)
 #[cfg(not(target_arch = "wasm32"))]
 pub fn discover_assets() -> Vec<AssetInfo> {
-    let assets_dir = PathBuf::from(ASSETS_DIR);
+    let mut assets = Vec::new();
+    assets.extend(discover_sample_assets());
+    assets.extend(discover_user_assets());
+    assets
+}
+
+/// Discover asset files from a specific directory
+#[cfg(not(target_arch = "wasm32"))]
+fn discover_assets_from_dir(dir: &str, category: AssetCategory) -> Vec<AssetInfo> {
+    let assets_dir = PathBuf::from(dir);
     let mut assets = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&assets_dir) {
@@ -32,7 +69,7 @@ pub fn discover_assets() -> Vec<AssetInfo> {
                 let name = path.file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                assets.push(AssetInfo { name, path });
+                assets.push(AssetInfo { name, path, category });
             }
         }
     }
@@ -43,20 +80,48 @@ pub fn discover_assets() -> Vec<AssetInfo> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn discover_assets() -> Vec<AssetInfo> {
-    // WASM: return empty, load async from manifest
+pub fn discover_sample_assets() -> Vec<AssetInfo> {
     Vec::new()
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn discover_user_assets() -> Vec<AssetInfo> {
+    Vec::new()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn discover_assets() -> Vec<AssetInfo> {
+    Vec::new()
+}
+
+/// Load sample asset list from manifest asynchronously (for WASM)
+pub async fn load_sample_asset_list() -> Vec<AssetInfo> {
+    load_asset_list_from_dir(SAMPLES_ASSETS_DIR, AssetCategory::Sample).await
+}
+
+/// Load user asset list from manifest asynchronously (for WASM)
+pub async fn load_user_asset_list() -> Vec<AssetInfo> {
+    load_asset_list_from_dir(USER_ASSETS_DIR, AssetCategory::User).await
+}
+
 /// Load asset list from manifest asynchronously (for WASM)
+/// Loads from both samples and user directories.
 pub async fn load_asset_list() -> Vec<AssetInfo> {
+    let mut assets = Vec::new();
+    assets.extend(load_sample_asset_list().await);
+    assets.extend(load_user_asset_list().await);
+    assets
+}
+
+/// Load asset list from a specific directory's manifest (for WASM)
+async fn load_asset_list_from_dir(dir: &str, category: AssetCategory) -> Vec<AssetInfo> {
     use macroquad::prelude::*;
 
     // Load and parse manifest
-    let manifest = match load_string(&format!("{}/manifest.txt", ASSETS_DIR)).await {
+    let manifest = match load_string(&format!("{}/manifest.txt", dir)).await {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to load assets manifest: {}", e);
+        Err(_) => {
+            // Manifest not found for this directory, skip silently
             return Vec::new();
         }
     };
@@ -73,9 +138,9 @@ pub async fn load_asset_list() -> Vec<AssetInfo> {
             .strip_suffix(".ron")
             .unwrap_or(line)
             .to_string();
-        let path = PathBuf::from(format!("{}/{}", ASSETS_DIR, line));
+        let path = PathBuf::from(format!("{}/{}", dir, line));
 
-        assets.push(AssetInfo { name, path });
+        assets.push(AssetInfo { name, path, category });
     }
 
     assets
@@ -101,9 +166,17 @@ pub async fn load_asset_async(path: &PathBuf) -> Option<Asset> {
 pub struct AssetBrowser {
     /// Whether the browser is open
     pub open: bool,
-    /// List of available assets
-    pub assets: Vec<AssetInfo>,
-    /// Currently selected index
+    /// Sample assets (read-only, bundled)
+    pub samples: Vec<AssetInfo>,
+    /// User assets (editable, cloud-synced)
+    pub user_assets: Vec<AssetInfo>,
+    /// Whether samples section is collapsed
+    pub samples_collapsed: bool,
+    /// Whether user assets section is collapsed
+    pub user_collapsed: bool,
+    /// Currently selected category
+    pub selected_category: Option<AssetCategory>,
+    /// Currently selected index within category
     pub selected_index: Option<usize>,
     /// Currently loaded preview asset
     pub preview_asset: Option<Asset>,
@@ -123,13 +196,23 @@ pub struct AssetBrowser {
     pub pending_load_path: Option<PathBuf>,
     /// Whether we need to async load the asset list (WASM)
     pub pending_load_list: bool,
+    /// Pending async preview load (native cloud storage)
+    pub pending_preview_load: Option<PendingLoad>,
+    /// Pending async user asset list (native cloud storage)
+    pub pending_user_list: Option<PendingList>,
+    /// Local framebuffer for preview rendering
+    preview_fb: Framebuffer,
 }
 
 impl Default for AssetBrowser {
     fn default() -> Self {
         Self {
             open: false,
-            assets: Vec::new(),
+            samples: Vec::new(),
+            user_assets: Vec::new(),
+            samples_collapsed: false,
+            user_collapsed: false,
+            selected_category: None,
             selected_index: None,
             preview_asset: None,
             preview_cluts: Vec::new(),
@@ -143,19 +226,29 @@ impl Default for AssetBrowser {
             scroll_offset: 0.0,
             pending_load_path: None,
             pending_load_list: false,
+            pending_preview_load: None,
+            pending_user_list: None,
+            preview_fb: Framebuffer::new(320, 240), // Initial size, will resize as needed
         }
     }
 }
 
 impl AssetBrowser {
-    /// Open the browser with the given list of assets
-    pub fn open(&mut self, assets: Vec<AssetInfo>) {
+    /// Open the browser with sample and user assets
+    pub fn open_with_assets(&mut self, samples: Vec<AssetInfo>, user_assets: Vec<AssetInfo>) {
         self.open = true;
-        self.assets = assets;
+        self.samples = samples;
+        self.user_assets = user_assets;
+        self.selected_category = None;
         self.selected_index = None;
         self.preview_asset = None;
         self.preview_cluts.clear();
         self.scroll_offset = 0.0;
+    }
+
+    /// Open the browser with just sample assets (legacy compatibility)
+    pub fn open(&mut self, samples: Vec<AssetInfo>) {
+        self.open_with_assets(samples, Vec::new());
     }
 
     /// Close the browser
@@ -163,6 +256,27 @@ impl AssetBrowser {
         self.open = false;
         self.preview_asset = None;
         self.preview_cluts.clear();
+        self.pending_preview_load = None;
+    }
+
+    /// Check if the selected asset is a sample (read-only)
+    pub fn is_sample_selected(&self) -> bool {
+        self.selected_category == Some(AssetCategory::Sample)
+    }
+
+    /// Check if the selected asset is a user asset (editable)
+    pub fn is_user_selected(&self) -> bool {
+        self.selected_category == Some(AssetCategory::User)
+    }
+
+    /// Check if a preview is currently being loaded
+    pub fn is_loading_preview(&self) -> bool {
+        self.pending_preview_load.is_some() || self.pending_load_path.is_some()
+    }
+
+    /// Check if user assets are being loaded
+    pub fn is_loading_user_assets(&self) -> bool {
+        self.pending_user_list.is_some()
     }
 
     /// Set the preview asset with texture resolution
@@ -257,7 +371,11 @@ impl AssetBrowser {
 
     /// Get the currently selected asset info
     pub fn selected_asset(&self) -> Option<&AssetInfo> {
-        self.selected_index.and_then(|i| self.assets.get(i))
+        match (self.selected_category, self.selected_index) {
+            (Some(AssetCategory::Sample), Some(i)) => self.samples.get(i),
+            (Some(AssetCategory::User), Some(i)) => self.user_assets.get(i),
+            _ => None,
+        }
     }
 }
 
@@ -265,12 +383,18 @@ impl AssetBrowser {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssetBrowserAction {
     None,
-    /// User selected an asset to preview
-    SelectPreview(usize),
+    /// User selected an asset to preview (need to load it async)
+    SelectPreview(AssetCategory, usize),
     /// User wants to open the selected asset
     OpenAsset,
+    /// User wants to create a copy of the sample as a user asset
+    OpenCopy,
+    /// User wants to delete the selected user asset
+    DeleteAsset,
     /// User wants to start with a new empty asset
     NewAsset,
+    /// User wants to refresh the asset list
+    Refresh,
     /// User cancelled
     Cancel,
 }
@@ -279,8 +403,8 @@ pub enum AssetBrowserAction {
 pub fn draw_asset_browser(
     ctx: &mut UiContext,
     browser: &mut AssetBrowser,
+    storage: &crate::storage::Storage,
     icon_font: Option<&Font>,
-    fb: &mut Framebuffer,
 ) -> AssetBrowserAction {
     if !browser.open {
         return AssetBrowserAction::None;
@@ -304,7 +428,7 @@ pub fn draw_asset_browser(
     // Header
     let header_h = 40.0;
     draw_rectangle(dialog_x, dialog_y, dialog_w, header_h, Color::from_rgba(45, 45, 55, 255));
-    draw_text("Browse Assets", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
+    draw_text("Asset Browser", dialog_x + 16.0, dialog_y + 26.0, 20.0, WHITE);
 
     // Close button
     let close_rect = Rect::new(dialog_x + dialog_w - 36.0, dialog_y + 4.0, 32.0, 32.0);
@@ -314,29 +438,33 @@ pub fn draw_asset_browser(
 
     // Content area
     let content_y = dialog_y + header_h + 8.0;
-    let content_h = dialog_h - header_h - 60.0;
-    let list_w = 200.0;
+    let content_h = dialog_h - header_h - 60.0; // Leave room for footer
+    let list_w = 220.0;
 
-    // List panel (left)
+    // List panel (left) - custom two-section list
     let list_rect = Rect::new(dialog_x + 8.0, content_y, list_w, content_h);
-    let item_h = 28.0;
+    draw_rectangle(list_rect.x, list_rect.y, list_rect.w, list_rect.h, Color::from_rgba(25, 25, 30, 255));
 
-    let items: Vec<String> = browser.assets.iter().map(|a| a.name.clone()).collect();
+    let item_h = 26.0;
+    let section_h = 28.0;
+    let has_cloud = storage.has_cloud();
 
-    let list_result = draw_scrollable_list(
+    // Draw two-section list
+    let list_action = draw_two_section_list(
         ctx,
         list_rect,
-        &items,
-        browser.selected_index,
-        &mut browser.scroll_offset,
+        browser,
         item_h,
-        None,
+        section_h,
+        has_cloud,
     );
 
-    if let Some(clicked_idx) = list_result.clicked {
-        if browser.selected_index != Some(clicked_idx) {
-            browser.selected_index = Some(clicked_idx);
-            action = AssetBrowserAction::SelectPreview(clicked_idx);
+    // Handle list actions
+    if let Some((category, idx)) = list_action {
+        if browser.selected_category != Some(category) || browser.selected_index != Some(idx) {
+            browser.selected_category = Some(category);
+            browser.selected_index = Some(idx);
+            action = AssetBrowserAction::SelectPreview(category, idx);
         }
     }
 
@@ -347,11 +475,13 @@ pub fn draw_asset_browser(
 
     draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h, Color::from_rgba(20, 20, 25, 255));
 
+    // Draw preview content
     let has_preview = browser.preview_asset.is_some();
-    let has_selection = browser.selected_index.is_some();
+    let has_selection = browser.selected_category.is_some();
 
     if has_preview {
-        draw_orbit_preview(ctx, browser, preview_rect, fb);
+        // Render 3D preview with orbit camera (uses browser's local framebuffer)
+        draw_orbit_preview_internal(ctx, browser, preview_rect);
 
         // Draw stats at bottom of preview
         if let Some(asset) = &browser.preview_asset {
@@ -366,12 +496,18 @@ pub fn draw_asset_browser(
             );
             draw_text(&stats_text, preview_rect.x + 8.0, stats_y + 17.0, 14.0, Color::from_rgba(180, 180, 180, 255));
         }
+    } else if browser.is_loading_preview() {
+        // Loading indicator with animated spinner
+        let time = get_time() as f32;
+        let spinner_chars = ['|', '/', '-', '\\'];
+        let spinner_idx = (time * 8.0) as usize % spinner_chars.len();
+        let loading_text = format!("{} Loading preview...", spinner_chars[spinner_idx]);
+        draw_text(&loading_text, preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 180, 255));
     } else if has_selection {
-        draw_text("Loading preview...", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
-    } else if browser.assets.is_empty() {
-        draw_text(&format!("No assets found in {}/", ASSETS_DIR), preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
-        draw_text("Save an asset first!", preview_rect.x + 20.0, preview_rect.y + 60.0, 14.0, Color::from_rgba(80, 80, 80, 255));
+        // Selection but no preview loaded yet (shouldn't normally happen)
+        draw_text("Select to load preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(150, 150, 150, 255));
     } else {
+        // No selection
         draw_text("Select an asset to preview", preview_rect.x + 20.0, preview_rect.y + 40.0, 16.0, Color::from_rgba(100, 100, 100, 255));
     }
 
@@ -379,19 +515,39 @@ pub fn draw_asset_browser(
     let footer_y = dialog_y + dialog_h - 44.0;
     draw_rectangle(dialog_x, footer_y, dialog_w, 44.0, Color::from_rgba(40, 40, 48, 255));
 
-    // New button (left side)
-    let new_rect = Rect::new(dialog_x + 10.0, footer_y + 8.0, 80.0, 28.0);
+    // New button (left side) - start with empty asset
+    let new_rect = Rect::new(dialog_x + 10.0, footer_y + 8.0, 70.0, 28.0);
     if draw_text_button(ctx, new_rect, "New", Color::from_rgba(60, 60, 70, 255)) {
         action = AssetBrowserAction::NewAsset;
     }
 
+    // Delete button (only for user assets)
+    let delete_rect = Rect::new(dialog_x + 90.0, footer_y + 8.0, 70.0, 28.0);
+    let delete_enabled = browser.is_user_selected() && browser.preview_asset.is_some();
+    if draw_text_button_enabled(ctx, delete_rect, "Delete", Color::from_rgba(120, 50, 50, 255), delete_enabled) {
+        action = AssetBrowserAction::DeleteAsset;
+    }
+
+    // Refresh button - reload asset lists from storage
+    let refresh_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    if draw_text_button(ctx, refresh_rect, "Refresh", Color::from_rgba(60, 60, 70, 255)) {
+        action = AssetBrowserAction::Refresh;
+    }
+
     // Cancel button
-    let cancel_rect = Rect::new(dialog_x + dialog_w - 180.0, footer_y + 8.0, 80.0, 28.0);
+    let cancel_rect = Rect::new(dialog_x + dialog_w - 270.0, footer_y + 8.0, 70.0, 28.0);
     if draw_text_button(ctx, cancel_rect, "Cancel", Color::from_rgba(60, 60, 70, 255)) {
         action = AssetBrowserAction::Cancel;
     }
 
-    // Open button
+    // Open Copy button (only for samples - copies sample to user asset)
+    let copy_rect = Rect::new(dialog_x + dialog_w - 190.0, footer_y + 8.0, 90.0, 28.0);
+    let copy_enabled = browser.is_sample_selected() && browser.preview_asset.is_some() && storage.can_write();
+    if draw_text_button_enabled(ctx, copy_rect, "Open Copy", Color::from_rgba(60, 80, 60, 255), copy_enabled) {
+        action = AssetBrowserAction::OpenCopy;
+    }
+
+    // Open button (enabled if something is selected and loaded)
     let open_rect = Rect::new(dialog_x + dialog_w - 90.0, footer_y + 8.0, 80.0, 28.0);
     let open_enabled = browser.preview_asset.is_some();
     if draw_text_button_enabled(ctx, open_rect, "Open", ACCENT_COLOR, open_enabled) {
@@ -406,12 +562,169 @@ pub fn draw_asset_browser(
     action
 }
 
-/// Draw the orbit preview of an asset
-fn draw_orbit_preview(
+/// Draw the two-section list (Samples + My Assets)
+fn draw_two_section_list(
+    ctx: &mut UiContext,
+    rect: Rect,
+    browser: &mut AssetBrowser,
+    item_h: f32,
+    section_h: f32,
+    has_cloud: bool,
+) -> Option<(AssetCategory, usize)> {
+    let mut clicked: Option<(AssetCategory, usize)> = None;
+    let mut y = rect.y - browser.scroll_offset;
+
+    let section_bg = Color::from_rgba(40, 40, 50, 255);
+    let item_bg = Color::from_rgba(30, 30, 38, 255);
+    let item_hover = Color::from_rgba(50, 50, 60, 255);
+    let item_selected = Color::from_rgba(60, 80, 120, 255);
+    let text_color = Color::from_rgba(200, 200, 200, 255);
+    let text_dim = Color::from_rgba(140, 140, 140, 255);
+    let cloud_color = Color::from_rgba(100, 180, 255, 255);
+
+    // Calculate total content height for scroll
+    let samples_content_h = if browser.samples_collapsed { 0.0 } else { browser.samples.len() as f32 * item_h };
+    let user_content_h = if browser.user_collapsed { 0.0 } else { browser.user_assets.len() as f32 * item_h };
+    let total_h = section_h * 2.0 + samples_content_h + user_content_h;
+
+    // Handle scroll within list bounds
+    if ctx.mouse.inside(&rect) && ctx.mouse.scroll != 0.0 {
+        browser.scroll_offset = (browser.scroll_offset - ctx.mouse.scroll * 30.0)
+            .clamp(0.0, (total_h - rect.h).max(0.0));
+    }
+
+    // SAMPLES section header
+    let samples_header_rect = Rect::new(rect.x, y, rect.w, section_h);
+    if y + section_h > rect.y && y < rect.bottom() {
+        draw_rectangle(samples_header_rect.x, samples_header_rect.y.max(rect.y),
+                      samples_header_rect.w, section_h.min(rect.bottom() - samples_header_rect.y.max(rect.y)), section_bg);
+
+        let arrow = if browser.samples_collapsed { ">" } else { "v" };
+        draw_text(&format!("{} SAMPLES ({})", arrow, browser.samples.len()),
+                 rect.x + 8.0, y + 18.0, 14.0, text_color);
+
+        // Toggle collapse on click
+        if ctx.mouse.inside(&samples_header_rect) && ctx.mouse.left_pressed {
+            browser.samples_collapsed = !browser.samples_collapsed;
+        }
+    }
+    y += section_h;
+
+    // SAMPLES items
+    if !browser.samples_collapsed {
+        for (i, asset) in browser.samples.iter().enumerate() {
+            let item_rect = Rect::new(rect.x, y, rect.w, item_h);
+
+            if y + item_h > rect.y && y < rect.bottom() {
+                let is_selected = browser.selected_category == Some(AssetCategory::Sample)
+                    && browser.selected_index == Some(i);
+                let is_hovered = ctx.mouse.inside(&item_rect) && item_rect.y >= rect.y;
+
+                let bg = if is_selected { item_selected }
+                        else if is_hovered { item_hover }
+                        else { item_bg };
+
+                // Clip to list bounds
+                let draw_y = item_rect.y.max(rect.y);
+                let draw_h = item_h.min(rect.bottom() - draw_y);
+                if draw_h > 0.0 {
+                    draw_rectangle(item_rect.x + 2.0, draw_y, item_rect.w - 4.0, draw_h, bg);
+
+                    if y >= rect.y {
+                        draw_text(&asset.name, rect.x + 20.0, y + 17.0, 13.0, text_color);
+                    }
+                }
+
+                // Handle click
+                if is_hovered && ctx.mouse.left_pressed && item_rect.y >= rect.y {
+                    clicked = Some((AssetCategory::Sample, i));
+                }
+            }
+            y += item_h;
+        }
+    }
+
+    // MY ASSETS section header
+    let user_header_rect = Rect::new(rect.x, y, rect.w, section_h);
+    if y + section_h > rect.y && y < rect.bottom() {
+        draw_rectangle(user_header_rect.x, user_header_rect.y.max(rect.y),
+                      user_header_rect.w, section_h.min(rect.bottom() - user_header_rect.y.max(rect.y)), section_bg);
+
+        let arrow = if browser.user_collapsed { ">" } else { "v" };
+        let cloud_indicator = if has_cloud { " [cloud]" } else { "" };
+        draw_text(&format!("{} MY ASSETS ({}){}", arrow, browser.user_assets.len(), cloud_indicator),
+                 rect.x + 8.0, y + 18.0, 14.0, text_color);
+
+        // Toggle collapse on click
+        if ctx.mouse.inside(&user_header_rect) && ctx.mouse.left_pressed && user_header_rect.y >= rect.y {
+            browser.user_collapsed = !browser.user_collapsed;
+        }
+    }
+    y += section_h;
+
+    // MY ASSETS items
+    if !browser.user_collapsed {
+        if browser.is_loading_user_assets() {
+            // Show loading indicator
+            if y + item_h > rect.y && y < rect.bottom() {
+                let time = get_time() as f32;
+                let spinner_chars = ['|', '/', '-', '\\'];
+                let spinner_idx = (time * 8.0) as usize % spinner_chars.len();
+                let loading_text = format!("  {} Loading...", spinner_chars[spinner_idx]);
+                draw_text(&loading_text, rect.x + 8.0, y + 17.0, 12.0, text_dim);
+            }
+        } else if browser.user_assets.is_empty() {
+            // Show empty state message
+            if y + item_h > rect.y && y < rect.bottom() {
+                draw_text("  (no saved assets)", rect.x + 8.0, y + 17.0, 12.0, text_dim);
+            }
+        } else {
+            for (i, asset) in browser.user_assets.iter().enumerate() {
+                let item_rect = Rect::new(rect.x, y, rect.w, item_h);
+
+                if y + item_h > rect.y && y < rect.bottom() {
+                    let is_selected = browser.selected_category == Some(AssetCategory::User)
+                        && browser.selected_index == Some(i);
+                    let is_hovered = ctx.mouse.inside(&item_rect) && item_rect.y >= rect.y;
+
+                    let bg = if is_selected { item_selected }
+                            else if is_hovered { item_hover }
+                            else { item_bg };
+
+                    // Clip to list bounds
+                    let draw_y = item_rect.y.max(rect.y);
+                    let draw_h = item_h.min(rect.bottom() - draw_y);
+                    if draw_h > 0.0 {
+                        draw_rectangle(item_rect.x + 2.0, draw_y, item_rect.w - 4.0, draw_h, bg);
+
+                        if y >= rect.y {
+                            draw_text(&asset.name, rect.x + 20.0, y + 17.0, 13.0, text_color);
+
+                            // Cloud icon for user assets when cloud storage is active
+                            if has_cloud {
+                                draw_text("*", rect.x + rect.w - 20.0, y + 17.0, 13.0, cloud_color);
+                            }
+                        }
+                    }
+
+                    // Handle click
+                    if is_hovered && ctx.mouse.left_pressed && item_rect.y >= rect.y {
+                        clicked = Some((AssetCategory::User, i));
+                    }
+                }
+                y += item_h;
+            }
+        }
+    }
+
+    clicked
+}
+
+/// Draw the orbit preview of an asset (uses browser's internal framebuffer)
+fn draw_orbit_preview_internal(
     ctx: &mut UiContext,
     browser: &mut AssetBrowser,
     rect: Rect,
-    fb: &mut Framebuffer,
 ) {
     let asset = match &browser.preview_asset {
         Some(a) => a,
@@ -476,10 +789,11 @@ fn draw_orbit_preview(
     camera.rotation_y = n.x.atan2(n.z);
     camera.update_basis();
 
-    // Resize framebuffer
+    // Resize local preview framebuffer
     let preview_h = rect.h - 24.0;
     let target_w = (rect.w as usize).min(640);
     let target_h = (preview_h as usize).min(target_w * 3 / 4);
+    let fb = &mut browser.preview_fb;
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(25, 25, 35));
 
@@ -628,8 +942,8 @@ pub async fn load_model(path: &PathBuf) -> Option<Asset> {
 pub fn draw_model_browser(
     ctx: &mut UiContext,
     browser: &mut AssetBrowser,
+    storage: &crate::storage::Storage,
     icon_font: Option<&Font>,
-    fb: &mut Framebuffer,
 ) -> AssetBrowserAction {
-    draw_asset_browser(ctx, browser, icon_font, fb)
+    draw_asset_browser(ctx, browser, storage, icon_font)
 }

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::modeler::{MeshPart, MeshProject};
 use crate::rasterizer::Vec3;
 use super::component::AssetComponent;
+use super::library::AssetSource;
 
 /// Counter for generating unique asset IDs
 static ASSET_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +106,14 @@ pub struct Asset {
     /// Built-in assets cannot be deleted and are shown with a special icon in the browser.
     #[serde(default)]
     pub is_builtin: bool,
+
+    /// Source/origin of this asset (set at load time, not persisted)
+    ///
+    /// Determines where the asset came from and whether it's editable:
+    /// - Sample: read-only bundled asset from assets/samples/assets/
+    /// - User: editable user-created asset from assets/userdata/assets/
+    #[serde(skip)]
+    pub source: AssetSource,
 }
 
 impl Asset {
@@ -121,6 +130,7 @@ impl Asset {
             description: String::new(),
             tags: Vec::new(),
             is_builtin: false,
+            source: AssetSource::User,
         }
     }
 
@@ -134,6 +144,7 @@ impl Asset {
             description: String::new(),
             tags: Vec::new(),
             is_builtin: false,
+            source: AssetSource::User,
         }
     }
 
@@ -149,6 +160,7 @@ impl Asset {
             description: String::new(),
             tags: Vec::new(),
             is_builtin: false,
+            source: AssetSource::User,
         }
     }
 

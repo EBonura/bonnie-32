@@ -5,9 +5,13 @@
 //! - Everything else → Local filesystem
 //!
 //! Uses a fire-and-poll async pattern that works with macroquad's single-threaded model.
+//! Native cloud operations can run in background threads to avoid blocking the UI.
 
+pub mod async_ops;
 pub mod gcp;
 pub mod local;
+
+pub use async_ops::{save_async, load_async, list_async, PendingSave, PendingLoad, PendingList};
 
 use gcp::GcpStorage;
 use local::LocalStorage;
@@ -223,7 +227,7 @@ impl Storage {
     }
 
     /// Check if a path should be routed to cloud storage
-    fn is_userdata_path(path: &str) -> bool {
+    pub fn is_userdata_path(path: &str) -> bool {
         path.starts_with(USERDATA_PREFIX)
     }
 

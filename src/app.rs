@@ -10,11 +10,50 @@ use crate::input::InputState;
 use crate::landing::LandingState;
 use crate::modeler::{ModelerState, ModelerLayout, ModelBrowser, ObjImportBrowser};
 use crate::project::ProjectData;
-use crate::storage::Storage;
+use crate::storage::{Storage, PendingSave, PendingLoad};
 use crate::tracker::TrackerState;
 use crate::world::Level;
 use macroquad::prelude::{Font, Texture2D};
 use std::path::PathBuf;
+
+/// Tracks pending async operations (save, load, etc.)
+///
+/// Poll this each frame to check if operations have completed.
+pub struct PendingOps {
+    /// Pending level save operation
+    pub save: Option<PendingSave>,
+    /// Pending level load operation
+    pub load: Option<PendingLoad>,
+    /// Status message to display (e.g., "Saving...")
+    pub status_message: Option<String>,
+}
+
+impl Default for PendingOps {
+    fn default() -> Self {
+        Self {
+            save: None,
+            load: None,
+            status_message: None,
+        }
+    }
+}
+
+impl PendingOps {
+    /// Check if any operation is in progress
+    pub fn is_busy(&self) -> bool {
+        self.save.is_some() || self.load.is_some()
+    }
+
+    /// Get the current status message, if any
+    pub fn status(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
+
+    /// Clear the status message
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+    }
+}
 
 /// The available tools (fixed set, one tab each)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,6 +161,9 @@ pub struct AppState {
 
     /// Authentication state (for cloud storage)
     pub auth: AuthState,
+
+    /// Pending async operations (save, load)
+    pub pending_ops: PendingOps,
 }
 
 impl AppState {
@@ -155,6 +197,7 @@ impl AppState {
             icon_font,
             input: InputState::new(),
             auth: AuthState::new(),
+            pending_ops: PendingOps::default(),
         }
     }
 

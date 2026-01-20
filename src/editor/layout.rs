@@ -26,6 +26,7 @@ pub enum EditorAction {
     Export,         // Browser: download as file
     Import,         // Browser: upload file
     BrowseExamples, // Open example browser
+    SwitchToModeler, // Switch to Asset Editor and create new asset
     Exit,           // Close/quit
 }
 
@@ -255,7 +256,7 @@ pub fn draw_editor(
 
     // Draw unified toolbar and handle keyboard shortcuts
     let toolbar_start = EditorFrameTimings::start();
-    let action = draw_unified_toolbar(ctx, toolbar_rect, state, icon_font, &layout.actions);
+    let mut action = draw_unified_toolbar(ctx, toolbar_rect, state, icon_font, &layout.actions);
     let toolbar_ms = EditorFrameTimings::elapsed_ms(toolbar_start);
 
     // Main split: left panels | rest
@@ -466,11 +467,16 @@ pub fn draw_editor(
     }
 
     // Draw Asset Browser modal (if open)
-    let browser_action = draw_asset_browser(ctx, &mut state.asset_browser, icon_font, fb);
+    let browser_action = draw_asset_browser(ctx, &mut state.asset_browser, storage, icon_font);
     match browser_action {
-        AssetBrowserAction::SelectPreview(idx) => {
+        AssetBrowserAction::SelectPreview(category, idx) => {
+            use crate::modeler::AssetCategory;
             // Load the selected asset for preview (with texture resolution)
-            if let Some(asset_info) = state.asset_browser.assets.get(idx) {
+            let asset_info = match category {
+                AssetCategory::Sample => state.asset_browser.samples.get(idx),
+                AssetCategory::User => state.asset_browser.user_assets.get(idx),
+            };
+            if let Some(asset_info) = asset_info {
                 if let Some(asset) = state.asset_library.get(&asset_info.name) {
                     state.asset_browser.set_preview(asset.clone(), &state.user_textures);
                 }
@@ -483,8 +489,29 @@ pub fn draw_editor(
             }
             state.asset_browser.close();
         }
-        AssetBrowserAction::Cancel | AssetBrowserAction::NewAsset => {
-            // Close browser (NewAsset doesn't apply to World Editor)
+        AssetBrowserAction::OpenCopy => {
+            // In world editor, OpenCopy just opens like normal (copying is for modeler)
+            if let Some(asset_info) = state.asset_browser.selected_asset() {
+                state.selected_asset = Some(asset_info.name.clone());
+            }
+            state.asset_browser.close();
+        }
+        AssetBrowserAction::Refresh => {
+            // Refresh asset lists - reload from asset library
+            use crate::modeler::{discover_sample_assets, discover_user_assets};
+            state.asset_browser.samples = discover_sample_assets();
+            state.asset_browser.user_assets = discover_user_assets();
+            state.asset_browser.preview_asset = None;
+            state.asset_browser.selected_category = None;
+            state.asset_browser.selected_index = None;
+        }
+        AssetBrowserAction::NewAsset => {
+            // Switch to Asset Editor to create new asset
+            state.asset_browser.close();
+            action = EditorAction::SwitchToModeler;
+        }
+        AssetBrowserAction::DeleteAsset | AssetBrowserAction::Cancel => {
+            // Close browser (DeleteAsset doesn't apply to World Editor)
             state.asset_browser.close();
         }
         AssetBrowserAction::None => {}
@@ -565,9 +592,9 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         }
     }
 
-    // Asset picker - always visible
+    // Asset picker - always visible (even if library is empty, allows browsing/creating)
     // Shows "< asset_name [browse] >" - clicking name activates PlaceObject, chevrons cycle + activate
-    if !state.asset_library.is_empty() {
+    {
         toolbar.separator();
 
         // Collect asset names
@@ -609,14 +636,24 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         // Browse assets button (opens Asset Browser modal)
         if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Assets") {
             state.tool = EditorTool::PlaceObject;
-            // Open the asset browser with current assets
-            let assets: Vec<_> = state.asset_library.names()
-                .map(|name| crate::modeler::AssetInfo {
-                    name: name.to_string(),
-                    path: std::path::PathBuf::from(format!("assets/userdata/assets/{}.ron", name)),
+            // Open the asset browser with current assets (both samples and user assets)
+            use crate::asset::{AssetSource, SAMPLES_ASSETS_DIR, USER_ASSETS_DIR};
+            // Build separate sample and user asset lists from the library
+            use crate::modeler::AssetCategory;
+            let (samples, user_assets): (Vec<_>, Vec<_>) = state.asset_library.iter()
+                .map(|(name, asset)| {
+                    let (dir, category) = match asset.source {
+                        AssetSource::Sample => (SAMPLES_ASSETS_DIR, AssetCategory::Sample),
+                        AssetSource::User => (USER_ASSETS_DIR, AssetCategory::User),
+                    };
+                    crate::modeler::AssetInfo {
+                        name: name.to_string(),
+                        path: std::path::PathBuf::from(format!("{}/{}.ron", dir, name)),
+                        category,
+                    }
                 })
-                .collect();
-            state.asset_browser.open(assets);
+                .partition(|info| info.category == AssetCategory::Sample);
+            state.asset_browser.open_with_assets(samples, user_assets);
         }
     }
 
