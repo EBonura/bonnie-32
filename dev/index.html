@@ -762,6 +762,367 @@
         };
 
         // =============================================================================
+        // GCP Authentication (Google Identity Services)
+        // =============================================================================
+
+        var GcpAuth = {
+            clientId: '93370111666-0ehu6ri1913ht4f7ur6gauiqffq6nvll.apps.googleusercontent.com',
+            accessToken: null,
+            userIdHash: null,
+            tokenExpiry: 0,
+            initialized: false,
+            gisLoaded: false,
+
+            // Initialize auth - load GIS library and restore token from localStorage
+            init: function() {
+                if (GcpAuth.initialized) return;
+                GcpAuth.initialized = true;
+
+                // Restore token from localStorage if still valid
+                var stored = localStorage.getItem('_b32_gcp_token');
+                var storedExpiry = parseInt(localStorage.getItem('_b32_gcp_token_expiry') || '0');
+                var storedHash = localStorage.getItem('_b32_gcp_user_hash');
+
+                if (stored && storedExpiry > Date.now() && storedHash) {
+                    GcpAuth.accessToken = stored;
+                    GcpAuth.tokenExpiry = storedExpiry;
+                    GcpAuth.userIdHash = storedHash;
+                    console.log('GCP auth restored from localStorage');
+                }
+
+                // Load Google Identity Services library
+                var script = document.createElement('script');
+                script.src = 'https://accounts.google.com/gsi/client';
+                script.async = true;
+                script.defer = true;
+                script.onload = function() {
+                    GcpAuth.gisLoaded = true;
+                    console.log('Google Identity Services loaded');
+                };
+                script.onerror = function() {
+                    console.warn('Failed to load Google Identity Services');
+                };
+                document.head.appendChild(script);
+            },
+
+            // Trigger Google sign-in
+            signIn: function() {
+                if (!GcpAuth.gisLoaded) {
+                    console.warn('Google Identity Services not loaded yet');
+                    return;
+                }
+
+                // Use Google Identity Services OAuth2 flow
+                var client = google.accounts.oauth2.initTokenClient({
+                    client_id: GcpAuth.clientId,
+                    scope: 'openid email',
+                    callback: function(response) {
+                        if (response.access_token) {
+                            GcpAuth.accessToken = response.access_token;
+                            // Token typically expires in 1 hour (3600 seconds)
+                            GcpAuth.tokenExpiry = Date.now() + (response.expires_in || 3600) * 1000;
+
+                            // Store in localStorage
+                            localStorage.setItem('_b32_gcp_token', response.access_token);
+                            localStorage.setItem('_b32_gcp_token_expiry', GcpAuth.tokenExpiry.toString());
+
+                            // Fetch user info to get user ID for hashing
+                            GcpAuth.fetchUserInfo();
+
+                            console.log('GCP sign-in successful');
+                        } else {
+                            console.warn('GCP sign-in failed:', response);
+                        }
+                    },
+                    error_callback: function(error) {
+                        console.error('GCP sign-in error:', error);
+                    }
+                });
+
+                client.requestAccessToken();
+            },
+
+            // Fetch user info and compute hashed user ID
+            fetchUserInfo: async function() {
+                if (!GcpAuth.accessToken) return;
+
+                try {
+                    var response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                        headers: { 'Authorization': 'Bearer ' + GcpAuth.accessToken }
+                    });
+                    if (response.ok) {
+                        var info = await response.json();
+                        // Hash the user's sub (unique Google ID) for privacy
+                        GcpAuth.userIdHash = await GcpAuth.sha256(info.sub);
+                        localStorage.setItem('_b32_gcp_user_hash', GcpAuth.userIdHash);
+                        console.log('User ID hash computed');
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch user info:', e);
+                }
+            },
+
+            // SHA256 hash function
+            sha256: async function(message) {
+                var msgBuffer = new TextEncoder().encode(message);
+                var hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+                var hashArray = Array.from(new Uint8Array(hashBuffer));
+                return hashArray.map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+            },
+
+            // Sign out
+            signOut: function() {
+                GcpAuth.accessToken = null;
+                GcpAuth.userIdHash = null;
+                GcpAuth.tokenExpiry = 0;
+                localStorage.removeItem('_b32_gcp_token');
+                localStorage.removeItem('_b32_gcp_token_expiry');
+                localStorage.removeItem('_b32_gcp_user_hash');
+                console.log('GCP signed out');
+            },
+
+            // Check if authenticated (token exists and not expired)
+            isAuthenticated: function() {
+                return GcpAuth.accessToken && GcpAuth.tokenExpiry > Date.now() && GcpAuth.userIdHash ? 1 : 0;
+            },
+
+            // Get access token length
+            getAccessTokenLen: function() {
+                return GcpAuth.accessToken ? GcpAuth.accessToken.length : 0;
+            },
+
+            // Copy access token to WASM memory
+            copyAccessToken: function(destPtr, maxLen) {
+                if (!GcpAuth.accessToken) return 0;
+                return writeWasmBytes(destPtr, new TextEncoder().encode(GcpAuth.accessToken), maxLen);
+            },
+
+            // Get user ID hash length
+            getUserIdHashLen: function() {
+                return GcpAuth.userIdHash ? GcpAuth.userIdHash.length : 0;
+            },
+
+            // Copy user ID hash to WASM memory
+            copyUserIdHash: function(destPtr, maxLen) {
+                if (!GcpAuth.userIdHash) return 0;
+                return writeWasmBytes(destPtr, new TextEncoder().encode(GcpAuth.userIdHash), maxLen);
+            }
+        };
+
+        // =============================================================================
+        // GCP Cloud Storage (via Cloud Run API)
+        // =============================================================================
+
+        var GcpStorage = {
+            baseUrl: 'https://bonnie32-storage-api-4bcenv646q-uc.a.run.app',
+
+            // Pending operations (fire-and-poll pattern)
+            // Each operation has: { id, status: 'pending'|'ready'|'error', result, error }
+            operations: {},
+            nextOpId: 1,
+
+            // Start a list operation, returns operation ID
+            startList: function(pathPtr, pathLen) {
+                var path = readWasmString(pathPtr, pathLen);
+                var opId = GcpStorage.nextOpId++;
+
+                GcpStorage.operations[opId] = { status: 'pending', result: null, error: null };
+
+                GcpStorage.doRequest('GET', '/list?prefix=' + encodeURIComponent(path))
+                    .then(function(data) {
+                        GcpStorage.operations[opId].status = 'ready';
+                        GcpStorage.operations[opId].result = data.files || [];
+                    })
+                    .catch(function(err) {
+                        GcpStorage.operations[opId].status = 'error';
+                        GcpStorage.operations[opId].error = err.message;
+                    });
+
+                return opId;
+            },
+
+            // Start a read operation, returns operation ID
+            startRead: function(pathPtr, pathLen) {
+                var path = readWasmString(pathPtr, pathLen);
+                var opId = GcpStorage.nextOpId++;
+
+                GcpStorage.operations[opId] = { status: 'pending', result: null, error: null };
+
+                GcpStorage.doRequest('GET', '/get?path=' + encodeURIComponent(path))
+                    .then(function(data) {
+                        // data.content is base64 encoded
+                        var binary = atob(data.content);
+                        var bytes = new Uint8Array(binary.length);
+                        for (var i = 0; i < binary.length; i++) {
+                            bytes[i] = binary.charCodeAt(i);
+                        }
+                        GcpStorage.operations[opId].status = 'ready';
+                        GcpStorage.operations[opId].result = bytes;
+                    })
+                    .catch(function(err) {
+                        GcpStorage.operations[opId].status = 'error';
+                        GcpStorage.operations[opId].error = err.message;
+                    });
+
+                return opId;
+            },
+
+            // Start a write operation, returns operation ID
+            startWrite: function(pathPtr, pathLen, dataPtr, dataLen) {
+                var path = readWasmString(pathPtr, pathLen);
+                var data = new Uint8Array(wasm_exports.memory.buffer, dataPtr, dataLen);
+
+                // Convert to base64
+                var binary = '';
+                for (var i = 0; i < data.length; i++) {
+                    binary += String.fromCharCode(data[i]);
+                }
+                var base64 = btoa(binary);
+
+                var opId = GcpStorage.nextOpId++;
+                GcpStorage.operations[opId] = { status: 'pending', result: null, error: null };
+
+                GcpStorage.doRequest('POST', '/upload', { path: path, content: base64 })
+                    .then(function() {
+                        GcpStorage.operations[opId].status = 'ready';
+                        GcpStorage.operations[opId].result = true;
+                    })
+                    .catch(function(err) {
+                        GcpStorage.operations[opId].status = 'error';
+                        GcpStorage.operations[opId].error = err.message;
+                    });
+
+                return opId;
+            },
+
+            // Start a delete operation, returns operation ID
+            startDelete: function(pathPtr, pathLen) {
+                var path = readWasmString(pathPtr, pathLen);
+                var opId = GcpStorage.nextOpId++;
+
+                GcpStorage.operations[opId] = { status: 'pending', result: null, error: null };
+
+                GcpStorage.doRequest('POST', '/delete', { path: path })
+                    .then(function() {
+                        GcpStorage.operations[opId].status = 'ready';
+                        GcpStorage.operations[opId].result = true;
+                    })
+                    .catch(function(err) {
+                        GcpStorage.operations[opId].status = 'error';
+                        GcpStorage.operations[opId].error = err.message;
+                    });
+
+                return opId;
+            },
+
+            // Poll operation status: 0=pending, 1=ready, 2=error
+            pollStatus: function(opId) {
+                var op = GcpStorage.operations[opId];
+                if (!op) return 2; // Error: operation not found
+                if (op.status === 'pending') return 0;
+                if (op.status === 'ready') return 1;
+                return 2; // Error
+            },
+
+            // Get result data length (for read operations)
+            getResultLen: function(opId) {
+                var op = GcpStorage.operations[opId];
+                if (!op || !op.result) return 0;
+                if (op.result instanceof Uint8Array) return op.result.length;
+                if (Array.isArray(op.result)) {
+                    // For list operations, join filenames with newlines
+                    return op.result.join('\n').length;
+                }
+                return 0;
+            },
+
+            // Copy result data to WASM memory
+            copyResult: function(opId, destPtr, maxLen) {
+                var op = GcpStorage.operations[opId];
+                if (!op || !op.result) return 0;
+
+                var data;
+                if (op.result instanceof Uint8Array) {
+                    data = op.result;
+                } else if (Array.isArray(op.result)) {
+                    data = new TextEncoder().encode(op.result.join('\n'));
+                } else {
+                    return 0;
+                }
+
+                return writeWasmBytes(destPtr, data, maxLen);
+            },
+
+            // Get error message length
+            getErrorLen: function(opId) {
+                var op = GcpStorage.operations[opId];
+                return op && op.error ? op.error.length : 0;
+            },
+
+            // Copy error message to WASM memory
+            copyError: function(opId, destPtr, maxLen) {
+                var op = GcpStorage.operations[opId];
+                if (!op || !op.error) return 0;
+                return writeWasmBytes(destPtr, new TextEncoder().encode(op.error), maxLen);
+            },
+
+            // Free operation (remove from memory)
+            freeOperation: function(opId) {
+                delete GcpStorage.operations[opId];
+            },
+
+            // Get quota info, returns operation ID
+            startGetQuota: function() {
+                var opId = GcpStorage.nextOpId++;
+                GcpStorage.operations[opId] = { status: 'pending', result: null, error: null };
+
+                GcpStorage.doRequest('GET', '/quota')
+                    .then(function(data) {
+                        GcpStorage.operations[opId].status = 'ready';
+                        // Store as JSON string for simplicity
+                        GcpStorage.operations[opId].result = new TextEncoder().encode(JSON.stringify(data));
+                    })
+                    .catch(function(err) {
+                        GcpStorage.operations[opId].status = 'error';
+                        GcpStorage.operations[opId].error = err.message;
+                    });
+
+                return opId;
+            },
+
+            // Internal: make authenticated request to Cloud Run
+            doRequest: async function(method, endpoint, body) {
+                if (!GcpAuth.isAuthenticated()) {
+                    throw new Error('Not authenticated');
+                }
+
+                var url = GcpStorage.baseUrl + endpoint;
+                var options = {
+                    method: method,
+                    headers: {
+                        'Authorization': 'Bearer ' + GcpAuth.accessToken,
+                        'Content-Type': 'application/json'
+                    }
+                };
+
+                if (body) {
+                    options.body = JSON.stringify(body);
+                }
+
+                var response = await fetch(url, options);
+
+                if (!response.ok) {
+                    var errorText = await response.text();
+                    throw new Error(response.status + ': ' + errorText);
+                }
+
+                // Handle empty responses (e.g., delete)
+                var text = await response.text();
+                return text ? JSON.parse(text) : {};
+            }
+        };
+
+        // =============================================================================
         // Register WASM imports
         // =============================================================================
 
@@ -830,6 +1191,29 @@
                         console.warn('Blocked non-HTTP URL:', url);
                     }
                 };
+
+                // GCP Authentication
+                env.b32_gcp_auth_init = GcpAuth.init;
+                env.b32_gcp_auth_sign_in = GcpAuth.signIn;
+                env.b32_gcp_auth_sign_out = GcpAuth.signOut;
+                env.b32_gcp_auth_is_authenticated = GcpAuth.isAuthenticated;
+                env.b32_gcp_auth_get_token_len = GcpAuth.getAccessTokenLen;
+                env.b32_gcp_auth_copy_token = GcpAuth.copyAccessToken;
+                env.b32_gcp_auth_get_user_hash_len = GcpAuth.getUserIdHashLen;
+                env.b32_gcp_auth_copy_user_hash = GcpAuth.copyUserIdHash;
+
+                // GCP Storage
+                env.b32_gcp_storage_list = GcpStorage.startList;
+                env.b32_gcp_storage_read = GcpStorage.startRead;
+                env.b32_gcp_storage_write = GcpStorage.startWrite;
+                env.b32_gcp_storage_delete = GcpStorage.startDelete;
+                env.b32_gcp_storage_poll = GcpStorage.pollStatus;
+                env.b32_gcp_storage_get_result_len = GcpStorage.getResultLen;
+                env.b32_gcp_storage_copy_result = GcpStorage.copyResult;
+                env.b32_gcp_storage_get_error_len = GcpStorage.getErrorLen;
+                env.b32_gcp_storage_copy_error = GcpStorage.copyError;
+                env.b32_gcp_storage_free = GcpStorage.freeOperation;
+                env.b32_gcp_storage_get_quota = GcpStorage.startGetQuota;
             }
         });
 
