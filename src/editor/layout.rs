@@ -498,9 +498,17 @@ pub fn draw_editor(
         }
         AssetBrowserAction::Refresh => {
             // Refresh asset lists - reload from asset library
-            use crate::modeler::{discover_sample_assets, discover_user_assets};
-            state.asset_browser.samples = discover_sample_assets();
-            state.asset_browser.user_assets = discover_user_assets();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use crate::modeler::{discover_sample_assets, discover_user_assets};
+                state.asset_browser.samples = discover_sample_assets();
+                state.asset_browser.user_assets = discover_user_assets();
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // WASM: trigger async reload (handled in main loop)
+                state.asset_browser.pending_load_list = true;
+            }
             state.asset_browser.preview_asset = None;
             state.asset_browser.selected_category = None;
             state.asset_browser.selected_index = None;

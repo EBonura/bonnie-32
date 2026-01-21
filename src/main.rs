@@ -173,6 +173,58 @@ async fn main() {
                     browser.user_levels = Vec::new();
                 }
             }
+
+            // Also refresh asset browsers when auth changes
+            // Modeler's asset browser
+            {
+                let mb = &mut app.modeler.model_browser;
+                if mb.selected_category == Some(modeler::AssetCategory::User) {
+                    mb.preview_asset = None;
+                    mb.pending_preview_load = None;
+                }
+                mb.pending_user_list = None;
+                #[cfg(target_arch = "wasm32")]
+                {
+                    if app.storage.has_cloud() {
+                        mb.pending_load_list = true;
+                    } else {
+                        mb.user_assets = Vec::new();
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if app.storage.has_cloud() {
+                        mb.pending_user_list = Some(list_async("assets/userdata/assets".to_string()));
+                    } else {
+                        mb.user_assets = modeler::discover_user_assets();
+                    }
+                }
+            }
+            // World editor's asset browser
+            {
+                let ab = &mut app.world_editor.editor_state.asset_browser;
+                if ab.selected_category == Some(modeler::AssetCategory::User) {
+                    ab.preview_asset = None;
+                    ab.pending_preview_load = None;
+                }
+                ab.pending_user_list = None;
+                #[cfg(target_arch = "wasm32")]
+                {
+                    if app.storage.has_cloud() {
+                        ab.pending_load_list = true;
+                    } else {
+                        ab.user_assets = Vec::new();
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if app.storage.has_cloud() {
+                        ab.pending_user_list = Some(list_async("assets/userdata/assets".to_string()));
+                    } else {
+                        ab.user_assets = modeler::discover_user_assets();
+                    }
+                }
+            }
         }
 
         // Poll pending async operations (save, load)
@@ -790,12 +842,21 @@ async fn main() {
                         }
                         ModelBrowserAction::Refresh => {
                             // Refresh both sample and user asset lists
-                            ms.model_browser.samples = modeler::discover_sample_assets();
-                            ms.model_browser.user_assets = modeler::discover_user_assets();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                ms.model_browser.samples = modeler::discover_sample_assets();
+                                ms.model_browser.user_assets = modeler::discover_user_assets();
+                                ms.modeler_state.set_status("Asset list refreshed", 2.0);
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                // WASM: trigger async reload
+                                ms.model_browser.pending_load_list = true;
+                                ms.modeler_state.set_status("Refreshing...", 2.0);
+                            }
                             ms.model_browser.preview_asset = None;
                             ms.model_browser.selected_category = None;
                             ms.model_browser.selected_index = None;
-                            ms.modeler_state.set_status("Asset list refreshed", 2.0);
                         }
                         ModelBrowserAction::NewAsset => {
                             ms.modeler_state.new_mesh();
@@ -1127,11 +1188,29 @@ async fn main() {
             }
             // Load individual level preview if pending
             if let Some(path) = ws.example_browser.pending_load_path.take() {
-                use editor::load_example_level;
-                if let Some(level) = load_example_level(&path).await {
-                    ws.example_browser.set_preview(level);
+                let path_str = path.to_string_lossy().to_string();
+                // Check if this is a user level (cloud storage) or sample (web server)
+                if Storage::is_userdata_path(&path_str) && crate::auth::is_authenticated() {
+                    // User level: load from cloud storage
+                    ws.example_browser.pending_preview_load = Some(load_async(path));
                 } else {
-                    ws.editor_state.set_status("Failed to load level preview", 3.0);
+                    // Sample level: load from web server
+                    use editor::load_example_level;
+                    if let Some(level) = load_example_level(&path).await {
+                        ws.example_browser.set_preview(level);
+                    } else {
+                        ws.editor_state.set_status("Failed to load level preview", 3.0);
+                    }
+                }
+            }
+            // Load asset browser list if pending (for world editor's asset picker)
+            if ws.editor_state.asset_browser.pending_load_list {
+                ws.editor_state.asset_browser.pending_load_list = false;
+                use modeler::load_sample_asset_list;
+                ws.editor_state.asset_browser.samples = load_sample_asset_list().await;
+                // Start async user asset discovery if authenticated (cloud storage)
+                if crate::auth::is_authenticated() {
+                    ws.editor_state.asset_browser.pending_user_list = Some(list_async("assets/userdata/assets".to_string()));
                 }
             }
         }
@@ -1143,17 +1222,28 @@ async fn main() {
             // Load model list from manifest if pending
             if ms.model_browser.pending_load_list {
                 ms.model_browser.pending_load_list = false;
-                use modeler::{load_sample_asset_list, load_user_asset_list};
+                use modeler::load_sample_asset_list;
                 ms.model_browser.samples = load_sample_asset_list().await;
-                ms.model_browser.user_assets = load_user_asset_list().await;
+                // Start async user asset discovery if authenticated (cloud storage)
+                if crate::auth::is_authenticated() {
+                    ms.model_browser.pending_user_list = Some(list_async("assets/userdata/assets".to_string()));
+                }
             }
             // Load individual model preview if pending
             if let Some(path) = ms.model_browser.pending_load_path.take() {
-                use modeler::load_model;
-                if let Some(project) = load_model(&path).await {
-                    ms.model_browser.set_preview(project, &ms.modeler_state.user_textures);
+                let path_str = path.to_string_lossy().to_string();
+                // Check if this is a user asset (cloud storage) or sample (web server)
+                if Storage::is_userdata_path(&path_str) && crate::auth::is_authenticated() {
+                    // User asset: load from cloud storage
+                    ms.model_browser.pending_preview_load = Some(load_async(path));
                 } else {
-                    ms.modeler_state.set_status("Failed to load model preview", 3.0);
+                    // Sample asset: load from web server
+                    use modeler::load_model;
+                    if let Some(project) = load_model(&path).await {
+                        ms.model_browser.set_preview(project, &ms.modeler_state.user_textures);
+                    } else {
+                        ms.modeler_state.set_status("Failed to load model preview", 3.0);
+                    }
                 }
             }
             // Load mesh list from manifest if pending
@@ -1421,6 +1511,64 @@ fn poll_pending_ops(app: &mut AppState) {
         }
     }
 
+    // Poll pending modeler asset browser preview load (for async cloud loads)
+    if let Some(mut pending) = app.modeler.model_browser.pending_preview_load.take() {
+        if pending.op.is_complete() {
+            match pending.op.take() {
+                Some(Ok(data)) => {
+                    // Parse the loaded asset data
+                    match asset::Asset::load_from_bytes(&data) {
+                        Ok(asset) => {
+                            app.modeler.model_browser.set_preview(asset, &app.modeler.modeler_state.user_textures);
+                            app.modeler.modeler_state.set_status("Preview loaded", 2.0);
+                        }
+                        Err(e) => {
+                            app.modeler.modeler_state.set_status(&format!("Preview failed: {}", e), 3.0);
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    app.modeler.modeler_state.set_status(&format!("Preview failed: {}", e), 3.0);
+                }
+                None => {
+                    app.modeler.modeler_state.set_status("Preview failed: unknown error", 3.0);
+                }
+            }
+        } else {
+            // Still pending, put it back
+            app.modeler.model_browser.pending_preview_load = Some(pending);
+        }
+    }
+
+    // Poll pending world editor asset browser preview load (for async cloud loads)
+    if let Some(mut pending) = app.world_editor.editor_state.asset_browser.pending_preview_load.take() {
+        if pending.op.is_complete() {
+            match pending.op.take() {
+                Some(Ok(data)) => {
+                    // Parse the loaded asset data
+                    match asset::Asset::load_from_bytes(&data) {
+                        Ok(asset) => {
+                            app.world_editor.editor_state.asset_browser.set_preview(asset, &app.world_editor.editor_state.user_textures);
+                            app.world_editor.editor_state.set_status("Preview loaded", 2.0);
+                        }
+                        Err(e) => {
+                            app.world_editor.editor_state.set_status(&format!("Preview failed: {}", e), 3.0);
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    app.world_editor.editor_state.set_status(&format!("Preview failed: {}", e), 3.0);
+                }
+                None => {
+                    app.world_editor.editor_state.set_status("Preview failed: unknown error", 3.0);
+                }
+            }
+        } else {
+            // Still pending, put it back
+            app.world_editor.editor_state.asset_browser.pending_preview_load = Some(pending);
+        }
+    }
+
     // Poll pending browser user level list (for async cloud discovery)
     if let Some(mut pending) = app.world_editor.example_browser.pending_user_list.take() {
         if pending.op.is_complete() {
@@ -1464,6 +1612,96 @@ fn poll_pending_ops(app: &mut AppState) {
         } else {
             // Still pending, put it back
             app.world_editor.example_browser.pending_user_list = Some(pending);
+        }
+    }
+
+    // Poll pending modeler asset browser user asset list (for async cloud discovery)
+    if let Some(mut pending) = app.modeler.model_browser.pending_user_list.take() {
+        if pending.op.is_complete() {
+            const USER_ASSETS_DIR: &str = "assets/userdata/assets";
+            match pending.op.take() {
+                Some(Ok(files)) => {
+                    // Convert file list to AssetInfo
+                    let assets: Vec<_> = files
+                        .iter()
+                        .filter(|f| f.ends_with(".ron"))
+                        .map(|f| {
+                            let full_path = if f.contains('/') {
+                                f.clone()
+                            } else {
+                                format!("{}/{}", USER_ASSETS_DIR, f)
+                            };
+                            let name = full_path
+                                .rsplit('/')
+                                .next()
+                                .and_then(|n| n.strip_suffix(".ron"))
+                                .unwrap_or(&full_path)
+                                .to_string();
+                            modeler::AssetInfo {
+                                name,
+                                path: PathBuf::from(full_path),
+                                category: modeler::AssetCategory::User,
+                            }
+                        })
+                        .collect();
+                    app.modeler.model_browser.user_assets = assets;
+                    app.modeler.modeler_state.set_status("Assets loaded", 2.0);
+                }
+                Some(Err(e)) => {
+                    app.modeler.modeler_state.set_status(&format!("Failed to list assets: {}", e), 3.0);
+                }
+                None => {
+                    // No result
+                }
+            }
+        } else {
+            // Still pending, put it back
+            app.modeler.model_browser.pending_user_list = Some(pending);
+        }
+    }
+
+    // Poll pending world editor asset browser user asset list (for async cloud discovery)
+    if let Some(mut pending) = app.world_editor.editor_state.asset_browser.pending_user_list.take() {
+        if pending.op.is_complete() {
+            const USER_ASSETS_DIR: &str = "assets/userdata/assets";
+            match pending.op.take() {
+                Some(Ok(files)) => {
+                    // Convert file list to AssetInfo
+                    let assets: Vec<_> = files
+                        .iter()
+                        .filter(|f| f.ends_with(".ron"))
+                        .map(|f| {
+                            let full_path = if f.contains('/') {
+                                f.clone()
+                            } else {
+                                format!("{}/{}", USER_ASSETS_DIR, f)
+                            };
+                            let name = full_path
+                                .rsplit('/')
+                                .next()
+                                .and_then(|n| n.strip_suffix(".ron"))
+                                .unwrap_or(&full_path)
+                                .to_string();
+                            modeler::AssetInfo {
+                                name,
+                                path: PathBuf::from(full_path),
+                                category: modeler::AssetCategory::User,
+                            }
+                        })
+                        .collect();
+                    app.world_editor.editor_state.asset_browser.user_assets = assets;
+                    app.world_editor.editor_state.set_status("Assets loaded", 2.0);
+                }
+                Some(Err(e)) => {
+                    app.world_editor.editor_state.set_status(&format!("Failed to list assets: {}", e), 3.0);
+                }
+                None => {
+                    // No result
+                }
+            }
+        } else {
+            // Still pending, put it back
+            app.world_editor.editor_state.asset_browser.pending_user_list = Some(pending);
         }
     }
 }
