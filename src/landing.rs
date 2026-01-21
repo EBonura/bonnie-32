@@ -3,8 +3,6 @@
 //! Displays introduction, motivation, and FAQ for BONNIE-32.
 
 use macroquad::prelude::*;
-use crate::auth::AuthState;
-use crate::storage::StorageMode;
 use crate::ui::{Rect, draw_link_row};
 use crate::VERSION;
 
@@ -79,17 +77,8 @@ impl LandingState {
     }
 }
 
-/// Actions that can be triggered from the landing page
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LandingAction {
-    None,
-    SignIn,
-    SignOut,
-}
-
 /// Draw the landing page
-pub fn draw_landing(rect: Rect, state: &mut LandingState, auth: &AuthState, storage_mode: StorageMode, can_write: bool, ctx: &crate::ui::UiContext) -> LandingAction {
-    let mut action = LandingAction::None;
+pub fn draw_landing(rect: Rect, state: &mut LandingState, ctx: &crate::ui::UiContext) {
     // Background
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, BG_COLOR);
 
@@ -137,53 +126,6 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, auth: &AuthState, stor
     let subtitle_width = subtitle.len() as f32 * 18.0 * 0.55;
     draw_text(subtitle, content_x + (content_width - subtitle_width) / 2.0, y + 18.0, 18.0, MUTED_COLOR);
     y += 54.0;
-
-    // === CLOUD STORAGE / AUTH SECTION ===
-    {
-        let auth_section_height = 60.0;
-        draw_rectangle(content_x, y, content_width, auth_section_height, SECTION_BG);
-
-        let padding = 16.0;
-        let text_x = content_x + padding;
-
-        // Storage mode indicator
-        let mode_text = match (storage_mode, can_write) {
-            (StorageMode::Cloud, _) => "Storage: Cloud",
-            (StorageMode::Local, true) => "Storage: Local",
-            (StorageMode::Local, false) => "Storage: Read-only (sign in to save)",
-        };
-        let mode_color = match (storage_mode, can_write) {
-            (StorageMode::Cloud, _) => Color::new(0.3, 0.8, 0.3, 1.0), // Green for cloud
-            (StorageMode::Local, true) => ACCENT_COLOR,
-            (StorageMode::Local, false) => MUTED_COLOR,
-        };
-        draw_text(mode_text, text_x, y + padding + 14.0, 14.0, mode_color);
-
-        // Sign in/out button
-        let button_text = if auth.authenticated { "Sign Out" } else { "Sign in with Google" };
-        let button_width = measure_text(button_text, None, 14, 1.0).width + 24.0;
-        let button_x = content_x + content_width - button_width - padding;
-        let button_y = y + padding;
-        let button_rect = macroquad::math::Rect::new(button_x, button_y, button_width, 28.0);
-
-        let mouse_over = button_rect.contains(vec2(ctx.mouse.x, ctx.mouse.y));
-        let button_bg = if mouse_over {
-            Color::new(0.2, 0.2, 0.24, 1.0)
-        } else {
-            Color::new(0.15, 0.15, 0.18, 1.0)
-        };
-        let button_border = if auth.authenticated { MUTED_COLOR } else { ACCENT_COLOR };
-
-        draw_rectangle(button_x, button_y, button_width, 28.0, button_bg);
-        draw_rectangle_lines(button_x, button_y, button_width, 28.0, 1.0, button_border);
-        draw_text(button_text, button_x + 12.0, button_y + 18.0, 14.0, TEXT_COLOR);
-
-        if mouse_over && ctx.mouse.left_pressed {
-            action = if auth.authenticated { LandingAction::SignOut } else { LandingAction::SignIn };
-        }
-
-        y += auth_section_height + 20.0;
-    }
 
     // === INTRO SECTION ===
     y = draw_section(content_x, y, content_width, "What is BONNIE-32?",
@@ -267,8 +209,6 @@ pub fn draw_landing(rect: Rect, state: &mut LandingState, auth: &AuthState, stor
     // Calculate and store max scroll for next frame
     let content_height = y - rect.y - state.scroll_y;
     state.max_scroll = -(content_height - rect.h + padding).max(0.0);
-
-    action
 }
 
 /// Draw a section with title and body text (auto-wrapping)

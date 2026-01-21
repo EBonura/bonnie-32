@@ -30,7 +30,7 @@ use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level_with_storage, serialize_level, save_level_with_storage};
 use storage::{save_async, list_async, load_async, Storage};
-use ui::{UiContext, MouseState, Rect, draw_fixed_tabs_with_version, TabEntry, layout as tab_layout, icon};
+use ui::{UiContext, MouseState, Rect, draw_fixed_tabs_with_auth, TabBarAction, TabEntry, layout as tab_layout, icon};
 use editor::{EditorAction, draw_editor, draw_level_browser, BrowserAction, LevelCategory, discover_examples, discover_user_levels};
 use modeler::{ModelerAction, ModelBrowserAction, ObjImportAction, draw_model_browser, draw_obj_importer, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
@@ -349,19 +349,7 @@ async fn main() {
         // Draw active tool content
         match app.active_tool {
             Tool::Home => {
-                let action = landing::draw_landing(
-                    content_rect,
-                    &mut app.landing,
-                    &app.auth,
-                    app.storage.mode(),
-                    app.storage.can_write(),
-                    &ui_ctx,
-                );
-                match action {
-                    landing::LandingAction::SignIn => auth::sign_in(),
-                    landing::LandingAction::SignOut => auth::sign_out(),
-                    landing::LandingAction::None => {}
-                }
+                landing::draw_landing(content_rect, &mut app.landing, &ui_ctx);
             }
 
             Tool::WorldEditor => {
@@ -1359,34 +1347,52 @@ async fn main() {
         }
 
         // Draw tab bar LAST so it covers any content overflow (e.g., landing page scroll)
-        if let Some(clicked) = draw_fixed_tabs_with_version(&mut ui_ctx, tab_bar_rect, &tabs, app.active_tool_index(), app.icon_font.as_ref(), Some(VERSION), &mut version_highlighted) {
-            if let Some(tool) = Tool::from_index(clicked) {
-                // Handle special cases for certain tabs
-                if tool == Tool::WorldEditor && world_editor_first_open {
-                    world_editor_first_open = false;
-                    let samples = discover_examples();
-                    // Open immediately with samples, user levels load async
-                    app.world_editor.example_browser.open_with_levels(samples, Vec::new());
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        app.world_editor.example_browser.pending_load_list = true;
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        // Start async user level discovery if cloud is enabled
-                        if app.storage.has_cloud() {
-                            app.world_editor.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
-                        } else {
-                            // Local storage is fast, use sync
-                            app.world_editor.example_browser.user_levels = discover_user_levels(&app.storage);
+        let tab_action = draw_fixed_tabs_with_auth(
+            &mut ui_ctx,
+            tab_bar_rect,
+            &tabs,
+            app.active_tool_index(),
+            app.icon_font.as_ref(),
+            Some(VERSION),
+            &mut version_highlighted,
+            app.storage.mode(),
+            app.storage.can_write(),
+            app.auth.authenticated,
+        );
+
+        match tab_action {
+            TabBarAction::SwitchTab(clicked) => {
+                if let Some(tool) = Tool::from_index(clicked) {
+                    // Handle special cases for certain tabs
+                    if tool == Tool::WorldEditor && world_editor_first_open {
+                        world_editor_first_open = false;
+                        let samples = discover_examples();
+                        // Open immediately with samples, user levels load async
+                        app.world_editor.example_browser.open_with_levels(samples, Vec::new());
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            app.world_editor.example_browser.pending_load_list = true;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            // Start async user level discovery if cloud is enabled
+                            if app.storage.has_cloud() {
+                                app.world_editor.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                            } else {
+                                // Local storage is fast, use sync
+                                app.world_editor.example_browser.user_levels = discover_user_levels(&app.storage);
+                            }
                         }
                     }
+                    if tool == Tool::Test {
+                        app.game.reset();
+                    }
+                    app.set_active_tool(tool);
                 }
-                if tool == Tool::Test {
-                    app.game.reset();
-                }
-                app.set_active_tool(tool);
             }
+            TabBarAction::SignIn => auth::sign_in(),
+            TabBarAction::SignOut => auth::sign_out(),
+            TabBarAction::None => {}
         }
 
         // FPS limiting (only when in game tab)
