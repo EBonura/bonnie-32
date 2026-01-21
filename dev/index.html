@@ -1026,8 +1026,8 @@
 
                 GcpStorage.doRequest('GET', '/get?path=' + encodeURIComponent(path))
                     .then(function(data) {
-                        // data.content is base64 encoded
-                        var binary = atob(data.content);
+                        // data.data.content is base64 encoded (wrapped in ApiResponse)
+                        var binary = atob(data.data.content);
                         var bytes = new Uint8Array(binary.length);
                         for (var i = 0; i < binary.length; i++) {
                             bytes[i] = binary.charCodeAt(i);
