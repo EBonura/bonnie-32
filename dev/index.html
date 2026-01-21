@@ -415,20 +415,26 @@
                 TextureCache.timings.startTime = performance.now();
 
                 try {
-                    var manifest = await (await fetch('assets/samples/textures/manifest.txt')).text();
+                    // Load top-level manifest (list of pack names)
+                    var packsManifest = await (await fetch('assets/samples/texture-packs/manifest.txt')).text();
+                    var packNames = packsManifest.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
 
-                    // Parse manifest
+                    // Load each pack's manifest and collect all paths
                     var paths = [];
-                    var currentPack = null;
-                    manifest.split('\n').forEach(function(line) {
-                        line = line.trim();
-                        if (!line) return;
-                        if (line[0] === '[' && line[line.length - 1] === ']') {
-                            currentPack = line.slice(1, -1);
-                        } else if (currentPack) {
-                            paths.push('assets/samples/textures/' + currentPack + '/' + line);
+                    for (var i = 0; i < packNames.length; i++) {
+                        var packName = packNames[i];
+                        try {
+                            var packManifest = await (await fetch('assets/samples/texture-packs/' + packName + '/manifest.txt')).text();
+                            packManifest.split('\n').forEach(function(line) {
+                                line = line.trim();
+                                if (line) {
+                                    paths.push('assets/samples/texture-packs/' + packName + '/' + line);
+                                }
+                            });
+                        } catch (e) {
+                            console.warn('Failed to load manifest for pack:', packName);
                         }
-                    });
+                    }
 
                     TextureCache.total = paths.length;
                     AssetLoader.addTotal(paths.length);
@@ -770,6 +776,7 @@
             idToken: null,       // JWT for Cloud Run authentication
             accessToken: null,   // Kept for compatibility (not used for Cloud Run)
             userIdHash: null,
+            userEmail: null,     // Email for revoke() on sign-out
             tokenExpiry: 0,
             initialized: false,
             gisLoaded: false,
@@ -789,6 +796,7 @@
                     GcpAuth.accessToken = storedIdToken; // For compatibility
                     GcpAuth.tokenExpiry = storedExpiry;
                     GcpAuth.userIdHash = storedHash;
+                    GcpAuth.userEmail = localStorage.getItem('_b32_gcp_user_email');
                     console.log('GCP auth restored from localStorage');
                 }
 
@@ -835,6 +843,12 @@
                             if (payload.sub) {
                                 GcpAuth.userIdHash = await GcpAuth.sha256(payload.sub);
                                 localStorage.setItem('_b32_gcp_user_hash', GcpAuth.userIdHash);
+                            }
+
+                            // Store email for revoke() on sign-out
+                            if (payload.email) {
+                                GcpAuth.userEmail = payload.email;
+                                localStorage.setItem('_b32_gcp_user_email', payload.email);
                             }
                         }
                     } catch (e) {
@@ -940,26 +954,52 @@
 
             // Sign out
             signOut: function() {
+                // Revoke credential with Google to force fresh token on next sign-in
+                var emailToRevoke = GcpAuth.userEmail;
+                if (GcpAuth.gisLoaded && emailToRevoke) {
+                    google.accounts.id.revoke(emailToRevoke, function(done) {
+                        console.log('GCP credential revoked:', done.successful ? 'success' : 'failed');
+                    });
+                }
+
+                // Also disable auto-select
+                if (GcpAuth.gisLoaded) {
+                    google.accounts.id.disableAutoSelect();
+                }
+
+                // Clear local state
                 GcpAuth.idToken = null;
                 GcpAuth.accessToken = null;
                 GcpAuth.userIdHash = null;
+                GcpAuth.userEmail = null;
                 GcpAuth.tokenExpiry = 0;
                 localStorage.removeItem('_b32_gcp_id_token');
                 localStorage.removeItem('_b32_gcp_token');
                 localStorage.removeItem('_b32_gcp_token_expiry');
                 localStorage.removeItem('_b32_gcp_user_hash');
-
-                // Revoke Google session if possible
-                if (GcpAuth.gisLoaded) {
-                    google.accounts.id.disableAutoSelect();
-                }
+                localStorage.removeItem('_b32_gcp_user_email');
 
                 console.log('GCP signed out');
             },
 
             // Check if authenticated (ID token exists and not expired)
             isAuthenticated: function() {
-                return GcpAuth.idToken && GcpAuth.tokenExpiry > Date.now() && GcpAuth.userIdHash ? 1 : 0;
+                var hasToken = !!GcpAuth.idToken;
+                var notExpired = GcpAuth.tokenExpiry > Date.now();
+                var hasHash = !!GcpAuth.userIdHash;
+                var authenticated = hasToken && notExpired && hasHash;
+
+                // Debug: log auth check details on failure
+                if (hasToken && !authenticated) {
+                    console.log('[GcpAuth] Auth check failed:',
+                        'token=' + (hasToken ? 'yes' : 'no'),
+                        'expiry=' + new Date(GcpAuth.tokenExpiry).toISOString(),
+                        'now=' + new Date().toISOString(),
+                        'expired=' + !notExpired,
+                        'hash=' + (hasHash ? 'yes' : 'no'));
+                }
+
+                return authenticated ? 1 : 0;
             },
 
             // Get access token length (returns ID token for Cloud Run auth)
@@ -1003,15 +1043,24 @@
                 var opId = GcpStorage.nextOpId++;
 
                 GcpStorage.operations[opId] = { status: 'pending', result: null, error: null };
+                console.log('[GcpStorage] List started, opId=' + opId + ', path=' + path);
 
                 GcpStorage.doRequest('GET', '/list?prefix=' + encodeURIComponent(path))
                     .then(function(data) {
-                        GcpStorage.operations[opId].status = 'ready';
-                        GcpStorage.operations[opId].result = data.files || [];
+                        // Server returns: {"success": true, "data": {"files": [{"path": "...", "size": N}]}}
+                        var files = (data.data && data.data.files) || [];
+                        console.log('[GcpStorage] List success, opId=' + opId + ', files=', files);
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'ready';
+                            GcpStorage.operations[opId].result = files.map(function(f) { return f.path; });
+                        }
                     })
                     .catch(function(err) {
-                        GcpStorage.operations[opId].status = 'error';
-                        GcpStorage.operations[opId].error = err.message;
+                        console.error('[GcpStorage] List error, opId=' + opId + ':', err);
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'error';
+                            GcpStorage.operations[opId].error = err.message;
+                        }
                     });
 
                 return opId;
@@ -1032,12 +1081,16 @@
                         for (var i = 0; i < binary.length; i++) {
                             bytes[i] = binary.charCodeAt(i);
                         }
-                        GcpStorage.operations[opId].status = 'ready';
-                        GcpStorage.operations[opId].result = bytes;
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'ready';
+                            GcpStorage.operations[opId].result = bytes;
+                        }
                     })
                     .catch(function(err) {
-                        GcpStorage.operations[opId].status = 'error';
-                        GcpStorage.operations[opId].error = err.message;
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'error';
+                            GcpStorage.operations[opId].error = err.message;
+                        }
                     });
 
                 return opId;
@@ -1057,15 +1110,22 @@
 
                 var opId = GcpStorage.nextOpId++;
                 GcpStorage.operations[opId] = { status: 'pending', result: null, error: null };
+                console.log('[GcpStorage] Write started, opId=' + opId + ', path=' + path + ', size=' + data.length);
 
                 GcpStorage.doRequest('POST', '/upload', { path: path, content: base64 })
                     .then(function() {
-                        GcpStorage.operations[opId].status = 'ready';
-                        GcpStorage.operations[opId].result = true;
+                        console.log('[GcpStorage] Write success, opId=' + opId);
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'ready';
+                            GcpStorage.operations[opId].result = true;
+                        }
                     })
                     .catch(function(err) {
-                        GcpStorage.operations[opId].status = 'error';
-                        GcpStorage.operations[opId].error = err.message;
+                        console.error('[GcpStorage] Write error, opId=' + opId + ':', err);
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'error';
+                            GcpStorage.operations[opId].error = err.message;
+                        }
                     });
 
                 return opId;
@@ -1080,12 +1140,16 @@
 
                 GcpStorage.doRequest('POST', '/delete', { path: path })
                     .then(function() {
-                        GcpStorage.operations[opId].status = 'ready';
-                        GcpStorage.operations[opId].result = true;
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'ready';
+                            GcpStorage.operations[opId].result = true;
+                        }
                     })
                     .catch(function(err) {
-                        GcpStorage.operations[opId].status = 'error';
-                        GcpStorage.operations[opId].error = err.message;
+                        if (GcpStorage.operations[opId]) {
+                            GcpStorage.operations[opId].status = 'error';
+                            GcpStorage.operations[opId].error = err.message;
+                        }
                     });
 
                 return opId;
@@ -1094,7 +1158,15 @@
             // Poll operation status: 0=pending, 1=ready, 2=error
             pollStatus: function(opId) {
                 var op = GcpStorage.operations[opId];
-                if (!op) return 2; // Error: operation not found
+                if (!op) {
+                    console.warn('[GcpStorage] pollStatus: operation not found, opId=' + opId);
+                    return 2; // Error: operation not found
+                }
+                // Log status changes
+                if (!op._lastLoggedStatus || op._lastLoggedStatus !== op.status) {
+                    console.log('[GcpStorage] pollStatus opId=' + opId + ' status=' + op.status);
+                    op._lastLoggedStatus = op.status;
+                }
                 if (op.status === 'pending') return 0;
                 if (op.status === 'ready') return 1;
                 return 2; // Error
@@ -1147,6 +1219,28 @@
                 delete GcpStorage.operations[opId];
             },
 
+            // Yield counter for logging
+            _yieldCount: 0,
+
+            // Yield to event loop (allows pending fetch callbacks to run)
+            // Uses sync XHR trick - blocks WASM but lets JS process events
+            yield: function() {
+                GcpStorage._yieldCount++;
+                if (GcpStorage._yieldCount % 10 === 0) {
+                    console.log('[GcpStorage] yield called ' + GcpStorage._yieldCount + ' times, pending ops:',
+                        Object.keys(GcpStorage.operations).filter(function(k) {
+                            return GcpStorage.operations[k].status === 'pending';
+                        }).join(','));
+                }
+                try {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('GET', 'data:text/plain,', false); // synchronous
+                    xhr.send();
+                } catch (e) {
+                    console.log('[GcpStorage] yield XHR error (ignored):', e);
+                }
+            },
+
             // Get quota info, returns operation ID
             startGetQuota: function() {
                 var opId = GcpStorage.nextOpId++;
@@ -1172,9 +1266,18 @@
                     throw new Error('Not authenticated');
                 }
 
+                // Extra safety: check token expiry with 60-second buffer
+                // This catches cases where isAuthenticated passed but token is about to expire
+                if (GcpAuth.tokenExpiry && GcpAuth.tokenExpiry < Date.now() + 60000) {
+                    console.warn('[GcpStorage] Token expires in <60s, signing out');
+                    GcpAuth.signOut();
+                    throw new Error('Token expired, please sign in again');
+                }
+
                 var url = GcpStorage.baseUrl + endpoint;
                 var options = {
                     method: method,
+                    cache: 'no-store',  // Prevent browser caching of API responses
                     headers: {
                         'Authorization': 'Bearer ' + GcpAuth.idToken,
                         'Content-Type': 'application/json'
@@ -1189,6 +1292,17 @@
 
                 if (!response.ok) {
                     var errorText = await response.text();
+
+                    // Only sign out if it's a CLIENT auth issue (401 from server directly)
+                    // NOT if it's a server-side Firestore/GCS auth issue (400 with nested error)
+                    if (response.status === 401) {
+                        console.warn('[GcpStorage] Client auth rejected (401), signing out');
+                        GcpAuth.signOut();
+                    } else if (response.status === 400 && errorText.includes('Firestore')) {
+                        // Server-side Firestore auth issue - don't sign out the user
+                        console.error('[GcpStorage] Server-side Firestore error - this is a backend issue, not client auth');
+                    }
+
                     throw new Error(response.status + ': ' + errorText);
                 }
 
@@ -1290,6 +1404,7 @@
                 env.b32_gcp_storage_copy_error = GcpStorage.copyError;
                 env.b32_gcp_storage_free = GcpStorage.freeOperation;
                 env.b32_gcp_storage_get_quota = GcpStorage.startGetQuota;
+                env.b32_gcp_storage_yield = GcpStorage.yield;
             }
         });
 
