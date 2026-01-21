@@ -151,27 +151,239 @@ pub fn list_async(path: String) -> PendingList {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WASM stubs (operations complete "immediately" since they're already async in JS)
+// WASM async operations (truly non-blocking via JS operation IDs)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "wasm32")]
+extern "C" {
+    fn b32_gcp_storage_write(
+        path_ptr: *const u8,
+        path_len: usize,
+        data_ptr: *const u8,
+        data_len: usize,
+    ) -> i32;
+    fn b32_gcp_storage_read(path_ptr: *const u8, path_len: usize) -> i32;
+    fn b32_gcp_storage_list(path_ptr: *const u8, path_len: usize) -> i32;
+    fn b32_gcp_storage_poll(op_id: i32) -> i32;
+    fn b32_gcp_storage_get_result_len(op_id: i32) -> usize;
+    fn b32_gcp_storage_copy_result(op_id: i32, dest_ptr: *mut u8, max_len: usize) -> usize;
+    fn b32_gcp_storage_get_error_len(op_id: i32) -> usize;
+    fn b32_gcp_storage_copy_error(op_id: i32, dest_ptr: *mut u8, max_len: usize) -> usize;
+    fn b32_gcp_storage_free(op_id: i32);
+}
+
+/// Poll status codes from JavaScript
+#[cfg(target_arch = "wasm32")]
+const POLL_PENDING: i32 = 0;
+#[cfg(target_arch = "wasm32")]
+const POLL_READY: i32 = 1;
+#[cfg(target_arch = "wasm32")]
+const POLL_ERROR: i32 = 2;
+
+/// Async operation holding a JS operation ID
+#[cfg(target_arch = "wasm32")]
 pub struct AsyncOp<T> {
+    op_id: Option<i32>,
     result: Option<AsyncResult<T>>,
+    _marker: std::marker::PhantomData<T>,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl<T> AsyncOp<T> {
-    pub fn is_complete(&mut self) -> bool {
-        true
+    fn new(op_id: i32) -> Self {
+        Self {
+            op_id: Some(op_id),
+            result: None,
+            _marker: std::marker::PhantomData,
+        }
     }
 
-    pub fn take(self) -> Option<AsyncResult<T>> {
-        self.result
+    fn with_result(result: AsyncResult<T>) -> Self {
+        Self {
+            op_id: None,
+            result: Some(result),
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn result(&self) -> Option<&AsyncResult<T>> {
         self.result.as_ref()
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncOp<()> {
+    /// Check if the operation has completed (single poll, no busy-wait)
+    pub fn is_complete(&mut self) -> bool {
+        if self.result.is_some() {
+            return true;
+        }
+
+        let op_id = match self.op_id {
+            Some(id) => id,
+            None => return true,
+        };
+
+        let status = unsafe { b32_gcp_storage_poll(op_id) };
+
+        match status {
+            POLL_PENDING => false,
+            POLL_READY => {
+                self.result = Some(Ok(()));
+                true
+            }
+            POLL_ERROR => {
+                let error = get_js_error(op_id);
+                self.result = Some(Err(error));
+                true
+            }
+            _ => {
+                self.result = Some(Err(StorageError::Other(format!("Unknown poll status: {}", status))));
+                true
+            }
+        }
+    }
+
+    pub fn take(mut self) -> Option<AsyncResult<()>> {
+        // Free the JS operation if we still have it
+        if let Some(op_id) = self.op_id.take() {
+            unsafe { b32_gcp_storage_free(op_id) };
+        }
+        self.result
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncOp<Vec<u8>> {
+    pub fn is_complete(&mut self) -> bool {
+        if self.result.is_some() {
+            return true;
+        }
+
+        let op_id = match self.op_id {
+            Some(id) => id,
+            None => return true,
+        };
+
+        let status = unsafe { b32_gcp_storage_poll(op_id) };
+
+        match status {
+            POLL_PENDING => false,
+            POLL_READY => {
+                let data = get_js_result_bytes(op_id);
+                self.result = Some(Ok(data));
+                true
+            }
+            POLL_ERROR => {
+                let error = get_js_error(op_id);
+                self.result = Some(Err(error));
+                true
+            }
+            _ => {
+                self.result = Some(Err(StorageError::Other(format!("Unknown poll status: {}", status))));
+                true
+            }
+        }
+    }
+
+    pub fn take(mut self) -> Option<AsyncResult<Vec<u8>>> {
+        if let Some(op_id) = self.op_id.take() {
+            unsafe { b32_gcp_storage_free(op_id) };
+        }
+        self.result
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncOp<Vec<String>> {
+    pub fn is_complete(&mut self) -> bool {
+        if self.result.is_some() {
+            return true;
+        }
+
+        let op_id = match self.op_id {
+            Some(id) => id,
+            None => return true,
+        };
+
+        let status = unsafe { b32_gcp_storage_poll(op_id) };
+
+        match status {
+            POLL_PENDING => false,
+            POLL_READY => {
+                let data = get_js_result_string(op_id);
+                let files: Vec<String> = if data.is_empty() {
+                    Vec::new()
+                } else {
+                    data.lines().map(|s| s.to_string()).collect()
+                };
+                self.result = Some(Ok(files));
+                true
+            }
+            POLL_ERROR => {
+                let error = get_js_error(op_id);
+                self.result = Some(Err(error));
+                true
+            }
+            _ => {
+                self.result = Some(Err(StorageError::Other(format!("Unknown poll status: {}", status))));
+                true
+            }
+        }
+    }
+
+    pub fn take(mut self) -> Option<AsyncResult<Vec<String>>> {
+        if let Some(op_id) = self.op_id.take() {
+            unsafe { b32_gcp_storage_free(op_id) };
+        }
+        self.result
+    }
+}
+
+/// Get error message from JavaScript
+#[cfg(target_arch = "wasm32")]
+fn get_js_error(op_id: i32) -> StorageError {
+    let len = unsafe { b32_gcp_storage_get_error_len(op_id) };
+    if len == 0 {
+        return StorageError::Other("Unknown error".to_string());
+    }
+
+    let mut buf = vec![0u8; len];
+    let copied = unsafe { b32_gcp_storage_copy_error(op_id, buf.as_mut_ptr(), len) };
+    buf.truncate(copied);
+    let msg = String::from_utf8_lossy(&buf).to_string();
+
+    // Parse error message to determine type
+    if msg.contains("401") || msg.contains("403") || msg.contains("Not authenticated") {
+        StorageError::AuthRequired
+    } else if msg.contains("404") {
+        StorageError::NotFound(msg)
+    } else if msg.contains("429") {
+        StorageError::RateLimited
+    } else {
+        StorageError::NetworkError(msg)
+    }
+}
+
+/// Get result bytes from JavaScript
+#[cfg(target_arch = "wasm32")]
+fn get_js_result_bytes(op_id: i32) -> Vec<u8> {
+    let len = unsafe { b32_gcp_storage_get_result_len(op_id) };
+    if len == 0 {
+        return Vec::new();
+    }
+
+    let mut buf = vec![0u8; len];
+    let copied = unsafe { b32_gcp_storage_copy_result(op_id, buf.as_mut_ptr(), len) };
+    buf.truncate(copied);
+    buf
+}
+
+/// Get result as string from JavaScript
+#[cfg(target_arch = "wasm32")]
+fn get_js_result_string(op_id: i32) -> String {
+    let bytes = get_js_result_bytes(op_id);
+    String::from_utf8_lossy(&bytes).to_string()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -192,38 +404,75 @@ pub struct PendingList {
     pub path: String,
 }
 
+/// Start an async save operation (returns immediately, poll for completion)
 #[cfg(target_arch = "wasm32")]
 pub fn save_async(path: PathBuf, data: Vec<u8>) -> PendingSave {
-    // On WASM, do synchronous (which actually goes through async JS)
-    let mut storage = Storage::new();
-    storage.update_for_auth();
-    let path_str = path.to_string_lossy().to_string();
-    let result = storage.write_sync(&path_str, &data);
+    use crate::auth;
+
+    // Check if authenticated
+    if !auth::is_authenticated() {
+        return PendingSave {
+            op: AsyncOp::with_result(Err(StorageError::AuthRequired)),
+            path,
+        };
+    }
+
+    // Start the JS write operation (non-blocking)
+    let path_str = path.to_string_lossy();
+    let op_id = unsafe {
+        b32_gcp_storage_write(
+            path_str.as_ptr(),
+            path_str.len(),
+            data.as_ptr(),
+            data.len(),
+        )
+    };
+
+    eprintln!("[async_ops] save_async started, op_id={}, path={}", op_id, path_str);
+
     PendingSave {
-        op: AsyncOp { result: Some(result) },
+        op: AsyncOp::new(op_id),
         path,
     }
 }
 
+/// Start an async load operation (returns immediately, poll for completion)
 #[cfg(target_arch = "wasm32")]
 pub fn load_async(path: PathBuf) -> PendingLoad {
-    let mut storage = Storage::new();
-    storage.update_for_auth();
-    let path_str = path.to_string_lossy().to_string();
-    let result = storage.read_sync(&path_str);
+    use crate::auth;
+
+    if !auth::is_authenticated() {
+        return PendingLoad {
+            op: AsyncOp::with_result(Err(StorageError::AuthRequired)),
+            path,
+        };
+    }
+
+    let path_str = path.to_string_lossy();
+    let op_id = unsafe { b32_gcp_storage_read(path_str.as_ptr(), path_str.len()) };
+
     PendingLoad {
-        op: AsyncOp { result: Some(result) },
+        op: AsyncOp::new(op_id),
         path,
     }
 }
 
+/// Start an async list operation (returns immediately, poll for completion)
 #[cfg(target_arch = "wasm32")]
 pub fn list_async(path: String) -> PendingList {
-    let mut storage = Storage::new();
-    storage.update_for_auth();
-    let result = storage.list_sync(&path);
+    use crate::auth;
+
+    if !auth::is_authenticated() {
+        return PendingList {
+            op: AsyncOp::with_result(Err(StorageError::AuthRequired)),
+            path,
+        };
+    }
+
+    let op_id = unsafe { b32_gcp_storage_list(path.as_ptr(), path.len()) };
+
     PendingList {
-        op: AsyncOp { result: Some(result) },
+        op: AsyncOp::new(op_id),
         path,
     }
 }

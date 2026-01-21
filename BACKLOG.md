@@ -92,4 +92,4 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Rotation pivot from selection**: Allow selecting an edge as rotation pivot (secondary selection mode) - similar to Blender's 3D cursor but simpler
 
 #### Future
-- [ ] **Light support**: Asset editor should support lights. Lights in world editor become objects with only a light component (no geometry)
+- [ ] 2D editor for designing menus and UIs

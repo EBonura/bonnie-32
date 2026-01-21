@@ -1115,7 +1115,10 @@ async fn main() {
                 use editor::load_example_list;
                 let samples = load_example_list().await;
                 ws.example_browser.samples = samples;
-                // Note: user levels are loaded synchronously via storage (cloud or empty)
+                // Start async user level discovery if authenticated
+                if crate::auth::is_authenticated() {
+                    ws.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                }
             }
             // Load individual level preview if pending
             if let Some(path) = ws.example_browser.pending_load_path.take() {

@@ -37,6 +37,7 @@ extern "C" {
     fn b32_gcp_storage_copy_error(op_id: i32, dest_ptr: *mut u8, max_len: usize) -> usize;
     fn b32_gcp_storage_free(op_id: i32);
     fn b32_gcp_storage_get_quota() -> i32;
+    fn b32_gcp_storage_yield();
 }
 
 /// Poll status codes from JavaScript
@@ -48,8 +49,13 @@ const POLL_READY: i32 = 1;
 const POLL_ERROR: i32 = 2;
 
 /// Maximum poll iterations before giving up (prevents infinite loops)
+/// With yielding, this represents actual time waiting, not just busy cycles
 #[cfg(target_arch = "wasm32")]
-const MAX_POLL_ITERATIONS: u32 = 100_000;
+const MAX_POLL_ITERATIONS: u32 = 1000;
+
+/// How often to yield to JS event loop (every N poll iterations)
+#[cfg(target_arch = "wasm32")]
+const YIELD_FREQUENCY: u32 = 10;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GCP Cloud Storage backend
@@ -104,9 +110,19 @@ impl GcpStorage {
     where
         F: FnOnce(i32) -> T,
     {
-        // Busy-wait for operation to complete
-        // Note: This blocks the main thread but is necessary for synchronous API
-        for _ in 0..MAX_POLL_ITERATIONS {
+        eprintln!("[GCP Rust] wait_for_operation started, op_id={}", op_id);
+
+        // Poll for operation to complete, yielding to JS event loop periodically
+        // Without yielding, fetch callbacks can never run (JS is single-threaded)
+        for i in 0..MAX_POLL_ITERATIONS {
+            // Yield to JS event loop periodically to allow fetch callbacks to run
+            if i > 0 && i % YIELD_FREQUENCY == 0 {
+                if i % 100 == 0 {
+                    eprintln!("[GCP Rust] Yielding at iteration {}, op_id={}", i, op_id);
+                }
+                unsafe { b32_gcp_storage_yield() };
+            }
+
             let status = unsafe { b32_gcp_storage_poll(op_id) };
 
             match status {
@@ -115,16 +131,20 @@ impl GcpStorage {
                     continue;
                 }
                 POLL_READY => {
+                    eprintln!("[GCP Rust] Operation ready after {} iterations, op_id={}", i, op_id);
                     let result = extract(op_id);
                     unsafe { b32_gcp_storage_free(op_id) };
                     return StorageHandle::ready(result);
                 }
                 POLL_ERROR => {
+                    eprintln!("[GCP Rust] Operation error after {} iterations, op_id={}", i, op_id);
                     let error = self.get_error(op_id);
+                    eprintln!("[GCP Rust] Error details: {:?}", error);
                     unsafe { b32_gcp_storage_free(op_id) };
                     return StorageHandle::error(error);
                 }
                 _ => {
+                    eprintln!("[GCP Rust] Unknown status {} at iteration {}, op_id={}", status, i, op_id);
                     unsafe { b32_gcp_storage_free(op_id) };
                     return StorageHandle::error(StorageError::Other(format!(
                         "Unknown poll status: {}",
@@ -135,6 +155,7 @@ impl GcpStorage {
         }
 
         // Timed out
+        eprintln!("[GCP Rust] TIMEOUT after {} iterations, op_id={}", MAX_POLL_ITERATIONS, op_id);
         unsafe { b32_gcp_storage_free(op_id) };
         StorageHandle::error(StorageError::NetworkError(
             "Operation timed out".to_string(),
@@ -188,7 +209,12 @@ impl GcpStorage {
     pub fn get_quota(&self) -> Option<QuotaInfo> {
         let op_id = unsafe { b32_gcp_storage_get_quota() };
 
-        for _ in 0..MAX_POLL_ITERATIONS {
+        for i in 0..MAX_POLL_ITERATIONS {
+            // Yield to JS event loop periodically
+            if i > 0 && i % YIELD_FREQUENCY == 0 {
+                unsafe { b32_gcp_storage_yield() };
+            }
+
             let status = unsafe { b32_gcp_storage_poll(op_id) };
 
             match status {
@@ -275,7 +301,12 @@ impl GcpStorage {
         // Check if file exists by trying to read it
         let op_id = unsafe { b32_gcp_storage_read(path.as_ptr(), path.len()) };
 
-        for _ in 0..MAX_POLL_ITERATIONS {
+        for i in 0..MAX_POLL_ITERATIONS {
+            // Yield to JS event loop periodically
+            if i > 0 && i % YIELD_FREQUENCY == 0 {
+                unsafe { b32_gcp_storage_yield() };
+            }
+
             let status = unsafe { b32_gcp_storage_poll(op_id) };
 
             match status {
