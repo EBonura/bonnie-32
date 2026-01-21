@@ -500,9 +500,10 @@ pub fn draw_editor(
             // Refresh asset lists - reload from asset library
             #[cfg(not(target_arch = "wasm32"))]
             {
-                use crate::modeler::{discover_sample_assets, discover_user_assets};
+                use crate::modeler::discover_sample_assets;
                 state.asset_browser.samples = discover_sample_assets();
-                state.asset_browser.user_assets = discover_user_assets();
+                // User assets refresh deferred to main loop (needs storage access for has_cloud check)
+                state.asset_browser.pending_refresh = true;
             }
             #[cfg(target_arch = "wasm32")]
             {

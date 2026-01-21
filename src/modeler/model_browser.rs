@@ -200,6 +200,8 @@ pub struct AssetBrowser {
     pub pending_preview_load: Option<PendingLoad>,
     /// Pending async user asset list (native cloud storage)
     pub pending_user_list: Option<PendingList>,
+    /// Flag to trigger user assets refresh from main loop (native only, needs storage access)
+    pub pending_refresh: bool,
     /// Local framebuffer for preview rendering
     preview_fb: Framebuffer,
 }
@@ -228,6 +230,7 @@ impl Default for AssetBrowser {
             pending_load_list: false,
             pending_preview_load: None,
             pending_user_list: None,
+            pending_refresh: false,
             preview_fb: Framebuffer::new(320, 240), // Initial size, will resize as needed
         }
     }

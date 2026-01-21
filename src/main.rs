@@ -738,9 +738,30 @@ async fn main() {
                 );
 
                 // Handle modeler actions
-                // Intercept Save action for cloud storage support (both native and WASM)
+                // Intercept Save and BrowseModels for cloud storage support
                 if matches!(action, ModelerAction::Save) {
                     handle_modeler_save_action(&mut app);
+                } else if matches!(action, ModelerAction::BrowseModels) {
+                    // Handle inline with full app access (like World Editor does)
+                    let ms = &mut app.modeler;
+                    let samples = modeler::discover_sample_assets();
+
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if app.storage.has_cloud() {
+                            ms.model_browser.open_with_assets(samples, Vec::new());
+                            ms.model_browser.pending_user_list = Some(list_async("assets/userdata/assets".to_string()));
+                        } else {
+                            let users = modeler::discover_user_assets();
+                            ms.model_browser.open_with_assets(samples, users);
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        ms.model_browser.open_with_assets(samples, Vec::new());
+                        ms.model_browser.pending_load_list = true;
+                    }
+                    ms.modeler_state.set_status("Browse assets", 2.0);
                 } else {
                     let ms = &mut app.modeler;
                     handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.obj_importer);
@@ -846,8 +867,15 @@ async fn main() {
                             #[cfg(not(target_arch = "wasm32"))]
                             {
                                 ms.model_browser.samples = modeler::discover_sample_assets();
-                                ms.model_browser.user_assets = modeler::discover_user_assets();
-                                ms.modeler_state.set_status("Asset list refreshed", 2.0);
+                                // User assets: check if cloud storage is available
+                                if app.storage.has_cloud() {
+                                    ms.model_browser.user_assets.clear();
+                                    ms.model_browser.pending_user_list = Some(list_async("assets/userdata/assets".to_string()));
+                                    ms.modeler_state.set_status("Refreshing...", 2.0);
+                                } else {
+                                    ms.model_browser.user_assets = modeler::discover_user_assets();
+                                    ms.modeler_state.set_status("Asset list refreshed", 2.0);
+                                }
                             }
                             #[cfg(target_arch = "wasm32")]
                             {
@@ -1658,6 +1686,20 @@ fn poll_pending_ops(app: &mut AppState) {
         } else {
             // Still pending, put it back
             app.modeler.model_browser.pending_user_list = Some(pending);
+        }
+    }
+
+    // Handle world editor asset browser pending refresh (native only)
+    // This is triggered when Refresh is clicked but storage access wasn't available in layout.rs
+    if app.world_editor.editor_state.asset_browser.pending_refresh {
+        app.world_editor.editor_state.asset_browser.pending_refresh = false;
+        if app.storage.has_cloud() {
+            app.world_editor.editor_state.asset_browser.user_assets.clear();
+            app.world_editor.editor_state.asset_browser.pending_user_list = Some(list_async("assets/userdata/assets".to_string()));
+            app.world_editor.editor_state.set_status("Refreshing assets...", 2.0);
+        } else {
+            app.world_editor.editor_state.asset_browser.user_assets = modeler::discover_user_assets();
+            app.world_editor.editor_state.set_status("Asset list refreshed", 2.0);
         }
     }
 
