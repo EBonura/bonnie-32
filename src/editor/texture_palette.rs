@@ -804,46 +804,37 @@ fn draw_user_texture_header(
     }
 }
 
-/// Draw the user texture grid
+/// Section header height for collapsible sections
+const SECTION_HEADER_HEIGHT: f32 = 24.0;
+
+/// Draw the user texture grid with two sections: SAMPLES and MY TEXTURES
 fn draw_user_texture_grid(
     ctx: &mut UiContext,
     content_rect: Rect,
     state: &mut EditorState,
 ) {
-    // Get thumbnail size from state
     let thumb_size = state.paint_thumb_size;
-
-    let texture_count = state.user_textures.len();
-
-    if texture_count == 0 {
-        draw_text(
-            "No user textures yet",
-            (content_rect.x + 10.0).floor(),
-            (content_rect.y + 20.0).floor(),
-            14.0,
-            Color::from_rgba(100, 100, 100, 255),
-        );
-        draw_text(
-            "Click 'New' to create one",
-            (content_rect.x + 10.0).floor(),
-            (content_rect.y + 38.0).floor(),
-            12.0,
-            Color::from_rgba(80, 80, 80, 255),
-        );
-        return;
-    }
-
-    // Calculate grid layout
     let cols = ((content_rect.w - THUMB_PADDING) / (thumb_size + THUMB_PADDING)).floor() as usize;
     let cols = cols.max(1);
-    let rows = (texture_count + cols - 1) / cols;
-    let total_height = rows as f32 * (thumb_size + THUMB_PADDING) + THUMB_PADDING;
 
-    // Use a separate scroll for user textures (reuse texture_scroll for simplicity)
+    // Collect texture names for both sections
+    let sample_names: Vec<String> = state.user_textures.sample_names().map(|s| s.to_string()).collect();
+    let user_names: Vec<String> = state.user_textures.user_names().map(|s| s.to_string()).collect();
+
+    // Calculate content heights for each section
+    let sample_rows = if state.paint_samples_collapsed { 0 } else { (sample_names.len() + cols - 1) / cols.max(1) };
+    let user_rows = if state.paint_user_collapsed { 0 } else { (user_names.len() + cols - 1) / cols.max(1) };
+
+    let sample_content_h = sample_rows as f32 * (thumb_size + THUMB_PADDING);
+    let user_content_h = user_rows as f32 * (thumb_size + THUMB_PADDING);
+
+    // Total scrollable height
+    let total_height = SECTION_HEADER_HEIGHT * 2.0 + sample_content_h + user_content_h + THUMB_PADDING * 2.0;
+
+    // Handle scrolling
     let max_scroll = (total_height - content_rect.h).max(0.0);
     state.texture_scroll = state.texture_scroll.clamp(0.0, max_scroll);
 
-    // Handle mouse wheel scrolling
     if ctx.mouse.inside(&content_rect) {
         state.texture_scroll -= ctx.mouse.scroll * 12.0;
         state.texture_scroll = state.texture_scroll.clamp(0.0, max_scroll);
@@ -861,12 +852,14 @@ fn draw_user_texture_grid(
         draw_rectangle(scrollbar_x, thumb_y, scrollbar_width, thumb_height, Color::from_rgba(80, 80, 90, 255));
     }
 
-    // Collect texture names first to avoid borrow issues
-    let texture_names: Vec<String> = state.user_textures.names().map(|s| s.to_string()).collect();
+    // Colors
+    let section_bg = Color::from_rgba(40, 40, 50, 255);
+    let text_color = Color::from_rgba(200, 200, 200, 255);
+    let text_dim = Color::from_rgba(140, 140, 140, 255);
 
-    // Track clicked texture
-    let mut clicked_texture: Option<String> = None;
-    let mut double_clicked_texture: Option<String> = None;
+    // Track clicked texture (with is_sample flag)
+    let mut clicked_texture: Option<(String, bool)> = None;
+    let mut double_clicked_texture: Option<(String, bool)> = None;
 
     // Enable scissor clipping
     let dpi = screen_dpi_scale();
@@ -880,76 +873,132 @@ fn draw_user_texture_grid(
         )));
     }
 
-    for (i, name) in texture_names.iter().enumerate() {
-        let col = i % cols;
-        let row = i / cols;
+    let mut y = content_rect.y - state.texture_scroll;
 
-        let x = content_rect.x + THUMB_PADDING + col as f32 * (thumb_size + THUMB_PADDING);
-        let y = content_rect.y + THUMB_PADDING + row as f32 * (thumb_size + THUMB_PADDING) - state.texture_scroll;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SAMPLES section
+    // ═══════════════════════════════════════════════════════════════════════════
+    let samples_header_rect = Rect::new(content_rect.x, y, content_rect.w, SECTION_HEADER_HEIGHT);
+    if y + SECTION_HEADER_HEIGHT > content_rect.y && y < content_rect.bottom() {
+        let draw_y = y.max(content_rect.y);
+        let draw_h = SECTION_HEADER_HEIGHT.min(content_rect.bottom() - draw_y);
+        draw_rectangle(content_rect.x, draw_y, content_rect.w, draw_h, section_bg);
 
-        // Skip if outside visible area
-        if y + thumb_size < content_rect.y || y > content_rect.bottom() {
-            continue;
-        }
-
-        let thumb_rect = Rect::new(x, y, thumb_size, thumb_size);
-
-        // Get texture for rendering
-        if let Some(tex) = state.user_textures.get(name) {
-            // Draw checkerboard background for transparency
-            let check_size = (thumb_size / tex.width.max(tex.height) as f32 * 2.0).max(4.0);
-            draw_checkerboard(x, y, thumb_size, thumb_size, check_size);
-
-            // Draw texture thumbnail with alpha
-            let mq_tex = user_texture_to_mq_texture(tex);
-            draw_texture_ex(
-                &mq_tex,
-                x,
-                y,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(Vec2::new(thumb_size, thumb_size)),
-                    ..Default::default()
-                },
+        if y >= content_rect.y {
+            let arrow = if state.paint_samples_collapsed { ">" } else { "v" };
+            draw_text(
+                &format!("{} SAMPLE TEXTURES ({})", arrow, sample_names.len()),
+                content_rect.x + 8.0,
+                y + 17.0,
+                14.0,
+                text_color,
             );
-        } else {
-            // Placeholder for missing texture
-            draw_rectangle(x, y, thumb_size, thumb_size, Color::from_rgba(60, 60, 70, 255));
         }
 
-        // Check visible portion for click detection
-        let visible_rect = Rect::new(
-            thumb_rect.x,
-            thumb_rect.y.max(content_rect.y),
-            thumb_rect.w,
-            (thumb_rect.bottom().min(content_rect.bottom()) - thumb_rect.y.max(content_rect.y)).max(0.0),
-        );
+        // Toggle collapse on click
+        if ctx.mouse.inside(&samples_header_rect) && ctx.mouse.left_pressed && samples_header_rect.y >= content_rect.y {
+            state.paint_samples_collapsed = !state.paint_samples_collapsed;
+        }
+    }
+    y += SECTION_HEADER_HEIGHT;
 
-        if visible_rect.h > 0.0 {
-            if ctx.mouse.double_clicked {
-                if ctx.mouse.inside(&visible_rect) {
-                    double_clicked_texture = Some(name.clone());
-                }
-            } else if ctx.mouse.clicked(&visible_rect) {
-                clicked_texture = Some(name.clone());
+    // Sample texture grid (if not collapsed)
+    if !state.paint_samples_collapsed {
+        if sample_names.is_empty() {
+            if y + 20.0 > content_rect.y && y < content_rect.bottom() {
+                draw_text("  (no sample textures)", content_rect.x + 8.0, y + 14.0, 12.0, text_dim);
             }
+            y += 20.0;
+        } else {
+            for (i, name) in sample_names.iter().enumerate() {
+                let col = i % cols;
+                let row = i / cols;
+
+                let x = content_rect.x + THUMB_PADDING + col as f32 * (thumb_size + THUMB_PADDING);
+                let item_y = y + THUMB_PADDING + row as f32 * (thumb_size + THUMB_PADDING);
+
+                // Skip if outside visible area
+                if item_y + thumb_size < content_rect.y || item_y > content_rect.bottom() {
+                    continue;
+                }
+
+                draw_texture_thumbnail(
+                    ctx,
+                    &content_rect,
+                    state,
+                    name,
+                    x,
+                    item_y,
+                    thumb_size,
+                    true, // is_sample
+                    &mut clicked_texture,
+                    &mut double_clicked_texture,
+                );
+            }
+            y += sample_content_h;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MY TEXTURES section
+    // ═══════════════════════════════════════════════════════════════════════════
+    let user_header_rect = Rect::new(content_rect.x, y, content_rect.w, SECTION_HEADER_HEIGHT);
+    if y + SECTION_HEADER_HEIGHT > content_rect.y && y < content_rect.bottom() {
+        let draw_y = y.max(content_rect.y);
+        let draw_h = SECTION_HEADER_HEIGHT.min(content_rect.bottom() - draw_y);
+        draw_rectangle(content_rect.x, draw_y, content_rect.w, draw_h, section_bg);
+
+        if y >= content_rect.y {
+            let arrow = if state.paint_user_collapsed { ">" } else { "v" };
+            draw_text(
+                &format!("{} MY TEXTURES ({})", arrow, user_names.len()),
+                content_rect.x + 8.0,
+                y + 17.0,
+                14.0,
+                text_color,
+            );
         }
 
-        // Check if this texture is selected
-        let is_selected = state.selected_user_texture.as_ref() == Some(name);
-
-        // Selection highlight (golden border, like source texture selection)
-        if is_selected {
-            draw_rectangle_lines(x - 2.0, y - 2.0, thumb_size + 4.0, thumb_size + 4.0, 2.0, Color::from_rgba(255, 200, 50, 255));
-        } else if ctx.mouse.inside(&visible_rect) {
-            // Hover highlight (only if not selected)
-            draw_rectangle_lines(x - 1.0, y - 1.0, thumb_size + 2.0, thumb_size + 2.0, 1.0, Color::from_rgba(150, 150, 200, 255));
+        // Toggle collapse on click
+        if ctx.mouse.inside(&user_header_rect) && ctx.mouse.left_pressed && user_header_rect.y >= content_rect.y {
+            state.paint_user_collapsed = !state.paint_user_collapsed;
         }
+    }
+    y += SECTION_HEADER_HEIGHT;
 
-        // Draw texture name (truncated if needed)
-        if y + thumb_size - 2.0 >= content_rect.y && y + thumb_size - 2.0 <= content_rect.bottom() {
-            let display_name = if name.len() > 8 { &name[..8] } else { name };
-            draw_text(display_name, (x + 2.0).floor(), (y + thumb_size - 2.0).floor(), 10.0, Color::from_rgba(255, 255, 255, 200));
+    // User texture grid (if not collapsed)
+    if !state.paint_user_collapsed {
+        if user_names.is_empty() {
+            if y + 20.0 > content_rect.y && y < content_rect.bottom() {
+                draw_text("  (no user textures)", content_rect.x + 8.0, y + 14.0, 12.0, text_dim);
+            }
+            // y += 20.0; // Not needed since this is the last section
+        } else {
+            for (i, name) in user_names.iter().enumerate() {
+                let col = i % cols;
+                let row = i / cols;
+
+                let x = content_rect.x + THUMB_PADDING + col as f32 * (thumb_size + THUMB_PADDING);
+                let item_y = y + THUMB_PADDING + row as f32 * (thumb_size + THUMB_PADDING);
+
+                // Skip if outside visible area
+                if item_y + thumb_size < content_rect.y || item_y > content_rect.bottom() {
+                    continue;
+                }
+
+                draw_texture_thumbnail(
+                    ctx,
+                    &content_rect,
+                    state,
+                    name,
+                    x,
+                    item_y,
+                    thumb_size,
+                    false, // is_sample
+                    &mut clicked_texture,
+                    &mut double_clicked_texture,
+                );
+            }
         }
     }
 
@@ -959,7 +1008,7 @@ fn draw_user_texture_grid(
     }
 
     // Handle single-click to select AND assign to face (same as source textures)
-    if let Some(name) = clicked_texture {
+    if let Some((name, _is_sample)) = clicked_texture {
         state.selected_user_texture = Some(name.clone());
 
         // Create TextureRef for user texture
@@ -984,10 +1033,96 @@ fn draw_user_texture_grid(
     }
 
     // Handle double-click to edit (also sets selection)
-    if let Some(name) = double_clicked_texture {
+    // Note: Sample textures are read-only, double-click opens a copy for editing
+    if let Some((name, is_sample)) = double_clicked_texture {
         state.selected_user_texture = Some(name.clone());
-        state.editing_texture = Some(name);
-        state.texture_editor.reset();
+        if is_sample {
+            // For sample textures, we could show a "read-only" notice or create a copy
+            // For now, just select it (editing samples would require copying to user textures)
+            state.set_status("Sample textures are read-only. Use 'New' to create editable textures.", 3.0);
+        } else {
+            state.editing_texture = Some(name);
+            state.texture_editor.reset();
+        }
+    }
+}
+
+/// Helper function to draw a single texture thumbnail
+fn draw_texture_thumbnail(
+    ctx: &UiContext,
+    content_rect: &Rect,
+    state: &EditorState,
+    name: &str,
+    x: f32,
+    y: f32,
+    thumb_size: f32,
+    is_sample: bool,
+    clicked_texture: &mut Option<(String, bool)>,
+    double_clicked_texture: &mut Option<(String, bool)>,
+) {
+    let thumb_rect = Rect::new(x, y, thumb_size, thumb_size);
+
+    // Get texture for rendering
+    if let Some(tex) = state.user_textures.get(name) {
+        // Draw checkerboard background for transparency
+        let check_size = (thumb_size / tex.width.max(tex.height) as f32 * 2.0).max(4.0);
+        draw_checkerboard(x, y, thumb_size, thumb_size, check_size);
+
+        // Draw texture thumbnail with alpha
+        let mq_tex = user_texture_to_mq_texture(tex);
+        draw_texture_ex(
+            &mq_tex,
+            x,
+            y,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(Vec2::new(thumb_size, thumb_size)),
+                ..Default::default()
+            },
+        );
+    } else {
+        // Placeholder for missing texture
+        draw_rectangle(x, y, thumb_size, thumb_size, Color::from_rgba(60, 60, 70, 255));
+    }
+
+    // Check visible portion for click detection
+    let visible_rect = Rect::new(
+        thumb_rect.x,
+        thumb_rect.y.max(content_rect.y),
+        thumb_rect.w,
+        (thumb_rect.bottom().min(content_rect.bottom()) - thumb_rect.y.max(content_rect.y)).max(0.0),
+    );
+
+    if visible_rect.h > 0.0 {
+        if ctx.mouse.double_clicked {
+            if ctx.mouse.inside(&visible_rect) {
+                *double_clicked_texture = Some((name.to_string(), is_sample));
+            }
+        } else if ctx.mouse.clicked(&visible_rect) {
+            *clicked_texture = Some((name.to_string(), is_sample));
+        }
+    }
+
+    // Check if this texture is selected
+    let is_selected = state.selected_user_texture.as_deref() == Some(name);
+
+    // Selection highlight (golden border for user textures, cyan for samples)
+    if is_selected {
+        let highlight_color = if is_sample {
+            Color::from_rgba(100, 200, 255, 255) // Cyan for samples
+        } else {
+            Color::from_rgba(255, 200, 50, 255) // Gold for user textures
+        };
+        draw_rectangle_lines(x - 2.0, y - 2.0, thumb_size + 4.0, thumb_size + 4.0, 2.0, highlight_color);
+    } else if ctx.mouse.inside(&visible_rect) {
+        // Hover highlight (only if not selected)
+        draw_rectangle_lines(x - 1.0, y - 1.0, thumb_size + 2.0, thumb_size + 2.0, 1.0, Color::from_rgba(150, 150, 200, 255));
+    }
+
+    // Draw texture name (truncated if needed)
+    if y + thumb_size - 2.0 >= content_rect.y && y + thumb_size - 2.0 <= content_rect.bottom() {
+        let display_name = if name.len() > 8 { &name[..8] } else { name };
+        draw_text(display_name, (x + 2.0).floor(), (y + thumb_size - 2.0).floor(), 10.0, Color::from_rgba(255, 255, 255, 200));
     }
 }
 

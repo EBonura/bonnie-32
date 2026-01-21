@@ -1,8 +1,10 @@
 //! Texture library - discovery and caching of user textures
 //!
-//! Manages the collection of user-created indexed textures stored in
-//! `assets/userdata/textures/`. Handles both native filesystem discovery
-//! and WASM manifest-based loading.
+//! Manages the collection of indexed textures stored in two directories:
+//! - `assets/samples/textures/` - Bundled sample textures (read-only)
+//! - `assets/userdata/textures/` - User-created textures (editable, cloud-synced)
+//!
+//! Handles both native filesystem discovery and WASM manifest-based loading.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,27 +12,46 @@ use std::path::{Path, PathBuf};
 use super::user_texture::{TextureError, UserTexture};
 use crate::storage::Storage;
 
-/// Directory where user textures are stored
+/// Directory where sample textures are stored (read-only)
+pub const SAMPLES_TEXTURES_DIR: &str = "assets/samples/textures";
+
+/// Directory where user textures are stored (editable, cloud-synced)
+pub const USER_TEXTURES_DIR: &str = "assets/userdata/textures";
+
+/// Legacy alias for USER_TEXTURES_DIR
 pub const TEXTURES_USER_DIR: &str = "assets/userdata/textures";
 
 /// Manifest file for WASM texture loading
 pub const MANIFEST_FILE: &str = "manifest.txt";
 
-/// A library of user-created textures
+/// Source/origin of a texture (sample vs user-created)
 ///
-/// Provides discovery, loading, and caching of textures from the
-/// `assets/userdata/textures/` directory.
+/// Determines where the texture came from and whether it's editable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureSource {
+    /// Bundled sample texture from assets/samples/textures/ (read-only)
+    Sample,
+    /// User-created texture from assets/userdata/textures/ (editable, cloud-synced)
+    #[default]
+    User,
+}
+
+/// A library of textures
+///
+/// Provides discovery, loading, and caching of textures from two directories:
+/// - `assets/samples/textures/` - Bundled sample textures (read-only)
+/// - `assets/userdata/textures/` - User-created textures (editable, cloud-synced)
 #[derive(Debug, Default)]
 pub struct TextureLibrary {
     /// Loaded textures keyed by name (without extension)
     textures: HashMap<String, UserTexture>,
-    /// List of discovered texture names (for iteration order)
-    texture_names: Vec<String>,
+    /// List of discovered sample texture names (for iteration order)
+    sample_names: Vec<String>,
+    /// List of discovered user texture names (for iteration order)
+    user_names: Vec<String>,
     /// Texture ID → texture name mapping for ID-based lookups
     /// Unlike content hash, IDs are stable across edits
     by_id: HashMap<u64, String>,
-    /// Base directory for textures
-    base_dir: PathBuf,
 }
 
 impl TextureLibrary {
@@ -38,38 +59,51 @@ impl TextureLibrary {
     pub fn new() -> Self {
         Self {
             textures: HashMap::new(),
-            texture_names: Vec::new(),
+            sample_names: Vec::new(),
+            user_names: Vec::new(),
             by_id: HashMap::new(),
-            base_dir: PathBuf::from(TEXTURES_USER_DIR),
         }
     }
 
-    /// Create a library with a custom base directory
-    pub fn with_dir(base_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            textures: HashMap::new(),
-            texture_names: Vec::new(),
-            by_id: HashMap::new(),
-            base_dir: base_dir.into(),
-        }
-    }
-
-    /// Discover and load all textures from the base directory (native only)
+    /// Discover and load all textures from both directories (native only)
+    ///
+    /// Scans:
+    /// - `assets/samples/textures/` for bundled sample textures (read-only)
+    /// - `assets/userdata/textures/` for user-created textures (editable)
     ///
     /// On WASM, this is a no-op - use upload functionality instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover(&mut self) -> Result<usize, TextureError> {
         self.textures.clear();
-        self.texture_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
 
-        if !self.base_dir.exists() {
-            // Create directory if it doesn't exist
-            std::fs::create_dir_all(&self.base_dir)?;
+        let mut count = 0;
+
+        // Discover sample textures (read-only)
+        count += self.discover_from_dir(SAMPLES_TEXTURES_DIR, TextureSource::Sample)?;
+
+        // Discover user textures (editable)
+        count += self.discover_from_dir(USER_TEXTURES_DIR, TextureSource::User)?;
+
+        Ok(count)
+    }
+
+    /// Discover textures from a specific directory
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discover_from_dir(&mut self, dir: &str, source: TextureSource) -> Result<usize, TextureError> {
+        let base_dir = PathBuf::from(dir);
+
+        if !base_dir.exists() {
+            // Create user directory if it doesn't exist, skip samples if missing
+            if source == TextureSource::User {
+                std::fs::create_dir_all(&base_dir)?;
+            }
             return Ok(0);
         }
 
-        let mut entries: Vec<_> = std::fs::read_dir(&self.base_dir)?
+        let mut entries: Vec<_> = std::fs::read_dir(&base_dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
@@ -85,11 +119,20 @@ impl TextureLibrary {
         let mut loaded = 0;
         for path in entries {
             match UserTexture::load(&path) {
-                Ok(tex) => {
+                Ok(mut tex) => {
+                    // Set the source
+                    tex.source = source;
+
                     let name = tex.name.clone();
-                    let hash = tex.id;
-                    self.texture_names.push(name.clone());
-                    self.by_id.insert(hash, name.clone());
+                    let id = tex.id;
+
+                    // Track in the appropriate list
+                    match source {
+                        TextureSource::Sample => self.sample_names.push(name.clone()),
+                        TextureSource::User => self.user_names.push(name.clone()),
+                    }
+
+                    self.by_id.insert(id, name.clone());
                     self.textures.insert(name, tex);
                     loaded += 1;
                 }
@@ -108,26 +151,45 @@ impl TextureLibrary {
     /// Use `add()` to add uploaded textures to the library.
     #[cfg(target_arch = "wasm32")]
     pub fn discover(&mut self) -> Result<usize, TextureError> {
-        // No filesystem on WASM - textures must be uploaded by user
+        self.textures.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
+        self.by_id.clear();
         Ok(0)
     }
 
     /// Load textures from manifest (for WASM)
     ///
     /// The manifest file should contain one texture filename per line (without path).
+    /// Loads from both samples and user directories.
     #[cfg(target_arch = "wasm32")]
     pub async fn discover_from_manifest(&mut self) -> Result<usize, TextureError> {
-        use macroquad::prelude::load_string;
-
         self.textures.clear();
-        self.texture_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
 
-        let manifest_path = format!("{}/{}", TEXTURES_USER_DIR, MANIFEST_FILE);
+        let mut count = 0;
+
+        // Load sample textures
+        count += self.load_manifest_from_dir(SAMPLES_TEXTURES_DIR, TextureSource::Sample).await?;
+
+        // Load user textures
+        count += self.load_manifest_from_dir(USER_TEXTURES_DIR, TextureSource::User).await?;
+
+        Ok(count)
+    }
+
+    /// Load textures from manifest in a specific directory (WASM)
+    #[cfg(target_arch = "wasm32")]
+    async fn load_manifest_from_dir(&mut self, dir: &str, source: TextureSource) -> Result<usize, TextureError> {
+        use macroquad::prelude::load_string;
+
+        let manifest_path = format!("{}/{}", dir, MANIFEST_FILE);
         let manifest = match load_string(&manifest_path).await {
             Ok(m) => m,
             Err(_) => {
-                // No manifest, no textures
+                // No manifest for this directory
                 return Ok(0);
             }
         };
@@ -139,14 +201,21 @@ impl TextureLibrary {
                 continue;
             }
 
-            let path = format!("{}/{}", TEXTURES_USER_DIR, filename);
+            let path = format!("{}/{}", dir, filename);
             match macroquad::prelude::load_file(&path).await {
                 Ok(bytes) => match UserTexture::load_from_bytes(&bytes) {
-                    Ok(tex) => {
+                    Ok(mut tex) => {
+                        tex.source = source;
+
                         let name = tex.name.clone();
-                        let hash = tex.id;
-                        self.texture_names.push(name.clone());
-                        self.by_id.insert(hash, name.clone());
+                        let id = tex.id;
+
+                        match source {
+                            TextureSource::Sample => self.sample_names.push(name.clone()),
+                            TextureSource::User => self.user_names.push(name.clone()),
+                        }
+
+                        self.by_id.insert(id, name.clone());
                         self.textures.insert(name, tex);
                         loaded += 1;
                     }
@@ -198,16 +267,35 @@ impl TextureLibrary {
     /// Add a texture to the library
     ///
     /// If a texture with the same name exists, it will be replaced.
-    /// Also updates the ID index.
+    /// Also updates the ID index. New textures are added to the appropriate
+    /// list based on their source field.
     pub fn add(&mut self, texture: UserTexture) {
         let name = texture.name.clone();
         let id = texture.id;
+        let source = texture.source;
 
-        // If replacing, remove old ID mapping
+        // If replacing, remove old ID mapping and from old list
         if let Some(old_tex) = self.textures.get(&name) {
             self.by_id.remove(&old_tex.id);
-        } else {
-            self.texture_names.push(name.clone());
+            // Remove from appropriate list
+            match old_tex.source {
+                TextureSource::Sample => self.sample_names.retain(|n| n != &name),
+                TextureSource::User => self.user_names.retain(|n| n != &name),
+            }
+        }
+
+        // Add to appropriate list
+        match source {
+            TextureSource::Sample => {
+                if !self.sample_names.contains(&name) {
+                    self.sample_names.push(name.clone());
+                }
+            }
+            TextureSource::User => {
+                if !self.user_names.contains(&name) {
+                    self.user_names.push(name.clone());
+                }
+            }
         }
 
         self.by_id.insert(id, name.clone());
@@ -217,7 +305,11 @@ impl TextureLibrary {
     /// Remove a texture by name
     pub fn remove(&mut self, name: &str) -> Option<UserTexture> {
         if let Some(tex) = self.textures.remove(name) {
-            self.texture_names.retain(|n| n != name);
+            // Remove from appropriate list
+            match tex.source {
+                TextureSource::Sample => self.sample_names.retain(|n| n != name),
+                TextureSource::User => self.user_names.retain(|n| n != name),
+            }
             // Clean up ID index
             self.by_id.remove(&tex.id);
             Some(tex)
@@ -236,15 +328,65 @@ impl TextureLibrary {
         self.textures.is_empty()
     }
 
-    /// Iterate over texture names in discovery order
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.texture_names.iter().map(|s| s.as_str())
+    /// Get the number of sample textures
+    pub fn sample_count(&self) -> usize {
+        self.sample_names.len()
     }
 
-    /// Iterate over all textures
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &UserTexture)> {
-        self.texture_names
+    /// Get the number of user textures
+    pub fn user_count(&self) -> usize {
+        self.user_names.len()
+    }
+
+    /// Check if there are any sample textures
+    pub fn has_samples(&self) -> bool {
+        !self.sample_names.is_empty()
+    }
+
+    /// Check if there are any user textures
+    pub fn has_user_textures(&self) -> bool {
+        !self.user_names.is_empty()
+    }
+
+    /// Iterate over sample texture names in discovery order
+    pub fn sample_names(&self) -> impl Iterator<Item = &str> {
+        self.sample_names.iter().map(|s| s.as_str())
+    }
+
+    /// Iterate over user texture names in discovery order
+    pub fn user_names(&self) -> impl Iterator<Item = &str> {
+        self.user_names.iter().map(|s| s.as_str())
+    }
+
+    /// Iterate over all texture names (samples first, then user textures)
+    pub fn all_names(&self) -> impl Iterator<Item = &str> {
+        self.sample_names.iter().chain(self.user_names.iter()).map(|s| s.as_str())
+    }
+
+    /// Iterate over texture names in discovery order (alias for all_names for backwards compatibility)
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.all_names()
+    }
+
+    /// Iterate over sample textures
+    pub fn samples(&self) -> impl Iterator<Item = (&str, &UserTexture)> {
+        self.sample_names
             .iter()
+            .filter_map(|name| self.textures.get(name).map(|tex| (name.as_str(), tex)))
+    }
+
+    /// Iterate over user textures
+    pub fn user_textures(&self) -> impl Iterator<Item = (&str, &UserTexture)> {
+        self.user_names
+            .iter()
+            .filter_map(|name| self.textures.get(name).map(|tex| (name.as_str(), tex)))
+    }
+
+    /// Iterate over all textures (samples first, then user textures)
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &UserTexture)> {
+        self.sample_names
+            .iter()
+            .chain(self.user_names.iter())
             .filter_map(|name| self.textures.get(name).map(|tex| (name.as_str(), tex)))
     }
 
@@ -260,7 +402,20 @@ impl TextureLibrary {
         self.iter().filter(|(_, tex)| tex.usable_in_world_editor())
     }
 
+    /// Get user textures usable in the World Editor (64x64 only)
+    pub fn world_editor_user_textures(&self) -> impl Iterator<Item = (&str, &UserTexture)> {
+        self.user_textures().filter(|(_, tex)| tex.usable_in_world_editor())
+    }
+
+    /// Get sample textures usable in the World Editor (64x64 only)
+    pub fn world_editor_sample_textures(&self) -> impl Iterator<Item = (&str, &UserTexture)> {
+        self.samples().filter(|(_, tex)| tex.usable_in_world_editor())
+    }
+
     /// Save a texture to disk (native only)
+    ///
+    /// Only user textures can be saved. Sample textures are read-only.
+    /// Returns an error if the texture is a sample.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_texture(&self, name: &str) -> Result<(), TextureError> {
         let tex = self
@@ -268,10 +423,17 @@ impl TextureLibrary {
             .get(name)
             .ok_or_else(|| TextureError::ValidationError(format!("texture '{}' not found", name)))?;
 
-        // Ensure directory exists
-        std::fs::create_dir_all(&self.base_dir)?;
+        // Check if this is a sample texture (read-only)
+        if tex.source == TextureSource::Sample {
+            return Err(TextureError::ValidationError(
+                "cannot save sample texture - it is read-only".to_string(),
+            ));
+        }
 
-        let path = self.base_dir.join(format!("{}.ron", name));
+        // Ensure directory exists
+        std::fs::create_dir_all(USER_TEXTURES_DIR)?;
+
+        let path = PathBuf::from(USER_TEXTURES_DIR).join(format!("{}.ron", name));
         tex.save(&path)
     }
 
@@ -285,14 +447,16 @@ impl TextureLibrary {
         Ok(())
     }
 
-    /// Save all textures to disk (native only)
+    /// Save all user textures to disk (native only)
+    ///
+    /// Only saves user textures - sample textures are read-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_all(&self) -> Result<usize, TextureError> {
-        std::fs::create_dir_all(&self.base_dir)?;
+        std::fs::create_dir_all(USER_TEXTURES_DIR)?;
 
         let mut saved = 0;
-        for (name, tex) in &self.textures {
-            let path = self.base_dir.join(format!("{}.ron", name));
+        for (name, tex) in self.user_textures() {
+            let path = PathBuf::from(USER_TEXTURES_DIR).join(format!("{}.ron", name));
             tex.save(&path)?;
             saved += 1;
         }
@@ -300,9 +464,20 @@ impl TextureLibrary {
     }
 
     /// Delete a texture file from disk (native only)
+    ///
+    /// Only user textures can be deleted. Sample textures are read-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn delete_texture_file(&mut self, name: &str) -> Result<(), TextureError> {
-        let path = self.base_dir.join(format!("{}.ron", name));
+        // Check if this is a sample texture (read-only)
+        if let Some(tex) = self.textures.get(name) {
+            if tex.source == TextureSource::Sample {
+                return Err(TextureError::ValidationError(
+                    "cannot delete sample texture - it is read-only".to_string(),
+                ));
+            }
+        }
+
+        let path = PathBuf::from(USER_TEXTURES_DIR).join(format!("{}.ron", name));
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -314,9 +489,9 @@ impl TextureLibrary {
     ///
     /// Follows the same numbering convention as levels and models.
     pub fn next_available_name(&self) -> String {
-        // Find the highest existing texture_XXX number
+        // Find the highest existing texture_XXX number across all textures
         let mut highest = 0u32;
-        for name in self.texture_names.iter() {
+        for name in self.sample_names.iter().chain(self.user_names.iter()) {
             if let Some(num_str) = name.strip_prefix("texture_") {
                 if let Ok(num) = num_str.parse::<u32>() {
                     highest = highest.max(num);
@@ -344,27 +519,51 @@ impl TextureLibrary {
         }
     }
 
-    /// Regenerate the manifest file (native only)
+    /// Regenerate manifest files for both directories (native only)
     ///
-    /// Creates a manifest.txt file listing all textures for WASM loading.
+    /// Creates manifest.txt files listing textures for WASM loading.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn regenerate_manifest(&self) -> Result<(), TextureError> {
-        std::fs::create_dir_all(&self.base_dir)?;
-
-        let manifest_path = self.base_dir.join(MANIFEST_FILE);
-        let mut manifest = String::new();
-
-        for name in &self.texture_names {
-            manifest.push_str(&format!("{}.ron\n", name));
+        // Generate sample manifest
+        if !self.sample_names.is_empty() {
+            let samples_dir = PathBuf::from(SAMPLES_TEXTURES_DIR);
+            if samples_dir.exists() {
+                let manifest_path = samples_dir.join(MANIFEST_FILE);
+                let mut manifest = String::new();
+                for name in &self.sample_names {
+                    manifest.push_str(&format!("{}.ron\n", name));
+                }
+                std::fs::write(manifest_path, manifest)?;
+            }
         }
 
+        // Generate user manifest
+        std::fs::create_dir_all(USER_TEXTURES_DIR)?;
+        let user_dir = PathBuf::from(USER_TEXTURES_DIR);
+        let manifest_path = user_dir.join(MANIFEST_FILE);
+        let mut manifest = String::new();
+        for name in &self.user_names {
+            manifest.push_str(&format!("{}.ron\n", name));
+        }
         std::fs::write(manifest_path, manifest)?;
+
         Ok(())
     }
 
-    /// Get the base directory path
-    pub fn base_dir(&self) -> &Path {
-        &self.base_dir
+    /// Regenerate user manifest only (native only)
+    ///
+    /// Creates manifest.txt for user textures directory.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn regenerate_user_manifest(&self) -> Result<(), TextureError> {
+        std::fs::create_dir_all(USER_TEXTURES_DIR)?;
+        let user_dir = PathBuf::from(USER_TEXTURES_DIR);
+        let manifest_path = user_dir.join(MANIFEST_FILE);
+        let mut manifest = String::new();
+        for name in &self.user_names {
+            manifest.push_str(&format!("{}.ron\n", name));
+        }
+        std::fs::write(manifest_path, manifest)?;
+        Ok(())
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -374,16 +573,34 @@ impl TextureLibrary {
     /// Discover and load all textures using the storage backend
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover_with_storage(&mut self, storage: &Storage) -> Result<usize, TextureError> {
-        use crate::storage::StorageError;
-
         self.textures.clear();
-        self.texture_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
 
-        let base_dir_str = self.base_dir.to_string_lossy().to_string();
+        let mut count = 0;
+
+        // Discover sample textures
+        count += self.discover_from_dir_with_storage(SAMPLES_TEXTURES_DIR, TextureSource::Sample, storage)?;
+
+        // Discover user textures
+        count += self.discover_from_dir_with_storage(USER_TEXTURES_DIR, TextureSource::User, storage)?;
+
+        Ok(count)
+    }
+
+    /// Discover textures from a specific directory using storage backend
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discover_from_dir_with_storage(
+        &mut self,
+        dir: &str,
+        source: TextureSource,
+        storage: &Storage,
+    ) -> Result<usize, TextureError> {
+        use crate::storage::StorageError;
 
         // List all files in the directory
-        let files = match storage.list_sync(&base_dir_str) {
+        let files = match storage.list_sync(dir) {
             Ok(files) => files,
             Err(StorageError::NotFound(_)) => {
                 // Directory doesn't exist - nothing to discover
@@ -405,14 +622,20 @@ impl TextureLibrary {
         // Load each texture
         let mut loaded = 0;
         for filename in ron_files {
-            let path = format!("{}/{}", base_dir_str, filename);
+            let path = format!("{}/{}", dir, filename);
             match storage.read_sync(&path) {
                 Ok(bytes) => {
                     match UserTexture::load_from_bytes(&bytes) {
-                        Ok(tex) => {
+                        Ok(mut tex) => {
+                            tex.source = source;
                             let name = tex.name.clone();
                             let id = tex.id;
-                            self.texture_names.push(name.clone());
+
+                            match source {
+                                TextureSource::Sample => self.sample_names.push(name.clone()),
+                                TextureSource::User => self.user_names.push(name.clone()),
+                            }
+
                             self.by_id.insert(id, name.clone());
                             self.textures.insert(name, tex);
                             loaded += 1;
@@ -435,19 +658,29 @@ impl TextureLibrary {
     #[cfg(target_arch = "wasm32")]
     pub fn discover_with_storage(&mut self, _storage: &Storage) -> Result<usize, TextureError> {
         self.textures.clear();
-        self.texture_names.clear();
+        self.sample_names.clear();
+        self.user_names.clear();
         self.by_id.clear();
         Ok(0)
     }
 
     /// Save a texture using the storage backend
+    ///
+    /// Only user textures can be saved. Sample textures are read-only.
     pub fn save_texture_with_storage(&self, name: &str, storage: &Storage) -> Result<(), TextureError> {
         let tex = self
             .textures
             .get(name)
             .ok_or_else(|| TextureError::ValidationError(format!("texture '{}' not found", name)))?;
 
-        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+        // Check if this is a sample texture (read-only)
+        if tex.source == TextureSource::Sample {
+            return Err(TextureError::ValidationError(
+                "cannot save sample texture - it is read-only".to_string(),
+            ));
+        }
+
+        let path = format!("{}/{}.ron", USER_TEXTURES_DIR, name);
 
         // Serialize the texture
         let content = tex.to_ron_string()?;
@@ -461,8 +694,19 @@ impl TextureLibrary {
     }
 
     /// Delete a texture file using the storage backend
+    ///
+    /// Only user textures can be deleted. Sample textures are read-only.
     pub fn delete_texture_with_storage(&mut self, name: &str, storage: &Storage) -> Result<(), TextureError> {
-        let path = format!("{}/{}.ron", self.base_dir.to_string_lossy(), name);
+        // Check if this is a sample texture (read-only)
+        if let Some(tex) = self.textures.get(name) {
+            if tex.source == TextureSource::Sample {
+                return Err(TextureError::ValidationError(
+                    "cannot delete sample texture - it is read-only".to_string(),
+                ));
+            }
+        }
+
+        let path = format!("{}/{}.ron", USER_TEXTURES_DIR, name);
 
         storage
             .delete_sync(&path)
@@ -475,12 +719,14 @@ impl TextureLibrary {
         Ok(())
     }
 
-    /// Regenerate manifest using storage backend
+    /// Regenerate user manifest using storage backend
+    ///
+    /// Only regenerates the user textures manifest, not samples.
     pub fn regenerate_manifest_with_storage(&self, storage: &Storage) -> Result<(), TextureError> {
-        let manifest_path = format!("{}/{}", self.base_dir.to_string_lossy(), MANIFEST_FILE);
+        let manifest_path = format!("{}/{}", USER_TEXTURES_DIR, MANIFEST_FILE);
 
         let mut manifest = String::new();
-        for name in &self.texture_names {
+        for name in &self.user_names {
             manifest.push_str(&format!("{}.ron\n", name));
         }
 

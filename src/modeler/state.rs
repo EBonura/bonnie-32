@@ -832,6 +832,8 @@ pub struct ModelerState {
     // Collapsible panel sections
     pub paint_section_expanded: bool, // Paint/texture editor section
     pub paint_texture_scroll: f32,    // Scroll position in paint texture browser
+    pub paint_samples_collapsed: bool,  // SAMPLES section collapsed state
+    pub paint_user_collapsed: bool,     // MY TEXTURES section collapsed state
 
     // Component management UI
     pub selected_component: Option<usize>,      // Index in asset.components for editing
@@ -1090,6 +1092,8 @@ impl ModelerState {
             // Collapsible sections
             paint_section_expanded: true,
             paint_texture_scroll: 0.0,
+            paint_samples_collapsed: false,
+            paint_user_collapsed: false,
 
             // Component management UI
             selected_component: None,

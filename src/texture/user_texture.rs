@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::rasterizer::{BlendMode, ClutDepth, Color15};
+use super::texture_library::TextureSource;
 
 /// Counter for generating unique texture IDs
 static TEXTURE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -193,6 +194,10 @@ pub struct UserTexture {
     /// Applies to pixels where palette entry has bit 15 (STP) set
     #[serde(default)]
     pub blend_mode: BlendMode,
+    /// Source/origin of this texture (runtime-only, not serialized)
+    /// Determines whether the texture is from samples (read-only) or user-created (editable)
+    #[serde(skip)]
+    pub source: TextureSource,
 }
 
 impl UserTexture {
@@ -247,6 +252,7 @@ impl UserTexture {
             indices,
             palette,
             blend_mode: BlendMode::Opaque,
+            source: TextureSource::User, // New textures are user-created by default
         }
     }
 
@@ -273,6 +279,7 @@ impl UserTexture {
             indices,
             palette,
             blend_mode: BlendMode::Opaque,
+            source: TextureSource::User, // New textures are user-created by default
         }
     }
 
@@ -658,6 +665,18 @@ impl UserTexture {
 impl Default for UserTexture {
     fn default() -> Self {
         Self::new("untitled", TextureSize::Size64x64, ClutDepth::Bpp4)
+    }
+}
+
+impl UserTexture {
+    /// Check if this texture is from the samples directory (read-only)
+    pub fn is_sample(&self) -> bool {
+        self.source == TextureSource::Sample
+    }
+
+    /// Check if this texture is a user-created texture (editable)
+    pub fn is_user_texture(&self) -> bool {
+        self.source == TextureSource::User
     }
 }
 

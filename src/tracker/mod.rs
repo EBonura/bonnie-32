@@ -26,9 +26,9 @@ pub use audio::{AudioEngine, OutputSampleRate};
 #[allow(unused_imports)]
 pub use pattern::*;
 pub use layout::{draw_tracker, draw_song_browser};
-pub use song_browser::SongBrowserAction;
+pub use song_browser::{SongBrowserAction, SongCategory, SAMPLES_SONGS_DIR, USER_SONGS_DIR};
 #[allow(unused_imports)]
 pub use psx_reverb::{PsxReverb, ReverbType};
 // WASM async loading functions for song browser
-pub use song_browser::{load_song_list, load_song_async};
+pub use song_browser::{load_song_list, load_song_async, discover_songs};
 // Actions used internally by layout.rs and state.rs

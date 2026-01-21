@@ -661,6 +661,10 @@ pub struct EditorState {
     /// Thumbnail size for paint texture grid (32, 48, 64, 96)
     pub paint_thumb_size: f32,
 
+    /// Paint tab section collapse state
+    pub paint_samples_collapsed: bool,
+    pub paint_user_collapsed: bool,
+
     /// Collapsible right panel sections (both can be open simultaneously)
     pub textures_section_expanded: bool,
     pub properties_section_expanded: bool,
@@ -833,6 +837,8 @@ impl EditorState {
             texture_palette_user_mode: false,
             source_thumb_size: 64.0,  // Default thumbnail size
             paint_thumb_size: 64.0,   // Default thumbnail size
+            paint_samples_collapsed: false,
+            paint_user_collapsed: false,
 
             // Collapsible sections (both can be open simultaneously)
             textures_section_expanded: true,

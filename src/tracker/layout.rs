@@ -65,13 +65,21 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
     let browser_action = state.song_browser.draw(ctx, screen_rect, icon_font);
 
     match browser_action {
-        SongBrowserAction::SelectPreview(idx) => {
+        SongBrowserAction::SelectPreview(category, idx) => {
             // Stop any playing preview when selecting a new song
             if state.song_browser.preview_playing {
                 state.stop_preview_playback();
                 state.song_browser.preview_playing = false;
             }
-            let path = state.song_browser.songs.get(idx).map(|s| s.path.clone());
+            // Get path from appropriate list based on category
+            let path = match category {
+                super::song_browser::SongCategory::Sample => {
+                    state.song_browser.samples.get(idx).map(|s| s.path.clone())
+                }
+                super::song_browser::SongCategory::User => {
+                    state.song_browser.user_songs.get(idx).map(|s| s.path.clone())
+                }
+            };
             if let Some(path) = path {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -87,9 +95,7 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
             }
         }
         SongBrowserAction::OpenSong => {
-            let path = state.song_browser.selected_index
-                .and_then(|idx| state.song_browser.songs.get(idx))
-                .map(|s| s.path.clone());
+            let path = state.song_browser.selected_song().map(|s| s.path.clone());
             if let Some(path) = path {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -107,6 +113,27 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
         }
         SongBrowserAction::NewSong => {
             state.new_song();
+        }
+        SongBrowserAction::DeleteSong => {
+            // Delete selected user song
+            if let Some(song_info) = state.song_browser.selected_song() {
+                let path = song_info.path.clone();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if std::fs::remove_file(&path).is_ok() {
+                        state.set_status("Song deleted", 2.0);
+                        // Refresh the song list
+                        let (samples, user_songs) = super::song_browser::discover_songs();
+                        state.song_browser.samples = samples;
+                        state.song_browser.user_songs = user_songs;
+                        state.song_browser.selected_category = None;
+                        state.song_browser.selected_index = None;
+                        state.song_browser.preview_song = None;
+                    } else {
+                        state.set_status("Failed to delete song", 2.0);
+                    }
+                }
+            }
         }
         SongBrowserAction::TogglePreview => {
             if state.song_browser.preview_playing {

@@ -1,8 +1,12 @@
 //! Song browser for loading and previewing saved songs
+//!
+//! Shows two sections:
+//! - SAMPLES: Read-only bundled songs from assets/samples/songs/
+//! - MY SONGS: User-created songs from assets/userdata/songs/
 
 use std::path::PathBuf;
 use crate::ui::{
-    Rect, UiContext, draw_scrollable_list, draw_icon_centered,
+    Rect, UiContext, draw_icon_centered,
     BG_COLOR, HEADER_COLOR, TEXT_COLOR, TEXT_DIM, ACCENT_COLOR,
 };
 use macroquad::prelude::*;
@@ -14,6 +18,20 @@ const CLOSE_ICON: char = '\u{e084}';
 // Button colors matching other browsers
 const BTN_BG: Color = Color::new(0.235, 0.235, 0.275, 1.0); // rgba(60, 60, 70, 255)
 
+/// Directory constants
+pub const SAMPLES_SONGS_DIR: &str = "assets/samples/songs";
+pub const USER_SONGS_DIR: &str = "assets/userdata/songs";
+
+/// Song source/category
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SongCategory {
+    /// Bundled sample song (read-only)
+    Sample,
+    /// User-created song (editable)
+    #[default]
+    User,
+}
+
 /// Information about a song file
 #[derive(Debug, Clone)]
 pub struct SongInfo {
@@ -21,6 +39,8 @@ pub struct SongInfo {
     pub name: String,
     /// Full path to the song file
     pub path: PathBuf,
+    /// Source category (sample or user)
+    pub category: SongCategory,
 }
 
 /// Action returned from the browser
@@ -28,8 +48,8 @@ pub struct SongInfo {
 pub enum SongBrowserAction {
     /// No action
     None,
-    /// User selected a song for preview
-    SelectPreview(usize),
+    /// User selected a song for preview (category, index)
+    SelectPreview(SongCategory, usize),
     /// User clicked Open to load the selected song
     OpenSong,
     /// User clicked New to create a new song
@@ -38,15 +58,21 @@ pub enum SongBrowserAction {
     Cancel,
     /// Toggle preview playback
     TogglePreview,
+    /// Delete selected user song
+    DeleteSong,
 }
 
 /// Song browser dialog
 pub struct SongBrowser {
     /// Is the browser open?
     pub open: bool,
-    /// List of discovered songs
-    pub songs: Vec<SongInfo>,
-    /// Currently selected song index
+    /// List of sample songs (read-only)
+    pub samples: Vec<SongInfo>,
+    /// List of user songs (editable)
+    pub user_songs: Vec<SongInfo>,
+    /// Currently selected category
+    pub selected_category: Option<SongCategory>,
+    /// Currently selected song index within category
     pub selected_index: Option<usize>,
     /// Preview of selected song (for stats display)
     pub preview_song: Option<Song>,
@@ -58,6 +84,10 @@ pub struct SongBrowser {
     pub pending_load_list: bool,
     /// Is preview playing?
     pub preview_playing: bool,
+    /// SAMPLES section collapsed
+    pub samples_collapsed: bool,
+    /// MY SONGS section collapsed
+    pub user_collapsed: bool,
 }
 
 impl Default for SongBrowser {
@@ -70,13 +100,17 @@ impl SongBrowser {
     pub fn new() -> Self {
         Self {
             open: false,
-            songs: Vec::new(),
+            samples: Vec::new(),
+            user_songs: Vec::new(),
+            selected_category: None,
             selected_index: None,
             preview_song: None,
             scroll_offset: 0.0,
             pending_load_path: None,
             pending_load_list: false,
             preview_playing: false,
+            samples_collapsed: false,
+            user_collapsed: false,
         }
     }
 
@@ -90,6 +124,7 @@ impl SongBrowser {
     /// Open the browser and refresh the song list
     pub fn open(&mut self) {
         self.open = true;
+        self.selected_category = None;
         self.selected_index = None;
         self.preview_song = None;
         self.preview_playing = false;
@@ -97,7 +132,9 @@ impl SongBrowser {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.songs = discover_songs();
+            let (samples, user_songs) = discover_songs();
+            self.samples = samples;
+            self.user_songs = user_songs;
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -109,6 +146,25 @@ impl SongBrowser {
     /// Set the preview song
     pub fn set_preview(&mut self, song: Song) {
         self.preview_song = Some(song);
+    }
+
+    /// Check if the selected song is a sample (read-only)
+    pub fn is_sample_selected(&self) -> bool {
+        self.selected_category == Some(SongCategory::Sample)
+    }
+
+    /// Check if the selected song is a user song (editable)
+    pub fn is_user_selected(&self) -> bool {
+        self.selected_category == Some(SongCategory::User)
+    }
+
+    /// Get the currently selected song info
+    pub fn selected_song(&self) -> Option<&SongInfo> {
+        match (self.selected_category, self.selected_index) {
+            (Some(SongCategory::Sample), Some(i)) => self.samples.get(i),
+            (Some(SongCategory::User), Some(i)) => self.user_songs.get(i),
+            _ => None,
+        }
     }
 
     /// Draw the browser and return any action
@@ -135,7 +191,7 @@ impl SongBrowser {
         // Header
         let header_h = 40.0;
         draw_rectangle(dialog_rect.x, dialog_rect.y, dialog_rect.w, header_h, HEADER_COLOR);
-        draw_text("Open Song", dialog_rect.x + 12.0, dialog_rect.y + 26.0, 20.0, TEXT_COLOR);
+        draw_text("Song Browser", dialog_rect.x + 12.0, dialog_rect.y + 26.0, 20.0, TEXT_COLOR);
 
         // Close button
         let close_btn = Rect::new(dialog_rect.x + dialog_rect.w - 36.0, dialog_rect.y + 4.0, 32.0, 32.0);
@@ -147,31 +203,20 @@ impl SongBrowser {
         let content_y = dialog_rect.y + header_h + 8.0;
         let content_h = dialog_rect.h - header_h - 60.0; // Leave room for footer
 
-        // Left side: song list
+        // Left side: two-section song list
         let list_w = dialog_w * 0.45;
         let list_rect = Rect::new(dialog_rect.x + 8.0, content_y, list_w, content_h);
 
-        let items: Vec<String> = self.songs.iter().map(|s| s.name.clone()).collect();
-        let item_h = 24.0;
-
-        let list_result = draw_scrollable_list(
-            ctx,
-            list_rect,
-            &items,
-            self.selected_index,
-            &mut self.scroll_offset,
-            item_h,
-            None,
-        );
-
-        if let Some(clicked_idx) = list_result.clicked {
-            if self.selected_index != Some(clicked_idx) {
-                self.selected_index = Some(clicked_idx);
-                action = SongBrowserAction::SelectPreview(clicked_idx);
+        // Draw two-section list and handle clicks
+        let list_action = draw_two_section_song_list(ctx, list_rect, self);
+        if let Some((category, idx)) = list_action.clicked {
+            if self.selected_category != Some(category) || self.selected_index != Some(idx) {
+                self.selected_category = Some(category);
+                self.selected_index = Some(idx);
+                action = SongBrowserAction::SelectPreview(category, idx);
             }
         }
-
-        if list_result.double_clicked.is_some() {
+        if list_action.double_clicked {
             action = SongBrowserAction::OpenSong;
         }
 
@@ -189,6 +234,12 @@ impl SongBrowser {
 
             draw_text(&format!("Name: {}", song.name), info_rect.x + 12.0, y, 16.0, TEXT_COLOR);
             y += line_h;
+
+            // Show if sample (read-only)
+            if self.is_sample_selected() {
+                draw_text("(Sample - Read Only)", info_rect.x + 12.0, y, 14.0, Color::from_rgba(100, 180, 255, 255));
+                y += line_h;
+            }
 
             draw_text(&format!("BPM: {}", song.bpm), info_rect.x + 12.0, y, 16.0, TEXT_DIM);
             y += line_h;
@@ -215,9 +266,9 @@ impl SongBrowser {
             if draw_text_button(ctx, play_btn, play_text, play_color) {
                 action = SongBrowserAction::TogglePreview;
             }
-        } else if self.songs.is_empty() {
+        } else if self.samples.is_empty() && self.user_songs.is_empty() {
             draw_text("No songs found", info_rect.x + 12.0, info_rect.y + 30.0, 16.0, TEXT_DIM);
-            draw_text("in assets/userdata/songs/", info_rect.x + 12.0, info_rect.y + 52.0, 14.0, TEXT_DIM);
+            draw_text("Click 'New' to create one", info_rect.x + 12.0, info_rect.y + 52.0, 14.0, TEXT_DIM);
         } else {
             draw_text("Select a song", info_rect.x + 12.0, info_rect.y + 30.0, 16.0, TEXT_DIM);
             draw_text("to preview", info_rect.x + 12.0, info_rect.y + 52.0, 14.0, TEXT_DIM);
@@ -229,19 +280,26 @@ impl SongBrowser {
         let btn_h = 32.0;
         let btn_spacing = 12.0;
 
-        // New button
+        // New button (left side)
         let new_btn = Rect::new(dialog_rect.x + 12.0, footer_y, btn_w, btn_h);
         if draw_text_button(ctx, new_btn, "New", BTN_BG) {
             action = SongBrowserAction::NewSong;
         }
 
-        // Cancel button
+        // Delete button (only for user songs)
+        let delete_btn = Rect::new(dialog_rect.x + 12.0 + btn_w + btn_spacing, footer_y, btn_w, btn_h);
+        let delete_enabled = self.is_user_selected() && self.preview_song.is_some();
+        if draw_text_button_enabled(ctx, delete_btn, "Delete", Color::from_rgba(120, 50, 50, 255), delete_enabled) {
+            action = SongBrowserAction::DeleteSong;
+        }
+
+        // Cancel button (right side)
         let cancel_btn = Rect::new(dialog_rect.x + dialog_rect.w - btn_w - 12.0, footer_y, btn_w, btn_h);
         if draw_text_button(ctx, cancel_btn, "Cancel", BTN_BG) {
             action = SongBrowserAction::Cancel;
         }
 
-        // Open button (only enabled if selection)
+        // Open button
         let open_btn = Rect::new(cancel_btn.x - btn_w - btn_spacing, footer_y, btn_w, btn_h);
         let open_enabled = self.selected_index.is_some();
         if draw_text_button_enabled(ctx, open_btn, "Open", ACCENT_COLOR, open_enabled) {
@@ -260,7 +318,7 @@ impl SongBrowser {
 
         // Close on certain actions
         match action {
-            SongBrowserAction::OpenSong | SongBrowserAction::NewSong | SongBrowserAction::Cancel => {
+            SongBrowserAction::OpenSong | SongBrowserAction::NewSong | SongBrowserAction::Cancel | SongBrowserAction::DeleteSong => {
                 self.open = false;
             }
             _ => {}
@@ -270,10 +328,212 @@ impl SongBrowser {
     }
 }
 
-/// Discover songs in the assets/userdata/songs/ directory
+/// Result from drawing the two-section list
+struct SongListResult {
+    clicked: Option<(SongCategory, usize)>,
+    double_clicked: bool,
+}
+
+/// Draw the two-section song list (SAMPLES + MY SONGS)
+fn draw_two_section_song_list(
+    ctx: &mut UiContext,
+    rect: Rect,
+    browser: &mut SongBrowser,
+) -> SongListResult {
+    let mut result = SongListResult {
+        clicked: None,
+        double_clicked: false,
+    };
+
+    let item_h = 26.0;
+    let section_h = 28.0;
+
+    let section_bg = Color::from_rgba(40, 40, 50, 255);
+    let item_bg = Color::from_rgba(30, 30, 38, 255);
+    let item_hover = Color::from_rgba(50, 50, 60, 255);
+    let item_selected = Color::from_rgba(60, 80, 120, 255);
+    let text_color = Color::from_rgba(200, 200, 200, 255);
+    let text_dim = Color::from_rgba(140, 140, 140, 255);
+
+    // Draw list background
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::from_rgba(25, 25, 30, 255));
+
+    // Calculate total content height for scroll
+    let samples_content_h = if browser.samples_collapsed { 0.0 } else { browser.samples.len() as f32 * item_h };
+    let user_content_h = if browser.user_collapsed { 0.0 } else { browser.user_songs.len() as f32 * item_h };
+    let total_h = section_h * 2.0 + samples_content_h + user_content_h;
+
+    // Handle scroll within list bounds
+    if ctx.mouse.inside(&rect) && ctx.mouse.scroll != 0.0 {
+        browser.scroll_offset = (browser.scroll_offset - ctx.mouse.scroll * 30.0)
+            .clamp(0.0, (total_h - rect.h).max(0.0));
+    }
+
+    let mut y = rect.y - browser.scroll_offset;
+
+    // SAMPLES section header
+    let samples_header_rect = Rect::new(rect.x, y, rect.w, section_h);
+    if y + section_h > rect.y && y < rect.bottom() {
+        let draw_y = y.max(rect.y);
+        let draw_h = section_h.min(rect.bottom() - draw_y);
+        draw_rectangle(rect.x, draw_y, rect.w, draw_h, section_bg);
+
+        if y >= rect.y {
+            let arrow = if browser.samples_collapsed { ">" } else { "v" };
+            draw_text(
+                &format!("{} SAMPLE SONGS ({})", arrow, browser.samples.len()),
+                rect.x + 8.0,
+                y + 18.0,
+                14.0,
+                text_color,
+            );
+        }
+
+        // Toggle collapse on click
+        if ctx.mouse.inside(&samples_header_rect) && ctx.mouse.left_pressed && samples_header_rect.y >= rect.y {
+            browser.samples_collapsed = !browser.samples_collapsed;
+        }
+    }
+    y += section_h;
+
+    // SAMPLES items
+    if !browser.samples_collapsed {
+        if browser.samples.is_empty() {
+            if y + item_h > rect.y && y < rect.bottom() {
+                draw_text("  (no sample songs)", rect.x + 8.0, y + 17.0, 12.0, text_dim);
+            }
+            y += item_h;
+        } else {
+            for (i, song) in browser.samples.iter().enumerate() {
+                let item_rect = Rect::new(rect.x, y, rect.w, item_h);
+
+                if y + item_h > rect.y && y < rect.bottom() {
+                    let is_selected = browser.selected_category == Some(SongCategory::Sample)
+                        && browser.selected_index == Some(i);
+                    let is_hovered = ctx.mouse.inside(&item_rect) && item_rect.y >= rect.y;
+
+                    let bg = if is_selected {
+                        item_selected
+                    } else if is_hovered {
+                        item_hover
+                    } else {
+                        item_bg
+                    };
+
+                    // Clip to list bounds
+                    let draw_y = item_rect.y.max(rect.y);
+                    let draw_h = item_h.min(rect.bottom() - draw_y);
+                    if draw_h > 0.0 {
+                        draw_rectangle(item_rect.x + 2.0, draw_y, item_rect.w - 4.0, draw_h, bg);
+
+                        if y >= rect.y {
+                            draw_text(&song.name, rect.x + 20.0, y + 17.0, 13.0, text_color);
+                        }
+                    }
+
+                    // Handle click
+                    if is_hovered && ctx.mouse.left_pressed && item_rect.y >= rect.y {
+                        result.clicked = Some((SongCategory::Sample, i));
+                    }
+                    if is_hovered && ctx.mouse.double_clicked && item_rect.y >= rect.y {
+                        result.double_clicked = true;
+                    }
+                }
+                y += item_h;
+            }
+        }
+    }
+
+    // MY SONGS section header
+    let user_header_rect = Rect::new(rect.x, y, rect.w, section_h);
+    if y + section_h > rect.y && y < rect.bottom() {
+        let draw_y = y.max(rect.y);
+        let draw_h = section_h.min(rect.bottom() - draw_y);
+        draw_rectangle(rect.x, draw_y, rect.w, draw_h, section_bg);
+
+        if y >= rect.y {
+            let arrow = if browser.user_collapsed { ">" } else { "v" };
+            draw_text(
+                &format!("{} MY SONGS ({})", arrow, browser.user_songs.len()),
+                rect.x + 8.0,
+                y + 18.0,
+                14.0,
+                text_color,
+            );
+        }
+
+        // Toggle collapse on click
+        if ctx.mouse.inside(&user_header_rect) && ctx.mouse.left_pressed && user_header_rect.y >= rect.y {
+            browser.user_collapsed = !browser.user_collapsed;
+        }
+    }
+    y += section_h;
+
+    // MY SONGS items
+    if !browser.user_collapsed {
+        if browser.user_songs.is_empty() {
+            if y + item_h > rect.y && y < rect.bottom() {
+                draw_text("  (no saved songs)", rect.x + 8.0, y + 17.0, 12.0, text_dim);
+            }
+            // y += item_h; // Not needed since this is the last section
+        } else {
+            for (i, song) in browser.user_songs.iter().enumerate() {
+                let item_rect = Rect::new(rect.x, y, rect.w, item_h);
+
+                if y + item_h > rect.y && y < rect.bottom() {
+                    let is_selected = browser.selected_category == Some(SongCategory::User)
+                        && browser.selected_index == Some(i);
+                    let is_hovered = ctx.mouse.inside(&item_rect) && item_rect.y >= rect.y;
+
+                    let bg = if is_selected {
+                        item_selected
+                    } else if is_hovered {
+                        item_hover
+                    } else {
+                        item_bg
+                    };
+
+                    // Clip to list bounds
+                    let draw_y = item_rect.y.max(rect.y);
+                    let draw_h = item_h.min(rect.bottom() - draw_y);
+                    if draw_h > 0.0 {
+                        draw_rectangle(item_rect.x + 2.0, draw_y, item_rect.w - 4.0, draw_h, bg);
+
+                        if y >= rect.y {
+                            draw_text(&song.name, rect.x + 20.0, y + 17.0, 13.0, text_color);
+                        }
+                    }
+
+                    // Handle click
+                    if is_hovered && ctx.mouse.left_pressed && item_rect.y >= rect.y {
+                        result.clicked = Some((SongCategory::User, i));
+                    }
+                    if is_hovered && ctx.mouse.double_clicked && item_rect.y >= rect.y {
+                        result.double_clicked = true;
+                    }
+                }
+                y += item_h;
+            }
+        }
+    }
+
+    result
+}
+
+/// Discover songs from both samples and user directories
+///
+/// Returns (samples, user_songs) tuple
 #[cfg(not(target_arch = "wasm32"))]
-pub fn discover_songs() -> Vec<SongInfo> {
-    let songs_dir = std::path::Path::new("assets/userdata/songs");
+pub fn discover_songs() -> (Vec<SongInfo>, Vec<SongInfo>) {
+    let samples = discover_songs_from_dir(SAMPLES_SONGS_DIR, SongCategory::Sample);
+    let user_songs = discover_songs_from_dir(USER_SONGS_DIR, SongCategory::User);
+    (samples, user_songs)
+}
+
+/// Discover songs from a specific directory
+#[cfg(not(target_arch = "wasm32"))]
+fn discover_songs_from_dir(dir: &str, category: SongCategory) -> Vec<SongInfo> {
+    let songs_dir = std::path::Path::new(dir);
     let mut songs = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(songs_dir) {
@@ -284,6 +544,7 @@ pub fn discover_songs() -> Vec<SongInfo> {
                     songs.push(SongInfo {
                         name: stem.to_string_lossy().to_string(),
                         path,
+                        category,
                     });
                 }
             }
@@ -296,20 +557,38 @@ pub fn discover_songs() -> Vec<SongInfo> {
 }
 
 /// Generate the next available song filename (song_001.ron, song_002.ron, etc.)
+///
+/// Checks both samples and user directories to avoid conflicts.
 pub fn next_available_song_name() -> PathBuf {
-    let songs_dir = PathBuf::from("assets/userdata/songs");
+    let songs_dir = PathBuf::from(USER_SONGS_DIR);
     let _ = std::fs::create_dir_all(&songs_dir);
 
     let mut highest = 0;
 
     #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(entries) = std::fs::read_dir(&songs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Some(num_str) = stem.strip_prefix("song_") {
-                    if let Ok(num) = num_str.parse::<u32>() {
-                        highest = highest.max(num);
+    {
+        // Check user songs
+        if let Ok(entries) = std::fs::read_dir(&songs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if let Some(num_str) = stem.strip_prefix("song_") {
+                        if let Ok(num) = num_str.parse::<u32>() {
+                            highest = highest.max(num);
+                        }
+                    }
+                }
+            }
+        }
+        // Also check sample songs
+        if let Ok(entries) = std::fs::read_dir(SAMPLES_SONGS_DIR) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if let Some(num_str) = stem.strip_prefix("song_") {
+                        if let Ok(num) = num_str.parse::<u32>() {
+                            highest = highest.max(num);
+                        }
                     }
                 }
             }
@@ -320,11 +599,21 @@ pub fn next_available_song_name() -> PathBuf {
     songs_dir.join(format!("song_{:03}.ron", next_num))
 }
 
-/// Load song list from manifest asynchronously (for WASM)
-pub async fn load_song_list() -> Vec<SongInfo> {
+/// Load song lists from manifests asynchronously (for WASM)
+///
+/// Returns (samples, user_songs) tuple
+pub async fn load_song_list() -> (Vec<SongInfo>, Vec<SongInfo>) {
+    let samples = load_song_list_from_dir(SAMPLES_SONGS_DIR, SongCategory::Sample).await;
+    let user_songs = load_song_list_from_dir(USER_SONGS_DIR, SongCategory::User).await;
+    (samples, user_songs)
+}
+
+/// Load song list from a specific directory's manifest (for WASM)
+async fn load_song_list_from_dir(dir: &str, category: SongCategory) -> Vec<SongInfo> {
     use macroquad::prelude::*;
 
-    let manifest = match load_string("assets/userdata/songs/manifest.txt").await {
+    let manifest_path = format!("{}/manifest.txt", dir);
+    let manifest = match load_string(&manifest_path).await {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -336,8 +625,8 @@ pub async fn load_song_list() -> Vec<SongInfo> {
             continue;
         }
         let name = line.strip_suffix(".ron").unwrap_or(line).to_string();
-        let path = PathBuf::from(format!("assets/userdata/songs/{}", line));
-        songs.push(SongInfo { name, path });
+        let path = PathBuf::from(format!("{}/{}", dir, line));
+        songs.push(SongInfo { name, path, category });
     }
     songs
 }

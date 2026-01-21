@@ -447,7 +447,7 @@ fn draw_two_section_list(
                       samples_header_rect.w, section_h.min(rect.bottom() - samples_header_rect.y.max(rect.y)), section_bg);
 
         let arrow = if browser.samples_collapsed { ">" } else { "v" };
-        draw_text(&format!("{} SAMPLES ({})", arrow, browser.samples.len()),
+        draw_text(&format!("{} SAMPLE LEVELS ({})", arrow, browser.samples.len()),
                  rect.x + 8.0, y + 18.0, 14.0, text_color);
 
         // Toggle collapse on click
