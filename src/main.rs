@@ -671,8 +671,9 @@ async fn main() {
                             }
                             #[cfg(target_arch = "wasm32")]
                             {
-                                ws.example_browser.user_levels = discover_user_levels(&app.storage);
-                                ws.editor_state.set_status("Level list refreshed", 2.0);
+                                // WASM: trigger async reload (handled in main loop)
+                                ws.example_browser.pending_load_list = true;
+                                ws.editor_state.set_status("Refreshing...", 2.0);
                             }
                         }
                         BrowserAction::Cancel => {
