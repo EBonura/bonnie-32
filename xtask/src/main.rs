@@ -3,6 +3,8 @@
 //! Usage:
 //!   cargo xtask build-web        # Build WASM for web deployment
 //!   cargo xtask build-web --dev  # Build with DEV banner
+//!   cargo xtask serve            # Build and serve locally on port 8080
+//!   cargo xtask serve -p 3000    # Build and serve on custom port
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,6 +27,12 @@ enum Commands {
         #[arg(long)]
         dev: bool,
     },
+    /// Build and serve locally for testing
+    Serve {
+        /// Port to serve on (default: 8080)
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
 }
 
 fn main() -> Result<()> {
@@ -32,6 +40,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::BuildWeb { dev } => build_web(dev),
+        Commands::Serve { port } => serve(port),
     }
 }
 
@@ -158,6 +167,35 @@ fn build_web(dev: bool) -> Result<()> {
     }
 
     println!("Web build complete: dist/web/");
+    Ok(())
+}
+
+/// Build and serve locally for testing
+fn serve(port: u16) -> Result<()> {
+    let root = project_root();
+    let dist = root.join("dist/web");
+
+    // Build first
+    build_web(false)?;
+
+    // Kill any existing server on this port (best effort)
+    #[cfg(unix)]
+    {
+        let _ = Command::new("sh")
+            .args(["-c", &format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port)])
+            .status();
+    }
+
+    println!("\n🚀 Starting local server at http://localhost:{}", port);
+    println!("   Press Ctrl+C to stop\n");
+
+    // Start Python HTTP server
+    run_cmd(
+        Command::new("python3")
+            .current_dir(&dist)
+            .args(["-m", "http.server", &port.to_string()]),
+    )?;
+
     Ok(())
 }
 
