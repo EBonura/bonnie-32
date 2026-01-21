@@ -65,7 +65,7 @@ pub fn draw_texture_palette(
     if state.texture_palette_user_mode {
         draw_user_texture_header(ctx, header_rect, state, icon_font);
         let grid_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, content_rect.w, content_rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
-        draw_user_texture_grid(ctx, grid_rect, state);
+        draw_user_texture_grid(ctx, grid_rect, state, storage);
     } else {
         draw_folder_selector(ctx, header_rect, state, icon_font);
         let grid_rect = Rect::new(content_rect.x, content_rect.y + MODE_TOGGLE_HEIGHT + HEADER_HEIGHT, content_rect.w, content_rect.h - MODE_TOGGLE_HEIGHT - HEADER_HEIGHT);
@@ -812,6 +812,7 @@ fn draw_user_texture_grid(
     ctx: &mut UiContext,
     content_rect: Rect,
     state: &mut EditorState,
+    storage: &Storage,
 ) {
     let thumb_size = state.paint_thumb_size;
     let cols = ((content_rect.w - THUMB_PADDING) / (thumb_size + THUMB_PADDING)).floor() as usize;
@@ -950,8 +951,18 @@ fn draw_user_texture_grid(
 
         if y >= content_rect.y {
             let arrow = if state.paint_user_collapsed { ">" } else { "v" };
+            let is_loading = state.pending_user_texture_list.is_some() || state.user_textures.is_loading_user_textures();
+            let cloud_indicator = if storage.has_cloud() { " [cloud]" } else { "" };
+            let header_text = if is_loading {
+                let time = macroquad::prelude::get_time() as f32;
+                let spinner_chars = ['|', '/', '-', '\\'];
+                let spinner_idx = (time * 8.0) as usize % spinner_chars.len();
+                format!("{} MY TEXTURES ({}){} {}", arrow, user_names.len(), cloud_indicator, spinner_chars[spinner_idx])
+            } else {
+                format!("{} MY TEXTURES ({}){}", arrow, user_names.len(), cloud_indicator)
+            };
             draw_text(
-                &format!("{} MY TEXTURES ({})", arrow, user_names.len()),
+                &header_text,
                 content_rect.x + 8.0,
                 y + 17.0,
                 14.0,
@@ -1288,9 +1299,13 @@ fn draw_texture_editor_panel(
         {
             // Native: save via storage
             if let Err(e) = state.user_textures.save_texture_with_storage(&texture_name, storage) {
-                eprintln!("Failed to save texture: {}", e);
+                state.set_status(&format!("Failed to save: {}", e), 3.0);
             } else {
                 state.texture_editor.dirty = false;
+                let cloud_text = if storage.has_cloud() { " to cloud" } else { "" };
+                state.set_status(&format!("Saved '{}'{}", texture_name, cloud_text), 2.0);
+                // Flag to sync with modeler
+                state.pending_texture_refresh = true;
             }
         }
 

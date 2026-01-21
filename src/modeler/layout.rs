@@ -2715,10 +2715,14 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         }
         // Now save via storage
         if let Err(e) = state.user_textures.save_texture_with_storage(&tex_name, storage) {
-            eprintln!("Failed to save texture: {}", e);
+            state.set_status(&format!("Failed to save: {}", e), 3.0);
         } else {
             // Clear dirty flag on successful save
             state.texture_editor.dirty = false;
+            let cloud_text = if storage.has_cloud() { " to cloud" } else { "" };
+            state.set_status(&format!("Saved '{}'{}", tex_name, cloud_text), 2.0);
+            // Flag to sync with world editor
+            state.pending_texture_refresh = true;
         }
         state.dirty = true;
     }

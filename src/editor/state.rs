@@ -665,6 +665,13 @@ pub struct EditorState {
     pub paint_samples_collapsed: bool,
     pub paint_user_collapsed: bool,
 
+    /// Pending async user texture list (cloud discovery)
+    pub pending_user_texture_list: Option<crate::storage::PendingList>,
+    /// Queue of user textures to load from cloud
+    pub pending_texture_loads: Vec<(String, crate::storage::PendingLoad)>,
+    /// Flag to trigger user texture refresh from main loop
+    pub pending_texture_refresh: bool,
+
     /// Collapsible right panel sections (both can be open simultaneously)
     pub textures_section_expanded: bool,
     pub properties_section_expanded: bool,
@@ -839,6 +846,9 @@ impl EditorState {
             paint_thumb_size: 64.0,   // Default thumbnail size
             paint_samples_collapsed: false,
             paint_user_collapsed: false,
+            pending_user_texture_list: None,
+            pending_texture_loads: Vec::new(),
+            pending_texture_refresh: false,
 
             // Collapsible sections (both can be open simultaneously)
             textures_section_expanded: true,

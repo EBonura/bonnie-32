@@ -376,6 +376,41 @@ impl TextureLibrary {
         !self.user_names.is_empty()
     }
 
+    /// Clear user textures (keep samples intact)
+    ///
+    /// Used when refreshing from cloud storage - clears existing user textures
+    /// before loading new list from cloud.
+    pub fn clear_user_textures(&mut self) {
+        for name in self.user_names.drain(..) {
+            if let Some(tex) = self.textures.remove(&name) {
+                self.by_id.remove(&tex.id);
+            }
+        }
+    }
+
+    /// Set user texture names (for cloud list discovery)
+    ///
+    /// Sets the list of user texture names without loading the actual texture data.
+    /// Used when loading from cloud - names are set first, then textures loaded individually.
+    pub fn set_user_texture_names(&mut self, names: Vec<String>) {
+        self.user_names = names;
+    }
+
+    /// Check if a texture is loaded (has actual data)
+    ///
+    /// A texture name may be in user_names but not yet loaded (during cloud loading).
+    pub fn is_texture_loaded(&self, name: &str) -> bool {
+        self.textures.contains_key(name)
+    }
+
+    /// Check if any user textures are still loading
+    ///
+    /// Returns true if there are texture names in user_names that don't have
+    /// corresponding texture data loaded yet.
+    pub fn is_loading_user_textures(&self) -> bool {
+        self.user_names.iter().any(|n| !self.textures.contains_key(n))
+    }
+
     /// Iterate over sample texture names in discovery order
     pub fn sample_names(&self) -> impl Iterator<Item = &str> {
         self.sample_names.iter().map(|s| s.as_str())

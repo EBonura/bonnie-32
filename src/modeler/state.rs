@@ -960,6 +960,13 @@ pub struct ModelerState {
     // Thumbnail size for paint texture grid (32, 48, 64, 96)
     pub paint_thumb_size: f32,
 
+    // Pending async user texture list (cloud discovery)
+    pub pending_user_texture_list: Option<crate::storage::PendingList>,
+    // Queue of user textures to load from cloud
+    pub pending_texture_loads: Vec<(String, crate::storage::PendingLoad)>,
+    // Flag to trigger user texture refresh from main loop
+    pub pending_texture_refresh: bool,
+
     // Object rename dialog state (object index, current text input)
     pub rename_dialog: Option<(usize, String)>,
 
@@ -1171,6 +1178,9 @@ impl ModelerState {
             editing_texture,
             selected_user_texture,
             paint_thumb_size: 64.0,  // Default thumbnail size
+            pending_user_texture_list: None,
+            pending_texture_loads: Vec::new(),
+            pending_texture_refresh: false,
 
             rename_dialog: None,
             delete_dialog: None,

@@ -250,6 +250,40 @@ async fn main() {
                     }
                 }
             }
+            // World editor's texture library
+            {
+                let es = &mut app.world_editor.editor_state;
+                es.pending_user_texture_list = None;
+                es.pending_texture_loads.clear();
+                if app.storage.has_cloud() {
+                    es.user_textures.clear_user_textures();
+                    es.pending_user_texture_list = Some(list_async("assets/userdata/textures".to_string()));
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Err(e) = es.user_textures.discover() {
+                            eprintln!("Failed to discover textures: {}", e);
+                        }
+                    }
+                }
+            }
+            // Modeler's texture library
+            {
+                let ms = &mut app.modeler.modeler_state;
+                ms.pending_user_texture_list = None;
+                ms.pending_texture_loads.clear();
+                if app.storage.has_cloud() {
+                    ms.user_textures.clear_user_textures();
+                    ms.pending_user_texture_list = Some(list_async("assets/userdata/textures".to_string()));
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Err(e) = ms.user_textures.discover() {
+                            eprintln!("Failed to discover textures: {}", e);
+                        }
+                    }
+                }
+            }
         }
 
         // Poll pending async operations (save, load)
@@ -1940,6 +1974,202 @@ fn poll_pending_ops(app: &mut AppState) {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TEXTURE LIBRARY ASYNC LOADING
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // Poll world editor's pending user texture list
+    if let Some(mut pending) = app.world_editor.editor_state.pending_user_texture_list.take() {
+        if pending.op.is_complete() {
+            const USER_TEXTURES_DIR: &str = "assets/userdata/textures";
+            match pending.op.take() {
+                Some(Ok(files)) => {
+                    // Extract texture names from file list
+                    let names: Vec<String> = files
+                        .iter()
+                        .filter(|f| f.ends_with(".ron"))
+                        .map(|f| {
+                            let full_path = if f.contains('/') {
+                                f.clone()
+                            } else {
+                                format!("{}/{}", USER_TEXTURES_DIR, f)
+                            };
+                            full_path
+                                .rsplit('/')
+                                .next()
+                                .and_then(|n| n.strip_suffix(".ron"))
+                                .unwrap_or(&full_path)
+                                .to_string()
+                        })
+                        .collect();
+
+                    // Set the names first (so they show in the UI)
+                    app.world_editor.editor_state.user_textures.set_user_texture_names(names.clone());
+
+                    // Queue all textures for loading
+                    for name in names {
+                        let path = format!("{}/{}.ron", USER_TEXTURES_DIR, name);
+                        app.world_editor.editor_state.pending_texture_loads.push(
+                            (name, load_async(path.into()))
+                        );
+                    }
+                    app.world_editor.editor_state.set_status("Loading textures...", 2.0);
+                }
+                Some(Err(e)) => {
+                    app.world_editor.editor_state.set_status(&format!("Failed to list textures: {}", e), 3.0);
+                }
+                None => {}
+            }
+        } else {
+            app.world_editor.editor_state.pending_user_texture_list = Some(pending);
+        }
+    }
+
+    // Poll world editor's pending texture loads (load one at a time)
+    if !app.world_editor.editor_state.pending_texture_loads.is_empty() {
+        if let Some((_, pending)) = app.world_editor.editor_state.pending_texture_loads.first_mut() {
+            if pending.op.is_complete() {
+                let (name, pending) = app.world_editor.editor_state.pending_texture_loads.remove(0);
+                match pending.op.take() {
+                    Some(Ok(data)) => {
+                        match parse_texture_data(&data) {
+                            Ok(mut texture) => {
+                                texture.name = name.clone();
+                                texture.source = texture::TextureSource::User;
+                                app.world_editor.editor_state.user_textures.add(texture);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to parse texture '{}': {}", name, e);
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("Failed to load texture '{}': {}", name, e);
+                    }
+                    None => {}
+                }
+                // Show completion status when all done
+                if app.world_editor.editor_state.pending_texture_loads.is_empty() {
+                    app.world_editor.editor_state.set_status("Textures loaded", 2.0);
+                }
+            }
+        }
+    }
+
+    // Poll modeler's pending user texture list
+    if let Some(mut pending) = app.modeler.modeler_state.pending_user_texture_list.take() {
+        if pending.op.is_complete() {
+            const USER_TEXTURES_DIR: &str = "assets/userdata/textures";
+            match pending.op.take() {
+                Some(Ok(files)) => {
+                    let names: Vec<String> = files
+                        .iter()
+                        .filter(|f| f.ends_with(".ron"))
+                        .map(|f| {
+                            let full_path = if f.contains('/') {
+                                f.clone()
+                            } else {
+                                format!("{}/{}", USER_TEXTURES_DIR, f)
+                            };
+                            full_path
+                                .rsplit('/')
+                                .next()
+                                .and_then(|n| n.strip_suffix(".ron"))
+                                .unwrap_or(&full_path)
+                                .to_string()
+                        })
+                        .collect();
+
+                    app.modeler.modeler_state.user_textures.set_user_texture_names(names.clone());
+
+                    for name in names {
+                        let path = format!("{}/{}.ron", USER_TEXTURES_DIR, name);
+                        app.modeler.modeler_state.pending_texture_loads.push(
+                            (name, load_async(path.into()))
+                        );
+                    }
+                    app.modeler.modeler_state.set_status("Loading textures...", 2.0);
+                }
+                Some(Err(e)) => {
+                    app.modeler.modeler_state.set_status(&format!("Failed to list textures: {}", e), 3.0);
+                }
+                None => {}
+            }
+        } else {
+            app.modeler.modeler_state.pending_user_texture_list = Some(pending);
+        }
+    }
+
+    // Poll modeler's pending texture loads
+    if !app.modeler.modeler_state.pending_texture_loads.is_empty() {
+        if let Some((_, pending)) = app.modeler.modeler_state.pending_texture_loads.first_mut() {
+            if pending.op.is_complete() {
+                let (name, pending) = app.modeler.modeler_state.pending_texture_loads.remove(0);
+                match pending.op.take() {
+                    Some(Ok(data)) => {
+                        match parse_texture_data(&data) {
+                            Ok(mut texture) => {
+                                texture.name = name.clone();
+                                texture.source = texture::TextureSource::User;
+                                app.modeler.modeler_state.user_textures.add(texture);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to parse texture '{}': {}", name, e);
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("Failed to load texture '{}': {}", name, e);
+                    }
+                    None => {}
+                }
+                if app.modeler.modeler_state.pending_texture_loads.is_empty() {
+                    app.modeler.modeler_state.set_status("Textures loaded", 2.0);
+                }
+            }
+        }
+    }
+
+    // Handle texture refresh syncing between editor and modeler
+    // When one saves a texture, the other should reload to see the changes
+    if app.world_editor.editor_state.pending_texture_refresh {
+        app.world_editor.editor_state.pending_texture_refresh = false;
+        // Reload modeler's textures
+        if app.storage.has_cloud() {
+            app.modeler.modeler_state.user_textures.clear_user_textures();
+            app.modeler.modeler_state.pending_user_texture_list =
+                Some(list_async("assets/userdata/textures".to_string()));
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Err(e) = app.modeler.modeler_state.user_textures.discover() {
+                    eprintln!("Failed to refresh modeler textures: {}", e);
+                }
+            }
+        }
+    }
+    if app.modeler.modeler_state.pending_texture_refresh {
+        app.modeler.modeler_state.pending_texture_refresh = false;
+        // Reload editor's textures
+        if app.storage.has_cloud() {
+            app.world_editor.editor_state.user_textures.clear_user_textures();
+            app.world_editor.editor_state.pending_user_texture_list =
+                Some(list_async("assets/userdata/textures".to_string()));
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Err(e) = app.world_editor.editor_state.user_textures.discover() {
+                    eprintln!("Failed to refresh editor textures: {}", e);
+                }
+            }
+        }
+    }
+}
+
+/// Parse texture data from bytes
+fn parse_texture_data(data: &[u8]) -> Result<texture::UserTexture, String> {
+    texture::UserTexture::load_from_bytes(data)
+        .map_err(|e| format!("Parse error: {}", e))
 }
 
 /// Parse song data from bytes (handles both compressed and uncompressed)
