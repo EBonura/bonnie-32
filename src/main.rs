@@ -1753,6 +1753,131 @@ fn poll_pending_ops(app: &mut AppState) {
             app.world_editor.editor_state.asset_browser.pending_user_list = Some(pending);
         }
     }
+
+    // Handle song browser pending refresh (native only)
+    if app.tracker.song_browser.pending_refresh {
+        app.tracker.song_browser.pending_refresh = false;
+        // Refresh sample songs (always local/sync)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            app.tracker.song_browser.samples = tracker::discover_songs_from_dir(
+                tracker::SAMPLES_SONGS_DIR,
+                tracker::SongCategory::Sample,
+            );
+        }
+        // User songs: check if cloud storage is available
+        if app.storage.has_cloud() {
+            app.tracker.song_browser.user_songs.clear();
+            app.tracker.song_browser.pending_user_list = Some(list_async("assets/userdata/songs".to_string()));
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                app.tracker.song_browser.user_songs = tracker::discover_songs_from_dir(
+                    tracker::USER_SONGS_DIR,
+                    tracker::SongCategory::User,
+                );
+            }
+            app.tracker.set_status("Song list refreshed", 2.0);
+        }
+    }
+
+    // Poll pending song browser preview load (for async cloud loads)
+    if let Some(mut pending) = app.tracker.song_browser.pending_preview_load.take() {
+        if pending.op.is_complete() {
+            match pending.op.take() {
+                Some(Ok(data)) => {
+                    // Parse the loaded song data
+                    match parse_song_data(&data) {
+                        Ok(song) => {
+                            app.tracker.song_browser.set_preview(song);
+                            app.tracker.set_status("Preview loaded", 2.0);
+                        }
+                        Err(e) => {
+                            app.tracker.set_status(&format!("Preview failed: {}", e), 3.0);
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    app.tracker.set_status(&format!("Preview failed: {}", e), 3.0);
+                }
+                None => {
+                    app.tracker.set_status("Preview failed: unknown error", 3.0);
+                }
+            }
+        } else {
+            // Still pending, put it back
+            app.tracker.song_browser.pending_preview_load = Some(pending);
+        }
+    }
+
+    // Poll pending song browser user songs list (for async cloud discovery)
+    if let Some(mut pending) = app.tracker.song_browser.pending_user_list.take() {
+        if pending.op.is_complete() {
+            const USER_SONGS_DIR: &str = "assets/userdata/songs";
+            match pending.op.take() {
+                Some(Ok(files)) => {
+                    // Convert file list to SongInfo
+                    let songs: Vec<_> = files
+                        .iter()
+                        .filter(|f| f.ends_with(".ron"))
+                        .map(|f| {
+                            let full_path = if f.contains('/') {
+                                f.clone()
+                            } else {
+                                format!("{}/{}", USER_SONGS_DIR, f)
+                            };
+                            let name = full_path
+                                .rsplit('/')
+                                .next()
+                                .and_then(|n| n.strip_suffix(".ron"))
+                                .unwrap_or(&full_path)
+                                .to_string();
+                            tracker::SongInfo {
+                                name,
+                                path: PathBuf::from(full_path),
+                                category: tracker::SongCategory::User,
+                            }
+                        })
+                        .collect();
+                    app.tracker.song_browser.user_songs = songs;
+                    app.tracker.set_status("Songs loaded", 2.0);
+                }
+                Some(Err(e)) => {
+                    app.tracker.set_status(&format!("Failed to list songs: {}", e), 3.0);
+                }
+                None => {
+                    // No result
+                }
+            }
+        } else {
+            // Still pending, put it back
+            app.tracker.song_browser.pending_user_list = Some(pending);
+        }
+    }
+}
+
+/// Parse song data from bytes (handles both compressed and uncompressed)
+fn parse_song_data(data: &[u8]) -> Result<tracker::Song, String> {
+    use std::io::Cursor;
+
+    // Detect format: RON files start with '(' or whitespace, brotli is binary
+    let is_plain_ron = data.first()
+        .map(|&b| b == b'(' || b == b' ' || b == b'\n' || b == b'\r' || b == b'\t')
+        .unwrap_or(false);
+
+    let contents = if is_plain_ron {
+        String::from_utf8(data.to_vec())
+            .map_err(|e| format!("Invalid UTF-8: {}", e))?
+    } else {
+        // Brotli compressed - decompress first
+        let mut decompressed = Vec::new();
+        brotli::BrotliDecompress(&mut Cursor::new(data), &mut decompressed)
+            .map_err(|e| format!("Failed to decompress: {}", e))?;
+        String::from_utf8(decompressed)
+            .map_err(|e| format!("Invalid UTF-8 after decompression: {}", e))?
+    };
+
+    tracker::load_song_from_str(&contents)
 }
 
 /// Find the next available level filename with format "level_001", "level_002", etc.

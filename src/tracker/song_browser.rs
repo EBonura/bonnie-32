@@ -9,6 +9,7 @@ use crate::ui::{
     Rect, UiContext, draw_icon_centered,
     BG_COLOR, HEADER_COLOR, TEXT_COLOR, TEXT_DIM, ACCENT_COLOR,
 };
+use crate::storage::{PendingLoad, PendingList};
 use macroquad::prelude::*;
 use super::pattern::Song;
 
@@ -60,6 +61,8 @@ pub enum SongBrowserAction {
     TogglePreview,
     /// Delete selected user song
     DeleteSong,
+    /// Refresh the song list
+    Refresh,
 }
 
 /// Song browser dialog
@@ -88,6 +91,12 @@ pub struct SongBrowser {
     pub samples_collapsed: bool,
     /// MY SONGS section collapsed
     pub user_collapsed: bool,
+    /// Pending async preview load (native cloud storage)
+    pub pending_preview_load: Option<PendingLoad>,
+    /// Pending async user songs list (native cloud storage)
+    pub pending_user_list: Option<PendingList>,
+    /// Flag to trigger user songs refresh from main loop
+    pub pending_refresh: bool,
 }
 
 impl Default for SongBrowser {
@@ -111,6 +120,9 @@ impl SongBrowser {
             preview_playing: false,
             samples_collapsed: false,
             user_collapsed: false,
+            pending_preview_load: None,
+            pending_user_list: None,
+            pending_refresh: false,
         }
     }
 
@@ -119,6 +131,17 @@ impl SongBrowser {
         self.open = false;
         self.preview_song = None;
         self.preview_playing = false;
+        self.pending_preview_load = None;
+    }
+
+    /// Check if a preview is currently being loaded
+    pub fn is_loading_preview(&self) -> bool {
+        self.pending_preview_load.is_some() || self.pending_load_path.is_some()
+    }
+
+    /// Check if user songs are being loaded
+    pub fn is_loading_user_songs(&self) -> bool {
+        self.pending_user_list.is_some()
     }
 
     /// Open the browser and refresh the song list
@@ -132,9 +155,11 @@ impl SongBrowser {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (samples, user_songs) = discover_songs();
-            self.samples = samples;
-            self.user_songs = user_songs;
+            // Samples are always local
+            self.samples = discover_songs_from_dir(SAMPLES_SONGS_DIR, SongCategory::Sample);
+            // User songs: set pending_refresh flag so main.rs handles cloud vs local
+            // This ensures cloud users get their songs from cloud storage
+            self.pending_refresh = true;
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -168,7 +193,7 @@ impl SongBrowser {
     }
 
     /// Draw the browser and return any action
-    pub fn draw(&mut self, ctx: &mut UiContext, screen_rect: Rect, icon_font: Option<&Font>) -> SongBrowserAction {
+    pub fn draw(&mut self, ctx: &mut UiContext, screen_rect: Rect, icon_font: Option<&Font>, storage: &crate::storage::Storage) -> SongBrowserAction {
         if !self.open {
             return SongBrowserAction::None;
         }
@@ -208,7 +233,8 @@ impl SongBrowser {
         let list_rect = Rect::new(dialog_rect.x + 8.0, content_y, list_w, content_h);
 
         // Draw two-section list and handle clicks
-        let list_action = draw_two_section_song_list(ctx, list_rect, self);
+        let has_cloud = storage.has_cloud();
+        let list_action = draw_two_section_song_list(ctx, list_rect, self, has_cloud);
         if let Some((category, idx)) = list_action.clicked {
             if self.selected_category != Some(category) || self.selected_index != Some(idx) {
                 self.selected_category = Some(category);
@@ -293,6 +319,12 @@ impl SongBrowser {
             action = SongBrowserAction::DeleteSong;
         }
 
+        // Refresh button
+        let refresh_btn = Rect::new(dialog_rect.x + 12.0 + (btn_w + btn_spacing) * 2.0, footer_y, btn_w, btn_h);
+        if draw_text_button(ctx, refresh_btn, "Refresh", BTN_BG) {
+            action = SongBrowserAction::Refresh;
+        }
+
         // Cancel button (right side)
         let cancel_btn = Rect::new(dialog_rect.x + dialog_rect.w - btn_w - 12.0, footer_y, btn_w, btn_h);
         if draw_text_button(ctx, cancel_btn, "Cancel", BTN_BG) {
@@ -339,6 +371,7 @@ fn draw_two_section_song_list(
     ctx: &mut UiContext,
     rect: Rect,
     browser: &mut SongBrowser,
+    has_cloud: bool,
 ) -> SongListResult {
     let mut result = SongListResult {
         clicked: None,
@@ -453,8 +486,9 @@ fn draw_two_section_song_list(
 
         if y >= rect.y {
             let arrow = if browser.user_collapsed { ">" } else { "v" };
+            let cloud_indicator = if has_cloud { " [cloud]" } else { "" };
             draw_text(
-                &format!("{} MY SONGS ({})", arrow, browser.user_songs.len()),
+                &format!("{} MY SONGS ({}){}", arrow, browser.user_songs.len(), cloud_indicator),
                 rect.x + 8.0,
                 y + 18.0,
                 14.0,
@@ -471,7 +505,17 @@ fn draw_two_section_song_list(
 
     // MY SONGS items
     if !browser.user_collapsed {
-        if browser.user_songs.is_empty() {
+        if browser.is_loading_user_songs() {
+            // Show loading indicator
+            if y + item_h > rect.y && y < rect.bottom() {
+                let time = get_time() as f32;
+                let spinner_chars = ['|', '/', '-', '\\'];
+                let spinner_idx = (time * 8.0) as usize % spinner_chars.len();
+                let loading_text = format!("  {} Loading...", spinner_chars[spinner_idx]);
+                draw_text(&loading_text, rect.x + 8.0, y + 17.0, 12.0, text_dim);
+            }
+            // y += item_h; // Not needed since this is the last section
+        } else if browser.user_songs.is_empty() {
             if y + item_h > rect.y && y < rect.bottom() {
                 draw_text("  (no saved songs)", rect.x + 8.0, y + 17.0, 12.0, text_dim);
             }
@@ -532,7 +576,7 @@ pub fn discover_songs() -> (Vec<SongInfo>, Vec<SongInfo>) {
 
 /// Discover songs from a specific directory
 #[cfg(not(target_arch = "wasm32"))]
-fn discover_songs_from_dir(dir: &str, category: SongCategory) -> Vec<SongInfo> {
+pub fn discover_songs_from_dir(dir: &str, category: SongCategory) -> Vec<SongInfo> {
     let songs_dir = std::path::Path::new(dir);
     let mut songs = Vec::new();
 
@@ -558,39 +602,19 @@ fn discover_songs_from_dir(dir: &str, category: SongCategory) -> Vec<SongInfo> {
 
 /// Generate the next available song filename (song_001.ron, song_002.ron, etc.)
 ///
-/// Checks both samples and user directories to avoid conflicts.
-pub fn next_available_song_name() -> PathBuf {
+/// Takes the loaded song lists to check for existing names. This works correctly
+/// with cloud storage where songs may not exist locally.
+pub fn next_available_song_name(samples: &[SongInfo], user_songs: &[SongInfo]) -> PathBuf {
     let songs_dir = PathBuf::from(USER_SONGS_DIR);
     let _ = std::fs::create_dir_all(&songs_dir);
 
     let mut highest = 0;
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        // Check user songs
-        if let Ok(entries) = std::fs::read_dir(&songs_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Some(num_str) = stem.strip_prefix("song_") {
-                        if let Ok(num) = num_str.parse::<u32>() {
-                            highest = highest.max(num);
-                        }
-                    }
-                }
-            }
-        }
-        // Also check sample songs
-        if let Ok(entries) = std::fs::read_dir(SAMPLES_SONGS_DIR) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Some(num_str) = stem.strip_prefix("song_") {
-                        if let Ok(num) = num_str.parse::<u32>() {
-                            highest = highest.max(num);
-                        }
-                    }
-                }
+    // Check names from the provided song lists (works with cloud storage)
+    for song in samples.iter().chain(user_songs.iter()) {
+        if let Some(num_str) = song.name.strip_prefix("song_") {
+            if let Ok(num) = num_str.parse::<u32>() {
+                highest = highest.max(num);
             }
         }
     }

@@ -62,7 +62,7 @@ pub fn draw_tracker(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, i
 /// Call this separately from draw_tracker so modal input blocking works correctly
 pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_font: Option<&Font>, storage: &Storage) -> SongBrowserAction {
     let screen_rect = Rect::new(0.0, 0.0, screen_width(), screen_height());
-    let browser_action = state.song_browser.draw(ctx, screen_rect, icon_font);
+    let browser_action = state.song_browser.draw(ctx, screen_rect, icon_font, storage);
 
     match browser_action {
         SongBrowserAction::SelectPreview(category, idx) => {
@@ -83,14 +83,31 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
             if let Some(path) = path {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let path_str = path.to_string_lossy();
-                    if let Ok(song) = super::io::load_song_with_storage(&path_str, storage) {
-                        state.song_browser.set_preview(song);
+                    let path_str = path.to_string_lossy().to_string();
+                    // Check if this is a cloud path
+                    if Storage::is_userdata_path(&path_str) && storage.has_cloud() {
+                        // Async load from cloud storage
+                        state.song_browser.preview_song = None;
+                        state.song_browser.pending_preview_load = Some(crate::storage::load_async(path));
+                        state.set_status("Loading preview...", 2.0);
+                    } else {
+                        // Sync load for local/sample paths
+                        if let Ok(song) = super::io::load_song_with_storage(&path_str, storage) {
+                            state.song_browser.set_preview(song);
+                        }
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    state.song_browser.pending_load_path = Some(path);
+                    let path_str = path.to_string_lossy().to_string();
+                    if Storage::is_userdata_path(&path_str) && crate::auth::is_authenticated() {
+                        // User song: load from cloud storage
+                        state.song_browser.preview_song = None;
+                        state.song_browser.pending_preview_load = Some(crate::storage::load_async(path));
+                    } else {
+                        // Sample song: use existing manifest-based loading
+                        state.song_browser.pending_load_path = Some(path);
+                    }
                 }
             }
         }
@@ -120,12 +137,12 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
                 let path = song_info.path.clone();
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if std::fs::remove_file(&path).is_ok() {
+                    // Use storage delete for cloud support
+                    let path_str = path.to_string_lossy().to_string();
+                    if storage.delete_sync(&path_str).is_ok() {
                         state.set_status("Song deleted", 2.0);
-                        // Refresh the song list
-                        let (samples, user_songs) = super::song_browser::discover_songs();
-                        state.song_browser.samples = samples;
-                        state.song_browser.user_songs = user_songs;
+                        // Trigger refresh via pending_refresh flag (works for both local and cloud)
+                        state.song_browser.pending_refresh = true;
                         state.song_browser.selected_category = None;
                         state.song_browser.selected_index = None;
                         state.song_browser.preview_song = None;
@@ -134,6 +151,14 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
                     }
                 }
             }
+        }
+        SongBrowserAction::Refresh => {
+            // Set pending_refresh flag - main loop will handle async list
+            state.song_browser.pending_refresh = true;
+            state.song_browser.selected_category = None;
+            state.song_browser.selected_index = None;
+            state.song_browser.preview_song = None;
+            state.set_status("Refreshing...", 2.0);
         }
         SongBrowserAction::TogglePreview => {
             if state.song_browser.preview_playing {
@@ -194,8 +219,8 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
             } else {
-                // No current file - use auto-generated name
-                let path = next_available_song_name();
+                // No current file - use auto-generated name from browser's loaded lists
+                let path = next_available_song_name(&state.song_browser.samples, &state.song_browser.user_songs);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -368,11 +393,6 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
         .map(|n| format!("SF: {}", n))
         .unwrap_or_else(|| "No Soundfont".to_string());
     draw_text(&sf_status, rect.x + 540.0, y2 + 14.0, 14.0, if state.audio.is_loaded() { TEXT_DIM } else { Color::new(0.8, 0.3, 0.3, 1.0) });
-
-    // Status message
-    if let Some(status) = state.get_status() {
-        draw_text(status, rect.x + 720.0, y2 + 14.0, 14.0, Color::new(1.0, 0.8, 0.3, 1.0));
-    }
 }
 
 /// Height of the channel strip header (simplified: just channel name + instrument)
@@ -1478,35 +1498,33 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 fn draw_status_bar(rect: Rect, state: &TrackerState) {
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::new(0.16, 0.16, 0.18, 1.0));
 
-    // Left side: Column-specific help based on current column and view
-    let column_help = match state.view {
+    // Left side: Status message in green (like world editor)
+    let status_end_x = if let Some(msg) = state.get_status() {
+        let msg_dims = measure_text(&msg, None, 14, 1.0);
+        draw_text(&msg, rect.x + 10.0, rect.y + 15.0, 14.0, Color::from_rgba(100, 255, 100, 255));
+        rect.x + 10.0 + msg_dims.width + 20.0
+    } else {
+        rect.x + 10.0
+    };
+
+    // Right side: Combined context help + shortcuts
+    let help_text = match state.view {
         TrackerView::Pattern => {
-            // Columns: 0=Note, 1=Volume, 2=Effect, 3=Effect param
             match state.current_column {
-                0 => "Note: Z-/ Q-] piano keys | ` note-off | Del clear",
-                1 => "Volume: 0-127 | Del clear",
-                2 => "Effect: 0=Arp 1=SlideUp 2=SlideDown 3=Porta 4=Vib A=VolSlide C=Vol E=Expr M=Mod P=Pan",
-                _ => "Effect Param: 0-127 | Del clear",
+                0 => "Note: piano keys | ` off | Del clear | Space: Play",
+                1 => "Vol: 0-127 | Del clear | Ctrl+S: Save",
+                2 => "Fx: 0-9 A-P | Del clear | Ctrl+O: Open",
+                _ => "Param: 0-127 | Del clear | Ctrl+N: New",
             }
         }
         TrackerView::Arrangement => {
-            "Tab: switch focus | Enter: edit pattern | +: new pattern | Del: remove | Shift+↑↓: reorder"
+            "Tab: focus | Enter: edit | +: new | Del: remove | Shift+↑↓: reorder"
         }
     };
 
-    draw_text(column_help, rect.x + 10.0, rect.y + 15.0, 14.0, TEXT_COLOR);
-
-    // Right side: Global shortcuts
-    let shortcuts = "Ctrl+S: Save | Ctrl+O: Open | Ctrl+N: New | Space: Play/Pause";
-
-    let shortcuts_width = shortcuts.len() as f32 * 6.5; // Approximate width
-    draw_text(
-        shortcuts,
-        rect.x + rect.w - shortcuts_width - 10.0,
-        rect.y + 15.0,
-        12.0,
-        TEXT_DIM,
-    );
+    let help_dims = measure_text(help_text, None, 12, 1.0);
+    let help_x = (rect.x + rect.w - help_dims.width - 10.0).max(status_end_x);
+    draw_text(help_text, help_x, rect.y + 15.0, 12.0, TEXT_DIM);
 }
 
 /// Handle keyboard and mouse input
@@ -1549,10 +1567,10 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState, storage: &Storag
                 state.set_status(&format!("Save failed: {}", e), 3.0);
             }
         } else {
-            // No current file - use auto-generated name
+            // No current file - use auto-generated name from browser's loaded lists
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let path = next_available_song_name();
+                let path = next_available_song_name(&state.song_browser.samples, &state.song_browser.user_songs);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }

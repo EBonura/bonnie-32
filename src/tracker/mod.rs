@@ -31,3 +31,9 @@ pub use psx_reverb::{PsxReverb, ReverbType};
 // WASM async loading functions for song browser
 #[allow(unused_imports)]
 pub use song_browser::{load_song_list, load_song_async};
+// Song browser types and discovery for main.rs cloud integration
+pub use song_browser::{SongCategory, SongInfo, SAMPLES_SONGS_DIR, USER_SONGS_DIR};
+#[cfg(not(target_arch = "wasm32"))]
+pub use song_browser::discover_songs_from_dir;
+// IO functions for cloud loading in main.rs
+pub use io::load_song_from_str;
