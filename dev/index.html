@@ -780,6 +780,7 @@
             tokenExpiry: 0,
             initialized: false,
             gisLoaded: false,
+            hiddenButton: null,  // Reference to hidden sign-in button element
 
             // Initialize auth - load GIS library and restore token from localStorage
             init: function() {
@@ -816,11 +817,33 @@
                         auto_select: false,
                         cancel_on_tap_outside: true
                     });
+
+                    // Pre-render hidden button for programmatic triggering
+                    GcpAuth.setupHiddenButton();
                 };
                 script.onerror = function() {
                     console.warn('Failed to load Google Identity Services');
                 };
                 document.head.appendChild(script);
+            },
+
+            // Pre-render hidden Google Sign-In button for programmatic triggering
+            setupHiddenButton: function() {
+                var container = document.createElement('div');
+                container.id = '_b32_hidden_signin';
+                container.style.cssText = 'position:absolute;top:-9999px;left:-9999px;';
+                document.body.appendChild(container);
+
+                google.accounts.id.renderButton(container, {
+                    type: 'standard',
+                    theme: 'filled_blue',
+                    size: 'large',
+                    text: 'signin_with',
+                    ux_mode: 'popup'  // Opens popup window
+                });
+
+                GcpAuth.hiddenButton = container.querySelector('div[role=button]');
+                console.log('Hidden sign-in button ready');
             },
 
             // Handle credential response from Google Sign-In
@@ -868,80 +891,26 @@
                 }
             },
 
-            // Trigger Google sign-in using One Tap / FedCM
+            // Trigger Google sign-in via hidden button -> popup window
             signIn: function() {
                 if (!GcpAuth.gisLoaded) {
                     console.warn('Google Identity Services not loaded yet');
                     return;
                 }
 
-                // Prompt for sign-in using Google One Tap
-                google.accounts.id.prompt(function(notification) {
-                    if (notification.isNotDisplayed()) {
-                        console.log('One Tap not displayed:', notification.getNotDisplayedReason());
-                        // Fallback: show the Google Sign-In button in a popup
-                        GcpAuth.showSignInPopup();
-                    } else if (notification.isSkippedMoment()) {
-                        console.log('One Tap skipped:', notification.getSkippedReason());
-                        // User dismissed, try popup
-                        GcpAuth.showSignInPopup();
-                    } else if (notification.isDismissedMoment()) {
-                        console.log('One Tap dismissed:', notification.getDismissedReason());
-                    }
-                });
-            },
-
-            // Fallback: Show sign-in popup when One Tap doesn't work
-            showSignInPopup: function() {
-                // Create a temporary container for the Google Sign-In button
-                var container = document.createElement('div');
-                container.id = '_b32_signin_container';
-                container.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10000;background:#222;padding:40px;border-radius:8px;text-align:center;';
-
-                var title = document.createElement('div');
-                title.textContent = 'Sign in with Google';
-                title.style.cssText = 'color:#fff;font-size:18px;margin-bottom:20px;';
-                container.appendChild(title);
-
-                var buttonDiv = document.createElement('div');
-                buttonDiv.id = '_b32_signin_button';
-                container.appendChild(buttonDiv);
-
-                var cancelBtn = document.createElement('button');
-                cancelBtn.textContent = 'Cancel';
-                cancelBtn.style.cssText = 'margin-top:20px;padding:8px 24px;background:#444;color:#fff;border:none;border-radius:4px;cursor:pointer;';
-                cancelBtn.onclick = function() {
-                    document.body.removeChild(container);
-                };
-                container.appendChild(cancelBtn);
-
-                document.body.appendChild(container);
-
-                // Render the Google Sign-In button
-                google.accounts.id.renderButton(buttonDiv, {
-                    theme: 'filled_blue',
-                    size: 'large',
-                    type: 'standard',
-                    text: 'signin_with'
-                });
-
-                // Remove container after successful sign-in
-                var checkInterval = setInterval(function() {
-                    if (GcpAuth.idToken) {
-                        clearInterval(checkInterval);
-                        if (document.getElementById('_b32_signin_container')) {
-                            document.body.removeChild(container);
+                if (!GcpAuth.hiddenButton) {
+                    console.warn('Sign-in button not ready, attempting setup...');
+                    GcpAuth.setupHiddenButton();
+                    setTimeout(function() {
+                        if (GcpAuth.hiddenButton) {
+                            GcpAuth.hiddenButton.click();
                         }
-                    }
-                }, 500);
+                    }, 100);
+                    return;
+                }
 
-                // Timeout after 60 seconds
-                setTimeout(function() {
-                    clearInterval(checkInterval);
-                    if (document.getElementById('_b32_signin_container')) {
-                        document.body.removeChild(container);
-                    }
-                }, 60000);
+                // Single click opens Google popup window directly
+                GcpAuth.hiddenButton.click();
             },
 
             // SHA256 hash function
