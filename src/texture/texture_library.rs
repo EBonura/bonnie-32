@@ -171,16 +171,18 @@ impl TextureLibrary {
 
         let mut count = 0;
 
-        // Load sample textures
-        count += self.load_manifest_from_dir(SAMPLES_TEXTURES_DIR, TextureSource::Sample).await?;
-
-        // Load user textures
+        // Skip sample textures on WASM - they're loaded by JavaScript prefetchAll
+        // Only load user textures
         count += self.load_manifest_from_dir(USER_TEXTURES_DIR, TextureSource::User).await?;
 
         Ok(count)
     }
 
     /// Load textures from manifest in a specific directory (WASM)
+    ///
+    /// The manifest supports section headers like `[subdirectory]` to organize
+    /// textures into subdirectories. Files listed after a section header are
+    /// loaded from that subdirectory.
     #[cfg(target_arch = "wasm32")]
     async fn load_manifest_from_dir(&mut self, dir: &str, source: TextureSource) -> Result<usize, TextureError> {
         use macroquad::prelude::load_string;
@@ -195,13 +197,31 @@ impl TextureLibrary {
         };
 
         let mut loaded = 0;
+        let mut current_subdir: Option<String> = None;
+
         for line in manifest.lines() {
-            let filename = line.trim();
-            if filename.is_empty() || filename.starts_with('#') {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
                 continue;
             }
 
-            let path = format!("{}/{}", dir, filename);
+            // Check for section header like [subdirectory]
+            if line.starts_with('[') && line.ends_with(']') {
+                let subdir = &line[1..line.len()-1];
+                current_subdir = if subdir.is_empty() {
+                    None
+                } else {
+                    Some(subdir.to_string())
+                };
+                continue;
+            }
+
+            // Build the full path including subdirectory if present
+            let path = match &current_subdir {
+                Some(subdir) => format!("{}/{}/{}", dir, subdir, line),
+                None => format!("{}/{}", dir, line),
+            };
+
             match macroquad::prelude::load_file(&path).await {
                 Ok(bytes) => match UserTexture::load_from_bytes(&bytes) {
                     Ok(mut tex) => {
@@ -220,11 +240,11 @@ impl TextureLibrary {
                         loaded += 1;
                     }
                     Err(e) => {
-                        eprintln!("Failed to parse texture {}: {}", filename, e);
+                        eprintln!("Failed to parse texture {}: {}", path, e);
                     }
                 },
                 Err(e) => {
-                    eprintln!("Failed to load texture file {}: {}", filename, e);
+                    eprintln!("Failed to load texture file {}: {}", path, e);
                 }
             }
         }

@@ -30,5 +30,8 @@ pub use song_browser::{SongBrowserAction, SongCategory, SAMPLES_SONGS_DIR, USER_
 #[allow(unused_imports)]
 pub use psx_reverb::{PsxReverb, ReverbType};
 // WASM async loading functions for song browser
-pub use song_browser::{load_song_list, load_song_async, discover_songs};
+pub use song_browser::{load_song_list, load_song_async};
+// Native-only discovery function
+#[cfg(not(target_arch = "wasm32"))]
+pub use song_browser::discover_songs;
 // Actions used internally by layout.rs and state.rs

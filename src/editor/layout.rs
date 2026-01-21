@@ -546,10 +546,22 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
 
     #[cfg(target_arch = "wasm32")]
     {
+        // Upload (import from local file)
         if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Upload") {
             action = EditorAction::Import;
         }
-        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Download") {
+
+        // Save to cloud (only enabled when authenticated)
+        if crate::auth::is_authenticated() {
+            if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Save to cloud") {
+                action = EditorAction::Save;
+            }
+        } else {
+            toolbar.icon_button_disabled(ctx, icon::SAVE, icon_font, "Sign in to save custom levels");
+        }
+
+        // Download (export to local file)
+        if toolbar.icon_button(ctx, icon::DOWNLOAD, icon_font, "Download") {
             action = EditorAction::Export;
         }
     }

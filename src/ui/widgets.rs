@@ -287,6 +287,14 @@ impl Toolbar {
         icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active)
     }
 
+    /// Add a disabled icon button (grayed out, no click, shows tooltip)
+    pub fn icon_button_disabled(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str) {
+        let size = (self.rect.h - 4.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), size, size);
+        self.cursor_x += size + self.spacing;
+        icon_button_disabled(ctx, btn_rect, icon, icon_font, tooltip);
+    }
+
     /// Add a letter button with active state (for object type picker)
     pub fn letter_button_active(&mut self, ctx: &mut UiContext, letter: char, tooltip: &str, is_active: bool) -> bool {
         let size = (self.rect.h - 4.0).round();
@@ -457,6 +465,24 @@ pub fn icon_button(ctx: &mut UiContext, rect: Rect, icon: char, icon_font: Optio
 /// Draw an icon button with active state highlighting (rounded cyan background when active)
 pub fn icon_button_active(ctx: &mut UiContext, rect: Rect, icon: char, icon_font: Option<&Font>, tooltip: &str, is_active: bool) -> bool {
     draw_flat_icon_button(ctx, rect, icon, icon_font, tooltip, is_active)
+}
+
+/// Draw a disabled icon button (grayed out, tooltip only, no click response)
+pub fn icon_button_disabled(ctx: &mut UiContext, rect: Rect, icon: char, icon_font: Option<&Font>, tooltip: &str) {
+    let id = ctx.next_id();
+    let hovered = ctx.mouse.inside(&rect);
+
+    if hovered {
+        ctx.set_hot(id);
+        if !tooltip.is_empty() {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+    }
+
+    // Draw icon dimmed
+    let icon_size = (rect.h * 0.55).min(16.0);
+    let disabled_color = Color::from_rgba(100, 100, 100, 255);
+    draw_icon_centered(icon_font, icon, &rect, icon_size, disabled_color);
 }
 
 /// Draw a flat icon button with optional active state (MuseScore style)

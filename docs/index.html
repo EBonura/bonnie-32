@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BONNIE-32 v0.1.8</title>
+    <title>BONNIE-32 v0.1.9</title>
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -57,7 +57,7 @@
 </head>
 <body>
     <div id="loading">
-        <div>Loading BONNIE-32 v0.1.8...</div>
+        <div>Loading BONNIE-32 v0.1.9...</div>
         <div id="loading-bar-container">
             <div id="loading-bar"></div>
         </div>
@@ -767,7 +767,8 @@
 
         var GcpAuth = {
             clientId: '93370111666-0ehu6ri1913ht4f7ur6gauiqffq6nvll.apps.googleusercontent.com',
-            accessToken: null,
+            idToken: null,       // JWT for Cloud Run authentication
+            accessToken: null,   // Kept for compatibility (not used for Cloud Run)
             userIdHash: null,
             tokenExpiry: 0,
             initialized: false,
@@ -779,12 +780,13 @@
                 GcpAuth.initialized = true;
 
                 // Restore token from localStorage if still valid
-                var stored = localStorage.getItem('_b32_gcp_token');
+                var storedIdToken = localStorage.getItem('_b32_gcp_id_token');
                 var storedExpiry = parseInt(localStorage.getItem('_b32_gcp_token_expiry') || '0');
                 var storedHash = localStorage.getItem('_b32_gcp_user_hash');
 
-                if (stored && storedExpiry > Date.now() && storedHash) {
-                    GcpAuth.accessToken = stored;
+                if (storedIdToken && storedExpiry > Date.now() && storedHash) {
+                    GcpAuth.idToken = storedIdToken;
+                    GcpAuth.accessToken = storedIdToken; // For compatibility
                     GcpAuth.tokenExpiry = storedExpiry;
                     GcpAuth.userIdHash = storedHash;
                     console.log('GCP auth restored from localStorage');
@@ -798,6 +800,14 @@
                 script.onload = function() {
                     GcpAuth.gisLoaded = true;
                     console.log('Google Identity Services loaded');
+
+                    // Initialize Google Sign-In with ID token callback
+                    google.accounts.id.initialize({
+                        client_id: GcpAuth.clientId,
+                        callback: GcpAuth.handleCredentialResponse,
+                        auto_select: false,
+                        cancel_on_tap_outside: true
+                    });
                 };
                 script.onerror = function() {
                     console.warn('Failed to load Google Identity Services');
@@ -805,61 +815,119 @@
                 document.head.appendChild(script);
             },
 
-            // Trigger Google sign-in
+            // Handle credential response from Google Sign-In
+            handleCredentialResponse: async function(response) {
+                if (response.credential) {
+                    GcpAuth.idToken = response.credential;
+                    GcpAuth.accessToken = response.credential; // For compatibility
+
+                    // Decode JWT to get expiry and user info
+                    // JWT format: header.payload.signature (base64url encoded)
+                    try {
+                        var parts = response.credential.split('.');
+                        if (parts.length === 3) {
+                            var payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+
+                            // Get expiry from JWT (exp is in seconds)
+                            GcpAuth.tokenExpiry = (payload.exp || 0) * 1000;
+
+                            // Hash the user's sub (unique Google ID) for privacy
+                            if (payload.sub) {
+                                GcpAuth.userIdHash = await GcpAuth.sha256(payload.sub);
+                                localStorage.setItem('_b32_gcp_user_hash', GcpAuth.userIdHash);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Failed to decode JWT:', e);
+                        // Fallback: assume 1 hour expiry
+                        GcpAuth.tokenExpiry = Date.now() + 3600 * 1000;
+                    }
+
+                    // Store in localStorage
+                    localStorage.setItem('_b32_gcp_id_token', response.credential);
+                    localStorage.setItem('_b32_gcp_token_expiry', GcpAuth.tokenExpiry.toString());
+
+                    console.log('GCP sign-in successful (ID token)');
+                    console.log('User ID hash computed');
+                } else {
+                    console.warn('GCP sign-in failed: no credential');
+                }
+            },
+
+            // Trigger Google sign-in using One Tap / FedCM
             signIn: function() {
                 if (!GcpAuth.gisLoaded) {
                     console.warn('Google Identity Services not loaded yet');
                     return;
                 }
 
-                // Use Google Identity Services OAuth2 flow
-                var client = google.accounts.oauth2.initTokenClient({
-                    client_id: GcpAuth.clientId,
-                    scope: 'openid email',
-                    callback: function(response) {
-                        if (response.access_token) {
-                            GcpAuth.accessToken = response.access_token;
-                            // Token typically expires in 1 hour (3600 seconds)
-                            GcpAuth.tokenExpiry = Date.now() + (response.expires_in || 3600) * 1000;
-
-                            // Store in localStorage
-                            localStorage.setItem('_b32_gcp_token', response.access_token);
-                            localStorage.setItem('_b32_gcp_token_expiry', GcpAuth.tokenExpiry.toString());
-
-                            // Fetch user info to get user ID for hashing
-                            GcpAuth.fetchUserInfo();
-
-                            console.log('GCP sign-in successful');
-                        } else {
-                            console.warn('GCP sign-in failed:', response);
-                        }
-                    },
-                    error_callback: function(error) {
-                        console.error('GCP sign-in error:', error);
+                // Prompt for sign-in using Google One Tap
+                google.accounts.id.prompt(function(notification) {
+                    if (notification.isNotDisplayed()) {
+                        console.log('One Tap not displayed:', notification.getNotDisplayedReason());
+                        // Fallback: show the Google Sign-In button in a popup
+                        GcpAuth.showSignInPopup();
+                    } else if (notification.isSkippedMoment()) {
+                        console.log('One Tap skipped:', notification.getSkippedReason());
+                        // User dismissed, try popup
+                        GcpAuth.showSignInPopup();
+                    } else if (notification.isDismissedMoment()) {
+                        console.log('One Tap dismissed:', notification.getDismissedReason());
                     }
                 });
-
-                client.requestAccessToken();
             },
 
-            // Fetch user info and compute hashed user ID
-            fetchUserInfo: async function() {
-                if (!GcpAuth.accessToken) return;
+            // Fallback: Show sign-in popup when One Tap doesn't work
+            showSignInPopup: function() {
+                // Create a temporary container for the Google Sign-In button
+                var container = document.createElement('div');
+                container.id = '_b32_signin_container';
+                container.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10000;background:#222;padding:40px;border-radius:8px;text-align:center;';
 
-                try {
-                    var response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-                        headers: { 'Authorization': 'Bearer ' + GcpAuth.accessToken }
-                    });
-                    if (response.ok) {
-                        var info = await response.json();
-                        // Hash the user's sub (unique Google ID) for privacy
-                        GcpAuth.userIdHash = await GcpAuth.sha256(info.sub);
-                        localStorage.setItem('_b32_gcp_user_hash', GcpAuth.userIdHash);
-                        console.log('User ID hash computed');
+                var title = document.createElement('div');
+                title.textContent = 'Sign in with Google';
+                title.style.cssText = 'color:#fff;font-size:18px;margin-bottom:20px;';
+                container.appendChild(title);
+
+                var buttonDiv = document.createElement('div');
+                buttonDiv.id = '_b32_signin_button';
+                container.appendChild(buttonDiv);
+
+                var cancelBtn = document.createElement('button');
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.style.cssText = 'margin-top:20px;padding:8px 24px;background:#444;color:#fff;border:none;border-radius:4px;cursor:pointer;';
+                cancelBtn.onclick = function() {
+                    document.body.removeChild(container);
+                };
+                container.appendChild(cancelBtn);
+
+                document.body.appendChild(container);
+
+                // Render the Google Sign-In button
+                google.accounts.id.renderButton(buttonDiv, {
+                    theme: 'filled_blue',
+                    size: 'large',
+                    type: 'standard',
+                    text: 'signin_with'
+                });
+
+                // Remove container after successful sign-in
+                var checkInterval = setInterval(function() {
+                    if (GcpAuth.idToken) {
+                        clearInterval(checkInterval);
+                        if (document.getElementById('_b32_signin_container')) {
+                            document.body.removeChild(container);
+                        }
                     }
-                } catch (e) {
-                    console.error('Failed to fetch user info:', e);
-                }
+                }, 500);
+
+                // Timeout after 60 seconds
+                setTimeout(function() {
+                    clearInterval(checkInterval);
+                    if (document.getElementById('_b32_signin_container')) {
+                        document.body.removeChild(container);
+                    }
+                }, 60000);
             },
 
             // SHA256 hash function
@@ -872,29 +940,37 @@
 
             // Sign out
             signOut: function() {
+                GcpAuth.idToken = null;
                 GcpAuth.accessToken = null;
                 GcpAuth.userIdHash = null;
                 GcpAuth.tokenExpiry = 0;
+                localStorage.removeItem('_b32_gcp_id_token');
                 localStorage.removeItem('_b32_gcp_token');
                 localStorage.removeItem('_b32_gcp_token_expiry');
                 localStorage.removeItem('_b32_gcp_user_hash');
+
+                // Revoke Google session if possible
+                if (GcpAuth.gisLoaded) {
+                    google.accounts.id.disableAutoSelect();
+                }
+
                 console.log('GCP signed out');
             },
 
-            // Check if authenticated (token exists and not expired)
+            // Check if authenticated (ID token exists and not expired)
             isAuthenticated: function() {
-                return GcpAuth.accessToken && GcpAuth.tokenExpiry > Date.now() && GcpAuth.userIdHash ? 1 : 0;
+                return GcpAuth.idToken && GcpAuth.tokenExpiry > Date.now() && GcpAuth.userIdHash ? 1 : 0;
             },
 
-            // Get access token length
+            // Get access token length (returns ID token for Cloud Run auth)
             getAccessTokenLen: function() {
-                return GcpAuth.accessToken ? GcpAuth.accessToken.length : 0;
+                return GcpAuth.idToken ? GcpAuth.idToken.length : 0;
             },
 
-            // Copy access token to WASM memory
+            // Copy access token to WASM memory (returns ID token for Cloud Run auth)
             copyAccessToken: function(destPtr, maxLen) {
-                if (!GcpAuth.accessToken) return 0;
-                return writeWasmBytes(destPtr, new TextEncoder().encode(GcpAuth.accessToken), maxLen);
+                if (!GcpAuth.idToken) return 0;
+                return writeWasmBytes(destPtr, new TextEncoder().encode(GcpAuth.idToken), maxLen);
             },
 
             // Get user ID hash length
@@ -1100,7 +1176,7 @@
                 var options = {
                     method: method,
                     headers: {
-                        'Authorization': 'Bearer ' + GcpAuth.accessToken,
+                        'Authorization': 'Bearer ' + GcpAuth.idToken,
                         'Content-Type': 'application/json'
                     }
                 };
@@ -1226,7 +1302,8 @@
             TextureCache.prefetchAll(),
             SoundfontCache.prefetch()
         ]).then(function() {
-            load('bonnie-32.wasm');
+            // Add version for cache-busting
+            load('bonnie-32.wasm?v=0.1.10');
         });
 
     })();

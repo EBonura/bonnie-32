@@ -1216,8 +1216,9 @@ async fn main() {
             if ts.song_browser.pending_load_list {
                 ts.song_browser.pending_load_list = false;
                 use tracker::load_song_list;
-                let songs = load_song_list().await;
-                ts.song_browser.songs = songs;
+                let (samples, user_songs) = load_song_list().await;
+                ts.song_browser.samples = samples;
+                ts.song_browser.user_songs = user_songs;
             }
             // Load individual song preview if pending
             if let Some(path) = ts.song_browser.pending_load_path.take() {
