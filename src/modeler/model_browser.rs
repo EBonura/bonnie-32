@@ -8,7 +8,7 @@
 //! - MY ASSETS: user-created assets (editable, cloud-synced)
 
 use macroquad::prelude::*;
-use crate::storage::{Storage, PendingLoad, PendingList};
+use crate::storage::{PendingLoad, PendingList};
 use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
 use crate::world::SECTOR_SIZE;

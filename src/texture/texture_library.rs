@@ -7,7 +7,8 @@
 //! Handles both native filesystem discovery and WASM manifest-based loading.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 use super::user_texture::{TextureError, UserTexture};
 use crate::storage::Storage;

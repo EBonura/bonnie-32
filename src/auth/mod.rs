@@ -466,4 +466,4 @@ mod native {
 
 // Re-export native functions
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{init, sign_in, sign_out, is_authenticated, get_access_token, get_id_token, get_user_id_hash};
+pub use native::{init, sign_in, sign_out, is_authenticated, get_id_token, get_user_id_hash};

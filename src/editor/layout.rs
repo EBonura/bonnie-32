@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::storage::Storage;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, COLLAPSED_PANEL_HEIGHT, Toolbar, icon, draw_knob, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, COLLAPSED_PANEL_HEIGHT, Toolbar, icon, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
 use crate::input::InputState;
 use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard, GeometryClipboard, CopiedFace, CopiedFaceData};

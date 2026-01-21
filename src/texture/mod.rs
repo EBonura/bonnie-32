@@ -28,23 +28,17 @@ mod texture_library;
 mod texture_editor;
 mod import;
 
-pub use user_texture::{UserTexture, TextureSize, TextureError, generate_texture_id};
+pub use user_texture::{UserTexture, TextureSize, generate_texture_id};
 pub use texture_library::{
     TextureLibrary, TextureSource,
-    TEXTURES_USER_DIR, USER_TEXTURES_DIR, SAMPLES_TEXTURES_DIR,
 };
 pub use texture_editor::{
-    DrawTool, BrushShape, TextureEditorState, TextureUndoEntry,
+    TextureEditorState,
     TextureEditorMode, UvModalTransform, UvOperation,
     UvOverlayData, UvVertex, UvFace,
     draw_texture_canvas, draw_tool_panel, draw_palette_panel,
-    draw_mode_tabs, screen_to_texture,
+    draw_mode_tabs,
     ImportAction, draw_import_dialog,
 };
-pub use import::{
-    TextureImportState, ResizeMode, IMPORT_SIZES, ATLAS_CELL_SIZES,
-    load_png_to_import_state, generate_preview, preview_to_rgba,
-    extract_atlas_cell, atlas_dimensions, extract_selection, CropResizeEdge,
-};
+pub use import::load_png_to_import_state;
 // Re-export quantization types from modeler for use with TextureImportState
-pub use crate::modeler::{QuantizeMode, QuantizeOptions};

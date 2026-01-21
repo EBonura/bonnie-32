@@ -7,7 +7,9 @@
 //! Handles both native filesystem discovery and WASM manifest-based loading.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 use super::asset::{Asset, AssetError};
 use crate::storage::Storage;
@@ -215,7 +217,7 @@ impl AssetLibrary {
     /// Loads from both samples and user assets directories.
     #[cfg(target_arch = "wasm32")]
     pub async fn discover_from_manifest(&mut self) -> Result<usize, AssetError> {
-        use macroquad::prelude::load_string;
+        
 
         self.assets.clear();
         self.sample_names.clear();

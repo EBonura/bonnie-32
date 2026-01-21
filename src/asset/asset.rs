@@ -4,8 +4,9 @@
 //! Everything is a component (including mesh), enabling uniform handling
 //! and mesh-less assets (pure triggers, lights, spawn points).
 
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 use serde::{Deserialize, Serialize};
 use crate::modeler::{MeshPart, MeshProject};
 use crate::rasterizer::Vec3;

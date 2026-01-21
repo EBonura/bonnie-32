@@ -4,10 +4,12 @@
 //! self-contained asset that can be shared across projects.
 
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::io::Cursor;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
 
 use crate::rasterizer::{BlendMode, ClutDepth, Color15};
 use super::texture_library::TextureSource;

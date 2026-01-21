@@ -5,7 +5,10 @@
 
 use std::path::PathBuf;
 use crate::storage::Storage;
-use crate::world::{Level, load_level};
+use crate::world::Level;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::world::load_level;
 
 #[cfg(target_arch = "wasm32")]
 use crate::world::load_level_from_str;

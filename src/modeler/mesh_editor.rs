@@ -9,8 +9,9 @@
 
 use crate::rasterizer::{Vec3, Vec2, Vertex, Color15, Texture15, BlendMode, ClutDepth, ClutId, Clut, IndexedTexture};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::OnceLock;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 use super::state::MirrorSettings;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;

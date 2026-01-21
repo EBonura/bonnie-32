@@ -3,9 +3,11 @@
 //! Provides non-blocking storage operations using background threads.
 //! Operations can be polled each frame to check for completion.
 
-use super::{Storage, StorageError};
+use super::StorageError;
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::Storage;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 #[cfg(not(target_arch = "wasm32"))]

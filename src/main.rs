@@ -28,8 +28,8 @@ mod auth;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
-use world::{create_empty_level, load_level_with_storage, save_level_with_storage, serialize_level};
-use storage::{Storage, save_async, load_async, list_async};
+use world::{create_empty_level, load_level_with_storage, serialize_level, save_level_with_storage};
+use storage::{save_async, list_async, load_async, Storage};
 use ui::{UiContext, MouseState, Rect, draw_fixed_tabs_with_version, TabEntry, layout as tab_layout, icon};
 use editor::{EditorAction, draw_editor, draw_level_browser, BrowserAction, LevelCategory, discover_examples, discover_user_levels};
 use modeler::{ModelerAction, ModelBrowserAction, ObjImportAction, draw_model_browser, draw_obj_importer, discover_models, discover_meshes, ObjImporter, TextureImportResult};

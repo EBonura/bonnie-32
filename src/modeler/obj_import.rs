@@ -2,7 +2,7 @@
 //! Supports basic OBJ format: vertices (v), texture coords (vt), normals (vn), faces (f)
 //! Also includes MTL parsing and PNG texture loading with quantization.
 
-use crate::rasterizer::{Vec2, Vec3, Vertex, ClutDepth, Clut};
+use crate::rasterizer::{Vec2, Vec3, Vertex, Clut, ClutDepth};
 use super::mesh_editor::{EditableMesh, IndexedAtlas, EditFace};
 use std::path::Path;
 

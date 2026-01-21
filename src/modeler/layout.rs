@@ -11,8 +11,8 @@ use crate::asset::AssetComponent;
 use crate::texture::{
     UserTexture, TextureSize, generate_texture_id,
     draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
-    TextureEditorMode, UvOverlayData, UvVertex, UvFace,
-    load_png_to_import_state, draw_import_dialog, ImportAction,
+    TextureEditorMode, UvOverlayData, UvVertex, UvFace, draw_import_dialog, ImportAction,
+    load_png_to_import_state,
 };
 use super::tools::ModelerToolId;
 use super::viewport::{draw_modeler_viewport, draw_modeler_viewport_ext};
@@ -887,47 +887,45 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
         }
     };
 
-    let mut modified = false;
-
-    match &mut component {
+    let modified = match &mut component {
         AssetComponent::Mesh { .. } => {
             // Mesh is handled specially by draw_mesh_editor_content, should not reach here
             return;
         }
         AssetComponent::Collision { shape, is_trigger } => {
-            modified = draw_collision_editor(ctx, x, y, width, shape, is_trigger, icon_font);
+            draw_collision_editor(ctx, x, y, width, shape, is_trigger, icon_font)
         }
         AssetComponent::Light { color, intensity, radius, offset } => {
-            modified = draw_light_component_editor(ctx, x, y, width, color, intensity, radius, offset, icon_font);
+            draw_light_component_editor(ctx, x, y, width, color, intensity, radius, offset, icon_font)
         }
         AssetComponent::Trigger { trigger_id, on_enter, on_exit } => {
-            modified = draw_trigger_editor(ctx, x, y, width, trigger_id, on_enter, on_exit, icon_font);
+            draw_trigger_editor(ctx, x, y, width, trigger_id, on_enter, on_exit, icon_font)
         }
         AssetComponent::Pickup { item_type, respawn_time } => {
-            modified = draw_pickup_editor(ctx, x, y, width, item_type, respawn_time, icon_font);
+            draw_pickup_editor(ctx, x, y, width, item_type, respawn_time, icon_font)
         }
         AssetComponent::Enemy { enemy_type, health, damage, patrol_radius } => {
-            modified = draw_enemy_editor(ctx, x, y, width, enemy_type, health, damage, patrol_radius, icon_font);
+            draw_enemy_editor(ctx, x, y, width, enemy_type, health, damage, patrol_radius, icon_font)
         }
         AssetComponent::Checkpoint { respawn_offset } => {
-            modified = draw_checkpoint_editor(ctx, x, y, width, respawn_offset, icon_font);
+            draw_checkpoint_editor(ctx, x, y, width, respawn_offset, icon_font)
         }
         AssetComponent::Door { required_key, start_open } => {
-            modified = draw_door_editor(ctx, x, y, width, required_key, start_open, icon_font);
+            draw_door_editor(ctx, x, y, width, required_key, start_open, icon_font)
         }
         AssetComponent::Audio { sound, volume, radius, looping } => {
-            modified = draw_audio_editor(ctx, x, y, width, sound, volume, radius, looping, icon_font);
+            draw_audio_editor(ctx, x, y, width, sound, volume, radius, looping, icon_font)
         }
         AssetComponent::Particle { effect, offset } => {
-            modified = draw_particle_editor(ctx, x, y, width, effect, offset, icon_font);
+            draw_particle_editor(ctx, x, y, width, effect, offset, icon_font)
         }
         AssetComponent::CharacterController { height, radius, step_height } => {
-            modified = draw_character_controller_editor(ctx, x, y, width, height, radius, step_height, icon_font);
+            draw_character_controller_editor(ctx, x, y, width, height, radius, step_height, icon_font)
         }
         AssetComponent::SpawnPoint { is_player_start } => {
-            modified = draw_spawn_point_editor(ctx, x, y, width, is_player_start, icon_font);
+            draw_spawn_point_editor(ctx, x, y, width, is_player_start, icon_font)
         }
-    }
+    };
 
     // Apply changes back to the asset
     if modified {
