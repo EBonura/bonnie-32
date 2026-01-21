@@ -24,6 +24,8 @@ pub struct PendingOps {
     pub save: Option<PendingSave>,
     /// Pending level load operation
     pub load: Option<PendingLoad>,
+    /// Pending asset (modeler) save operation
+    pub modeler_save: Option<PendingSave>,
     /// Status message to display (e.g., "Saving...")
     pub status_message: Option<String>,
 }
@@ -33,6 +35,7 @@ impl Default for PendingOps {
         Self {
             save: None,
             load: None,
+            modeler_save: None,
             status_message: None,
         }
     }
@@ -41,7 +44,7 @@ impl Default for PendingOps {
 impl PendingOps {
     /// Check if any operation is in progress
     pub fn is_busy(&self) -> bool {
-        self.save.is_some() || self.load.is_some()
+        self.save.is_some() || self.load.is_some() || self.modeler_save.is_some()
     }
 
     /// Get the current status message, if any

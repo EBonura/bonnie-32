@@ -667,19 +667,17 @@ async fn main() {
             }
 
             Tool::Modeler => {
-                let ms = &mut app.modeler;
-
                 // Block background input if any browser is open
                 let real_mouse_modeler = mouse_state;
-                if ms.model_browser.open || ms.obj_importer.open {
+                if app.modeler.model_browser.open || app.modeler.obj_importer.open {
                     ui_ctx.begin_modal();
                 }
 
                 // Draw modeler UI
                 let action = modeler::draw_modeler(
                     &mut ui_ctx,
-                    &mut ms.modeler_layout,
-                    &mut ms.modeler_state,
+                    &mut app.modeler.modeler_layout,
+                    &mut app.modeler.modeler_state,
                     &mut fb,
                     content_rect,
                     app.icon_font.as_ref(),
@@ -687,7 +685,14 @@ async fn main() {
                 );
 
                 // Handle modeler actions
-                handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.obj_importer);
+                // Intercept Save action for cloud storage support (both native and WASM)
+                if matches!(action, ModelerAction::Save) {
+                    handle_modeler_save_action(&mut app);
+                } else {
+                    let ms = &mut app.modeler;
+                    handle_modeler_action(action, &mut ms.modeler_state, &mut ms.model_browser, &mut ms.obj_importer);
+                }
+                let ms = &mut app.modeler;
 
                 // Draw model browser overlay if open
                 if ms.model_browser.open {
@@ -1327,6 +1332,32 @@ fn poll_pending_ops(app: &mut AppState) {
         }
     }
 
+    // Poll pending modeler (asset) save operation
+    if let Some(mut pending) = app.pending_ops.modeler_save.take() {
+        if pending.op.is_complete() {
+            match pending.op.take() {
+                Some(Ok(())) => {
+                    app.modeler.modeler_state.dirty = false;
+                    let mode_label = app.storage.mode().label();
+                    app.modeler.modeler_state.set_status(
+                        &format!("Saved ({}) {}", mode_label, pending.path.display()),
+                        3.0,
+                    );
+                }
+                Some(Err(e)) => {
+                    app.modeler.modeler_state.set_status(&format!("Save failed: {}", e), 5.0);
+                }
+                None => {
+                    app.modeler.modeler_state.set_status("Save failed: unknown error", 5.0);
+                }
+            }
+            app.pending_ops.status_message = None;
+        } else {
+            // Still pending, put it back
+            app.pending_ops.modeler_save = Some(pending);
+        }
+    }
+
     // Poll pending load operation
     if let Some(mut pending) = app.pending_ops.load.take() {
         if pending.op.is_complete() {
@@ -1555,6 +1586,62 @@ fn handle_save_action(app: &mut AppState) {
             }
             Err(e) => {
                 app.world_editor.editor_state.set_status(&format!("Save failed: {}", e), 5.0);
+            }
+        }
+    }
+}
+
+/// Handle modeler save action with async support for cloud storage
+fn handle_modeler_save_action(app: &mut AppState) {
+    // Don't start a new save if one is already in progress
+    if app.pending_ops.modeler_save.is_some() {
+        app.modeler.modeler_state.set_status("Save already in progress...", 1.0);
+        return;
+    }
+
+    let state = &mut app.modeler.modeler_state;
+
+    // Determine save path
+    let save_path = if let Some(path) = &state.current_file {
+        path.clone()
+    } else {
+        // Generate next available asset_XXX name
+        let default_path = next_available_asset_path();
+        state.current_file = Some(default_path.clone());
+        default_path
+    };
+
+    // Serialize asset to bytes
+    let data = match state.asset.to_bytes() {
+        Ok(data) => data,
+        Err(e) => {
+            state.set_status(&format!("Save failed: {}", e), 5.0);
+            return;
+        }
+    };
+
+    let storage = &app.storage;
+    let path_str = save_path.to_string_lossy().to_string();
+
+    // Use async save for cloud storage, sync for local
+    if storage.has_cloud() && storage::Storage::is_userdata_path(&path_str) {
+        // Start async save
+        app.modeler.modeler_state.set_status("Saving...", 30.0);
+        app.pending_ops.modeler_save = Some(save_async(save_path.clone(), data));
+        app.pending_ops.status_message = Some("Saving...".to_string());
+    } else {
+        // Sync save for local storage
+        match storage.write_sync(&path_str, &data) {
+            Ok(()) => {
+                app.modeler.modeler_state.dirty = false;
+                let mode_label = storage.mode().label();
+                app.modeler.modeler_state.set_status(
+                    &format!("Saved ({}) {}", mode_label, save_path.display()),
+                    3.0,
+                );
+            }
+            Err(e) => {
+                app.modeler.modeler_state.set_status(&format!("Save failed: {}", e), 5.0);
             }
         }
     }
@@ -1816,25 +1903,9 @@ fn handle_modeler_action(
             }
             state.set_status("Browse meshes", 2.0);
         }
-        #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::Save => {
-            if let Some(path) = state.current_file.clone() {
-                if let Err(e) = state.save_project(&path) {
-                    state.set_status(&format!("Save failed: {}", e), 5.0);
-                }
-            } else {
-                // No current file - save with auto-generated name (asset_001, asset_002, etc.)
-                let default_path = next_available_asset_path();
-                if let Err(e) = state.save_project(&default_path) {
-                    state.set_status(&format!("Save failed: {}", e), 5.0);
-                } else {
-                    state.current_file = Some(default_path);
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        ModelerAction::Save => {
-            state.set_status("Save not available in browser - use Export", 3.0);
+            // Handled by handle_modeler_save_action before this function is called
+            // This arm exists for completeness but should not be reached
         }
         #[cfg(not(target_arch = "wasm32"))]
         ModelerAction::SaveAs => {
