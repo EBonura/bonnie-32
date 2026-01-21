@@ -10,7 +10,9 @@ docs/textures/
 docs/mq_js_bundle.js
 
 # User data (local saves, not for distribution)
-assets/userdata/
+assets/userdata/**/*
+!assets/userdata/**/
+!assets/userdata/**/.gitkeep
 
 # Copyrighted PS1 model references (not for distribution)
 assets/samples/meshes/ps1-reference/
