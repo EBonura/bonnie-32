@@ -48,10 +48,10 @@ impl TexturePack {
         }
     }
 
-    /// Discover all texture packs in the assets/samples/textures directory (native only)
+    /// Discover all texture packs in the assets/samples/texture-packs directory (native only)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn discover_all() -> Vec<Self> {
-        let textures_dir = PathBuf::from("assets/samples/textures");
+        let textures_dir = PathBuf::from("assets/samples/texture-packs");
         let mut packs = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(&textures_dir) {
@@ -83,25 +83,40 @@ impl TexturePack {
     pub async fn load_from_manifest() -> Vec<Self> {
         use macroquad::prelude::*;
 
-        // Load and parse manifest
-        let manifest = match load_string("assets/samples/textures/manifest.txt").await {
+        // Load top-level manifest (list of pack names)
+        let packs_manifest = match load_string("assets/samples/texture-packs/manifest.txt").await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to load texture manifest: {}", e);
+                eprintln!("Failed to load texture packs manifest: {}", e);
                 wasm::hide_loading();
                 return Vec::new();
             }
         };
 
-        let pack_files = parse_manifest(&manifest);
         let mut packs = Vec::new();
 
-        for (pack_name, files) in pack_files {
+        for pack_name in packs_manifest.lines() {
+            let pack_name = pack_name.trim();
+            if pack_name.is_empty() {
+                continue;
+            }
+
             wasm::set_status(&format!("Loading {}...", pack_name));
 
-            let mut textures = Vec::with_capacity(files.len());
-            for filename in &files {
-                if let Some(mut tex) = load_single_texture(&pack_name, filename).await {
+            // Load this pack's manifest
+            let pack_manifest_path = format!("assets/samples/texture-packs/{}/manifest.txt", pack_name);
+            let pack_manifest = match load_string(&pack_manifest_path).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let mut textures = Vec::new();
+            for filename in pack_manifest.lines() {
+                let filename = filename.trim();
+                if filename.is_empty() {
+                    continue;
+                }
+                if let Some(mut tex) = load_single_texture(pack_name, filename).await {
                     // Quantize to PS1 15-bit color depth
                     tex.quantize_15bit();
                     textures.push(tex);
@@ -110,8 +125,8 @@ impl TexturePack {
 
             if !textures.is_empty() {
                 packs.push(TexturePack {
-                    name: pack_name.clone(),
-                    path: PathBuf::from(format!("assets/samples/textures/{}", pack_name)),
+                    name: pack_name.to_string(),
+                    path: PathBuf::from(format!("assets/samples/texture-packs/{}", pack_name)),
                     textures,
                 });
             }
@@ -162,7 +177,7 @@ fn parse_manifest(manifest: &str) -> Vec<(String, Vec<String>)> {
 /// Load a single texture from pack
 #[allow(dead_code)]
 async fn load_single_texture(pack_name: &str, filename: &str) -> Option<Texture> {
-    let tex_path = format!("assets/samples/textures/{}/{}", pack_name, filename);
+    let tex_path = format!("assets/samples/texture-packs/{}/{}", pack_name, filename);
     let tex_name = filename
         .strip_suffix(".png")
         .or_else(|| filename.strip_suffix(".PNG"))

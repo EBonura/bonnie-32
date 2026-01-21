@@ -9,19 +9,21 @@ use std::path::Path;
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/samples/textures");
+    println!("cargo:rerun-if-changed=assets/samples/texture-packs");
     println!("cargo:rerun-if-changed=assets/samples/levels");
     println!("cargo:rerun-if-changed=assets/samples/assets");
     println!("cargo:rerun-if-changed=assets/samples/meshes");
     println!("cargo:rerun-if-changed=assets/samples/songs");
 
     generate_texture_manifest();
+    generate_texture_packs_manifest();
     generate_levels_manifest();
     generate_models_manifest();
     generate_meshes_manifest();
     generate_songs_manifest();
 }
 
-/// Generate manifest for texture packs
+/// Generate manifest for UserTexture RON files in textures/
 fn generate_texture_manifest() {
     let textures_dir = Path::new("assets/samples/textures");
     let manifest_path = Path::new("assets/samples/textures/manifest.txt");
@@ -29,43 +31,24 @@ fn generate_texture_manifest() {
     let mut manifest = String::new();
 
     if textures_dir.exists() {
-        let mut packs: Vec<_> = fs::read_dir(textures_dir)
+        let mut textures: Vec<_> = fs::read_dir(textures_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
+            .filter(|e| {
+                let path = e.path();
+                path.is_file()
+                    && path
+                        .extension()
+                        .map(|ext| ext.to_ascii_lowercase() == "ron")
+                        .unwrap_or(false)
+            })
             .collect();
 
-        packs.sort_by_key(|e| e.file_name());
+        textures.sort_by_key(|e| e.file_name());
 
-        for pack_entry in packs {
-            let pack_path = pack_entry.path();
-            let pack_name = pack_entry.file_name().to_string_lossy().to_string();
-
-            // Get all PNG files in the pack
-            let mut textures: Vec<_> = fs::read_dir(&pack_path)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext.to_ascii_lowercase() == "png")
-                        .unwrap_or(false)
-                })
-                .collect();
-
-            textures.sort_by_key(|e| e.file_name());
-
-            if !textures.is_empty() {
-                // Pack header: [pack_name]
-                manifest.push_str(&format!("[{}]\n", pack_name));
-
-                for tex_entry in textures {
-                    let tex_name = tex_entry.file_name().to_string_lossy().to_string();
-                    manifest.push_str(&format!("{}\n", tex_name));
-                }
-
-                manifest.push('\n');
-            }
+        for tex_entry in textures {
+            let tex_name = tex_entry.file_name().to_string_lossy().to_string();
+            manifest.push_str(&format!("{}\n", tex_name));
         }
     }
 
@@ -75,6 +58,69 @@ fn generate_texture_manifest() {
     }
     let mut file = fs::File::create(manifest_path).unwrap();
     file.write_all(manifest.as_bytes()).unwrap();
+}
+
+/// Generate manifests for texture packs (PNG source images)
+/// Creates:
+/// - texture-packs/manifest.txt (list of pack names)
+/// - texture-packs/{pack}/manifest.txt (list of PNGs in each pack)
+fn generate_texture_packs_manifest() {
+    let packs_dir = Path::new("assets/samples/texture-packs");
+
+    if !packs_dir.exists() {
+        return;
+    }
+
+    let mut packs: Vec<_> = fs::read_dir(packs_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+
+    packs.sort_by_key(|e| e.file_name());
+
+    // Generate top-level manifest listing pack names
+    let mut packs_manifest = String::new();
+
+    for pack_entry in &packs {
+        let pack_path = pack_entry.path();
+        let pack_name = pack_entry.file_name().to_string_lossy().to_string();
+
+        // Get all PNG files in the pack
+        let mut textures: Vec<_> = fs::read_dir(&pack_path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext.to_ascii_lowercase() == "png")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        textures.sort_by_key(|e| e.file_name());
+
+        if !textures.is_empty() {
+            // Add to packs manifest
+            packs_manifest.push_str(&format!("{}\n", pack_name));
+
+            // Generate per-pack manifest
+            let mut pack_manifest = String::new();
+            for tex_entry in textures {
+                let tex_name = tex_entry.file_name().to_string_lossy().to_string();
+                pack_manifest.push_str(&format!("{}\n", tex_name));
+            }
+
+            let pack_manifest_path = pack_path.join("manifest.txt");
+            let mut file = fs::File::create(pack_manifest_path).unwrap();
+            file.write_all(pack_manifest.as_bytes()).unwrap();
+        }
+    }
+
+    // Write top-level packs manifest
+    let packs_manifest_path = packs_dir.join("manifest.txt");
+    let mut file = fs::File::create(packs_manifest_path).unwrap();
+    file.write_all(packs_manifest.as_bytes()).unwrap();
 }
 
 /// Generate manifest for levels (for WASM builds)

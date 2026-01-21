@@ -171,8 +171,10 @@ impl TextureLibrary {
 
         let mut count = 0;
 
-        // Skip sample textures on WASM - they're loaded by JavaScript prefetchAll
-        // Only load user textures
+        // Load sample textures (RON UserTexture definitions)
+        count += self.load_manifest_from_dir(SAMPLES_TEXTURES_DIR, TextureSource::Sample).await?;
+
+        // Load user textures
         count += self.load_manifest_from_dir(USER_TEXTURES_DIR, TextureSource::User).await?;
 
         Ok(count)
