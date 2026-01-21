@@ -225,6 +225,31 @@ async fn main() {
                     }
                 }
             }
+            // Tracker's song browser
+            {
+                let sb = &mut app.tracker.song_browser;
+                if sb.selected_category == Some(tracker::SongCategory::User) {
+                    sb.preview_song = None;
+                    sb.pending_preview_load = None;
+                }
+                sb.pending_user_list = None;
+                if app.storage.has_cloud() {
+                    sb.user_songs.clear();
+                    sb.pending_user_list = Some(list_async("assets/userdata/songs".to_string()));
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        sb.user_songs = tracker::discover_songs_from_dir(
+                            tracker::USER_SONGS_DIR,
+                            tracker::SongCategory::User,
+                        );
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        sb.user_songs = Vec::new();
+                    }
+                }
+            }
         }
 
         // Poll pending async operations (save, load)
@@ -1330,18 +1355,45 @@ async fn main() {
             // Load song list from manifest if pending
             if ts.song_browser.pending_load_list {
                 ts.song_browser.pending_load_list = false;
+                // Load samples from bundled manifest
                 use tracker::load_song_list;
-                let (samples, user_songs) = load_song_list().await;
+                let (samples, _manifest_user_songs) = load_song_list().await;
                 ts.song_browser.samples = samples;
-                ts.song_browser.user_songs = user_songs;
+                // User songs: load from cloud if authenticated, otherwise empty
+                if crate::auth::is_authenticated() {
+                    ts.song_browser.pending_user_list = Some(list_async("assets/userdata/songs".to_string()));
+                } else {
+                    ts.song_browser.user_songs = Vec::new();
+                }
             }
             // Load individual song preview if pending
             if let Some(path) = ts.song_browser.pending_load_path.take() {
+                let path_str = path.to_string_lossy().to_string();
+                if path_str.contains("userdata") && crate::auth::is_authenticated() {
+                    // User song from cloud: load via async API
+                    ts.song_browser.pending_preview_load = Some(load_async(path_str.into()));
+                } else {
+                    // Sample song: load from web server
+                    use tracker::load_song_async;
+                    if let Some(song) = load_song_async(&path).await {
+                        ts.song_browser.set_preview(song);
+                    } else {
+                        ts.set_status("Failed to load song preview", 3.0);
+                    }
+                }
+            }
+            // Load song from sample when "Open" is clicked (not preview, the actual song)
+            if let Some(path) = ts.pending_song_load_path.take() {
                 use tracker::load_song_async;
                 if let Some(song) = load_song_async(&path).await {
-                    ts.song_browser.set_preview(song);
+                    let name = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("song")
+                        .to_string();
+                    ts.apply_song(song, Some(path));
+                    ts.set_status(&format!("Loaded '{}'", name), 2.0);
                 } else {
-                    ts.set_status("Failed to load song preview", 3.0);
+                    ts.set_status("Failed to load song", 3.0);
                 }
             }
         }
@@ -1854,6 +1906,40 @@ fn poll_pending_ops(app: &mut AppState) {
             app.tracker.song_browser.pending_user_list = Some(pending);
         }
     }
+
+    // Poll pending song load (for async cloud/WASM song loading)
+    if let Some(mut pending) = app.tracker.pending_song_load.take() {
+        if pending.op.is_complete() {
+            let load_path = app.tracker.pending_song_path.take();
+            match pending.op.take() {
+                Some(Ok(data)) => {
+                    match parse_song_data(&data) {
+                        Ok(song) => {
+                            let name = load_path
+                                .as_ref()
+                                .and_then(|p| p.file_stem())
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("song")
+                                .to_string();
+                            app.tracker.apply_song(song, load_path);
+                            app.tracker.set_status(&format!("Loaded '{}'", name), 2.0);
+                        }
+                        Err(e) => {
+                            app.tracker.set_status(&format!("Failed to parse song: {}", e), 3.0);
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    app.tracker.set_status(&format!("Failed to load song: {}", e), 3.0);
+                }
+                None => {}
+            }
+        } else {
+            // Still pending, put it back
+            app.tracker.pending_song_load = Some(pending);
+        }
+    }
+
 }
 
 /// Parse song data from bytes (handles both compressed and uncompressed)

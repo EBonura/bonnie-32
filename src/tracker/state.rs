@@ -103,6 +103,13 @@ pub struct TrackerState {
     /// Song browser dialog
     pub song_browser: SongBrowser,
 
+    /// Pending async song load from cloud storage
+    pub pending_song_load: Option<crate::storage::PendingLoad>,
+    /// Path of pending song load (to set current_file after load completes)
+    pub pending_song_path: Option<PathBuf>,
+    /// Pending song load path for WASM manifest-based loading (samples)
+    pub pending_song_load_path: Option<PathBuf>,
+
     /// Preview song for browser playback (uses this instead of main song when Some)
     preview_song: Option<Song>,
 
@@ -220,6 +227,9 @@ impl TrackerState {
             actions: create_tracker_actions(),
             clipboard: None,
             song_browser: SongBrowser::new(),
+            pending_song_load: None,
+            pending_song_path: None,
+            pending_song_load_path: None,
             preview_song: None,
             tap_times: Vec::new(),
             pattern_split: SplitPanel::horizontal(2000).with_ratio(0.6).with_min_size(200.0),
@@ -1353,6 +1363,44 @@ impl TrackerState {
 
         self.set_status(&format!("Loaded: {}", path.file_name().unwrap_or_default().to_string_lossy()), 2.0);
         Ok(())
+    }
+
+    /// Apply a song that was loaded asynchronously
+    pub fn apply_song(&mut self, song: Song, path: Option<PathBuf>) {
+        self.song = song;
+        self.current_file = path.clone();
+        self.dirty = false;
+
+        // Reset playback state
+        self.playing = false;
+        self.playback_row = 0;
+        self.playback_pattern_idx = 0;
+        self.current_row = 0;
+        self.current_pattern_idx = 0;
+        self.current_channel = 0;
+        self.scroll_row = 0;
+        self.clear_selection();
+        self.audio.all_notes_off();
+
+        // Make sure channel instruments and settings are synced with audio engine
+        for (ch, &inst) in self.song.channel_instruments.iter().enumerate() {
+            self.audio.set_program(ch as i32, inst as i32);
+        }
+        self.sync_all_channel_settings();
+
+        // Apply reverb settings from loaded song
+        let reverb_type = ReverbType::from_index(self.song.reverb.preset);
+        self.audio.set_reverb_preset(reverb_type);
+        self.audio.set_reverb_wet_level(self.song.reverb.wet as f32 / 127.0);
+
+        // Apply master volume from loaded song
+        self.audio.set_master_volume(self.song.master_volume as f32 / 100.0);
+
+        if let Some(p) = path {
+            self.set_status(&format!("Loaded: {}", p.file_name().unwrap_or_default().to_string_lossy()), 2.0);
+        } else {
+            self.set_status("Song loaded", 2.0);
+        }
     }
 
     /// Create a new empty song

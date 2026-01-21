@@ -112,19 +112,40 @@ pub fn draw_song_browser(ctx: &mut UiContext, state: &mut TrackerState, icon_fon
             }
         }
         SongBrowserAction::OpenSong => {
-            let path = state.song_browser.selected_song().map(|s| s.path.clone());
-            if let Some(path) = path {
+            let song_info = state.song_browser.selected_song().cloned();
+            if let Some(song_info) = song_info {
+                let path = song_info.path.clone();
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Err(e) = state.load_from_file(&path, storage) {
-                        state.set_status(&format!("Load failed: {}", e), 3.0);
+                    let path_str = path.to_string_lossy().to_string();
+                    // For cloud user songs, use async loading
+                    if Storage::is_userdata_path(&path_str) && storage.has_cloud() {
+                        state.pending_song_load = Some(crate::storage::load_async(path.clone()));
+                        state.pending_song_path = Some(path);
+                        state.set_status("Loading song...", 2.0);
+                    } else {
+                        // Local/sample songs: sync load
+                        if let Err(e) = state.load_from_file(&path, storage) {
+                            state.set_status(&format!("Load failed: {}", e), 3.0);
+                        }
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    // TODO: WASM async load
-                    let _ = path;
-                    state.set_status("Loading...", 1.0);
+                    let path_str = path.to_string_lossy().to_string();
+                    let category = song_info.category;
+                    if Storage::is_userdata_path(&path_str) && crate::auth::is_authenticated() {
+                        // Cloud user song: async load
+                        state.pending_song_load = Some(crate::storage::load_async(path.clone()));
+                        state.pending_song_path = Some(path);
+                        state.set_status("Loading song...", 2.0);
+                    } else if category == super::song_browser::SongCategory::Sample {
+                        // Sample song: use pending_load_path for manifest-based loading
+                        state.pending_song_load_path = Some(path);
+                        state.set_status("Loading song...", 2.0);
+                    } else {
+                        state.set_status("Sign in to load user songs", 2.0);
+                    }
                 }
             }
         }
@@ -249,7 +270,25 @@ fn draw_header(ctx: &mut UiContext, rect: Rect, state: &mut TrackerState, icon_f
             // TODO: Trigger file upload from JavaScript
             state.set_status("Upload not implemented yet", 2.0);
         }
-        if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Download") {
+        // Save button - save to cloud when authenticated
+        if crate::auth::is_authenticated() {
+            if toolbar.icon_button(ctx, icon::SAVE, icon_font, "Save to Cloud (Ctrl+S)") {
+                if let Some(path) = state.current_file.clone() {
+                    if let Err(e) = state.save_to_file(&path, storage) {
+                        state.set_status(&format!("Save failed: {}", e), 3.0);
+                    }
+                } else {
+                    // No current file - use auto-generated name from browser's loaded lists
+                    let path = next_available_song_name(&state.song_browser.samples, &state.song_browser.user_songs);
+                    if let Err(e) = state.save_to_file(&path, storage) {
+                        state.set_status(&format!("Save failed: {}", e), 3.0);
+                    }
+                }
+            }
+        } else {
+            toolbar.icon_button_disabled(ctx, icon::SAVE, icon_font, "Sign in to save songs");
+        }
+        if toolbar.icon_button(ctx, icon::DOWNLOAD, icon_font, "Download") {
             // TODO: Trigger file download to JavaScript
             state.set_status("Download not implemented yet", 2.0);
         }
@@ -1562,14 +1601,31 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState, storage: &Storag
     }
     // Ctrl+S - Save song (auto-name if new)
     if ctrl_held && is_key_pressed(KeyCode::S) {
-        if let Some(path) = state.current_file.clone() {
-            if let Err(e) = state.save_to_file(&path, storage) {
-                state.set_status(&format!("Save failed: {}", e), 3.0);
+        #[cfg(target_arch = "wasm32")]
+        {
+            if crate::auth::is_authenticated() {
+                if let Some(path) = state.current_file.clone() {
+                    if let Err(e) = state.save_to_file(&path, storage) {
+                        state.set_status(&format!("Save failed: {}", e), 3.0);
+                    }
+                } else {
+                    let path = next_available_song_name(&state.song_browser.samples, &state.song_browser.user_songs);
+                    if let Err(e) = state.save_to_file(&path, storage) {
+                        state.set_status(&format!("Save failed: {}", e), 3.0);
+                    }
+                }
+            } else {
+                state.set_status("Sign in to save songs", 2.0);
             }
-        } else {
-            // No current file - use auto-generated name from browser's loaded lists
-            #[cfg(not(target_arch = "wasm32"))]
-            {
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(path) = state.current_file.clone() {
+                if let Err(e) = state.save_to_file(&path, storage) {
+                    state.set_status(&format!("Save failed: {}", e), 3.0);
+                }
+            } else {
+                // No current file - use auto-generated name from browser's loaded lists
                 let path = next_available_song_name(&state.song_browser.samples, &state.song_browser.user_songs);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -1577,10 +1633,6 @@ fn handle_input(_ctx: &mut UiContext, state: &mut TrackerState, storage: &Storag
                 if let Err(e) = state.save_to_file(&path, storage) {
                     state.set_status(&format!("Save failed: {}", e), 3.0);
                 }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                state.set_status("Save not available on web", 2.0);
             }
         }
     }
