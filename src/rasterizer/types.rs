@@ -1313,6 +1313,21 @@ impl Light {
         }
     }
 
+    /// Create a new point light with custom color
+    pub fn point_colored(position: Vec3, radius: f32, intensity: f32, r: f32, g: f32, b: f32) -> Self {
+        Self {
+            light_type: LightType::Point { position, radius },
+            color: Color::new(
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+            ),
+            intensity,
+            enabled: true,
+            name: String::from("Point"),
+        }
+    }
+
     /// Create a new spot light
     pub fn spot(position: Vec3, direction: Vec3, angle: f32, radius: f32, intensity: f32) -> Self {
         Self {

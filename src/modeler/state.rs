@@ -838,6 +838,8 @@ pub struct ModelerState {
     // Component management UI
     pub selected_component: Option<usize>,      // Index in asset.components for editing
     pub components_section_expanded: bool,      // Whether Components section is expanded
+    pub properties_section_expanded: bool,      // Whether Properties section is expanded
+    pub lights_section_expanded: bool,          // Whether Lights section is expanded
     pub add_component_menu_open: bool,          // Whether the "Add Component" popup is open
     pub add_component_btn_rect: Option<crate::ui::Rect>, // Position of add button for popup positioning
     pub hidden_components: std::collections::HashSet<usize>, // Hidden component indices
@@ -1120,6 +1122,8 @@ impl ModelerState {
             // Component management UI
             selected_component: None,
             components_section_expanded: true,
+            properties_section_expanded: true,
+            lights_section_expanded: true,
             add_component_menu_open: false,
             add_component_btn_rect: None,
             hidden_components: std::collections::HashSet::new(),

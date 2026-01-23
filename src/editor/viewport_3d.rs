@@ -3132,15 +3132,29 @@ pub fn draw_viewport_3d(
         state.level.rooms.iter()
             .flat_map(|room| {
                 room.objects.iter()
-                    .filter(|obj| {
-                        obj.enabled && state.asset_library.get_by_id(obj.asset_id)
-                            .map(|a| a.has_light())
-                            .unwrap_or(false)
-                    })
-                    .map(|obj| {
-                        let world_pos = obj.world_position(room);
-                        // Use default light settings (can be expanded later with asset component data)
-                        Light::point(world_pos, 5000.0, 1.0)
+                    .filter_map(|obj| {
+                        if !obj.enabled {
+                            return None;
+                        }
+                        let asset = state.asset_library.get_by_id(obj.asset_id)?;
+                        // Find Light component and extract its properties
+                        for comp in &asset.components {
+                            if let crate::asset::AssetComponent::Light { color, intensity, radius, offset } = comp {
+                                let base_pos = obj.world_position(room);
+                                // Apply light offset to get actual light position
+                                let light_pos = Vec3::new(
+                                    base_pos.x + offset[0],
+                                    base_pos.y + offset[1],
+                                    base_pos.z + offset[2],
+                                );
+                                // Convert color from [u8; 3] to normalized RGB
+                                let r = color[0] as f32 / 255.0;
+                                let g = color[1] as f32 / 255.0;
+                                let b = color[2] as f32 / 255.0;
+                                return Some(Light::point_colored(light_pos, *radius, *intensity, r, g, b));
+                            }
+                        }
+                        None
                     })
             })
             .collect()
@@ -3857,15 +3871,33 @@ pub fn draw_viewport_3d(
                     RasterColor::new(100, 100, 100)
                 };
 
-                // For lights, draw 3D filled octahedron gizmo
+                // For lights, draw 3D filled octahedron gizmo at light position (with offset)
                 if is_light {
+                    // Get light offset from the Light component
+                    let light_pos = if let Some(asset) = asset {
+                        let mut pos = world_pos;
+                        for comp in &asset.components {
+                            if let crate::asset::AssetComponent::Light { offset, .. } = comp {
+                                pos = Vec3::new(
+                                    world_pos.x + offset[0],
+                                    world_pos.y + offset[1],
+                                    world_pos.z + offset[2],
+                                );
+                                break;
+                            }
+                        }
+                        pos
+                    } else {
+                        world_pos
+                    };
+
                     let octa_size = if is_selected { 80.0 } else { 50.0 };
                     let octa_color = if is_selected {
                         RasterColor::new(255, 255, 255) // White when selected
                     } else {
                         color
                     };
-                    draw_filled_octahedron(fb, &state.camera_3d, world_pos, octa_size, octa_color);
+                    draw_filled_octahedron(fb, &state.camera_3d, light_pos, octa_size, octa_color);
                 } else if is_player_spawn {
                     // PlayerStart: draw collision cylinder wireframe only (no dot)
                     let settings = &state.level.player_settings;

@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::storage::Storage;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
@@ -542,58 +542,96 @@ fn draw_overview_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 // Left Panel (Overview + Selection + Lights + Shortcuts)
 // ============================================================================
 
-/// Draw a simple section label (non-collapsible, matches World Editor panel header style)
-fn draw_section_label(x: f32, y: &mut f32, width: f32, label: &str) {
-    let header_h = 20.0;
-    draw_rectangle(x, *y, width, header_h, Color::from_rgba(50, 50, 60, 255));
-    draw_text(label, x + 4.0, *y + 14.0, 16.0, WHITE);
-    draw_rectangle_lines(x, *y, width, header_h, 1.0, Color::from_rgba(80, 80, 80, 255));
-    *y += header_h;
-}
+const COLLAPSED_HEADER_HEIGHT: f32 = 20.0;
 
 fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let panel_bg = Color::from_rgba(35, 35, 40, 255);
+
+    // Calculate available height for expanded panels
+    let total_height = rect.h;
+    let num_panels = 3;
+
+    // Count collapsed panels to distribute remaining space
+    let collapsed_count = [
+        !state.components_section_expanded,
+        !state.properties_section_expanded,
+        !state.lights_section_expanded,
+    ].iter().filter(|&&c| c).count();
+
+    let expanded_count = num_panels - collapsed_count;
+    let collapsed_height = collapsed_count as f32 * COLLAPSED_HEADER_HEIGHT;
+    let available_for_expanded = total_height - collapsed_height;
+
+    // Distribute height among expanded panels
+    let expanded_panel_height = if expanded_count > 0 {
+        available_for_expanded / expanded_count as f32
+    } else {
+        100.0
+    };
+
     let mut y = rect.y;
-    let width = rect.w;
-    let x = rect.x;
 
     // === COMPONENTS SECTION ===
-    draw_section_label(x, &mut y, width, "Components");
-    draw_components_section(ctx, x, &mut y, width, state, icon_font);
-    y += 4.0;
+    let comp_collapsed = !state.components_section_expanded;
+    let comp_h = if comp_collapsed { COLLAPSED_HEADER_HEIGHT } else { expanded_panel_height };
+    let comp_rect = Rect::new(rect.x, y, rect.w, comp_h);
+    let (clicked, comp_content) = draw_collapsible_panel(ctx, comp_rect, "Components", comp_collapsed, panel_bg);
+    if clicked {
+        state.components_section_expanded = !state.components_section_expanded;
+    }
+    if let Some(content) = comp_content {
+        let mut cy = content.y;
+        draw_components_section(ctx, content.x, &mut cy, content.w, state, icon_font);
+    }
+    y += comp_h;
 
-    // === PROPERTIES SECTION (component details or per-object properties) ===
-    if let Some(comp_idx) = state.selected_component {
-        // Show component details
+    // === PROPERTIES SECTION ===
+    let props_collapsed = !state.properties_section_expanded;
+    let props_h = if props_collapsed { COLLAPSED_HEADER_HEIGHT } else { expanded_panel_height };
+    let props_title = if let Some(comp_idx) = state.selected_component {
         let comp_name = state.asset.components.get(comp_idx)
             .map(|c| c.type_name())
             .unwrap_or("Component");
-        draw_section_label(x, &mut y, width, &format!("Properties: {}", comp_name));
-
-        // For Mesh, show embedded object list; for others, show property editor
-        let is_mesh = state.asset.components.get(comp_idx)
-            .map(|c| c.is_mesh())
-            .unwrap_or(false);
-
-        if is_mesh {
-            // Show mesh parts list with per-part properties
-            let remaining_h = rect.bottom() - y - 24.0; // Leave room for lights
-            let mesh_rect = Rect::new(x, y, width, remaining_h.max(100.0));
-            draw_mesh_editor_content(ctx, mesh_rect, state, icon_font);
-            y += remaining_h.max(100.0) + 4.0;
-        } else {
-            draw_component_editor(ctx, x, &mut y, width, state, icon_font);
-            y += 4.0;
-        }
+        format!("Properties: {}", comp_name)
     } else {
-        // No component selected - prompt to select one
-        draw_section_label(x, &mut y, width, "Properties");
-        draw_text("Select a component", x + 4.0, y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
-        y += 18.0;
+        "Properties".to_string()
+    };
+    let props_rect = Rect::new(rect.x, y, rect.w, props_h);
+    let (clicked, props_content) = draw_collapsible_panel(ctx, props_rect, &props_title, props_collapsed, panel_bg);
+    if clicked {
+        state.properties_section_expanded = !state.properties_section_expanded;
     }
+    if let Some(content) = props_content {
+        if let Some(comp_idx) = state.selected_component {
+            // For Mesh, show embedded object list; for others, show property editor
+            let is_mesh = state.asset.components.get(comp_idx)
+                .map(|c| c.is_mesh())
+                .unwrap_or(false);
+
+            if is_mesh {
+                draw_mesh_editor_content(ctx, content, state, icon_font);
+            } else {
+                let mut cy = content.y;
+                draw_component_editor(ctx, content.x, &mut cy, content.w, state, icon_font);
+            }
+        } else {
+            draw_text("Select a component", content.x + 4.0, content.y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
+        }
+    }
+    y += props_h;
 
     // === LIGHTS SECTION ===
-    draw_section_label(x, &mut y, width, "Lights");
-    draw_lights_section(ctx, x, &mut y, width, state, icon_font);
+    let lights_collapsed = !state.lights_section_expanded;
+    let lights_h = if lights_collapsed { COLLAPSED_HEADER_HEIGHT } else { expanded_panel_height };
+    let lights_rect = Rect::new(rect.x, y, rect.w, lights_h);
+    let (clicked, lights_content) = draw_collapsible_panel(ctx, lights_rect, "Lights", lights_collapsed, panel_bg);
+    if clicked {
+        state.lights_section_expanded = !state.lights_section_expanded;
+    }
+    if let Some(content) = lights_content {
+        let mut cy = content.y;
+        draw_lights_section(ctx, content.x, &mut cy, content.w, state, icon_font);
+    }
 }
 
 /// Helper to get a Lucide icon for component types
