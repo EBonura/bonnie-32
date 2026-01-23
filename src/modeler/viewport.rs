@@ -1087,7 +1087,7 @@ pub fn draw_modeler_viewport_ext(
     // Render all combined geometry in one pass
     if !all_vertices.is_empty() && !all_faces.is_empty() {
         // Use combined raster settings
-        let combined_settings = if any_double_sided {
+        let mut combined_settings = if any_double_sided {
             let mut settings = state.raster_settings.clone();
             settings.backface_cull = false;
             settings.backface_wireframe = false;
@@ -1095,6 +1095,27 @@ pub fn draw_modeler_viewport_ext(
         } else {
             state.raster_settings.clone()
         };
+
+        // Add lights from Light components to the render settings
+        for (comp_idx, component) in state.asset.components.iter().enumerate() {
+            if state.hidden_components.contains(&comp_idx) {
+                continue;
+            }
+            if let crate::asset::AssetComponent::Light { color, intensity, radius, offset } = component {
+                use crate::rasterizer::{Light, LightType};
+                let light = Light {
+                    name: format!("Component Light {}", comp_idx),
+                    light_type: LightType::Point {
+                        position: Vec3::new(offset[0], offset[1], offset[2]),
+                        radius: *radius,
+                    },
+                    color: RasterColor::new(color[0], color[1], color[2]),
+                    intensity: *intensity,
+                    enabled: true,
+                };
+                combined_settings.lights.push(light);
+            }
+        }
 
         if use_rgb555 {
             render_mesh_15(
@@ -1121,6 +1142,9 @@ pub fn draw_modeler_viewport_ext(
 
     // Draw selection overlays
     draw_mesh_selection_overlays(state, fb);
+
+    // Draw component gizmos (lights, etc.)
+    draw_component_gizmos(state, fb, &state.hidden_components);
 
     // Draw box selection preview (highlight elements that would be selected)
     if state.box_select_viewport == Some(viewport_id) {
@@ -1153,46 +1177,56 @@ pub fn draw_modeler_viewport_ext(
         },
     );
 
-    // Draw and handle transform gizmo (on top of the framebuffer)
-    handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+    // Check if a non-Mesh component is selected (Light, etc.)
+    // When true: disable all mesh interaction, only component gizmo works
+    // When false: normal mesh editing mode
+    let non_mesh_component_selected = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx))
+        .map(|c| !matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .unwrap_or(false);
 
-    // Update hover state every frame (like world editor) - but not when gizmo is active
-    // Only update for the active viewport to prevent viewports from overwriting each other's hover state
-    let is_active_viewport = state.active_viewport == viewport_id;
-    if is_active_viewport && !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
-        update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
-    }
+    if non_mesh_component_selected {
+        // Component editing mode: only component gizmo, no mesh interaction
+        handle_component_move_gizmo(ctx, state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+    } else {
+        // Mesh editing mode: normal mesh tools and interaction
+        handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
 
-    // Handle box selection (left-drag without hitting an element or gizmo)
-    // Uses DragManager for tracking
-    if state.gizmo_hovered_axis.is_none() {
-        handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
-    }
+        // Update hover state every frame (like world editor) - but not when gizmo is active
+        let is_active_viewport = state.active_viewport == viewport_id;
+        if is_active_viewport && !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
+            update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+        }
 
-    // Draw box selection overlay only for the viewport that owns it
-    if state.box_select_viewport == Some(viewport_id) {
-        if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
-            let (min_x, min_y, max_x, max_y) = tracker.bounds();
+        // Handle box selection (left-drag without hitting an element or gizmo)
+        if state.gizmo_hovered_axis.is_none() {
+            handle_box_selection(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+        }
 
-            // Clip box selection rectangle to viewport bounds
-            let clip_min_x = min_x.max(draw_x);
-            let clip_min_y = min_y.max(draw_y);
-            let clip_max_x = max_x.min(draw_x + draw_w);
-            let clip_max_y = max_y.min(draw_y + draw_h);
+        // Draw box selection overlay only for the viewport that owns it
+        if state.box_select_viewport == Some(viewport_id) {
+            if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
+                let (min_x, min_y, max_x, max_y) = tracker.bounds();
 
-            // Only draw if the clipped rectangle has positive area
-            if clip_max_x > clip_min_x && clip_max_y > clip_min_y {
-                // Semi-transparent fill
-                draw_rectangle(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, Color::from_rgba(100, 150, 255, 50));
-                // Border
-                draw_rectangle_lines(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, 1.0, Color::from_rgba(100, 150, 255, 200));
+                // Clip box selection rectangle to viewport bounds
+                let clip_min_x = min_x.max(draw_x);
+                let clip_min_y = min_y.max(draw_y);
+                let clip_max_x = max_x.min(draw_x + draw_w);
+                let clip_max_y = max_y.min(draw_y + draw_h);
+
+                // Only draw if the clipped rectangle has positive area
+                if clip_max_x > clip_min_x && clip_max_y > clip_min_y {
+                    draw_rectangle(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, Color::from_rgba(100, 150, 255, 50));
+                    draw_rectangle_lines(clip_min_x, clip_min_y, clip_max_x - clip_min_x, clip_max_y - clip_min_y, 1.0, Color::from_rgba(100, 150, 255, 200));
+                }
             }
         }
     }
 
     // Handle single-click selection using hover system (like world editor)
-    // Only if not clicking on gizmo
-    if inside_viewport && ctx.mouse.left_pressed
+    // Only in mesh editing mode (not when a non-Mesh component is selected)
+    if !non_mesh_component_selected
+        && inside_viewport && ctx.mouse.left_pressed
         && state.modal_transform == ModalTransform::None
         && state.gizmo_hovered_axis.is_none()
         && !state.drag_manager.is_dragging()
@@ -2966,4 +3000,407 @@ fn handle_rotate_gizmo(
     // Draw center circle
     let center_color = if is_dragging { YELLOW } else { WHITE };
     draw_circle(setup.center_screen.0, setup.center_screen.1, 4.0, center_color);
+}
+
+// =============================================================================
+// Component Gizmos - Visual representations for non-mesh components
+// =============================================================================
+
+/// Draw visual representations for components (lights show as octahedrons, etc.)
+fn draw_component_gizmos(
+    state: &ModelerState,
+    fb: &mut Framebuffer,
+    hidden_components: &std::collections::HashSet<usize>,
+) {
+    let camera = &state.camera;
+    let ortho = state.raster_settings.ortho_projection.as_ref();
+
+    // Draw all visible light components as octahedrons
+    for (comp_idx, component) in state.asset.components.iter().enumerate() {
+        if hidden_components.contains(&comp_idx) {
+            continue;
+        }
+
+        match component {
+            crate::asset::AssetComponent::Light { color, offset, .. } => {
+                let light_pos = Vec3::new(offset[0], offset[1], offset[2]);
+                let is_selected = state.selected_component == Some(comp_idx);
+
+                // Slightly larger and white when selected
+                let size = if is_selected { 120.0 } else { 80.0 };
+                let gizmo_color = if is_selected {
+                    RasterColor::new(255, 255, 255)
+                } else {
+                    RasterColor::new(color[0], color[1], color[2])
+                };
+
+                draw_filled_octahedron(fb, camera, ortho, light_pos, size, gizmo_color);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Handle move gizmo for component offset (Light, etc.)
+/// Draws gizmo arrows and handles drag interaction
+fn handle_component_move_gizmo(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    draw_x: f32,
+    draw_y: f32,
+    draw_w: f32,
+    draw_h: f32,
+    fb_width: usize,
+    fb_height: usize,
+    viewport_id: ViewportId,
+) {
+    // Only show gizmo when Move tool is active and a component with offset is selected
+    if state.tool_box.active_transform_tool() != Some(ModelerToolId::Move) {
+        return;
+    }
+
+    let Some(comp_idx) = state.selected_component else { return };
+
+    // Get the component's offset position
+    let offset = match state.asset.components.get(comp_idx) {
+        Some(crate::asset::AssetComponent::Light { offset, .. }) => *offset,
+        _ => return, // No gizmo for non-offset components
+    };
+
+    let center = Vec3::new(offset[0], offset[1], offset[2]);
+    let camera = &state.camera;
+    let ortho = state.raster_settings.ortho_projection.as_ref();
+
+    // Project center to screen
+    let Some((cx, cy)) = world_to_screen_with_ortho(
+        center, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+        fb_width, fb_height, ortho
+    ) else { return };
+
+    let center_screen = (
+        draw_x + cx / fb_width as f32 * draw_w,
+        draw_y + cy / fb_height as f32 * draw_h,
+    );
+
+    // Calculate gizmo size based on distance
+    let world_length = if let Some(ortho) = ortho {
+        50.0 / ortho.zoom
+    } else {
+        let dist_to_camera = (center - camera.position).len();
+        dist_to_camera * 0.1
+    };
+
+    // Project axis endpoints
+    let axis_data = [
+        (Axis::X, Vec3::new(1.0, 0.0, 0.0), RED),
+        (Axis::Y, Vec3::new(0.0, 1.0, 0.0), GREEN),
+        (Axis::Z, Vec3::new(0.0, 0.0, 1.0), BLUE),
+    ];
+
+    let mut axis_screen_ends: Vec<(Axis, (f32, f32), Color)> = Vec::new();
+    for (axis, dir, color) in &axis_data {
+        let end_world = center + *dir * world_length;
+        if let Some((sx, sy)) = world_to_screen_with_ortho(
+            end_world, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb_width, fb_height, ortho
+        ) {
+            let screen_end = (
+                draw_x + sx / fb_width as f32 * draw_w,
+                draw_y + sy / fb_height as f32 * draw_h,
+            );
+            axis_screen_ends.push((*axis, screen_end, *color));
+        }
+    }
+
+    let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
+    let is_dragging = state.component_gizmo_drag_axis.is_some();
+
+    // Handle ongoing drag
+    if is_dragging && ctx.mouse.left_down {
+        if let (Some(drag_axis), Some(drag_start)) = (state.component_gizmo_drag_axis, state.component_gizmo_drag_start) {
+            let dx = mouse_pos.0 - drag_start.0;
+            let dy = mouse_pos.1 - drag_start.1;
+
+            // Get zoom/scale factor
+            let zoom = if let Some(ortho) = ortho {
+                ortho.zoom
+            } else {
+                // For perspective, approximate zoom based on distance
+                let dist = (center - camera.position).len();
+                500.0 / dist
+            };
+
+            // Convert screen delta to world delta (same as mesh gizmo)
+            let world_dx = dx / zoom;
+            let world_dy = -dy / zoom; // Y inverted
+
+            // Map to world delta based on viewport (same as mesh move gizmo)
+            // For perspective, use horizontal for X, vertical for Y and Z
+            let delta = match viewport_id {
+                ViewportId::Top => match drag_axis {
+                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),
+                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),  // Y not visible in Top, use vertical anyway
+                    Axis::Z => Vec3::new(0.0, 0.0, world_dy),
+                },
+                ViewportId::Front => match drag_axis {
+                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),
+                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),
+                    Axis::Z => Vec3::new(0.0, 0.0, world_dy),  // Z not visible in Front, use vertical
+                },
+                ViewportId::Side => match drag_axis {
+                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),  // X not visible in Side, use horizontal
+                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),
+                    Axis::Z => Vec3::new(0.0, 0.0, world_dx),
+                },
+                ViewportId::Perspective => match drag_axis {
+                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),
+                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),
+                    Axis::Z => Vec3::new(0.0, 0.0, world_dy),  // Use vertical for Z in perspective
+                },
+            };
+
+            // Calculate new offset from start position + delta
+            let start = state.component_gizmo_start_offset;
+            let mut new_offset = [
+                start[0] + delta.x,
+                start[1] + delta.y,
+                start[2] + delta.z,
+            ];
+
+            // Apply snap to grid
+            let snap_disabled = is_key_down(KeyCode::Z);
+            let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+            if snap_enabled {
+                let snap_size = state.snap_settings.grid_size;
+                new_offset[0] = (new_offset[0] / snap_size).round() * snap_size;
+                new_offset[1] = (new_offset[1] / snap_size).round() * snap_size;
+                new_offset[2] = (new_offset[2] / snap_size).round() * snap_size;
+            }
+
+            if let Some(crate::asset::AssetComponent::Light { offset, .. }) = state.asset.components.get_mut(comp_idx) {
+                *offset = new_offset;
+            }
+        }
+    }
+
+    // End drag on mouse release
+    if is_dragging && !ctx.mouse.left_down {
+        state.component_gizmo_drag_axis = None;
+        state.component_gizmo_drag_start = None;
+    }
+
+    // Check for hover/click on gizmo axes
+    let hit_radius = 8.0;
+    let mut hovered_axis: Option<Axis> = None;
+
+    if !is_dragging {
+        for (axis, end_pos, _) in &axis_screen_ends {
+            let dist = point_to_line_distance(
+                mouse_pos.0, mouse_pos.1,
+                center_screen.0, center_screen.1,
+                end_pos.0, end_pos.1
+            );
+            if dist < hit_radius {
+                hovered_axis = Some(*axis);
+                break;
+            }
+        }
+
+        // Start drag on click
+        if hovered_axis.is_some() && ctx.mouse.left_pressed {
+            state.component_gizmo_drag_axis = hovered_axis;
+            state.component_gizmo_drag_start = Some(mouse_pos);
+            state.component_gizmo_start_offset = offset;
+        }
+    }
+
+    // Draw gizmo arrows
+    for (axis, end_pos, base_color) in &axis_screen_ends {
+        let is_this_hovered = hovered_axis == Some(*axis);
+        let is_this_dragging = state.component_gizmo_drag_axis == Some(*axis);
+
+        let color = if is_this_dragging {
+            YELLOW
+        } else if is_this_hovered {
+            WHITE
+        } else {
+            *base_color
+        };
+
+        let thickness = if is_this_dragging || is_this_hovered { 3.0 } else { 2.0 };
+        draw_line(center_screen.0, center_screen.1, end_pos.0, end_pos.1, thickness, color);
+
+        // Draw arrowhead
+        let dir = (end_pos.0 - center_screen.0, end_pos.1 - center_screen.1);
+        let len = (dir.0 * dir.0 + dir.1 * dir.1).sqrt();
+        if len > 0.0 {
+            let norm = (dir.0 / len, dir.1 / len);
+            let perp = (-norm.1, norm.0);
+            let arrow_size = 8.0;
+            let tip = *end_pos;
+            let left = (tip.0 - norm.0 * arrow_size + perp.0 * arrow_size * 0.5,
+                       tip.1 - norm.1 * arrow_size + perp.1 * arrow_size * 0.5);
+            let right = (tip.0 - norm.0 * arrow_size - perp.0 * arrow_size * 0.5,
+                        tip.1 - norm.1 * arrow_size - perp.1 * arrow_size * 0.5);
+            draw_triangle(
+                vec2(tip.0, tip.1),
+                vec2(left.0, left.1),
+                vec2(right.0, right.1),
+                color,
+            );
+        }
+    }
+
+    // Draw center dot
+    draw_circle(center_screen.0, center_screen.1, 4.0, WHITE);
+}
+
+/// Draw a filled octahedron in 3D (classic light gizmo)
+fn draw_filled_octahedron(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    ortho: Option<&OrthoProjection>,
+    center: Vec3,
+    size: f32,
+    color: RasterColor,
+) {
+    // Octahedron has 6 vertices: top, bottom, and 4 around the middle
+    let top = Vec3::new(center.x, center.y + size, center.z);
+    let bottom = Vec3::new(center.x, center.y - size, center.z);
+    let front = Vec3::new(center.x, center.y, center.z + size);
+    let back = Vec3::new(center.x, center.y, center.z - size);
+    let left = Vec3::new(center.x - size, center.y, center.z);
+    let right = Vec3::new(center.x + size, center.y, center.z);
+
+    // Project all vertices to screen space
+    let project_vertex = |p: Vec3| -> Option<(i32, i32, f32)> {
+        if let Some(proj) = world_to_screen_with_ortho_depth(
+            p,
+            camera.position,
+            camera.basis_x,
+            camera.basis_y,
+            camera.basis_z,
+            fb.width,
+            fb.height,
+            ortho,
+        ) {
+            Some((proj.0 as i32, proj.1 as i32, proj.2))
+        } else {
+            None
+        }
+    };
+
+    let top_s = project_vertex(top);
+    let bottom_s = project_vertex(bottom);
+    let front_s = project_vertex(front);
+    let back_s = project_vertex(back);
+    let left_s = project_vertex(left);
+    let right_s = project_vertex(right);
+
+    // 8 triangular faces of the octahedron
+    let faces = [
+        (top_s, front_s, right_s),
+        (top_s, right_s, back_s),
+        (top_s, back_s, left_s),
+        (top_s, left_s, front_s),
+        (bottom_s, right_s, front_s),
+        (bottom_s, back_s, right_s),
+        (bottom_s, left_s, back_s),
+        (bottom_s, front_s, left_s),
+    ];
+
+    for (v0, v1, v2) in faces {
+        if let (Some(p0), Some(p1), Some(p2)) = (v0, v1, v2) {
+            draw_filled_triangle_3d(fb, p0, p1, p2, color);
+        }
+    }
+
+    // Draw edges for definition
+    let edge_color = RasterColor::new(
+        (color.r as u16 * 3 / 4) as u8,
+        (color.g as u16 * 3 / 4) as u8,
+        (color.b as u16 * 3 / 4) as u8,
+    );
+
+    // Draw edges using framebuffer's 3d line function
+    let draw_edge = |fb: &mut Framebuffer, p0: Option<(i32, i32, f32)>, p1: Option<(i32, i32, f32)>| {
+        if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (p0, p1) {
+            fb.draw_line_3d(x0, y0, z0, x1, y1, z1, edge_color);
+        }
+    };
+
+    draw_edge(fb, top_s, front_s);
+    draw_edge(fb, top_s, back_s);
+    draw_edge(fb, top_s, left_s);
+    draw_edge(fb, top_s, right_s);
+    draw_edge(fb, bottom_s, front_s);
+    draw_edge(fb, bottom_s, back_s);
+    draw_edge(fb, bottom_s, left_s);
+    draw_edge(fb, bottom_s, right_s);
+    draw_edge(fb, front_s, right_s);
+    draw_edge(fb, right_s, back_s);
+    draw_edge(fb, back_s, left_s);
+    draw_edge(fb, left_s, front_s);
+}
+
+/// Draw a filled triangle (for gizmos)
+fn draw_filled_triangle_3d(
+    fb: &mut Framebuffer,
+    p0: (i32, i32, f32),
+    p1: (i32, i32, f32),
+    p2: (i32, i32, f32),
+    color: RasterColor,
+) {
+    // Sort vertices by y coordinate
+    let mut pts = [(p0.0, p0.1), (p1.0, p1.1), (p2.0, p2.1)];
+    pts.sort_by(|a, b| a.1.cmp(&b.1));
+    let (x0, y0) = pts[0];
+    let (x1, y1) = pts[1];
+    let (x2, y2) = pts[2];
+
+    if y2 == y0 { return; } // Degenerate triangle
+
+    let total_height = (y2 - y0) as f32;
+
+    for y in y0.max(0)..=y2.min(fb.height as i32 - 1) {
+        let second_half = y > y1 || y1 == y0;
+        let segment_height = if second_half {
+            (y2 - y1) as f32
+        } else {
+            (y1 - y0) as f32
+        };
+
+        if segment_height == 0.0 { continue; }
+
+        let alpha = (y - y0) as f32 / total_height;
+        let beta = if second_half {
+            (y - y1) as f32 / segment_height
+        } else {
+            (y - y0) as f32 / segment_height
+        };
+
+        let mut ax = x0 as f32 + (x2 - x0) as f32 * alpha;
+        let mut bx = if second_half {
+            x1 as f32 + (x2 - x1) as f32 * beta
+        } else {
+            x0 as f32 + (x1 - x0) as f32 * beta
+        };
+
+        if ax > bx {
+            std::mem::swap(&mut ax, &mut bx);
+        }
+
+        let x_start = (ax as i32).max(0);
+        let x_end = (bx as i32).min(fb.width as i32 - 1);
+
+        for x in x_start..=x_end {
+            let idx = (y as usize * fb.width + x as usize) * 4;
+            if idx + 3 < fb.pixels.len() {
+                fb.pixels[idx] = color.r;
+                fb.pixels[idx + 1] = color.g;
+                fb.pixels[idx + 2] = color.b;
+                fb.pixels[idx + 3] = 255;
+            }
+        }
+    }
 }

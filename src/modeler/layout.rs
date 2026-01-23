@@ -748,6 +748,12 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
         state.delete_component_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
         state.selected_component = Some(idx);
+        // Clear mesh selection when selecting a non-Mesh component
+        if let Some(comp) = state.asset.components.get(idx) {
+            if !matches!(comp, crate::asset::AssetComponent::Mesh { .. }) {
+                state.selection.clear();
+            }
+        }
     }
 
 }

@@ -843,6 +843,11 @@ pub struct ModelerState {
     pub hidden_components: std::collections::HashSet<usize>, // Hidden component indices
     pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
 
+    // Component gizmo dragging (for Light offset, etc.)
+    pub component_gizmo_drag_axis: Option<Axis>,      // Which axis is being dragged
+    pub component_gizmo_drag_start: Option<(f32, f32)>, // Starting mouse position
+    pub component_gizmo_start_offset: [f32; 3],       // Starting offset value
+
     // CLUT editing state
     pub selected_clut: Option<crate::rasterizer::ClutId>, // Currently selected CLUT in pool
     pub selected_clut_entry: usize,                       // Selected palette index (0-15 or 0-255)
@@ -1109,6 +1114,11 @@ impl ModelerState {
             add_component_btn_rect: None,
             hidden_components: std::collections::HashSet::new(),
             delete_component_dialog: None,
+
+            // Component gizmo dragging
+            component_gizmo_drag_axis: None,
+            component_gizmo_drag_start: None,
+            component_gizmo_start_offset: [0.0, 0.0, 0.0],
 
             // CLUT editing defaults
             selected_clut: None,
