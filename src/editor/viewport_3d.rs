@@ -3140,18 +3140,25 @@ pub fn draw_viewport_3d(
                         // Find Light component and extract its properties
                         for comp in &asset.components {
                             if let crate::asset::AssetComponent::Light { color, intensity, radius, offset } = comp {
+                                // Apply per-instance overrides if present
+                                let overrides = &obj.overrides.light;
+                                let final_color = overrides.as_ref().and_then(|o| o.color).unwrap_or(*color);
+                                let final_intensity = overrides.as_ref().and_then(|o| o.intensity).unwrap_or(*intensity);
+                                let final_radius = overrides.as_ref().and_then(|o| o.radius).unwrap_or(*radius);
+                                let final_offset = overrides.as_ref().and_then(|o| o.offset).unwrap_or(*offset);
+
                                 let base_pos = obj.world_position(room);
                                 // Apply light offset to get actual light position
                                 let light_pos = Vec3::new(
-                                    base_pos.x + offset[0],
-                                    base_pos.y + offset[1],
-                                    base_pos.z + offset[2],
+                                    base_pos.x + final_offset[0],
+                                    base_pos.y + final_offset[1],
+                                    base_pos.z + final_offset[2],
                                 );
                                 // Convert color from [u8; 3] to normalized RGB
-                                let r = color[0] as f32 / 255.0;
-                                let g = color[1] as f32 / 255.0;
-                                let b = color[2] as f32 / 255.0;
-                                return Some(Light::point_colored(light_pos, *radius, *intensity, r, g, b));
+                                let r = final_color[0] as f32 / 255.0;
+                                let g = final_color[1] as f32 / 255.0;
+                                let b = final_color[2] as f32 / 255.0;
+                                return Some(Light::point_colored(light_pos, final_radius, final_intensity, r, g, b));
                             }
                         }
                         None
@@ -3873,15 +3880,19 @@ pub fn draw_viewport_3d(
 
                 // For lights, draw 3D filled octahedron gizmo at light position (with offset)
                 if is_light {
-                    // Get light offset from the Light component
+                    // Get light offset from the Light component (with per-instance override)
                     let light_pos = if let Some(asset) = asset {
                         let mut pos = world_pos;
                         for comp in &asset.components {
                             if let crate::asset::AssetComponent::Light { offset, .. } = comp {
+                                // Apply per-instance offset override if present
+                                let final_offset = obj.overrides.light.as_ref()
+                                    .and_then(|o| o.offset)
+                                    .unwrap_or(*offset);
                                 pos = Vec3::new(
-                                    world_pos.x + offset[0],
-                                    world_pos.y + offset[1],
-                                    world_pos.z + offset[2],
+                                    world_pos.x + final_offset[0],
+                                    world_pos.y + final_offset[1],
+                                    world_pos.z + final_offset[2],
                                 );
                                 break;
                             }

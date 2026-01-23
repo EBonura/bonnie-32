@@ -5623,13 +5623,33 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 .cloned();
 
             if let Some(obj) = obj_opt {
-                // Get asset name from library
+                // Get asset name and extract needed data BEFORE any mutable borrows
                 let asset_name = state.asset_library.get_name_by_id(obj.asset_id)
-                    .unwrap_or("Unknown");
-                let asset = state.asset_library.get_by_id(obj.asset_id);
+                    .unwrap_or("Unknown").to_string();
+
+                // Extract component info for display (ends borrow of asset_library)
+                let (component_names, light_defaults, is_player_spawn): (Vec<String>, Option<([u8; 3], f32, f32, [f32; 3])>, bool) = {
+                    if let Some(asset) = state.asset_library.get_by_id(obj.asset_id) {
+                        let names: Vec<String> = asset.components.iter()
+                            .map(|c| c.type_name().to_string())
+                            .collect();
+                        let light = asset.components.iter()
+                            .find_map(|c| {
+                                if let crate::asset::AssetComponent::Light { color, intensity, radius, offset } = c {
+                                    Some((*color, *intensity, *radius, *offset))
+                                } else {
+                                    None
+                                }
+                            });
+                        let spawn = asset.has_spawn_point(true);
+                        (names, light, spawn)
+                    } else {
+                        (Vec::new(), None, false)
+                    }
+                };
 
                 // Header with asset name
-                draw_text(asset_name, x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
+                draw_text(&asset_name, x, (y + 10.0).floor(), FONT_SIZE_HEADER, WHITE);
                 y += 20.0;
 
                 // Location
@@ -5645,22 +5665,199 @@ fn draw_properties(ctx: &mut UiContext, rect: Rect, state: &mut EditorState, ico
                 y += 20.0;
 
                 // Show asset components
-                if let Some(asset) = asset {
+                if !component_names.is_empty() {
                     draw_text("Components:", x, (y + 10.0).floor(), FONT_SIZE_HEADER, Color::from_rgba(150, 150, 150, 255));
                     y += LINE_HEIGHT;
-                    for component in &asset.components {
-                        let comp_name = component.type_name();
+                    for comp_name in &component_names {
                         draw_text(&format!("  • {}", comp_name), x, (y + 10.0).floor(), FONT_SIZE_CONTENT, WHITE);
-                        y += LINE_HEIGHT;
-                    }
-                    if asset.components.is_empty() {
-                        draw_text("  (none)", x, (y + 10.0).floor(), FONT_SIZE_CONTENT, Color::from_rgba(150, 150, 150, 255));
                         y += LINE_HEIGHT;
                     }
                     y += 8.0;
 
+                    // Light properties (editable with per-instance overrides)
+                    // Uses slider UI matching asset editor style
+                    if let Some((color, intensity, radius, _offset)) = light_defaults {
+                        let section_color = Color::from_rgba(255, 255, 100, 255);
+                        let slider_height = 10.0;
+                        let line_height = 18.0;
+                        let track_bg = Color::from_rgba(30, 30, 35, 255);
+                        let accent_color = Color::from_rgba(0, 180, 180, 255);
+
+                        draw_text("Light", x, (y + 12.0).floor(), 11.0, section_color);
+                        y += 18.0;
+
+                        // Get current overrides
+                        let light_overrides = &obj.overrides.light;
+                        let current_color = light_overrides.as_ref()
+                            .and_then(|o| o.color)
+                            .unwrap_or(color);
+                        let color_overridden = light_overrides.as_ref()
+                            .and_then(|o| o.color).is_some();
+
+                        // Color preview with reset button
+                        draw_text("Color:", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 110, 255));
+                        let preview_rect = Rect::new(x + 50.0, y + 2.0, 40.0, 14.0);
+                        draw_rectangle(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h,
+                            Color::from_rgba(current_color[0], current_color[1], current_color[2], 255));
+                        if color_overridden {
+                            draw_rectangle_lines(preview_rect.x, preview_rect.y, preview_rect.w, preview_rect.h, 1.0, accent_color);
+                            // Reset button
+                            let reset_rect = Rect::new(preview_rect.right() + 4.0, y + 2.0, 14.0, 14.0);
+                            let reset_hover = reset_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                            draw_rectangle(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h,
+                                if reset_hover { Color::from_rgba(80, 50, 50, 255) } else { Color::from_rgba(60, 40, 40, 255) });
+                            let cx = reset_rect.x + 7.0;
+                            let cy = reset_rect.y + 7.0;
+                            draw_line(cx - 3.0, cy - 3.0, cx + 3.0, cy + 3.0, 1.5, Color::from_rgba(200, 100, 100, 255));
+                            draw_line(cx + 3.0, cy - 3.0, cx - 3.0, cy + 3.0, 1.5, Color::from_rgba(200, 100, 100, 255));
+                            if reset_hover && ctx.mouse.left_pressed {
+                                state.save_undo();
+                                if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                    if let Some(light) = &mut obj_mut.overrides.light {
+                                        light.color = None;
+                                    }
+                                }
+                            }
+                        }
+                        y += line_height;
+
+                        // RGB sliders (0-31 display, stored as 0-255)
+                        let slider_x = x + 14.0;
+                        let slider_width = container_width - 60.0;
+                        let channels = [
+                            ("R", current_color[0] / 8, Color::new(0.7, 0.3, 0.3, 1.0), 0usize),
+                            ("G", current_color[1] / 8, Color::new(0.3, 0.7, 0.3, 1.0), 1usize),
+                            ("B", current_color[2] / 8, Color::new(0.3, 0.3, 0.7, 1.0), 2usize),
+                        ];
+
+                        for (label, value, tint, slider_idx) in channels {
+                            let track_rect = Rect::new(slider_x, y, slider_width, slider_height);
+                            draw_text(label, x + 4.0, y + 9.0, 12.0, tint);
+                            draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+                            let fill_ratio = value as f32 / 31.0;
+                            draw_rectangle(track_rect.x, track_rect.y, track_rect.w * fill_ratio, slider_height, tint);
+                            let handle_x = track_rect.x + track_rect.w * fill_ratio - 2.0;
+                            draw_rectangle(handle_x.max(track_rect.x), track_rect.y, 4.0, slider_height, WHITE);
+                            draw_text(&format!("{}", value), track_rect.x + track_rect.w + 4.0, y + 9.0, 11.0, Color::from_rgba(100, 100, 110, 255));
+
+                            // Slider interaction
+                            if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && state.light_color_slider.is_none() {
+                                state.light_color_slider = Some(slider_idx);
+                            }
+                            if state.light_color_slider == Some(slider_idx) {
+                                if ctx.mouse.left_down {
+                                    let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
+                                    let new_val_31 = ((rel_x / track_rect.w) * 31.0).round() as u8;
+                                    let new_val_255 = (new_val_31 as u16 * 8).min(255) as u8;
+                                    if current_color[slider_idx] != new_val_255 {
+                                        state.save_undo();
+                                        if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                            let light = obj_mut.overrides.light.get_or_insert_with(Default::default);
+                                            let mut c = light.color.unwrap_or(color);
+                                            c[slider_idx] = new_val_255;
+                                            light.color = Some(c);
+                                        }
+                                    }
+                                } else {
+                                    state.light_color_slider = None;
+                                }
+                            }
+                            y += slider_height + 4.0;
+                        }
+
+                        // Intensity slider
+                        let current_intensity = light_overrides.as_ref()
+                            .and_then(|o| o.intensity)
+                            .unwrap_or(intensity);
+                        let intensity_overridden = light_overrides.as_ref()
+                            .and_then(|o| o.intensity).is_some();
+
+                        draw_text("Intensity:", x + 4.0, y + 14.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 110, 255));
+                        let int_slider_x = x + 70.0;
+                        let int_slider_w = container_width - 130.0;
+                        let slider_rect = Rect::new(int_slider_x, y + 4.0, int_slider_w, slider_height);
+                        draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, track_bg);
+                        let max_intensity = 5.0;
+                        let fill_w = (current_intensity.clamp(0.0, max_intensity) / max_intensity) * int_slider_w;
+                        draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, accent_color);
+                        draw_text(&format!("{:.1}", current_intensity), slider_rect.right() + 4.0, y + 14.0, FONT_SIZE_CONTENT, WHITE);
+
+                        if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+                            let t = ((ctx.mouse.x - slider_rect.x) / int_slider_w).clamp(0.0, 1.0);
+                            let new_val = t * max_intensity;
+                            state.save_undo();
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                let light = obj_mut.overrides.light.get_or_insert_with(Default::default);
+                                light.intensity = Some(new_val);
+                            }
+                        }
+                        if intensity_overridden {
+                            let reset_rect = Rect::new(x + container_width - 22.0, y + 2.0, 14.0, 14.0);
+                            let reset_hover = reset_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                            draw_rectangle(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h,
+                                if reset_hover { Color::from_rgba(80, 50, 50, 255) } else { Color::from_rgba(60, 40, 40, 255) });
+                            let cx = reset_rect.x + 7.0;
+                            let cy = reset_rect.y + 7.0;
+                            draw_line(cx - 3.0, cy - 3.0, cx + 3.0, cy + 3.0, 1.5, Color::from_rgba(200, 100, 100, 255));
+                            draw_line(cx + 3.0, cy - 3.0, cx - 3.0, cy + 3.0, 1.5, Color::from_rgba(200, 100, 100, 255));
+                            if reset_hover && ctx.mouse.left_pressed {
+                                state.save_undo();
+                                if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                    if let Some(light) = &mut obj_mut.overrides.light {
+                                        light.intensity = None;
+                                    }
+                                }
+                            }
+                        }
+                        y += line_height;
+
+                        // Radius slider
+                        let current_radius = light_overrides.as_ref()
+                            .and_then(|o| o.radius)
+                            .unwrap_or(radius);
+                        let radius_overridden = light_overrides.as_ref()
+                            .and_then(|o| o.radius).is_some();
+
+                        draw_text("Radius:", x + 4.0, y + 14.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 100, 110, 255));
+                        let slider_rect = Rect::new(int_slider_x, y + 4.0, int_slider_w, slider_height);
+                        draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, track_bg);
+                        let max_radius = 8192.0;
+                        let fill_w = (current_radius.clamp(0.0, max_radius) / max_radius) * int_slider_w;
+                        draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, accent_color);
+                        draw_text(&format!("{:.0}", current_radius), slider_rect.right() + 4.0, y + 14.0, FONT_SIZE_CONTENT, WHITE);
+
+                        if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
+                            let t = ((ctx.mouse.x - slider_rect.x) / int_slider_w).clamp(0.0, 1.0);
+                            let new_val = t * max_radius;
+                            state.save_undo();
+                            if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                let light = obj_mut.overrides.light.get_or_insert_with(Default::default);
+                                light.radius = Some(new_val);
+                            }
+                        }
+                        if radius_overridden {
+                            let reset_rect = Rect::new(x + container_width - 22.0, y + 2.0, 14.0, 14.0);
+                            let reset_hover = reset_rect.contains(ctx.mouse.x, ctx.mouse.y);
+                            draw_rectangle(reset_rect.x, reset_rect.y, reset_rect.w, reset_rect.h,
+                                if reset_hover { Color::from_rgba(80, 50, 50, 255) } else { Color::from_rgba(60, 40, 40, 255) });
+                            let cx = reset_rect.x + 7.0;
+                            let cy = reset_rect.y + 7.0;
+                            draw_line(cx - 3.0, cy - 3.0, cx + 3.0, cy + 3.0, 1.5, Color::from_rgba(200, 100, 100, 255));
+                            draw_line(cx + 3.0, cy - 3.0, cx - 3.0, cy + 3.0, 1.5, Color::from_rgba(200, 100, 100, 255));
+                            if reset_hover && ctx.mouse.left_pressed {
+                                state.save_undo();
+                                if let Some(obj_mut) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                    if let Some(light) = &mut obj_mut.overrides.light {
+                                        light.radius = None;
+                                    }
+                                }
+                            }
+                        }
+                        y += line_height + 8.0;
+                    }
+
                     // Player spawn shows player settings
-                    if asset.has_spawn_point(true) {
+                    if is_player_spawn {
                         let section_color = Color::from_rgba(120, 150, 180, 255);
                         let line_height = 20.0;
                         let label_color = Color::from_rgba(180, 180, 190, 255);

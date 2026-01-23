@@ -2206,6 +2206,57 @@ impl Default for PlayerSettings {
 // Asset-Based Object System
 // ============================================================================
 
+/// Per-instance overrides for Light component properties
+///
+/// Any field that is Some will override the asset's default value.
+/// None means "use asset default".
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LightOverride {
+    /// Override RGB color (0-255)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+    /// Override intensity multiplier
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intensity: Option<f32>,
+    /// Override falloff radius
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    /// Override position offset
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<[f32; 3]>,
+}
+
+impl LightOverride {
+    /// Returns true if any field is overridden
+    pub fn has_any(&self) -> bool {
+        self.color.is_some() || self.intensity.is_some() || self.radius.is_some() || self.offset.is_some()
+    }
+}
+
+/// Per-instance component overrides
+///
+/// Allows overriding specific component properties on a per-instance basis.
+/// Only populated fields are serialized to keep level files compact.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComponentOverrides {
+    /// Light component overrides
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<LightOverride>,
+    // Future: add door, enemy, etc. overrides as needed
+}
+
+impl ComponentOverrides {
+    /// Returns true if any overrides are set
+    pub fn has_any(&self) -> bool {
+        self.light.as_ref().map_or(false, |l| l.has_any())
+    }
+
+    /// Returns true if no overrides are set (for serde skip_serializing_if)
+    pub fn is_empty(&self) -> bool {
+        !self.has_any()
+    }
+}
+
 /// An instance of an asset placed in a room
 ///
 /// Asset instances are tied to sectors (tiles) using grid coordinates within the room.
@@ -2238,6 +2289,9 @@ pub struct AssetInstance {
     /// Is this instance active/enabled?
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Per-instance component overrides (light intensity, color, etc.)
+    #[serde(default, skip_serializing_if = "ComponentOverrides::is_empty")]
+    pub overrides: ComponentOverrides,
 }
 
 impl AssetInstance {
@@ -2251,6 +2305,7 @@ impl AssetInstance {
             asset_id,
             name: String::new(),
             enabled: true,
+            overrides: ComponentOverrides::default(),
         }
     }
 
