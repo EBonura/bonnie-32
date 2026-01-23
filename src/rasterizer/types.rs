@@ -1420,6 +1420,18 @@ impl RasterSettings {
             ..Self::default()
         }
     }
+
+    /// Create settings for asset modeler (ambient lighting, no directional)
+    /// This provides even lighting so textures show their true colors,
+    /// and lets placed Light components be clearly visible on top.
+    pub fn modeler() -> Self {
+        Self {
+            backface_wireframe: false,
+            lights: vec![], // No directional lights - use ambient + placed lights
+            ambient: 0.7,   // Higher ambient for even lighting
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for RasterSettings {

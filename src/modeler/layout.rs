@@ -1765,63 +1765,65 @@ fn draw_spawn_point_editor(
     modified
 }
 
-/// Draw lights section
-fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, icon_font: Option<&Font>) {
-    let line_height = 18.0;
-    let btn_size = 18.0;
+/// Draw lights section - simple ambient slider (Light components add point lights on top)
+fn draw_lights_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, state: &mut ModelerState, _icon_font: Option<&Font>) {
+    let slider_height = 12.0;
+    let label_width = 55.0;
+    let value_width = 24.0;
+    let slider_x = x + label_width;
+    let slider_width = width - label_width - value_width - 12.0;
 
-    // Light count and add/remove buttons
-    let light_count = state.raster_settings.lights.len();
-    draw_text(&format!("{} light(s)", light_count), x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
+    let text_color = Color::from_rgba(204, 204, 204, 255);
+    let track_bg = Color::from_rgba(38, 38, 46, 255);
+    let tint = Color::from_rgba(230, 217, 102, 255); // Yellow/warm for light
 
-    // Add button
-    let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
-    if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add light") {
-        use crate::rasterizer::{Light, LightType, Vec3};
-        state.raster_settings.lights.push(Light {
-            light_type: LightType::Directional { direction: Vec3::new(-1.0, -1.0, -1.0).normalize() },
-            color: crate::rasterizer::Color::new(255, 255, 255),
-            intensity: 0.5,
-            enabled: true,
-            name: format!("Light {}", light_count + 1),
-        });
+    // Label
+    draw_text("Ambient", x, *y + slider_height - 2.0, 11.0, text_color);
+
+    // Convert ambient (0.0-1.0) to display value (0-31)
+    let ambient = state.raster_settings.ambient;
+    let ambient_31 = (ambient * 31.0).round() as u8;
+
+    // Slider track background
+    let track_rect = Rect::new(slider_x, *y, slider_width, slider_height);
+    draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+    // Filled portion
+    let fill_ratio = ambient_31 as f32 / 31.0;
+    let fill_width = fill_ratio * slider_width;
+    draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, tint);
+
+    // Thumb indicator
+    let thumb_x = track_rect.x + fill_width - 1.0;
+    draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+    // Value text
+    draw_text(&format!("{:2}", ambient_31), slider_x + slider_width + 4.0, *y + slider_height - 2.0, 11.0, text_color);
+
+    // Handle slider interaction
+    let hovered = ctx.mouse.inside(&track_rect);
+
+    // Start dragging
+    if hovered && ctx.mouse.left_pressed {
+        state.ambient_slider_active = true;
     }
 
-    // Remove button
-    let rem_rect = Rect::new(x + width - btn_size - 4.0, *y, btn_size, btn_size);
-    if icon_button(ctx, rem_rect, icon::MINUS, icon_font, "Remove light") && light_count > 0 {
-        state.raster_settings.lights.pop();
-    }
-
-    *y += btn_size + 4.0;
-
-    // List lights
-    let mut toggle_idx: Option<usize> = None;
-    for (i, light) in state.raster_settings.lights.iter().enumerate() {
-        let toggle_rect = Rect::new(x + 4.0, *y, 50.0, 14.0);
-        let toggle_color = if light.enabled { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
-        draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
-
-        let type_str = match &light.light_type {
-            crate::rasterizer::LightType::Directional { .. } => "Dir",
-            crate::rasterizer::LightType::Point { .. } => "Pt",
-            crate::rasterizer::LightType::Spot { .. } => "Sp",
-        };
-        draw_text(&format!("{} {}", type_str, i + 1), toggle_rect.x + 4.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-
-        if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
-            toggle_idx = Some(i);
+    // Continue dragging
+    if state.ambient_slider_active && ctx.mouse.left_down {
+        let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+        let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+        let new_ambient = new_val as f32 / 31.0;
+        if (state.raster_settings.ambient - new_ambient).abs() > 0.001 {
+            state.raster_settings.ambient = new_ambient;
         }
-
-        // Intensity
-        draw_text(&format!("{:.0}%", light.intensity * 100.0), x + 58.0, *y + 10.0, FONT_SIZE_CONTENT, TEXT_DIM);
-
-        *y += line_height;
     }
 
-    if let Some(i) = toggle_idx {
-        state.raster_settings.lights[i].enabled = !state.raster_settings.lights[i].enabled;
+    // End dragging
+    if state.ambient_slider_active && !ctx.mouse.left_down {
+        state.ambient_slider_active = false;
     }
+
+    *y += slider_height + 8.0;
 }
 
 // ============================================================================
@@ -4975,80 +4977,52 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
     }
     y += line_height;
 
-    // Lights section
-    if y + line_height * 3.0 < rect.bottom() {
-        draw_text("Lights:", rect.x, y + 14.0, 12.0, TEXT_DIM);
+    // Ambient light slider (Light components add point lights on top)
+    if y + line_height * 2.0 < rect.bottom() {
+        draw_text("Ambient:", rect.x, y + 14.0, 12.0, TEXT_DIM);
         y += line_height;
 
-        // Show light count and add/remove buttons
-        let light_count = state.raster_settings.lights.len();
-        draw_text(&format!("{} light(s)", light_count), rect.x, y + 14.0, 12.0, TEXT_COLOR);
-        y += line_height;
+        let slider_height = 12.0;
+        let slider_width = rect.w - 40.0;
+        let text_color = Color::from_rgba(204, 204, 204, 255);
+        let track_bg = Color::from_rgba(38, 38, 46, 255);
+        let tint = Color::from_rgba(230, 217, 102, 255);
 
-        // Add light button
-        let btn_size = 20.0;
-        let add_rect = Rect::new(rect.x, y, btn_size, btn_size);
-        if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add directional light") {
-            use crate::rasterizer::{Light, LightType, Vec3};
-            let new_light = Light {
-                light_type: LightType::Directional { direction: Vec3::new(-1.0, -1.0, -1.0).normalize() },
-                color: crate::rasterizer::Color::new(255, 255, 255),
-                intensity: 0.5,
-                enabled: true,
-                name: format!("Light {}", light_count + 1),
-            };
-            state.raster_settings.lights.push(new_light);
-            state.set_status(&format!("Added light {}", light_count + 1), 1.0);
+        let ambient = state.raster_settings.ambient;
+        let ambient_31 = (ambient * 31.0).round() as u8;
+
+        let track_rect = Rect::new(rect.x, y, slider_width, slider_height);
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
+
+        let fill_ratio = ambient_31 as f32 / 31.0;
+        let fill_width = fill_ratio * slider_width;
+        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, tint);
+
+        let thumb_x = track_rect.x + fill_width - 1.0;
+        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+
+        draw_text(&format!("{:2}", ambient_31), rect.x + slider_width + 4.0, y + slider_height - 2.0, 11.0, text_color);
+
+        // Handle slider interaction
+        let hovered = ctx.mouse.inside(&track_rect);
+        if hovered && ctx.mouse.left_pressed {
+            state.ambient_slider_active = true;
         }
-
-        // Remove last light button
-        let remove_rect = Rect::new(rect.x + btn_size + 4.0, y, btn_size, btn_size);
-        if icon_button(ctx, remove_rect, icon::MINUS, icon_font, "Remove last light") && light_count > 0 {
-            state.raster_settings.lights.pop();
-            state.set_status(&format!("Removed light (now {})", light_count.saturating_sub(1)), 1.0);
-        }
-
-        y += btn_size + 8.0;
-
-        // List lights with enable toggle - collect click actions first
-        let mut toggle_light: Option<usize> = None;
-
-        for (i, light) in state.raster_settings.lights.iter().enumerate() {
-            if y + line_height > rect.bottom() {
-                break;
+        if state.ambient_slider_active && ctx.mouse.left_down {
+            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
+            let new_val = ((rel_x / slider_width) * 31.0).round() as u8;
+            let new_ambient = new_val as f32 / 31.0;
+            if (state.raster_settings.ambient - new_ambient).abs() > 0.001 {
+                state.raster_settings.ambient = new_ambient;
             }
-
-            let light_type_str = match &light.light_type {
-                crate::rasterizer::LightType::Directional { .. } => "Dir",
-                crate::rasterizer::LightType::Point { .. } => "Pt",
-                crate::rasterizer::LightType::Spot { .. } => "Sp",
-            };
-
-            // Toggle button
-            let toggle_rect = Rect::new(rect.x, y, 50.0, 16.0);
-            let toggle_color = if light.enabled { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
-            draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
-            draw_text(&format!("{} {}", light_type_str, i + 1), toggle_rect.x + 4.0, toggle_rect.y + 12.0, 12.0, TEXT_COLOR);
-
-            if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
-                toggle_light = Some(i);
-            }
-
-            // Intensity indicator
-            let intensity_str = format!("{:.0}%", light.intensity * 100.0);
-            draw_text(&intensity_str, rect.x + 55.0, y + 12.0, 12.0, TEXT_DIM);
-
-            y += line_height;
+        }
+        if state.ambient_slider_active && !ctx.mouse.left_down {
+            state.ambient_slider_active = false;
         }
 
-        // Apply toggle action after the loop
-        if let Some(i) = toggle_light {
-            let was_enabled = state.raster_settings.lights[i].enabled;
-            state.raster_settings.lights[i].enabled = !was_enabled;
-            let status = if !was_enabled { "ON" } else { "OFF" };
-            state.set_status(&format!("Light {}: {}", i + 1, status), 0.5);
-        }
+        y += slider_height + 8.0;
     }
+    let _ = y; // Silence unused warning
 }
 
 fn draw_timeline(_ctx: &mut UiContext, rect: Rect, _state: &mut ModelerState, _icon_font: Option<&Font>) {

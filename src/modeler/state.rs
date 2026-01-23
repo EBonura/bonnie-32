@@ -977,6 +977,9 @@ pub struct ModelerState {
 
     // Object delete confirmation dialog (object index)
     pub delete_dialog: Option<usize>,
+
+    // Ambient light slider dragging state
+    pub ambient_slider_active: bool,
 }
 
 /// Context menu for right-click actions
@@ -1072,7 +1075,7 @@ impl ModelerState {
 
             camera,
             camera_mode: CameraMode::Free, // Default to free camera (like world editor)
-            raster_settings: RasterSettings::game(), // Use game settings (no backface wireframe)
+            raster_settings: RasterSettings::modeler(), // Ambient lighting, placed lights shine through
             orbit_target,
             orbit_distance,
             orbit_azimuth,
@@ -1194,6 +1197,7 @@ impl ModelerState {
 
             rename_dialog: None,
             delete_dialog: None,
+            ambient_slider_active: false,
         }
     }
 
