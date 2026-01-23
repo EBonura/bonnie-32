@@ -914,7 +914,7 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
             draw_collision_editor(ctx, x, y, width, shape, is_trigger, icon_font)
         }
         AssetComponent::Light { color, intensity, radius, offset } => {
-            draw_light_component_editor(ctx, x, y, width, color, intensity, radius, offset, icon_font)
+            draw_light_component_editor(ctx, x, y, width, color, intensity, radius, offset, &mut state.light_color_slider, icon_font)
         }
         AssetComponent::Trigger { trigger_id, on_enter, on_exit } => {
             draw_trigger_editor(ctx, x, y, width, trigger_id, on_enter, on_exit, icon_font)
@@ -1234,17 +1234,15 @@ fn draw_light_component_editor(
     intensity: &mut f32,
     radius: &mut f32,
     offset: &mut [f32; 3],
+    color_slider: &mut Option<usize>,
     _icon_font: Option<&Font>,
 ) -> bool {
     let mut modified = false;
     let line_height = 18.0;
-    let slider_height = 12.0;
-    let label_width = 24.0;
-    let value_width = 20.0;
-    let slider_x = x + label_width;
-    let slider_width = width - label_width - value_width - 12.0;
-    let track_bg = Color::from_rgba(38, 38, 46, 255);
-    let text_color = Color::from_rgba(204, 204, 204, 255);
+    let slider_height = 10.0;
+    let slider_x = x + 14.0;
+    let slider_width = width - 40.0;
+    let track_bg = Color::new(0.12, 0.12, 0.14, 1.0);
 
     // Color preview
     draw_text("Color:", x + 4.0, *y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
@@ -1253,45 +1251,51 @@ fn draw_light_component_editor(
         Color::from_rgba(color[0], color[1], color[2], 255));
     *y += line_height;
 
-    // RGB sliders (0-31 display, stored as 0-255)
-    let rgb_labels = ["R", "G", "B"];
-    let rgb_tints = [
-        Color::from_rgba(255, 100, 100, 255), // Red
-        Color::from_rgba(100, 255, 100, 255), // Green
-        Color::from_rgba(100, 150, 255, 255), // Blue
+    // RGB sliders (0-31 display, stored as 0-255) - matching texture editor style
+    let channels = [
+        ("R", color[0] / 8, Color::new(0.7, 0.3, 0.3, 1.0), 0usize),
+        ("G", color[1] / 8, Color::new(0.3, 0.7, 0.3, 1.0), 1usize),
+        ("B", color[2] / 8, Color::new(0.3, 0.3, 0.7, 1.0), 2usize),
     ];
 
-    for i in 0..3 {
-        // Convert 0-255 to 0-31 display value
-        let val_31 = (color[i] as f32 / 8.0).round() as u8;
-
-        // Label
-        draw_text(rgb_labels[i], x + 4.0, *y + slider_height - 2.0, 11.0, text_color);
-
-        // Slider track
+    for (label, value, tint, slider_idx) in channels {
         let track_rect = Rect::new(slider_x, *y, slider_width, slider_height);
+
+        // Label in channel color
+        draw_text(label, x + 4.0, *y + 9.0, 12.0, tint);
+
+        // Track background
         draw_rectangle(track_rect.x, track_rect.y, track_rect.w, track_rect.h, track_bg);
 
         // Filled portion
-        let fill_ratio = val_31 as f32 / 31.0;
-        let fill_width = fill_ratio * slider_width;
-        draw_rectangle(track_rect.x, track_rect.y, fill_width, track_rect.h, rgb_tints[i]);
+        let fill_ratio = value as f32 / 31.0;
+        draw_rectangle(track_rect.x, track_rect.y, track_rect.w * fill_ratio, slider_height, tint);
 
-        // Thumb indicator
-        let thumb_x = track_rect.x + fill_width - 1.0;
-        draw_rectangle(thumb_x, track_rect.y, 3.0, track_rect.h, WHITE);
+        // Handle/thumb
+        let handle_x = track_rect.x + track_rect.w * fill_ratio - 2.0;
+        draw_rectangle(handle_x.max(track_rect.x), track_rect.y, 4.0, slider_height, WHITE);
 
         // Value text
-        draw_text(&format!("{:2}", val_31), slider_x + slider_width + 4.0, *y + slider_height - 2.0, 11.0, text_color);
+        draw_text(&format!("{}", value), track_rect.x + track_rect.w + 4.0, *y + 9.0, 11.0, TEXT_DIM);
 
-        // Handle slider interaction
-        if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down {
-            let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, slider_width);
-            let new_val_31 = ((rel_x / slider_width) * 31.0).round() as u8;
-            let new_val_255 = (new_val_31 as u16 * 8).min(255) as u8;
-            if color[i] != new_val_255 {
-                color[i] = new_val_255;
-                modified = true;
+        // Slider interaction - start drag
+        if ctx.mouse.inside(&track_rect) && ctx.mouse.left_down && color_slider.is_none() {
+            *color_slider = Some(slider_idx);
+        }
+
+        // Continue drag (even outside track)
+        if *color_slider == Some(slider_idx) {
+            if ctx.mouse.left_down {
+                let rel_x = (ctx.mouse.x - track_rect.x).clamp(0.0, track_rect.w);
+                let new_val_31 = ((rel_x / track_rect.w) * 31.0).round() as u8;
+                let new_val_255 = (new_val_31 as u16 * 8).min(255) as u8;
+                if color[slider_idx] != new_val_255 {
+                    color[slider_idx] = new_val_255;
+                    modified = true;
+                }
+            } else {
+                // Mouse released
+                *color_slider = None;
             }
         }
 
@@ -1305,14 +1309,15 @@ fn draw_light_component_editor(
     let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
     draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
 
-    let fill_w = (intensity.clamp(0.0, 2.0) / 2.0) * slider_w;
+    let max_intensity = 5.0;
+    let fill_w = (intensity.clamp(0.0, max_intensity) / max_intensity) * slider_w;
     draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
 
     draw_text(&format!("{:.1}", intensity), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
 
     if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_down {
         let t = ((ctx.mouse.x - slider_rect.x) / slider_w).clamp(0.0, 1.0);
-        *intensity = t * 2.0;
+        *intensity = t * max_intensity;
         modified = true;
     }
     *y += line_height;
@@ -1322,7 +1327,7 @@ fn draw_light_component_editor(
     let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
     draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
 
-    let max_radius = 2048.0;
+    let max_radius = 8192.0; // 8 meters
     let fill_w = (radius.clamp(0.0, max_radius) / max_radius) * slider_w;
     draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
 
@@ -1656,7 +1661,7 @@ fn draw_audio_editor(
     let slider_rect = Rect::new(slider_x, *y + 4.0, slider_w, 10.0);
     draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, Color::from_rgba(40, 40, 45, 255));
 
-    let max_radius = 2048.0;
+    let max_radius = 8192.0; // 8 meters
     let fill_w = (radius.clamp(0.0, max_radius) / max_radius) * slider_w;
     draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, ACCENT_COLOR);
 

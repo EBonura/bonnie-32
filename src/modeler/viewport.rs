@@ -3115,48 +3115,45 @@ fn handle_component_move_gizmo(
     let mouse_pos = (ctx.mouse.x, ctx.mouse.y);
     let is_dragging = state.component_gizmo_drag_axis.is_some();
 
-    // Handle ongoing drag
-    if is_dragging && ctx.mouse.left_down {
-        if let (Some(drag_axis), Some(drag_start)) = (state.component_gizmo_drag_axis, state.component_gizmo_drag_start) {
-            let dx = mouse_pos.0 - drag_start.0;
-            let dy = mouse_pos.1 - drag_start.1;
+    // Check if this viewport owns the drag (or no drag is active)
+    let owns_drag = state.component_gizmo_drag_viewport == Some(viewport_id) ||
+                   state.component_gizmo_drag_viewport.is_none();
 
-            // Get zoom/scale factor
+    // Handle ongoing drag - only in the viewport that owns it
+    if is_dragging && ctx.mouse.left_down && state.component_gizmo_drag_viewport == Some(viewport_id) {
+        if let (Some(drag_axis), Some(drag_start)) = (state.component_gizmo_drag_axis, state.component_gizmo_drag_start) {
+            let screen_dx = mouse_pos.0 - drag_start.0;
+            let screen_dy = mouse_pos.1 - drag_start.1;
+
+            // Find the screen direction of the dragged axis
+            let axis_screen_dir = axis_screen_ends.iter()
+                .find(|(a, _, _)| *a == drag_axis)
+                .map(|(_, end, _)| {
+                    let dx = end.0 - center_screen.0;
+                    let dy = end.1 - center_screen.1;
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len > 0.001 { (dx / len, dy / len) } else { (1.0, 0.0) }
+                })
+                .unwrap_or((1.0, 0.0));
+
+            // Project mouse movement onto the screen direction of the axis
+            // dot product gives how much the mouse moved along the axis direction
+            let screen_movement = screen_dx * axis_screen_dir.0 + screen_dy * axis_screen_dir.1;
+
+            // Convert screen movement to world units
             let zoom = if let Some(ortho) = ortho {
                 ortho.zoom
             } else {
-                // For perspective, approximate zoom based on distance
                 let dist = (center - camera.position).len();
                 500.0 / dist
             };
+            let world_movement = screen_movement / zoom;
 
-            // Convert screen delta to world delta (same as mesh gizmo)
-            let world_dx = dx / zoom;
-            let world_dy = -dy / zoom; // Y inverted
-
-            // Map to world delta based on viewport (same as mesh move gizmo)
-            // For perspective, use horizontal for X, vertical for Y and Z
-            let delta = match viewport_id {
-                ViewportId::Top => match drag_axis {
-                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),
-                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),  // Y not visible in Top, use vertical anyway
-                    Axis::Z => Vec3::new(0.0, 0.0, world_dy),
-                },
-                ViewportId::Front => match drag_axis {
-                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),
-                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),
-                    Axis::Z => Vec3::new(0.0, 0.0, world_dy),  // Z not visible in Front, use vertical
-                },
-                ViewportId::Side => match drag_axis {
-                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),  // X not visible in Side, use horizontal
-                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),
-                    Axis::Z => Vec3::new(0.0, 0.0, world_dx),
-                },
-                ViewportId::Perspective => match drag_axis {
-                    Axis::X => Vec3::new(-world_dx, 0.0, 0.0),
-                    Axis::Y => Vec3::new(0.0, world_dy, 0.0),
-                    Axis::Z => Vec3::new(0.0, 0.0, world_dy),  // Use vertical for Z in perspective
-                },
+            // Apply movement along the world axis
+            let delta = match drag_axis {
+                Axis::X => Vec3::new(world_movement, 0.0, 0.0),
+                Axis::Y => Vec3::new(0.0, world_movement, 0.0),
+                Axis::Z => Vec3::new(0.0, 0.0, world_movement),
             };
 
             // Calculate new offset from start position + delta
@@ -3183,17 +3180,18 @@ fn handle_component_move_gizmo(
         }
     }
 
-    // End drag on mouse release
+    // End drag on mouse release (any viewport can detect this)
     if is_dragging && !ctx.mouse.left_down {
         state.component_gizmo_drag_axis = None;
         state.component_gizmo_drag_start = None;
+        state.component_gizmo_drag_viewport = None;
     }
 
-    // Check for hover/click on gizmo axes
+    // Check for hover/click on gizmo axes (only when not dragging or this viewport owns it)
     let hit_radius = 8.0;
     let mut hovered_axis: Option<Axis> = None;
 
-    if !is_dragging {
+    if !is_dragging && owns_drag {
         for (axis, end_pos, _) in &axis_screen_ends {
             let dist = point_to_line_distance(
                 mouse_pos.0, mouse_pos.1,
@@ -3211,6 +3209,7 @@ fn handle_component_move_gizmo(
             state.component_gizmo_drag_axis = hovered_axis;
             state.component_gizmo_drag_start = Some(mouse_pos);
             state.component_gizmo_start_offset = offset;
+            state.component_gizmo_drag_viewport = Some(viewport_id);
         }
     }
 

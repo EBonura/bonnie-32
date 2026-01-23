@@ -847,6 +847,7 @@ pub struct ModelerState {
     pub component_gizmo_drag_axis: Option<Axis>,      // Which axis is being dragged
     pub component_gizmo_drag_start: Option<(f32, f32)>, // Starting mouse position
     pub component_gizmo_start_offset: [f32; 3],       // Starting offset value
+    pub component_gizmo_drag_viewport: Option<ViewportId>, // Which viewport owns the drag
 
     // CLUT editing state
     pub selected_clut: Option<crate::rasterizer::ClutId>, // Currently selected CLUT in pool
@@ -980,6 +981,9 @@ pub struct ModelerState {
 
     // Ambient light slider dragging state
     pub ambient_slider_active: bool,
+
+    // Light component RGB slider being dragged (0=R, 1=G, 2=B)
+    pub light_color_slider: Option<usize>,
 }
 
 /// Context menu for right-click actions
@@ -1122,6 +1126,7 @@ impl ModelerState {
             component_gizmo_drag_axis: None,
             component_gizmo_drag_start: None,
             component_gizmo_start_offset: [0.0, 0.0, 0.0],
+            component_gizmo_drag_viewport: None,
 
             // CLUT editing defaults
             selected_clut: None,
@@ -1198,6 +1203,7 @@ impl ModelerState {
             rename_dialog: None,
             delete_dialog: None,
             ambient_slider_active: false,
+            light_color_slider: None,
         }
     }
 
