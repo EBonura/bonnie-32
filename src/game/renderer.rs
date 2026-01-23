@@ -99,13 +99,15 @@ pub fn draw_test_viewport(
     // === RENDER PHASE ===
     let render_start = FrameTimings::start();
 
-    // Texture resolver closure
-    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<usize> {
+    // Texture resolver closure - returns (texture_id, texture_width)
+    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<(usize, u32)> {
         if !tex_ref.is_valid() {
-            return Some(0); // Fallback to first texture
+            return Some((0, 64)); // Fallback to first texture with default 64x64 size
         }
         // Try finding by name in the textures array directly
-        textures.iter().position(|t| t.name == tex_ref.name)
+        textures.iter().enumerate()
+            .find(|(_, t)| t.name == tex_ref.name)
+            .map(|(idx, t)| (idx, t.width as u32))
     };
 
     // --- Sub-timing: Light collection ---

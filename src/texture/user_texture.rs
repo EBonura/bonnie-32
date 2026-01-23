@@ -76,9 +76,9 @@ impl TextureSize {
         self.dimensions().1
     }
 
-    /// Check if this size is usable in the World Editor (must be 64x64)
+    /// Check if this size is usable in the World Editor (32x32, 64x64, or 128x128)
     pub fn usable_in_world_editor(&self) -> bool {
-        matches!(self, TextureSize::Size64x64)
+        matches!(self, TextureSize::Size32x32 | TextureSize::Size64x64 | TextureSize::Size128x128)
     }
 
     /// Get a display label for UI
@@ -116,8 +116,12 @@ impl TextureSize {
         TextureSize::Size256x256,
     ];
 
-    /// Sizes available for the World Editor (64x64 only)
-    pub const WORLD_EDITOR_SIZES: &'static [TextureSize] = &[TextureSize::Size64x64];
+    /// Sizes available for the World Editor
+    pub const WORLD_EDITOR_SIZES: &'static [TextureSize] = &[
+        TextureSize::Size32x32,
+        TextureSize::Size64x64,
+        TextureSize::Size128x128,
+    ];
 }
 
 impl Default for TextureSize {

@@ -3103,24 +3103,26 @@ pub fn draw_viewport_3d(
     let lights_start = EditorFrameTimings::start();
 
     // Build texture map from texture packs + user textures
-    let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    // Maps (pack, name) -> (texture_idx, texture_width)
+    let mut texture_map: std::collections::HashMap<(String, String), (usize, u32)> = std::collections::HashMap::new();
     let mut texture_idx = 0;
     for pack in &state.texture_packs {
         for tex in &pack.textures {
-            texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
+            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64)); // Pack textures are 64x64
             texture_idx += 1;
         }
     }
     // Add user textures (using _USER pack name convention)
     for name in state.user_textures.names() {
-        texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), texture_idx);
+        let width = state.user_textures.get(name).map(|t| t.width as u32).unwrap_or(64);
+        texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), (texture_idx, width));
         texture_idx += 1;
     }
 
-    // Texture resolver closure
-    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<usize> {
+    // Texture resolver closure - returns (texture_id, texture_width)
+    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<(usize, u32)> {
         if !tex_ref.is_valid() {
-            return Some(0); // Fallback to first texture
+            return Some((0, 64)); // Fallback to first texture with default 64x64 size
         }
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };

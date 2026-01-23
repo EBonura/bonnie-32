@@ -705,18 +705,20 @@ fn draw_orbit_preview(
         .cloned()
         .collect();
 
-    let mut texture_map: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    // Maps (pack, name) -> (texture_idx, texture_width)
+    let mut texture_map: std::collections::HashMap<(String, String), (usize, u32)> = std::collections::HashMap::new();
     let mut texture_idx = 0;
     for pack in texture_packs {
         for tex in &pack.textures {
-            texture_map.insert((pack.name.clone(), tex.name.clone()), texture_idx);
+            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64)); // Pack textures are 64x64
             texture_idx += 1;
         }
     }
 
-    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<usize> {
+    // Texture resolver - returns (texture_id, texture_width)
+    let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<(usize, u32)> {
         if !tex_ref.is_valid() {
-            return Some(0); // Fallback to first texture
+            return Some((0, 64)); // Fallback to first texture with default 64x64 size
         }
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
