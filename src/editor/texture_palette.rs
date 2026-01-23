@@ -101,6 +101,108 @@ pub fn draw_texture_palette(
             }
         }
     }
+
+    // Draw delete confirmation dialog (modal overlay) if pending
+    if let Some(action) = draw_delete_texture_dialog(ctx, state, icon_font) {
+        match action {
+            DeleteTextureAction::Confirm => {
+                if let Some(name) = state.texture_pending_delete.take() {
+                    // Delete the texture file and remove from library
+                    match state.user_textures.delete_texture_with_storage(&name, storage) {
+                        Ok(()) => {
+                            state.set_status(&format!("Deleted '{}'", name), 2.0);
+                            // Clear selection if we deleted the selected texture
+                            if state.selected_user_texture.as_ref() == Some(&name) {
+                                state.selected_user_texture = None;
+                            }
+                        }
+                        Err(e) => {
+                            state.set_status(&format!("Delete failed: {}", e), 3.0);
+                        }
+                    }
+                }
+            }
+            DeleteTextureAction::Cancel => {
+                state.texture_pending_delete = None;
+            }
+        }
+    }
+}
+
+/// Action from delete texture confirmation dialog
+pub enum DeleteTextureAction {
+    Confirm,
+    Cancel,
+}
+
+/// Draw the delete texture confirmation dialog (modal overlay)
+fn draw_delete_texture_dialog(
+    ctx: &mut UiContext,
+    state: &EditorState,
+    _icon_font: Option<&Font>,
+) -> Option<DeleteTextureAction> {
+    let texture_name = state.texture_pending_delete.as_ref()?;
+
+    // Dark overlay
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.6));
+
+    // Dialog dimensions
+    let dialog_w = 300.0;
+    let dialog_h = 120.0;
+    let dialog_x = (screen_width() - dialog_w) / 2.0;
+    let dialog_y = (screen_height() - dialog_h) / 2.0;
+
+    // Dialog background
+    draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 55, 255));
+    draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Title
+    draw_rectangle(dialog_x, dialog_y, dialog_w, 24.0, Color::from_rgba(60, 45, 45, 255));
+    draw_text("Delete Texture", dialog_x + 8.0, dialog_y + 17.0, 16.0, WHITE);
+
+    // Message
+    let msg = format!("Delete '{}'?", texture_name);
+    let msg_dims = measure_text(&msg, None, 14, 1.0);
+    draw_text(&msg, dialog_x + (dialog_w - msg_dims.width) / 2.0, dialog_y + 55.0, 14.0, WHITE);
+    draw_text("This cannot be undone.", dialog_x + (dialog_w - measure_text("This cannot be undone.", None, 12, 1.0).width) / 2.0, dialog_y + 75.0, 12.0, Color::from_rgba(180, 150, 150, 255));
+
+    // Buttons
+    let btn_w = 80.0;
+    let btn_h = 28.0;
+    let btn_y = dialog_y + dialog_h - btn_h - 10.0;
+    let btn_spacing = 20.0;
+    let total_btn_w = btn_w * 2.0 + btn_spacing;
+    let btn_start_x = dialog_x + (dialog_w - total_btn_w) / 2.0;
+
+    // Cancel button
+    let cancel_rect = Rect::new(btn_start_x, btn_y, btn_w, btn_h);
+    let cancel_hovered = ctx.mouse.inside(&cancel_rect);
+    let cancel_bg = if cancel_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
+    draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h, cancel_bg);
+    draw_rectangle_lines(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+    let cancel_text = "Cancel";
+    let cancel_dims = measure_text(cancel_text, None, 14, 1.0);
+    draw_text(cancel_text, cancel_rect.x + (cancel_rect.w - cancel_dims.width) / 2.0, cancel_rect.y + cancel_rect.h / 2.0 + 5.0, 14.0, if cancel_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+    if ctx.mouse.clicked(&cancel_rect) {
+        return Some(DeleteTextureAction::Cancel);
+    }
+
+    // Delete button
+    let delete_rect = Rect::new(btn_start_x + btn_w + btn_spacing, btn_y, btn_w, btn_h);
+    let delete_hovered = ctx.mouse.inside(&delete_rect);
+    let delete_bg = if delete_hovered { Color::from_rgba(150, 60, 60, 255) } else { Color::from_rgba(120, 50, 50, 255) };
+    draw_rectangle(delete_rect.x, delete_rect.y, delete_rect.w, delete_rect.h, delete_bg);
+    draw_rectangle_lines(delete_rect.x, delete_rect.y, delete_rect.w, delete_rect.h, 1.0, Color::from_rgba(160, 80, 80, 255));
+    let delete_text = "Delete";
+    let delete_dims = measure_text(delete_text, None, 14, 1.0);
+    draw_text(delete_text, delete_rect.x + (delete_rect.w - delete_dims.width) / 2.0, delete_rect.y + delete_rect.h / 2.0 + 5.0, 14.0, WHITE);
+
+    if ctx.mouse.clicked(&delete_rect) {
+        return Some(DeleteTextureAction::Confirm);
+    }
+
+    None
 }
 
 /// Draw mode toggle tabs
@@ -661,40 +763,14 @@ fn draw_user_texture_header(
     state: &mut EditorState,
     icon_font: Option<&Font>,
 ) {
+    use crate::ui::Toolbar;
+
     draw_rectangle(rect.x.floor(), rect.y.floor(), rect.w, rect.h, Color::from_rgba(40, 40, 45, 255));
 
-    let btn_h = rect.h - 8.0;
-    let btn_w = 60.0;
-    let btn_y = rect.y + 4.0;
-    let mut btn_x = rect.x + 4.0;
+    let mut toolbar = Toolbar::new(rect);
 
-    // "Import" button - square icon button at the start
-    let import_btn_w = btn_h;
-    let import_rect = Rect::new(btn_x, btn_y, import_btn_w, btn_h);
-    let import_hovered = ctx.mouse.inside(&import_rect);
-    let import_bg = if import_hovered {
-        Color::from_rgba(70, 70, 80, 255)
-    } else {
-        Color::from_rgba(55, 55, 65, 255)
-    };
-    draw_rectangle(import_rect.x, import_rect.y, import_rect.w, import_rect.h, import_bg);
-    draw_rectangle_lines(import_rect.x, import_rect.y, import_rect.w, import_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
-
-    let import_icon_color = if import_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) };
-    draw_icon_centered(icon_font, icon::FOLDER_OPEN, &import_rect, 14.0, import_icon_color);
-
-    // Tooltip on hover
-    if import_hovered {
-        let tooltip = "Import PNG";
-        let tip_dims = measure_text(tooltip, None, 12, 1.0);
-        let tip_x = import_rect.x + import_rect.w / 2.0 - tip_dims.width / 2.0;
-        let tip_y = import_rect.bottom() + 4.0;
-        draw_rectangle(tip_x - 4.0, tip_y - 2.0, tip_dims.width + 8.0, tip_dims.height + 6.0, Color::from_rgba(30, 30, 35, 240));
-        draw_text(tooltip, tip_x, tip_y + tip_dims.height, 12.0, WHITE);
-    }
-
-    // Import button opens file picker
-    if ctx.mouse.clicked(&import_rect) {
+    // Import button - opens file picker
+    if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Import PNG") {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if let Some(path) = rfd::FileDialog::new()
@@ -719,87 +795,57 @@ fn draw_user_texture_header(
         }
     }
 
-    btn_x += import_btn_w + 4.0;
-
-    // "New" button
-    let new_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
-    let new_hovered = ctx.mouse.inside(&new_rect);
-    let new_bg = if new_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
-    draw_rectangle(new_rect.x, new_rect.y, new_rect.w, new_rect.h, new_bg);
-    draw_rectangle_lines(new_rect.x, new_rect.y, new_rect.w, new_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
-
-    // Draw plus icon and "New" text
-    let icon_rect = Rect::new(new_rect.x + 2.0, new_rect.y, 16.0, new_rect.h);
-    draw_icon_centered(icon_font, icon::PLUS, &icon_rect, 12.0, if new_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
-    draw_text("New", (new_rect.x + 18.0).floor(), (new_rect.y + new_rect.h / 2.0 + 4.0).floor(), 12.0, if new_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
-
-    if ctx.mouse.clicked(&new_rect) {
-        // Create a new 64x64 texture with auto-numbered name (texture_001, texture_002, etc.)
+    // New button - creates a new texture
+    if toolbar.icon_button(ctx, icon::PLUS, icon_font, "New Texture") {
         let name = state.user_textures.next_available_name();
         let tex = UserTexture::new(&name, TextureSize::Size64x64, ClutDepth::Bpp4);
         state.user_textures.add(tex);
         state.editing_texture = Some(name.clone());
-        // Reset texture editor state for new texture
         state.texture_editor.reset();
     }
 
-    btn_x += btn_w + 4.0;
-
-    // "Edit" button - edits the selected texture
+    // Edit button - edits the selected texture
     let has_selection = state.selected_user_texture.is_some();
-    let edit_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
-    let edit_hovered = ctx.mouse.inside(&edit_rect);
-    let edit_enabled = has_selection;
-    let edit_bg = if !edit_enabled {
-        Color::from_rgba(40, 40, 45, 255) // Dimmed when disabled
-    } else if edit_hovered {
-        Color::from_rgba(70, 70, 80, 255)
-    } else {
-        Color::from_rgba(55, 55, 65, 255)
-    };
-    draw_rectangle(edit_rect.x, edit_rect.y, edit_rect.w, edit_rect.h, edit_bg);
-    draw_rectangle_lines(edit_rect.x, edit_rect.y, edit_rect.w, edit_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
-
-    let icon_color = if !edit_enabled {
-        Color::from_rgba(100, 100, 100, 255) // Dimmed when disabled
-    } else if edit_hovered {
-        WHITE
-    } else {
-        Color::from_rgba(200, 200, 200, 255)
-    };
-    let icon_rect = Rect::new(edit_rect.x + 2.0, edit_rect.y, 16.0, edit_rect.h);
-    draw_icon_centered(icon_font, icon::PENCIL, &icon_rect, 12.0, icon_color);
-    draw_text("Edit", (edit_rect.x + 18.0).floor(), (edit_rect.y + edit_rect.h / 2.0 + 4.0).floor(), 12.0, icon_color);
-
-    // Edit button edits the selected texture
-    if edit_enabled && ctx.mouse.clicked(&edit_rect) {
-        if let Some(name) = &state.selected_user_texture {
-            state.editing_texture = Some(name.clone());
-            state.texture_editor.reset();
+    if has_selection {
+        if toolbar.icon_button(ctx, icon::PENCIL, icon_font, "Edit Texture") {
+            if let Some(name) = &state.selected_user_texture {
+                state.editing_texture = Some(name.clone());
+                state.texture_editor.reset();
+            }
         }
+    } else {
+        toolbar.icon_button_disabled(ctx, icon::PENCIL, icon_font, "Edit Texture (select a texture first)");
     }
 
-    // Texture count on right side
-    let count = state.user_textures.len();
-    let count_text = format!("{} textures", count);
-    let count_dims = measure_text(&count_text, None, 11, 1.0);
-    let count_x = (rect.right() - count_dims.width - 8.0).floor();
-    draw_text(
-        &count_text,
-        count_x,
-        (rect.y + (rect.h + count_dims.height) / 2.0).floor(),
-        11.0,
-        Color::from_rgba(150, 150, 150, 255),
-    );
+    // Delete button - deletes the selected user texture (not samples)
+    let is_user_texture = state.selected_user_texture.as_ref()
+        .and_then(|name| state.user_textures.get(name))
+        .map(|tex| tex.source == crate::texture::TextureSource::User)
+        .unwrap_or(false);
+    let delete_enabled = has_selection && is_user_texture;
 
-    // Zoom buttons - before texture count
-    let btn_size = 20.0;
-    let zoom_x = count_x - (btn_size * 2.0 + 2.0) - 8.0;
-    let (zoom_out, zoom_in) = draw_zoom_buttons(ctx, zoom_x, (rect.y + 4.0).round(), btn_size, icon_font);
-    if zoom_out {
+    if delete_enabled {
+        if toolbar.icon_button_danger(ctx, icon::TRASH, icon_font, "Delete Texture") {
+            if let Some(name) = &state.selected_user_texture {
+                state.texture_pending_delete = Some(name.clone());
+            }
+        }
+    } else {
+        let tooltip = if has_selection && !is_user_texture {
+            "Cannot delete sample textures"
+        } else {
+            "Delete Texture (select a user texture first)"
+        };
+        toolbar.icon_button_danger_disabled(ctx, icon::TRASH, icon_font, tooltip);
+    }
+
+    toolbar.separator();
+
+    // Zoom buttons
+    if toolbar.icon_button(ctx, icon::ZOOM_OUT, icon_font, "Smaller Thumbnails") {
         state.paint_thumb_size = smaller_thumb_size(state.paint_thumb_size);
     }
-    if zoom_in {
+    if toolbar.icon_button(ctx, icon::ZOOM_IN, icon_font, "Larger Thumbnails") {
         state.paint_thumb_size = larger_thumb_size(state.paint_thumb_size);
     }
 }

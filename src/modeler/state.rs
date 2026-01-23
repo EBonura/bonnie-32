@@ -963,6 +963,9 @@ pub struct ModelerState {
     // Currently selected user texture name (for single-click selection before editing)
     pub selected_user_texture: Option<String>,
 
+    // Texture pending deletion (shows confirmation dialog when Some)
+    pub texture_pending_delete: Option<String>,
+
     // Thumbnail size for paint texture grid (32, 48, 64, 96)
     pub paint_thumb_size: f32,
 
@@ -1195,6 +1198,7 @@ impl ModelerState {
             editing_indexed_atlas: false,
             editing_texture,
             selected_user_texture,
+            texture_pending_delete: None,
             paint_thumb_size: 64.0,  // Default thumbnail size
             pending_user_texture_list: None,
             pending_texture_loads: Vec::new(),

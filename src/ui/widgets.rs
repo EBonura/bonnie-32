@@ -295,6 +295,22 @@ impl Toolbar {
         icon_button_disabled(ctx, btn_rect, icon, icon_font, tooltip);
     }
 
+    /// Add a danger icon button (red-tinted for destructive actions like delete)
+    pub fn icon_button_danger(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str) -> bool {
+        let size = (self.rect.h - 4.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), size, size);
+        self.cursor_x += size + self.spacing;
+        icon_button_danger(ctx, btn_rect, icon, icon_font, tooltip)
+    }
+
+    /// Add a disabled danger icon button (grayed out)
+    pub fn icon_button_danger_disabled(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str) {
+        let size = (self.rect.h - 4.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), size, size);
+        self.cursor_x += size + self.spacing;
+        icon_button_disabled(ctx, btn_rect, icon, icon_font, tooltip);
+    }
+
     /// Add a letter button with active state (for object type picker)
     pub fn letter_button_active(&mut self, ctx: &mut UiContext, letter: char, tooltip: &str, is_active: bool) -> bool {
         let size = (self.rect.h - 4.0).round();
@@ -483,6 +499,42 @@ pub fn icon_button_disabled(ctx: &mut UiContext, rect: Rect, icon: char, icon_fo
     let icon_size = (rect.h * 0.55).min(16.0);
     let disabled_color = Color::from_rgba(100, 100, 100, 255);
     draw_icon_centered(icon_font, icon, &rect, icon_size, disabled_color);
+}
+
+/// Draw a danger icon button (red-tinted for destructive actions)
+pub fn icon_button_danger(ctx: &mut UiContext, rect: Rect, icon: char, icon_font: Option<&Font>, tooltip: &str) -> bool {
+    let id = ctx.next_id();
+    let hovered = ctx.mouse.inside(&rect);
+    let pressed = ctx.mouse.clicking(&rect);
+    let clicked = ctx.mouse.clicked(&rect);
+
+    if hovered {
+        ctx.set_hot(id);
+        if !tooltip.is_empty() {
+            ctx.set_tooltip(tooltip, ctx.mouse.x, ctx.mouse.y);
+        }
+    }
+
+    let corner_radius = 4.0;
+
+    // Draw red-tinted background on hover/press
+    if pressed {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(120, 40, 40, 255));
+    } else if hovered {
+        draw_rounded_rect(rect.x, rect.y, rect.w, rect.h, corner_radius, Color::from_rgba(80, 40, 40, 255));
+    }
+
+    // Icon color: red-tinted when hovered, normal otherwise
+    let icon_color = if hovered {
+        Color::from_rgba(255, 180, 180, 255)
+    } else {
+        Color::from_rgba(180, 180, 180, 255)
+    };
+
+    let icon_size = (rect.h * 0.55).min(16.0);
+    draw_icon_centered(icon_font, icon, &rect, icon_size, icon_color);
+
+    clicked
 }
 
 /// Draw a flat icon button with optional active state (MuseScore style)

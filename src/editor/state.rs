@@ -652,6 +652,9 @@ pub struct EditorState {
     /// Currently selected user texture name (for single-click selection before editing)
     pub selected_user_texture: Option<String>,
 
+    /// Texture pending deletion (shows confirmation dialog when Some)
+    pub texture_pending_delete: Option<String>,
+
     /// Texture palette mode: false = source PNGs, true = user/paint textures
     pub texture_palette_user_mode: bool,
 
@@ -841,6 +844,7 @@ impl EditorState {
             texture_editor: TextureEditorState::new(),
             editing_texture: None,
             selected_user_texture: None,
+            texture_pending_delete: None,
             texture_palette_user_mode: false,
             source_thumb_size: 64.0,  // Default thumbnail size
             paint_thumb_size: 64.0,   // Default thumbnail size
