@@ -9,6 +9,7 @@ use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::world::Level;
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex};
 use crate::modeler::checkerboard_clut;
+use crate::asset::AssetComponent;
 use super::example_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
 
@@ -675,15 +676,35 @@ fn draw_orbit_preview(
     }
     // Collect lights from room objects (any asset with Light component)
     for room in &level.rooms {
-        for obj in room.objects.iter().filter(|o| {
-            o.enabled && asset_library.get_by_id(o.asset_id)
-                .map(|a| a.has_light())
-                .unwrap_or(false)
-        }) {
-            let world_pos = obj.world_position(room);
-            // Use default light settings
-            let light = Light::point(world_pos, 5000.0, 1.0);
-            lights.push(light);
+        for obj in room.objects.iter().filter(|o| o.enabled) {
+            let asset = match asset_library.get_by_id(obj.asset_id) {
+                Some(a) => a,
+                None => continue,
+            };
+            // Find Light component and extract its properties
+            for comp in &asset.components {
+                if let AssetComponent::Light { color, intensity, radius, offset } = comp {
+                    // Apply per-instance overrides if present
+                    let overrides = &obj.overrides.light;
+                    let final_color = overrides.as_ref().and_then(|o| o.color).unwrap_or(*color);
+                    let final_intensity = overrides.as_ref().and_then(|o| o.intensity).unwrap_or(*intensity);
+                    let final_radius = overrides.as_ref().and_then(|o| o.radius).unwrap_or(*radius);
+                    let final_offset = overrides.as_ref().and_then(|o| o.offset).unwrap_or(*offset);
+
+                    let base_pos = obj.world_position(room);
+                    // Apply light offset to get actual light position
+                    let light_pos = Vec3::new(
+                        base_pos.x + final_offset[0],
+                        base_pos.y + final_offset[1],
+                        base_pos.z + final_offset[2],
+                    );
+                    // Convert color from [u8; 3] to normalized RGB
+                    let r = final_color[0] as f32 / 255.0;
+                    let g = final_color[1] as f32 / 255.0;
+                    let b = final_color[2] as f32 / 255.0;
+                    lights.push(Light::point_colored(light_pos, final_radius, final_intensity, r, g, b));
+                }
+            }
         }
     }
     let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
