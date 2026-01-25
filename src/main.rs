@@ -143,7 +143,7 @@ async fn main() {
         // Update authentication state (checks for sign-in/sign-out)
         // When auth state changes, refresh browser's user levels to avoid stale data
         if app.update_auth() {
-            let browser = &mut app.world_editor.example_browser;
+            let browser = &mut app.world_editor.level_browser;
             // Clear any stale preview if it was from cloud
             if browser.selected_category == Some(LevelCategory::User) {
                 browser.preview_level = None;
@@ -333,7 +333,7 @@ async fn main() {
         // Block background input if example browser modal is open
         // Save the real mouse state so we can restore it for the modal
         let real_mouse = mouse_state;
-        if app.world_editor.example_browser.open {
+        if app.world_editor.level_browser.open {
             ui_ctx.begin_modal();
         }
 
@@ -375,19 +375,19 @@ async fn main() {
                     world_editor_first_open = false;
                     let samples = discover_examples();
                     // Open immediately with samples, user levels load async
-                    app.world_editor.example_browser.open_with_levels(samples, Vec::new());
+                    app.world_editor.level_browser.open_with_levels(samples, Vec::new());
                     #[cfg(target_arch = "wasm32")]
                     {
-                        app.world_editor.example_browser.pending_load_list = true;
+                        app.world_editor.level_browser.pending_load_list = true;
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         // Start async user level discovery if cloud is enabled
                         if app.storage.has_cloud() {
-                            app.world_editor.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                            app.world_editor.level_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
                         } else {
                             // Local storage is fast, use sync
-                            app.world_editor.example_browser.user_levels = discover_user_levels(&app.storage);
+                            app.world_editor.level_browser.user_levels = discover_user_levels(&app.storage);
                         }
                     }
                 }
@@ -527,13 +527,13 @@ async fn main() {
                 let ws = &mut app.world_editor;
 
                 // Draw level browser overlay if open
-                if ws.example_browser.open {
+                if ws.level_browser.open {
                     // End modal blocking so the browser itself can receive input
                     ui_ctx.end_modal(real_mouse);
 
                     let browser_action = draw_level_browser(
                         &mut ui_ctx,
-                        &mut ws.example_browser,
+                        &mut ws.level_browser,
                         &app.storage,
                         app.icon_font.as_ref(),
                         &ws.editor_state.texture_packs,
@@ -544,8 +544,8 @@ async fn main() {
                         BrowserAction::SelectPreview(category, index) => {
                             // Get level from the appropriate list
                             let level_info = match category {
-                                LevelCategory::Sample => ws.example_browser.samples.get(index),
-                                LevelCategory::User => ws.example_browser.user_levels.get(index),
+                                LevelCategory::Sample => ws.level_browser.samples.get(index),
+                                LevelCategory::User => ws.level_browser.user_levels.get(index),
                             };
                             if let Some(info) = level_info {
                                 let path = info.path.clone();
@@ -555,17 +555,17 @@ async fn main() {
                                     // Check if this is a cloud path (userdata + authenticated)
                                     if Storage::is_userdata_path(&path_str) && app.storage.has_cloud() {
                                         // Clear existing preview so loading indicator shows
-                                        ws.example_browser.preview_level = None;
-                                        ws.example_browser.preview_stats = None;
+                                        ws.level_browser.preview_level = None;
+                                        ws.level_browser.preview_stats = None;
                                         // Async load for cloud paths
-                                        ws.example_browser.pending_preview_load = Some(load_async(path));
+                                        ws.level_browser.pending_preview_load = Some(load_async(path));
                                         ws.editor_state.set_status("Loading preview...", 2.0);
                                     } else {
                                         // Sync load for local paths
                                         match load_level_with_storage(&path_str, &app.storage) {
                                             Ok(level) => {
                                                 println!("Loaded level with {} rooms", level.rooms.len());
-                                                ws.example_browser.set_preview(level);
+                                                ws.level_browser.set_preview(level);
                                             }
                                             Err(e) => {
                                                 eprintln!("Failed to load level {}: {}", path.display(), e);
@@ -577,17 +577,17 @@ async fn main() {
                                 #[cfg(target_arch = "wasm32")]
                                 {
                                     // Clear existing preview so loading indicator shows
-                                    ws.example_browser.preview_level = None;
-                                    ws.example_browser.preview_stats = None;
+                                    ws.level_browser.preview_level = None;
+                                    ws.level_browser.preview_stats = None;
                                     // WASM: set pending path for async load (handled after drawing)
-                                    ws.example_browser.pending_load_path = Some(path);
+                                    ws.level_browser.pending_load_path = Some(path);
                                 }
                             }
                         }
                         BrowserAction::OpenLevel => {
                             // Load the selected level, preserving texture packs and other state
-                            if let Some(level) = ws.example_browser.preview_level.take() {
-                                let (name, path) = ws.example_browser.selected_level()
+                            if let Some(level) = ws.level_browser.preview_level.take() {
+                                let (name, path) = ws.level_browser.selected_level()
                                     .map(|e| (e.name.clone(), e.path.clone()))
                                     .unwrap_or_else(|| ("level".to_string(), PathBuf::from("assets/userdata/levels/untitled.ron")));
                                 ws.editor_layout.apply_config(&level.editor_layout);
@@ -608,13 +608,13 @@ async fn main() {
                                 // Reset game state for the new level
                                 app.game.reset_for_new_level();
                                 ws.editor_state.set_status(&format!("Opened: {}", name), 3.0);
-                                ws.example_browser.close();
+                                ws.level_browser.close();
                             }
                         }
                         BrowserAction::OpenCopy => {
                             // Copy sample level to user levels and open it
-                            if let Some(level) = ws.example_browser.preview_level.take() {
-                                let name = ws.example_browser.selected_level()
+                            if let Some(level) = ws.level_browser.preview_level.take() {
+                                let name = ws.level_browser.selected_level()
                                     .map(|e| e.name.clone())
                                     .unwrap_or_else(|| "copy".to_string());
                                 // Generate a new path in userdata
@@ -637,35 +637,35 @@ async fn main() {
                                 ws.editor_state.current_file = None;
                                 app.game.reset_for_new_level();
                                 ws.editor_state.set_status(&format!("Copied: {} (save to keep)", name), 3.0);
-                                ws.example_browser.close();
+                                ws.level_browser.close();
                             }
                         }
                         BrowserAction::DeleteLevel => {
                             // Delete user level (only enabled for user levels)
-                            if let Some(info) = ws.example_browser.selected_level() {
+                            if let Some(info) = ws.level_browser.selected_level() {
                                 let path_str = info.path.to_string_lossy().to_string();
                                 let name = info.name.clone();
                                 match app.storage.delete_sync(&path_str) {
                                     Ok(()) => {
                                         ws.editor_state.set_status(&format!("Deleted: {}", name), 3.0);
                                         // Clear selection
-                                        ws.example_browser.selected_category = None;
-                                        ws.example_browser.selected_index = None;
-                                        ws.example_browser.preview_level = None;
-                                        ws.example_browser.preview_stats = None;
+                                        ws.level_browser.selected_category = None;
+                                        ws.level_browser.selected_index = None;
+                                        ws.level_browser.preview_level = None;
+                                        ws.level_browser.preview_stats = None;
                                         // Refresh user levels list (async if cloud)
                                         #[cfg(not(target_arch = "wasm32"))]
                                         {
                                             if app.storage.has_cloud() {
-                                                ws.example_browser.user_levels.clear();
-                                                ws.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                                                ws.level_browser.user_levels.clear();
+                                                ws.level_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
                                             } else {
-                                                ws.example_browser.user_levels = discover_user_levels(&app.storage);
+                                                ws.level_browser.user_levels = discover_user_levels(&app.storage);
                                             }
                                         }
                                         #[cfg(target_arch = "wasm32")]
                                         {
-                                            ws.example_browser.user_levels = discover_user_levels(&app.storage);
+                                            ws.level_browser.user_levels = discover_user_levels(&app.storage);
                                         }
                                     }
                                     Err(e) => {
@@ -695,36 +695,36 @@ async fn main() {
                             // Reset game state for the new level
                             app.game.reset_for_new_level();
                             ws.editor_state.set_status("New level created", 3.0);
-                            ws.example_browser.close();
+                            ws.level_browser.close();
                         }
                         BrowserAction::Refresh => {
                             // Refresh level lists from storage
-                            ws.example_browser.samples = discover_examples();
-                            ws.example_browser.selected_category = None;
-                            ws.example_browser.selected_index = None;
-                            ws.example_browser.preview_level = None;
-                            ws.example_browser.preview_stats = None;
+                            ws.level_browser.samples = discover_examples();
+                            ws.level_browser.selected_category = None;
+                            ws.level_browser.selected_index = None;
+                            ws.level_browser.preview_level = None;
+                            ws.level_browser.preview_stats = None;
                             // Refresh user levels (async if cloud)
                             #[cfg(not(target_arch = "wasm32"))]
                             {
                                 if app.storage.has_cloud() {
-                                    ws.example_browser.user_levels.clear();
-                                    ws.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                                    ws.level_browser.user_levels.clear();
+                                    ws.level_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
                                     ws.editor_state.set_status("Refreshing...", 2.0);
                                 } else {
-                                    ws.example_browser.user_levels = discover_user_levels(&app.storage);
+                                    ws.level_browser.user_levels = discover_user_levels(&app.storage);
                                     ws.editor_state.set_status("Level list refreshed", 2.0);
                                 }
                             }
                             #[cfg(target_arch = "wasm32")]
                             {
                                 // WASM: trigger async reload (handled in main loop)
-                                ws.example_browser.pending_load_list = true;
+                                ws.level_browser.pending_load_list = true;
                                 ws.editor_state.set_status("Refreshing...", 2.0);
                             }
                         }
                         BrowserAction::Cancel => {
-                            ws.example_browser.close();
+                            ws.level_browser.close();
                         }
                         BrowserAction::None => {}
                     }
@@ -1252,28 +1252,28 @@ async fn main() {
         if let Tool::WorldEditor = app.active_tool {
             let ws = &mut app.world_editor;
             // Load sample list from manifest if pending
-            if ws.example_browser.pending_load_list {
-                ws.example_browser.pending_load_list = false;
+            if ws.level_browser.pending_load_list {
+                ws.level_browser.pending_load_list = false;
                 use editor::load_example_list;
                 let samples = load_example_list().await;
-                ws.example_browser.samples = samples;
+                ws.level_browser.samples = samples;
                 // Start async user level discovery if authenticated
                 if crate::auth::is_authenticated() {
-                    ws.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                    ws.level_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
                 }
             }
             // Load individual level preview if pending
-            if let Some(path) = ws.example_browser.pending_load_path.take() {
+            if let Some(path) = ws.level_browser.pending_load_path.take() {
                 let path_str = path.to_string_lossy().to_string();
                 // Check if this is a user level (cloud storage) or sample (web server)
                 if Storage::is_userdata_path(&path_str) && crate::auth::is_authenticated() {
                     // User level: load from cloud storage
-                    ws.example_browser.pending_preview_load = Some(load_async(path));
+                    ws.level_browser.pending_preview_load = Some(load_async(path));
                 } else {
                     // Sample level: load from web server
                     use editor::load_example_level;
                     if let Some(level) = load_example_level(&path).await {
-                        ws.example_browser.set_preview(level);
+                        ws.level_browser.set_preview(level);
                     } else {
                         ws.editor_state.set_status("Failed to load level preview", 3.0);
                     }
@@ -1454,19 +1454,19 @@ async fn main() {
                         world_editor_first_open = false;
                         let samples = discover_examples();
                         // Open immediately with samples, user levels load async
-                        app.world_editor.example_browser.open_with_levels(samples, Vec::new());
+                        app.world_editor.level_browser.open_with_levels(samples, Vec::new());
                         #[cfg(target_arch = "wasm32")]
                         {
-                            app.world_editor.example_browser.pending_load_list = true;
+                            app.world_editor.level_browser.pending_load_list = true;
                         }
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             // Start async user level discovery if cloud is enabled
                             if app.storage.has_cloud() {
-                                app.world_editor.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                                app.world_editor.level_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
                             } else {
                                 // Local storage is fast, use sync
-                                app.world_editor.example_browser.user_levels = discover_user_levels(&app.storage);
+                                app.world_editor.level_browser.user_levels = discover_user_levels(&app.storage);
                             }
                         }
                     }
@@ -1604,14 +1604,14 @@ fn poll_pending_ops(app: &mut AppState) {
     }
 
     // Poll pending browser preview load (for async cloud loads)
-    if let Some(mut pending) = app.world_editor.example_browser.pending_preview_load.take() {
+    if let Some(mut pending) = app.world_editor.level_browser.pending_preview_load.take() {
         if pending.op.is_complete() {
             match pending.op.take() {
                 Some(Ok(data)) => {
                     // Parse the loaded data
                     match world::parse_level_data(&data) {
                         Ok(level) => {
-                            app.world_editor.example_browser.set_preview(level);
+                            app.world_editor.level_browser.set_preview(level);
                             app.world_editor.editor_state.set_status("Preview loaded", 2.0);
                         }
                         Err(e) => {
@@ -1628,7 +1628,7 @@ fn poll_pending_ops(app: &mut AppState) {
             }
         } else {
             // Still pending, put it back
-            app.world_editor.example_browser.pending_preview_load = Some(pending);
+            app.world_editor.level_browser.pending_preview_load = Some(pending);
         }
     }
 
@@ -1691,7 +1691,7 @@ fn poll_pending_ops(app: &mut AppState) {
     }
 
     // Poll pending browser user level list (for async cloud discovery)
-    if let Some(mut pending) = app.world_editor.example_browser.pending_user_list.take() {
+    if let Some(mut pending) = app.world_editor.level_browser.pending_user_list.take() {
         if pending.op.is_complete() {
             const USER_LEVELS_DIR: &str = "assets/userdata/levels";
             match pending.op.take() {
@@ -1720,7 +1720,7 @@ fn poll_pending_ops(app: &mut AppState) {
                             }
                         })
                         .collect();
-                    app.world_editor.example_browser.user_levels = levels;
+                    app.world_editor.level_browser.user_levels = levels;
                     app.world_editor.editor_state.set_status("Levels loaded", 2.0);
                 }
                 Some(Err(e)) => {
@@ -1732,7 +1732,7 @@ fn poll_pending_ops(app: &mut AppState) {
             }
         } else {
             // Still pending, put it back
-            app.world_editor.example_browser.pending_user_list = Some(pending);
+            app.world_editor.level_browser.pending_user_list = Some(pending);
         }
     }
 
@@ -2574,19 +2574,19 @@ fn handle_editor_action(action: EditorAction, app: &mut AppState) {
         EditorAction::BrowseExamples => {
             // Open the level browser immediately, user levels load async
             let samples = discover_examples();
-            ws.example_browser.open_with_levels(samples, Vec::new());
+            ws.level_browser.open_with_levels(samples, Vec::new());
             #[cfg(target_arch = "wasm32")]
             {
-                ws.example_browser.pending_load_list = true;
+                ws.level_browser.pending_load_list = true;
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 // Start async user level discovery if cloud is enabled
                 if storage.has_cloud() {
-                    ws.example_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                    ws.level_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
                 } else {
                     // Local storage is fast, use sync
-                    ws.example_browser.user_levels = discover_user_levels(storage);
+                    ws.level_browser.user_levels = discover_user_levels(storage);
                 }
             }
             ws.editor_state.set_status("Browse levels", 2.0);

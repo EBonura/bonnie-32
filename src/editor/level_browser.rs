@@ -53,9 +53,6 @@ pub struct LevelBrowser {
     preview_fb: Framebuffer,
 }
 
-/// Legacy alias for backward compatibility
-pub type ExampleBrowser = LevelBrowser;
-
 impl Default for LevelBrowser {
     fn default() -> Self {
         Self {
@@ -570,7 +567,7 @@ fn draw_two_section_list(
 /// Draw the orbit preview of a level (uses browser's local framebuffer)
 fn draw_orbit_preview(
     ctx: &mut UiContext,
-    browser: &mut ExampleBrowser,
+    browser: &mut LevelBrowser,
     rect: Rect,
     texture_packs: &[TexturePack],
     asset_library: &crate::asset::AssetLibrary,

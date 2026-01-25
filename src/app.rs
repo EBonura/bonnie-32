@@ -4,7 +4,7 @@
 //! Switch between tools via the tab bar - all tools stay alive in background.
 
 use crate::auth::AuthState;
-use crate::editor::{EditorState, EditorLayout, ExampleBrowser};
+use crate::editor::{EditorState, EditorLayout, LevelBrowser};
 use crate::game::GameToolState;
 use crate::input::InputState;
 use crate::landing::LandingState;
@@ -114,7 +114,7 @@ impl Tool {
 pub struct WorldEditorState {
     pub editor_state: EditorState,
     pub editor_layout: EditorLayout,
-    pub example_browser: ExampleBrowser,
+    pub level_browser: LevelBrowser,
 }
 
 /// State for the Modeler tool
@@ -187,7 +187,7 @@ impl AppState {
             world_editor: WorldEditorState {
                 editor_state,
                 editor_layout: EditorLayout::new(),
-                example_browser: ExampleBrowser::default(),
+                level_browser: LevelBrowser::default(),
             },
             game: GameToolState::new(),
             modeler: ModelerToolState {
