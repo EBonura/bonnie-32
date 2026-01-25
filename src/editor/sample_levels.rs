@@ -1,6 +1,6 @@
-//! Level browser for the editor
+//! Sample levels for the editor
 //!
-//! Handles loading bundled levels from disk (native) or via manifest (WASM),
+//! Handles loading bundled sample levels from disk (native) or via manifest (WASM),
 //! as well as discovering user-created levels from storage.
 
 use std::path::PathBuf;
@@ -33,12 +33,9 @@ pub struct LevelInfo {
     pub category: LevelCategory,
 }
 
-/// Legacy alias for backward compatibility
-pub type ExampleLevelInfo = LevelInfo;
-
 /// Discover all sample levels in the levels directory (native)
 #[cfg(not(target_arch = "wasm32"))]
-pub fn discover_examples() -> Vec<LevelInfo> {
+pub fn discover_sample_levels() -> Vec<LevelInfo> {
     let levels_dir = PathBuf::from("assets/samples/levels");
     let mut levels = Vec::new();
 
@@ -66,7 +63,7 @@ pub fn discover_examples() -> Vec<LevelInfo> {
 
 /// Discover all sample levels from manifest (WASM)
 #[cfg(target_arch = "wasm32")]
-pub fn discover_examples() -> Vec<LevelInfo> {
+pub fn discover_sample_levels() -> Vec<LevelInfo> {
     // On WASM, we return empty here and load async later
     Vec::new()
 }
@@ -115,7 +112,7 @@ pub fn discover_user_levels(storage: &Storage) -> Vec<LevelInfo> {
 }
 
 /// Load sample level list from manifest asynchronously (for WASM)
-pub async fn load_example_list() -> Vec<LevelInfo> {
+pub async fn load_sample_list() -> Vec<LevelInfo> {
     use macroquad::prelude::*;
 
     // Load and parse manifest
@@ -151,8 +148,8 @@ pub async fn load_example_list() -> Vec<LevelInfo> {
     levels
 }
 
-/// Load a specific example level by path
-pub async fn load_example_level(path: &PathBuf) -> Option<Level> {
+/// Load a specific sample level by path
+pub async fn load_sample_level(path: &PathBuf) -> Option<Level> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         load_level(path).ok()

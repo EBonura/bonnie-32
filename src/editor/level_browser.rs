@@ -10,7 +10,7 @@ use crate::world::Level;
 use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex, Clut, ClutId};
 use crate::modeler::{checkerboard_clut, IndexedAtlas, TextureRef};
 use crate::asset::AssetComponent;
-use super::example_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
+use super::sample_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
 
 /// State for the level browser dialog
@@ -207,8 +207,8 @@ impl LevelBrowser {
         self.orbit_pitch = 0.4;
     }
 
-    /// Get the currently selected example info (legacy compatibility)
-    pub fn selected_example(&self) -> Option<&LevelInfo> {
+    /// Get the currently selected sample info
+    pub fn selected_sample(&self) -> Option<&LevelInfo> {
         self.selected_level()
     }
 }
@@ -394,20 +394,6 @@ pub fn draw_level_browser(
     }
 
     action
-}
-
-/// Legacy alias for backward compatibility
-pub fn draw_example_browser(
-    ctx: &mut UiContext,
-    browser: &mut LevelBrowser,
-    icon_font: Option<&Font>,
-    texture_packs: &[TexturePack],
-    asset_library: &crate::asset::AssetLibrary,
-    user_textures: &crate::texture::TextureLibrary,
-) -> BrowserAction {
-    // Create a temporary storage for legacy calls (local-only)
-    let storage = Storage::new();
-    draw_level_browser(ctx, browser, &storage, icon_font, texture_packs, asset_library, user_textures)
 }
 
 /// Draw the two-section list (Samples + My Levels)

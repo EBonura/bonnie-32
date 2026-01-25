@@ -25,7 +25,7 @@ pub enum EditorAction {
     PromptLoad,     // Show file prompt
     Export,         // Browser: download as file
     Import,         // Browser: upload file
-    BrowseExamples, // Open example browser
+    OpenLevelBrowser, // Open level browser
     SwitchToModeler, // Switch to Asset Editor and create new asset
     Exit,           // Close/quit
 }
@@ -576,8 +576,8 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     }
 
     // Level browser (works on both native and WASM)
-    if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse") {
-        action = EditorAction::BrowseExamples;
+    if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Levels") {
+        action = EditorAction::OpenLevelBrowser;
     }
 
     toolbar.separator();

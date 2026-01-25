@@ -31,7 +31,7 @@ use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
 use world::{create_empty_level, load_level_with_storage, serialize_level, save_level_with_storage};
 use storage::{save_async, list_async, load_async, Storage};
 use ui::{UiContext, MouseState, Rect, draw_fixed_tabs_with_auth, TabBarAction, TabEntry, layout as tab_layout, icon};
-use editor::{EditorAction, draw_editor, draw_level_browser, BrowserAction, LevelCategory, discover_examples, discover_user_levels};
+use editor::{EditorAction, draw_editor, draw_level_browser, BrowserAction, LevelCategory, discover_sample_levels, discover_user_levels};
 use modeler::{ModelerAction, ModelBrowserAction, ObjImportAction, draw_model_browser, draw_obj_importer, discover_models, discover_meshes, ObjImporter, TextureImportResult};
 use app::{AppState, Tool};
 use std::path::PathBuf;
@@ -330,7 +330,7 @@ async fn main() {
         // Poll gamepad input
         app.input.poll();
 
-        // Block background input if example browser modal is open
+        // Block background input if level browser modal is open
         // Save the real mouse state so we can restore it for the modal
         let real_mouse = mouse_state;
         if app.world_editor.level_browser.open {
@@ -373,7 +373,7 @@ async fn main() {
                 // Handle special cases for certain tabs
                 if tool == Tool::WorldEditor && world_editor_first_open {
                     world_editor_first_open = false;
-                    let samples = discover_examples();
+                    let samples = discover_sample_levels();
                     // Open immediately with samples, user levels load async
                     app.world_editor.level_browser.open_with_levels(samples, Vec::new());
                     #[cfg(target_arch = "wasm32")]
@@ -520,7 +520,7 @@ async fn main() {
                     &app.storage,
                 );
 
-                // Handle editor actions (including opening example browser)
+                // Handle editor actions (including opening level browser)
                 handle_editor_action(action, &mut app);
 
                 // Reborrow after handle_editor_action
@@ -700,7 +700,7 @@ async fn main() {
                         }
                         BrowserAction::Refresh => {
                             // Refresh level lists from storage
-                            ws.level_browser.samples = discover_examples();
+                            ws.level_browser.samples = discover_sample_levels();
                             ws.level_browser.selected_category = None;
                             ws.level_browser.selected_index = None;
                             ws.level_browser.preview_level = None;
@@ -1255,8 +1255,8 @@ async fn main() {
             // Load sample list from manifest if pending
             if ws.level_browser.pending_load_list {
                 ws.level_browser.pending_load_list = false;
-                use editor::load_example_list;
-                let samples = load_example_list().await;
+                use editor::load_sample_list;
+                let samples = load_sample_list().await;
                 ws.level_browser.samples = samples;
                 // Start async user level discovery if authenticated
                 if crate::auth::is_authenticated() {
@@ -1272,8 +1272,8 @@ async fn main() {
                     ws.level_browser.pending_preview_load = Some(load_async(path));
                 } else {
                     // Sample level: load from web server
-                    use editor::load_example_level;
-                    if let Some(level) = load_example_level(&path).await {
+                    use editor::load_sample_level;
+                    if let Some(level) = load_sample_level(&path).await {
                         ws.level_browser.set_preview(level);
                     } else {
                         ws.editor_state.set_status("Failed to load level preview", 3.0);
@@ -1453,7 +1453,7 @@ async fn main() {
                     // Handle special cases for certain tabs
                     if tool == Tool::WorldEditor && world_editor_first_open {
                         world_editor_first_open = false;
-                        let samples = discover_examples();
+                        let samples = discover_sample_levels();
                         // Open immediately with samples, user levels load async
                         app.world_editor.level_browser.open_with_levels(samples, Vec::new());
                         #[cfg(target_arch = "wasm32")]
@@ -2572,9 +2572,9 @@ fn handle_editor_action(action: EditorAction, app: &mut AppState) {
                 }
             }
         }
-        EditorAction::BrowseExamples => {
+        EditorAction::OpenLevelBrowser => {
             // Open the level browser immediately, user levels load async
-            let samples = discover_examples();
+            let samples = discover_sample_levels();
             ws.level_browser.open_with_levels(samples, Vec::new());
             #[cfg(target_arch = "wasm32")]
             {
