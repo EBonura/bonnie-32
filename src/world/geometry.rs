@@ -1224,6 +1224,27 @@ impl HorizontalFace {
         self.heights_2.is_some()
     }
 
+    /// Check if the diagonal split is visually significant in 2D view.
+    /// Returns true if the two triangles have different properties that matter:
+    /// - Different textures (texture_2 is set)
+    /// - Split-level triangles (heights_2 is set)
+    /// - Non-uniform slope (twisted surface where diagonal affects rendering)
+    pub fn diagonal_matters(&self) -> bool {
+        self.texture_2.is_some()
+            || self.heights_2.is_some()
+            || !self.is_uniform_slope()
+    }
+
+    /// Check if heights form a uniform slope (flat or 2+2 ramp pattern).
+    /// Heights [NW, NE, SE, SW]:
+    /// - Flat: all same
+    /// - E-W ramp: NW == NE && SW == SE
+    /// - N-S ramp: NW == SW && NE == SE
+    fn is_uniform_slope(&self) -> bool {
+        let h = &self.heights;
+        (h[0] == h[1] && h[2] == h[3]) || // E-W slope (includes flat)
+        (h[0] == h[3] && h[1] == h[2])    // N-S slope
+    }
 
     /// Set all vertex colors to the same value (uniform tint)
     pub fn set_uniform_color(&mut self, color: Color) {
@@ -2396,17 +2417,17 @@ pub struct RoomFog {
 }
 
 fn default_fog_falloff() -> f32 {
-    1500.0
+    30000.0
 }
 
 impl Default for RoomFog {
     fn default() -> Self {
         Self {
             enabled: false,
-            color: (0.5, 0.5, 0.5), // Gray fog (PS1 typical)
-            start: 500.0,           // Fog starts at Z=500
-            falloff: 1500.0,        // Full fog 1500 units after start
-            cull_offset: 0.0,       // Cull immediately at full fog
+            color: (0.02, 0.02, 0.02), // Near-black fog (RGB 5,5,5)
+            start: 8192.0,              // Fog starts at 8 sectors
+            falloff: 30000.0,           // Gradual falloff
+            cull_offset: 9000.0,        // Cull at ~9 sectors
         }
     }
 }

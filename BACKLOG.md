@@ -9,7 +9,6 @@ This document tracks planned features, known issues, and future improvements.
 ### Architecture
 
 - [ ] **Unified render pipeline**: Game and editor currently have separate render paths with duplicated code. Should create a shared scene renderer that both use, with hooks for editor-specific overlays (grid, selection, gizmos) and game-specific features (player, particles). This becomes critical as we add meshes, skeletal animation, particle systems, etc. Benefits: any optimization applies to both, WYSIWYG editing, single source of truth for rendering.
-- [ ] **Eliminate model folder**: The `model` folder can probably be removed since everything is now in `asset`
 
 
 ---
@@ -28,23 +27,18 @@ This document tracks planned features, known issues, and future improvements.
 
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
 - [ ] **Camera floor limit**: Add a minimum camera height so users can't accidentally go below the floor level. Should be slightly below the camera's current position.
-- [ ] **Scroll wheel for camera dolly**: Use mouse scroll wheel for forward/backward camera movement (dolly) in addition to zoom.
 - [ ] **Object movement like cells**: Move objects by dragging on Z/X axis, with Shift for Y axis movement (same as cell movement)
-- [ ] **Larger light indicators**: Lights are hard to see and click - make them at least 3x bigger
 
 ---
 
 ### World Editor - UI/UX
 
-- [ ] **Scissor clipping uses unsafe**: The texture editor and other panels use `unsafe { get_internal_gl().quad_gl.scissor(...) }` for clipping. Consider creating a safe wrapper function in the UI module to encapsulate this pattern.
 - [ ] **Refine skybox section**: The skybox settings need UI polish and better controls.
 - [ ] **Gradient fills across cells**: Support linear and spherical gradient fills across multiple selected cells for vertex colors.
 - [ ] **Auto-select room vs room lock**: Automatically select the room the cursor is in, rather than requiring manual room locking.
 - [ ] **Color slider lock**: Add a lock toggle to color sliders to prevent accidental changes.
-- [ ] **Increase texture cache time**: Textures are being uwnloaded too quickly from cache. Increase the retention time to avoid reloading.
+- [ ] **Convert texture-packs to .ron textures**: Migrate from texture-packs format to individual .ron texture files (like assets/samples/textures). Remove assets/samples/texture-packs entirely.
 - [ ] **Environment/Objects switch**: Add a switch between environment and objects editing mode
-- [ ] **Smarter 2D diagonal display**: Only show diagonal lines in sectors when it matters (different textures or heights) for a cleaner 2D view
-- [ ] **Better fog defaults**: Default fog values should be color (5,5,5), start 8192, falloff 30k+, cull 9k. Sliders should work in sectors (1 sector = 1024)
 - [ ] **Assets not showing in level browser**: Assets are not appearing in the level browser
 
 ---
