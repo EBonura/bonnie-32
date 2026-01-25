@@ -15,7 +15,6 @@ This document tracks planned features, known issues, and future improvements.
 
 ### World Editor - Geometry
 
-- [ ] Smarter floor/ceiling placement tool, if there's already a floor nearby, use that height, ideally if the neighbour floor is slanted, new floor should have the same slant
 - [ ] We need a way to place rooms on top of each other, maybe the top view can be toggled with a side view?
 - [ ] **Hold button for continuous placement**: When holding the mouse button in floor/wall/ceiling mode, should continuously place geometry as the mouse moves.
 - [ ] **Batch slope/height editing**: When multiple faces are selected, changing slope or height should apply to all selected faces proportionally.
@@ -73,8 +72,6 @@ This document tracks planned features, known issues, and future improvements.
 ### Assets (Modeler)
 
 #### Known Issues
-- [ ] Selection box overflows from 2D view into 3D viewport when dragging near boundary
-- [ ] Fix transform tool icons: Select/Move/Rotate/Scale all show the same select icon
 - [ ] **Rotation mouse movement unintuitive**: Currently only responds to left/right movement. Should follow the rotation axis precisely
 
 #### UX Improvements

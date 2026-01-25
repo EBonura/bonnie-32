@@ -2736,22 +2736,11 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         None
     };
 
-    // Save undo BEFORE drawing if a new stroke is starting
-    // This must happen before draw_texture_canvas modifies the texture
-    // Note: bounds check is done inside draw_texture_canvas, so worst case we save an unnecessary undo
-    if ctx.mouse.left_pressed
-        && !state.texture_editor.drawing
-        && !state.texture_editor.panning
-        && state.texture_editor.tool.modifies_texture()
-    {
-        state.save_texture_undo();
-    }
-
-    // Now get mutable reference to the texture
-    let tex = state.editing_texture.as_mut().unwrap();
-    // Extract dimensions for later use (to avoid borrow conflicts)
-    let tex_width_f = tex.width as f32;
-    let tex_height_f = tex.height as f32;
+    // Extract texture info before calculating layout (to avoid borrow conflicts later)
+    let (tex_width_f, tex_height_f, tex_name, is_dirty) = {
+        let tex = state.editing_texture.as_ref().unwrap();
+        (tex.width as f32, tex.height as f32, tex.name.clone(), state.texture_editor.dirty)
+    };
 
     // Header with texture name and buttons (match main toolbar sizing: 36px height, 32px buttons, 16px icons)
     let header_h = 36.0;
@@ -2759,8 +2748,6 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let icon_size = 16.0;
     let header_rect = Rect::new(rect.x, rect.y, rect.w, header_h);
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, Color::from_rgba(45, 45, 55, 255));
-
-    let is_dirty = state.texture_editor.dirty;
 
     // Back button (arrow-big-left) - far right
     let back_rect = Rect::new(rect.right() - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
@@ -2775,9 +2762,6 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.editing_indexed_atlas = false;
         return;
     }
-
-    // Get texture name for save and display (clone before we use tex mutably)
-    let tex_name = tex.name.clone();
 
     // Save/Download button - only visible when dirty
     let mut save_clicked = false;
@@ -2834,6 +2818,19 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
     let palette_rect = Rect::new(content_rect.x, content_rect.y + canvas_h, content_rect.w, palette_panel_h);
 
+    // Save undo BEFORE drawing if a new stroke is starting AND cursor is inside canvas
+    if ctx.mouse.left_pressed
+        && ctx.mouse.inside(&canvas_rect)
+        && !state.texture_editor.drawing
+        && !state.texture_editor.panning
+        && state.texture_editor.tool.modifies_texture()
+    {
+        state.save_texture_undo();
+    }
+
+    // Now get mutable reference to the texture for drawing
+    let tex = state.editing_texture.as_mut().unwrap();
+
     // Draw panels using the shared texture editor components
     draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor, uv_data.as_ref());
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
@@ -2848,7 +2845,7 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     // Handle UV operations (flip/rotate/reset buttons)
     apply_uv_operation(tex_width_f, tex_height_f, state);
 
-    // Handle undo save signals from texture editor (save BEFORE the action is applied)
+    // Handle undo save signals from texture editor (for non-paint actions like selection move)
     if state.texture_editor.undo_save_pending.take().is_some() {
         state.save_texture_undo();
     }
