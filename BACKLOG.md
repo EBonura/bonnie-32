@@ -61,7 +61,6 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Color adjustments**: Add contrast/saturation/hue/brightness controls
 - [ ] **Multiple layers**: Full support for multiple layers
 - [ ] **Multiple frames**: Full support for animation frames
-- [ ] **Checkerboard for transparency**: Texture preview should show checkerboard pattern for transparent background instead of black
 
 ---
 

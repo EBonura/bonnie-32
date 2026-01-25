@@ -378,6 +378,10 @@ fn draw_source_texture_grid(
             clicked_texture = Some(crate::world::TextureRef::new(pack_name.clone(), texture.name.clone()));
         }
 
+        // Draw checkerboard background for transparency
+        let check_size = (thumb_size / 64.0 * 8.0).max(4.0);
+        draw_checkerboard(x, y, thumb_size, thumb_size, check_size);
+
         // Draw texture thumbnail (use cached GPU texture to prevent memory leak)
         let cache_key = (selected_pack, i);
         let mq_texture = state.gpu_texture_cache.entry(cache_key).or_insert_with(|| {

@@ -2618,6 +2618,10 @@ fn draw_modeler_texture_thumbnail(
 
     // Get texture for rendering
     if let Some(tex) = state.user_textures.get(name) {
+        // Draw checkerboard background for transparency
+        let check_size = (thumb_size / tex.width.max(tex.height) as f32 * 2.0).max(4.0);
+        draw_checkerboard(x, y, thumb_size, thumb_size, check_size);
+
         // Draw texture thumbnail
         let mq_tex = user_texture_to_mq_texture(tex);
         draw_texture_ex(
@@ -2676,23 +2680,45 @@ fn draw_modeler_texture_thumbnail(
     }
 }
 
-/// Convert a UserTexture to a macroquad texture for display
+/// Convert a UserTexture to a macroquad texture for display (with transparency)
 fn user_texture_to_mq_texture(texture: &UserTexture) -> Texture2D {
     let mut pixels = Vec::with_capacity(texture.width * texture.height * 4);
     for y in 0..texture.height {
         for x in 0..texture.width {
             let idx = texture.indices[y * texture.width + x] as usize;
             let color = texture.palette.get(idx).copied().unwrap_or_default();
+            // Index 0 is transparent
+            let alpha = if idx == 0 { 0 } else { 255 };
             pixels.push(color.r8());
             pixels.push(color.g8());
             pixels.push(color.b8());
-            pixels.push(255); // Full alpha
+            pixels.push(alpha);
         }
     }
 
     let tex = Texture2D::from_rgba8(texture.width as u16, texture.height as u16, &pixels);
     tex.set_filter(FilterMode::Nearest);
     tex
+}
+
+/// Draw a checkerboard pattern for transparency display
+fn draw_checkerboard(x: f32, y: f32, w: f32, h: f32, check_size: f32) {
+    let cols = (w / check_size).ceil() as i32;
+    let rows = (h / check_size).ceil() as i32;
+    for row in 0..rows {
+        for col in 0..cols {
+            let c = if (row + col) % 2 == 0 {
+                Color::new(0.25, 0.25, 0.28, 1.0)
+            } else {
+                Color::new(0.18, 0.18, 0.20, 1.0)
+            };
+            let cx = x + col as f32 * check_size;
+            let cy = y + row as f32 * check_size;
+            let cw = check_size.min(x + w - cx);
+            let ch = check_size.min(y + h - cy);
+            draw_rectangle(cx, cy, cw, ch, c);
+        }
+    }
 }
 
 /// Draw the texture editor panel (when editing a texture)
