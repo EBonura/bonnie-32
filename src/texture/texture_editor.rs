@@ -378,6 +378,11 @@ impl DrawTool {
     pub fn is_shape_tool(&self) -> bool {
         matches!(self, DrawTool::Line | DrawTool::Rectangle | DrawTool::Ellipse)
     }
+
+    /// Whether this tool modifies the texture (requires undo save)
+    pub fn modifies_texture(&self) -> bool {
+        matches!(self, DrawTool::Brush | DrawTool::Fill | DrawTool::Line | DrawTool::Rectangle | DrawTool::Ellipse)
+    }
 }
 
 /// Undo entry for texture editing
@@ -2313,8 +2318,11 @@ pub fn draw_texture_canvas(
                     state.drawing = true;
                     state.last_draw_pos = Some((px, py));
 
-                    // Signal to caller to save undo at start of stroke/shape
-                    state.undo_save_pending = Some(format!("{:?}", state.tool));
+                    // Signal to caller to save undo for non-texture-modifying tools
+                    // (Brush, Fill, etc. are handled upfront in layout.rs)
+                    if !state.tool.modifies_texture() {
+                        state.undo_save_pending = Some(format!("{:?}", state.tool));
+                    }
 
                     if state.tool.is_shape_tool() {
                         state.shape_start = Some((px, py));

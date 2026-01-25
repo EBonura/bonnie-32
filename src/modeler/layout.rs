@@ -2736,6 +2736,17 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         None
     };
 
+    // Save undo BEFORE drawing if a new stroke is starting
+    // This must happen before draw_texture_canvas modifies the texture
+    // Note: bounds check is done inside draw_texture_canvas, so worst case we save an unnecessary undo
+    if ctx.mouse.left_pressed
+        && !state.texture_editor.drawing
+        && !state.texture_editor.panning
+        && state.texture_editor.tool.modifies_texture()
+    {
+        state.save_texture_undo();
+    }
+
     // Now get mutable reference to the texture
     let tex = state.editing_texture.as_mut().unwrap();
     // Extract dimensions for later use (to avoid borrow conflicts)
