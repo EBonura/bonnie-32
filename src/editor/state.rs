@@ -504,6 +504,14 @@ pub struct EditorState {
     pub dragging_object_initial_y: f32,          // Initial Y when drag started
     pub dragging_object_plane_y: f32,            // Current accumulated drag plane Y
 
+    /// 3D viewport object XZ dragging (drag without Shift moves on XZ plane)
+    pub object_xz_drag_active: bool,
+    pub object_xz_drag_start: Option<(f32, f32)>,  // Initial world XZ position
+    pub object_xz_drag_initial_sector: Option<(usize, usize)>, // Initial sector coords
+
+    /// 3D viewport object placement preview (for PlaceObject tool)
+    pub object_placement_preview: Option<(usize, usize, f32)>, // (sector_x, sector_z, floor_y)
+
     /// X/Z face relocation drag state
     pub xz_drag_active: bool,
     /// Initial positions: (room_idx, gx, gz, SectorFace)
@@ -777,6 +785,10 @@ impl EditorState {
             dragging_object: None,
             dragging_object_initial_y: 0.0,
             dragging_object_plane_y: 0.0,
+            object_xz_drag_active: false,
+            object_xz_drag_start: None,
+            object_xz_drag_initial_sector: None,
+            object_placement_preview: None,
             xz_drag_active: false,
             xz_drag_initial_positions: Vec::new(),
             xz_drag_delta: (0, 0),
