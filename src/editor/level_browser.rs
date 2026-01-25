@@ -7,7 +7,8 @@ use macroquad::prelude::*;
 use crate::storage::{Storage, PendingLoad, PendingList};
 use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::world::Level;
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex};
+use crate::modeler::checkerboard_clut;
 use super::example_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
 
@@ -736,6 +737,77 @@ fn draw_orbit_preview(
                 render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
             } else {
                 render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+            }
+        }
+    }
+
+    // Render asset meshes placed in each room
+    let fallback_clut = checkerboard_clut();
+    for room in &level.rooms {
+        for obj in &room.objects {
+            if !obj.enabled {
+                continue;
+            }
+
+            // Get asset from library
+            let asset = match asset_library.get_by_id(obj.asset_id) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            // Get mesh parts from asset
+            let mesh_parts = match asset.mesh() {
+                Some(parts) => parts,
+                None => continue,
+            };
+
+            // Calculate world transform
+            let world_pos = obj.world_position(room);
+            let facing = obj.facing;
+            let cos_f = facing.cos();
+            let sin_f = facing.sin();
+
+            // Per-room render settings
+            let asset_settings = RasterSettings {
+                lights: settings.lights.clone(),
+                ambient,
+                ..settings.clone()
+            };
+
+            // Render each visible mesh part
+            for part in mesh_parts.iter().filter(|p| p.visible) {
+                let (local_vertices, faces) = part.mesh.to_render_data_textured();
+                if local_vertices.is_empty() {
+                    continue;
+                }
+
+                // Transform vertices: rotate around Y by facing, then translate
+                let transformed_vertices: Vec<Vertex> = local_vertices.iter().map(|v| {
+                    let rx = v.pos.x * cos_f - v.pos.z * sin_f;
+                    let rz = v.pos.x * sin_f + v.pos.z * cos_f;
+                    Vertex {
+                        pos: Vec3::new(rx + world_pos.x, v.pos.y + world_pos.y, rz + world_pos.z),
+                        uv: v.uv,
+                        normal: Vec3::new(
+                            v.normal.x * cos_f - v.normal.z * sin_f,
+                            v.normal.y,
+                            v.normal.x * sin_f + v.normal.z * cos_f,
+                        ),
+                        color: v.color,
+                        bone_index: v.bone_index,
+                    }
+                }).collect();
+
+                // Use part atlas with fallback clut for preview
+                if use_rgb555 {
+                    let tex15 = part.atlas.to_texture15(fallback_clut, "preview_asset");
+                    let part_textures = [tex15];
+                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &camera, &asset_settings, None);
+                } else {
+                    let tex = part.atlas.to_raster_texture(fallback_clut, "preview_asset");
+                    let part_textures = [tex];
+                    render_mesh(fb, &transformed_vertices, &faces, &part_textures, &camera, &asset_settings);
+                }
             }
         }
     }

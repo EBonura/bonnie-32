@@ -39,7 +39,6 @@ This document tracks planned features, known issues, and future improvements.
 - [ ] **Color slider lock**: Add a lock toggle to color sliders to prevent accidental changes.
 - [ ] **Convert texture-packs to .ron textures**: Migrate from texture-packs format to individual .ron texture files (like assets/samples/textures). Remove assets/samples/texture-packs entirely.
 - [ ] **Environment/Objects switch**: Add a switch between environment and objects editing mode
-- [ ] **Assets not showing in level browser**: Assets are not appearing in the level browser
 
 ---
 
