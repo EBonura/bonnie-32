@@ -7,8 +7,8 @@ use macroquad::prelude::*;
 use crate::storage::{Storage, PendingLoad, PendingList};
 use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::world::Level;
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex};
-use crate::modeler::checkerboard_clut;
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex, Clut, ClutId};
+use crate::modeler::{checkerboard_clut, IndexedAtlas, TextureRef};
 use crate::asset::AssetComponent;
 use super::example_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
@@ -241,6 +241,7 @@ pub fn draw_level_browser(
     icon_font: Option<&Font>,
     texture_packs: &[TexturePack],
     asset_library: &crate::asset::AssetLibrary,
+    user_textures: &crate::texture::TextureLibrary,
 ) -> BrowserAction {
     if !browser.open {
         return BrowserAction::None;
@@ -317,7 +318,7 @@ pub fn draw_level_browser(
 
     if has_preview {
         // Render 3D preview with orbit camera (uses browser's local framebuffer)
-        draw_orbit_preview(ctx, browser, preview_rect, texture_packs, asset_library);
+        draw_orbit_preview(ctx, browser, preview_rect, texture_packs, asset_library, user_textures);
 
         // Draw stats at bottom of preview
         if let Some(stats) = &browser.preview_stats {
@@ -402,10 +403,11 @@ pub fn draw_example_browser(
     icon_font: Option<&Font>,
     texture_packs: &[TexturePack],
     asset_library: &crate::asset::AssetLibrary,
+    user_textures: &crate::texture::TextureLibrary,
 ) -> BrowserAction {
     // Create a temporary storage for legacy calls (local-only)
     let storage = Storage::new();
-    draw_level_browser(ctx, browser, &storage, icon_font, texture_packs, asset_library)
+    draw_level_browser(ctx, browser, &storage, icon_font, texture_packs, asset_library, user_textures)
 }
 
 /// Draw the two-section list (Samples + My Levels)
@@ -573,6 +575,7 @@ fn draw_orbit_preview(
     rect: Rect,
     texture_packs: &[TexturePack],
     asset_library: &crate::asset::AssetLibrary,
+    user_textures: &crate::texture::TextureLibrary,
 ) {
     use crate::rasterizer::WIDTH;
 
@@ -819,13 +822,35 @@ fn draw_orbit_preview(
                     }
                 }).collect();
 
-                // Use part atlas with fallback clut for preview
+                // Resolve texture: use UserTexture data for Id refs, otherwise use atlas with fallback
+                let (atlas, clut) = match &part.texture_ref {
+                    TextureRef::Id(id) => {
+                        // Find user texture by ID and create atlas + CLUT from it
+                        if let Some(tex) = user_textures.get_by_id(*id) {
+                            let atlas = IndexedAtlas {
+                                width: tex.width,
+                                height: tex.height,
+                                depth: tex.depth,
+                                indices: tex.indices.clone(),
+                                default_clut: ClutId::NONE,
+                            };
+                            let mut clut = Clut::new_4bit("preview_texture");
+                            clut.colors = tex.palette.clone();
+                            clut.depth = tex.depth;
+                            (atlas, clut)
+                        } else {
+                            (part.atlas.clone(), fallback_clut.clone())
+                        }
+                    }
+                    _ => (part.atlas.clone(), fallback_clut.clone()),
+                };
+
                 if use_rgb555 {
-                    let tex15 = part.atlas.to_texture15(fallback_clut, "preview_asset");
+                    let tex15 = atlas.to_texture15(&clut, "preview_asset");
                     let part_textures = [tex15];
                     render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &camera, &asset_settings, None);
                 } else {
-                    let tex = part.atlas.to_raster_texture(fallback_clut, "preview_asset");
+                    let tex = atlas.to_raster_texture(&clut, "preview_asset");
                     let part_textures = [tex];
                     render_mesh(fb, &transformed_vertices, &faces, &part_textures, &camera, &asset_settings);
                 }

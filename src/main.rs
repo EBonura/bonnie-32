@@ -538,6 +538,7 @@ async fn main() {
                         app.icon_font.as_ref(),
                         &ws.editor_state.texture_packs,
                         &ws.editor_state.asset_library,
+                        &ws.editor_state.user_textures,
                     );
 
                     match browser_action {
