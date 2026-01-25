@@ -2621,7 +2621,7 @@ fn handle_modeler_action(
             }
             state.set_status("Browse assets", 2.0);
         }
-        ModelerAction::BrowseMeshes => {
+        ModelerAction::ImportObj => {
             let meshes = discover_meshes();
             obj_importer.open(meshes);
             // On WASM, trigger async load of mesh list
@@ -2629,7 +2629,7 @@ fn handle_modeler_action(
             {
                 obj_importer.pending_load_list = true;
             }
-            state.set_status("Browse meshes", 2.0);
+            state.set_status("Import OBJ", 2.0);
         }
         ModelerAction::Save => {
             // Handled by handle_modeler_save_action before this function is called

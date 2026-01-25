@@ -78,7 +78,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     registry.register(
-        Action::new("file.browse_meshes")
+        Action::new("file.import_obj")
             .label("Import OBJ")
             .icon(icon::FOLDER_OPEN)
             .status_tip("Import mesh from OBJ file")
