@@ -16,7 +16,6 @@ This document tracks planned features, known issues, and future improvements.
 ### World Editor - Geometry
 
 - [ ] We need a way to place rooms on top of each other, maybe the top view can be toggled with a side view?
-- [ ] **Hold button for continuous placement**: When holding the mouse button in floor/wall/ceiling mode, should continuously place geometry as the mouse moves.
 - [ ] **Batch slope/height editing**: When multiple faces are selected, changing slope or height should apply to all selected faces proportionally.
 - [ ] **Better floor placement highlight**: Improve the visual feedback when placing floors to make it clearer where the floor will be placed.
 
