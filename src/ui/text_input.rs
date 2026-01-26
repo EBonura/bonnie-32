@@ -16,6 +16,10 @@ pub struct TextInputState {
     pub blink_timer: f32,
     /// Whether the input has focus
     pub focused: bool,
+    /// Last click time for double-click detection
+    pub last_click_time: f64,
+    /// Last click position (byte index) for double-click detection
+    pub last_click_pos: usize,
 }
 
 impl TextInputState {
@@ -28,6 +32,8 @@ impl TextInputState {
             selection_start: None,
             blink_timer: 0.0,
             focused: true,
+            last_click_time: 0.0,
+            last_click_pos: 0,
         }
     }
 
@@ -143,6 +149,59 @@ impl TextInputState {
     pub fn select_all(&mut self) {
         self.selection_start = Some(0);
         self.cursor = self.text.len();
+    }
+
+    /// Find word boundaries around the given byte position
+    /// Returns (word_start, word_end) byte indices
+    fn word_boundaries(&self, pos: usize) -> (usize, usize) {
+        if self.text.is_empty() {
+            return (0, 0);
+        }
+
+        // Find word start (scan backwards)
+        let mut start = pos;
+        for (i, ch) in self.text[..pos].char_indices().rev() {
+            if !ch.is_alphanumeric() && ch != '_' {
+                start = i + ch.len_utf8();
+                break;
+            }
+            start = i;
+        }
+
+        // Find word end (scan forwards)
+        let mut end = pos;
+        for (i, ch) in self.text[pos..].char_indices() {
+            if !ch.is_alphanumeric() && ch != '_' {
+                end = pos + i;
+                break;
+            }
+            end = pos + i + ch.len_utf8();
+        }
+
+        (start, end)
+    }
+
+    /// Select the word at cursor position
+    pub fn select_word_at_cursor(&mut self) {
+        let (start, end) = self.word_boundaries(self.cursor);
+        if start != end {
+            self.selection_start = Some(start);
+            self.cursor = end;
+        }
+    }
+
+    /// Set cursor position from a byte index, optionally extending selection
+    pub fn set_cursor(&mut self, pos: usize, extend_selection: bool) {
+        let pos = pos.min(self.text.len());
+        if extend_selection {
+            if self.selection_start.is_none() {
+                self.selection_start = Some(self.cursor);
+            }
+        } else {
+            self.selection_start = None;
+        }
+        self.cursor = pos;
+        self.blink_timer = 0.0;
     }
 
     /// Insert text at cursor, replacing selection if any
@@ -262,6 +321,38 @@ const INPUT_TEXT: Color = Color::new(0.8, 0.8, 0.85, 1.0);
 const INPUT_SELECTION: Color = Color::new(0.0, 0.5, 0.7, 0.5);
 const INPUT_CURSOR: Color = Color::new(0.9, 0.9, 0.95, 1.0);
 
+/// Double-click threshold in seconds
+const DOUBLE_CLICK_TIME: f64 = 0.4;
+
+/// Convert mouse X position to byte index in text
+fn x_to_byte_index(text: &str, text_x: f32, mouse_x: f32, font_size: f32) -> usize {
+    let relative_x = mouse_x - text_x;
+    if relative_x <= 0.0 {
+        return 0;
+    }
+
+    // Find the character position closest to the click
+    let mut best_pos = 0;
+    let mut best_dist = relative_x;
+
+    for (i, _) in text.char_indices() {
+        let width = measure_text(&text[..i], None, font_size as u16, 1.0).width;
+        let dist = (relative_x - width).abs();
+        if dist < best_dist {
+            best_dist = dist;
+            best_pos = i;
+        }
+    }
+
+    // Check end of text too
+    let end_width = measure_text(text, None, font_size as u16, 1.0).width;
+    if (relative_x - end_width).abs() < best_dist {
+        best_pos = text.len();
+    }
+
+    best_pos
+}
+
 /// Draw a text input field and handle input
 /// Returns true if the text changed
 pub fn draw_text_input(rect: Rect, state: &mut TextInputState, font_size: f32) -> bool {
@@ -273,7 +364,35 @@ pub fn draw_text_input(rect: Rect, state: &mut TextInputState, font_size: f32) -
     let text_x = rect.x + padding;
     let text_y = rect.y + (rect.h + font_size * 0.7) / 2.0;
 
-    // Handle input
+    // Handle mouse clicks
+    let (mx, my) = mouse_position();
+    let mouse_in_rect = mx >= rect.x && mx < rect.x + rect.w && my >= rect.y && my < rect.y + rect.h;
+
+    if mouse_in_rect && is_mouse_button_pressed(MouseButton::Left) {
+        let click_pos = x_to_byte_index(&state.text, text_x, mx, font_size);
+        let now = get_time();
+        let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+        // Check for double-click
+        if now - state.last_click_time < DOUBLE_CLICK_TIME
+            && (click_pos as i32 - state.last_click_pos as i32).abs() <= 1
+        {
+            // Double-click: select word
+            state.cursor = click_pos;
+            state.select_word_at_cursor();
+        } else if shift {
+            // Shift-click: extend selection
+            state.set_cursor(click_pos, true);
+        } else {
+            // Single click: position cursor
+            state.set_cursor(click_pos, false);
+        }
+
+        state.last_click_time = now;
+        state.last_click_pos = click_pos;
+    }
+
+    // Handle keyboard input
     let changed = state.handle_input();
 
     // Measure text up to cursor for cursor positioning
