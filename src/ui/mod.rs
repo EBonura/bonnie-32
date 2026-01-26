@@ -22,6 +22,7 @@ mod tabbar;
 mod icons;
 mod theme;
 mod actions;
+mod text_input;
 pub mod drag_tracker;
 pub mod tool;
 pub mod tool_box;
@@ -35,6 +36,7 @@ pub use tabbar::*;
 pub use icons::*;
 pub use theme::*;
 pub use actions::*;
+pub use text_input::{TextInputState, draw_text_input};
 pub use drag_tracker::{
     DragState, DragStatus, DragConfig, SnapMode, Axis, PickerType, apply_drag_update, snap_angle,
 };

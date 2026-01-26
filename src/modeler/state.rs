@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15, Clut, ClutId};
 use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
 use crate::asset::Asset;
+use crate::ui::TextInputState;
 use super::mesh_editor::{
     EditableMesh, MeshPart, IndexedAtlas, EditFace, TextureRef, ClutPool,
     checkerboard_atlas, checkerboard_clut,
@@ -980,8 +981,8 @@ pub struct ModelerState {
     // Flag to trigger user texture refresh from main loop
     pub pending_texture_refresh: bool,
 
-    // Object rename dialog state (object index, current text input)
-    pub rename_dialog: Option<(usize, String)>,
+    // Object rename dialog state (object index, text input state)
+    pub rename_dialog: Option<(usize, TextInputState)>,
 
     // Object delete confirmation dialog (object index)
     pub delete_dialog: Option<usize>,

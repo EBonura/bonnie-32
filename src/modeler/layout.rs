@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::storage::Storage;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered, TextInputState, draw_text_input};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
@@ -1112,7 +1112,7 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
         }
     } else if let Some(idx) = rename_idx {
         let name = state.objects().get(idx).map(|o| o.name.clone()).unwrap_or_default();
-        state.rename_dialog = Some((idx, name));
+        state.rename_dialog = Some((idx, TextInputState::new(name)));
     } else if let Some(idx) = delete_idx {
         state.delete_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
@@ -6885,12 +6885,11 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
 /// Draw rename and delete dialogs for objects
 fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font: Option<&Font>) {
     // Handle rename dialog
-    if let Some((idx, ref current_name)) = state.rename_dialog.clone() {
+    if state.rename_dialog.is_some() {
         let dialog_w = 280.0;
         let dialog_h = 120.0;
         let dialog_x = (screen_width() - dialog_w) / 2.0;
         let dialog_y = (screen_height() - dialog_h) / 2.0;
-        let _dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
         // Background
         draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
@@ -6899,27 +6898,10 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
         // Title
         draw_text("Rename Object", dialog_x + 12.0, dialog_y + 22.0, 16.0, WHITE);
 
-        // Text input field
+        // Text input field - use the new widget
         let input_rect = Rect::new(dialog_x + 12.0, dialog_y + 40.0, dialog_w - 24.0, 28.0);
-        draw_rectangle(input_rect.x, input_rect.y, input_rect.w, input_rect.h, Color::from_rgba(30, 30, 35, 255));
-        draw_rectangle_lines(input_rect.x, input_rect.y, input_rect.w, input_rect.h, 1.0, ACCENT_COLOR);
-        draw_text(&current_name, input_rect.x + 8.0, input_rect.y + 19.0, 14.0, TEXT_COLOR);
-
-        // Handle text input
-        let mut new_name = current_name.clone();
-        // Check for character input
-        if let Some(ch) = get_char_pressed() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.' || ch == ' ' {
-                new_name.push(ch);
-            }
-        }
-        // Handle backspace
-        if is_key_pressed(KeyCode::Backspace) && !new_name.is_empty() {
-            new_name.pop();
-        }
-        // Update the dialog state with new name
-        if new_name != *current_name {
-            state.rename_dialog = Some((idx, new_name));
+        if let Some((_, ref mut input_state)) = state.rename_dialog {
+            draw_text_input(input_rect, input_state, 14.0);
         }
 
         // Buttons
@@ -6941,30 +6923,13 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
             if confirm_hover { Color::from_rgba(60, 100, 140, 255) } else { ACCENT_COLOR });
         draw_text("Rename", confirm_rect.x + 14.0, confirm_rect.y + 18.0, 14.0, WHITE);
 
-        // Handle button clicks (use clicked() for buttons, not left_pressed)
-        if ctx.mouse.clicked(&cancel_rect) {
+        // Handle button clicks
+        if ctx.mouse.clicked(&cancel_rect) || is_key_pressed(KeyCode::Escape) {
             state.rename_dialog = None;
-        } else if ctx.mouse.clicked(&confirm_rect) {
-            // Extract values before mutable borrow
-            let rename_data = state.rename_dialog.clone();
-            if let Some((idx, name)) = rename_data {
-                if !name.is_empty() && idx < state.objects().len() {
-                    if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(idx)) {
-                        obj.name = name.clone();
-                    }
-                    state.set_status(&format!("Renamed to '{}'", name), 1.0);
-                }
-            }
-            state.rename_dialog = None;
-        }
-
-        // Handle Enter/Escape keys
-        if is_key_pressed(KeyCode::Escape) {
-            state.rename_dialog = None;
-        } else if is_key_pressed(KeyCode::Enter) {
-            // Extract values before mutable borrow
-            let rename_data = state.rename_dialog.clone();
-            if let Some((idx, name)) = rename_data {
+        } else if ctx.mouse.clicked(&confirm_rect) || is_key_pressed(KeyCode::Enter) {
+            // Apply the rename
+            if let Some((idx, ref input_state)) = state.rename_dialog {
+                let name = input_state.text.clone();
                 if !name.is_empty() && idx < state.objects().len() {
                     if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(idx)) {
                         obj.name = name.clone();
