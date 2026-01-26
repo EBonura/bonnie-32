@@ -163,8 +163,13 @@ pub fn draw_modeler(
     // Draw status bar
     draw_status_bar(status_rect, state);
 
-    // Handle keyboard shortcuts using action registry
-    let keyboard_action = handle_actions(&layout.actions, state, ctx);
+    // Handle keyboard shortcuts using action registry (but not when a dialog is open)
+    let dialog_open = state.rename_dialog.is_some() || state.delete_dialog.is_some();
+    let keyboard_action = if dialog_open {
+        ModelerAction::None
+    } else {
+        handle_actions(&layout.actions, state, ctx)
+    };
     let action = if keyboard_action != ModelerAction::None { keyboard_action } else { action };
 
     // Draw popups and menus (on top of everything)
