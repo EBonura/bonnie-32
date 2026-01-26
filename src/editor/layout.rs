@@ -478,10 +478,16 @@ pub fn draw_editor(
                 AssetCategory::User => state.asset_browser.user_assets.get(idx),
             };
             if let Some(asset_info) = asset_info {
-                match Asset::load(&asset_info.path) {
-                    Ok(asset) => {
-                        state.asset_browser.set_preview(asset, &state.user_textures);
-                    }
+                let path_str = asset_info.path.to_string_lossy();
+                match storage.read_sync(&path_str) {
+                    Ok(bytes) => match Asset::load_from_bytes(&bytes) {
+                        Ok(asset) => {
+                            state.asset_browser.set_preview(asset, &state.user_textures);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse asset for preview: {}", e);
+                        }
+                    },
                     Err(e) => {
                         eprintln!("Failed to load asset for preview: {}", e);
                     }
