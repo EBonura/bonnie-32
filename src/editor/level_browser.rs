@@ -707,11 +707,18 @@ fn draw_orbit_preview(
     };
 
     // Build flattened textures array and texture map (same as main viewport)
-    let textures: Vec<RasterTexture> = texture_packs
+    let mut textures: Vec<RasterTexture> = texture_packs
         .iter()
         .flat_map(|pack| &pack.textures)
         .cloned()
         .collect();
+
+    // Append user textures (they'll be indexed after pack textures)
+    for name in user_textures.names() {
+        if let Some(user_tex) = user_textures.get(name) {
+            textures.push(user_tex.to_raster_texture());
+        }
+    }
 
     // Maps (pack, name) -> (texture_idx, texture_width)
     let mut texture_map: std::collections::HashMap<(String, String), (usize, u32)> = std::collections::HashMap::new();
@@ -721,6 +728,12 @@ fn draw_orbit_preview(
             texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64)); // Pack textures are 64x64
             texture_idx += 1;
         }
+    }
+    // Add user textures (using _USER pack name convention)
+    for name in user_textures.names() {
+        let width = user_textures.get(name).map(|t| t.width as u32).unwrap_or(64);
+        texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), (texture_idx, width));
+        texture_idx += 1;
     }
 
     // Texture resolver - returns (texture_id, texture_width)
