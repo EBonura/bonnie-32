@@ -103,6 +103,20 @@ pub fn draw_modeler(
     icon_font: Option<&Font>,
     storage: &Storage,
 ) -> ModelerAction {
+    // Save original mouse state for menus that need it after we block viewport clicks
+    let original_left_pressed = ctx.mouse.left_pressed;
+
+    // Block clicks if snap menu is open and mouse is in menu area
+    // (must happen before viewport processes clicks)
+    if state.snap_menu_open {
+        if let Some(btn_rect) = state.snap_btn_rect {
+            let menu_rect = Rect::new(btn_rect.x, btn_rect.bottom() + 2.0, 80.0, 7.0 * 22.0 + 8.0);
+            if ctx.mouse.inside(&menu_rect) {
+                ctx.mouse.left_pressed = false;
+            }
+        }
+    }
+
     let screen = bounds;
 
     // Toolbar at top
@@ -155,6 +169,8 @@ pub fn draw_modeler(
 
     // Draw popups and menus (on top of everything)
     draw_add_component_popup(ctx, left_rect, state, icon_font);
+    // Restore original click state for snap menu (we blocked it earlier to protect viewport)
+    ctx.mouse.left_pressed = original_left_pressed;
     draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
 
