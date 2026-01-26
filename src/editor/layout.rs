@@ -471,28 +471,36 @@ pub fn draw_editor(
     match browser_action {
         AssetBrowserAction::SelectPreview(category, idx) => {
             use crate::modeler::AssetCategory;
-            // Load the selected asset for preview (with texture resolution)
+            use crate::asset::Asset;
+            // Load the selected asset for preview (fresh from disk, like Asset Editor does)
             let asset_info = match category {
                 AssetCategory::Sample => state.asset_browser.samples.get(idx),
                 AssetCategory::User => state.asset_browser.user_assets.get(idx),
             };
             if let Some(asset_info) = asset_info {
-                if let Some(asset) = state.asset_library.get(&asset_info.name) {
-                    state.asset_browser.set_preview(asset.clone(), &state.user_textures);
+                match Asset::load(&asset_info.path) {
+                    Ok(asset) => {
+                        state.asset_browser.set_preview(asset, &state.user_textures);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load asset for preview: {}", e);
+                    }
                 }
             }
         }
         AssetBrowserAction::OpenAsset => {
             // User confirmed selection - set selected_asset and close browser
             if let Some(asset_info) = state.asset_browser.selected_asset() {
-                state.selected_asset = Some(asset_info.name.clone());
+                // Use namespaced key to distinguish sample vs user assets
+                state.selected_asset = Some(asset_info.library_key());
             }
             state.asset_browser.close();
         }
         AssetBrowserAction::OpenCopy => {
             // In world editor, OpenCopy just opens like normal (copying is for modeler)
             if let Some(asset_info) = state.asset_browser.selected_asset() {
-                state.selected_asset = Some(asset_info.name.clone());
+                // Use namespaced key to distinguish sample vs user assets
+                state.selected_asset = Some(asset_info.library_key());
             }
             state.asset_browser.close();
         }
@@ -618,36 +626,49 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
     {
         toolbar.separator();
 
-        // Collect asset names
-        let asset_names: Vec<&str> = state.asset_library.names().collect();
+        // Collect assets with their namespaced keys for proper selection
+        // Format: (display_name, library_key) e.g. ("asset_003", "sample:asset_003")
+        let assets: Vec<(String, String)> = state.asset_library.iter_with_keys()
+            .map(|(key, asset)| {
+                // Extract display name by removing prefix
+                let display = if let Some(name) = key.strip_prefix("sample:") {
+                    name.to_string()
+                } else if let Some(name) = key.strip_prefix("user:") {
+                    name.to_string()
+                } else {
+                    asset.name.clone()
+                };
+                (display, key)
+            })
+            .collect();
 
         // Auto-select first asset if none selected
-        if state.selected_asset.is_none() && !asset_names.is_empty() {
-            state.selected_asset = Some(asset_names[0].to_string());
+        if state.selected_asset.is_none() && !assets.is_empty() {
+            state.selected_asset = Some(assets[0].1.clone());
         }
 
-        // Find current asset index
+        // Find current asset index by matching the library key
         let (current_asset_idx, current_label) = if let Some(ref selected) = state.selected_asset {
-            let idx = asset_names.iter().position(|n| *n == selected.as_str()).unwrap_or(0);
-            (idx, asset_names.get(idx).copied().unwrap_or("(none)"))
+            let idx = assets.iter().position(|(_, key)| key == selected).unwrap_or(0);
+            let label = assets.get(idx).map(|(name, _)| name.as_str()).unwrap_or("(none)");
+            (idx, label.to_string())
         } else {
-            (0, "(none)")
+            (0, "(none)".to_string())
         };
-
-        let label = current_label.to_string();
 
         // Highlight if PlaceObject mode is active
         let is_active = state.tool == EditorTool::PlaceObject;
 
         // Draw "< Asset >" navigation - clicking arrows or label activates PlaceObject mode
-        let picker_clicked = toolbar.arrow_picker_active(ctx, icon_font, &label, is_active, &mut |delta: i32| {
+        let picker_clicked = toolbar.arrow_picker_active(ctx, icon_font, &current_label, is_active, &mut |delta: i32| {
             // Activate PlaceObject mode when cycling
             state.tool = EditorTool::PlaceObject;
-            if asset_names.is_empty() {
+            if assets.is_empty() {
                 return;
             }
-            let new_idx = (current_asset_idx as i32 + delta).rem_euclid(asset_names.len() as i32) as usize;
-            state.selected_asset = Some(asset_names[new_idx].to_string());
+            let new_idx = (current_asset_idx as i32 + delta).rem_euclid(assets.len() as i32) as usize;
+            // Store the namespaced library key for proper lookup
+            state.selected_asset = Some(assets[new_idx].1.clone());
         });
         if picker_clicked {
             // Label was clicked - activate PlaceObject mode
@@ -657,23 +678,15 @@ fn draw_unified_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut EditorState
         // Browse assets button (opens Asset Browser modal)
         if toolbar.icon_button(ctx, icon::BOOK_OPEN, icon_font, "Browse Assets") {
             state.tool = EditorTool::PlaceObject;
+            // Refresh asset library to ensure it's in sync with disk
+            if let Err(e) = state.asset_library.discover() {
+                eprintln!("Failed to refresh asset library: {}", e);
+            }
             // Open the asset browser with current assets (both samples and user assets)
-            use crate::asset::{AssetSource, SAMPLES_ASSETS_DIR, USER_ASSETS_DIR};
-            // Build separate sample and user asset lists from the library
-            use crate::modeler::AssetCategory;
-            let (samples, user_assets): (Vec<_>, Vec<_>) = state.asset_library.iter()
-                .map(|(name, asset)| {
-                    let (dir, category) = match asset.source {
-                        AssetSource::Sample => (SAMPLES_ASSETS_DIR, AssetCategory::Sample),
-                        AssetSource::User => (USER_ASSETS_DIR, AssetCategory::User),
-                    };
-                    crate::modeler::AssetInfo {
-                        name: name.to_string(),
-                        path: std::path::PathBuf::from(format!("{}/{}.ron", dir, name)),
-                        category,
-                    }
-                })
-                .partition(|info| info.category == AssetCategory::Sample);
+            // Use discover functions (same as Asset Editor) to list files directly
+            use crate::modeler::{discover_sample_assets, discover_user_assets};
+            let samples = discover_sample_assets();
+            let user_assets = discover_user_assets();
             state.asset_browser.open_with_assets(samples, user_assets);
         }
     }
