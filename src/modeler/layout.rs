@@ -2167,6 +2167,47 @@ fn draw_paint_section(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState,
             }
         }
     }
+
+    // Draw unsaved texture changes dialog (modal overlay) if active
+    if let Some(action) = draw_unsaved_texture_dialog(ctx, state, icon_font) {
+        match action {
+            UnsavedTextureAction::Save => {
+                // Save the texture first, then switch
+                if let Some(ref editing_tex) = state.editing_texture {
+                    let tex_name = editing_tex.name.clone();
+                    // Sync editing_texture to user_textures library
+                    if let Some(lib_tex) = state.user_textures.get_mut(&tex_name) {
+                        lib_tex.indices = editing_tex.indices.clone();
+                        lib_tex.palette = editing_tex.palette.clone();
+                        lib_tex.depth = editing_tex.depth;
+                        lib_tex.width = editing_tex.width;
+                        lib_tex.height = editing_tex.height;
+                    }
+                    // Save to storage
+                    if let Err(e) = state.user_textures.save_texture_with_storage(&tex_name, storage) {
+                        state.set_status(&format!("Failed to save: {}", e), 3.0);
+                    } else {
+                        let cloud_text = if storage.has_cloud() { " to cloud" } else { "" };
+                        state.set_status(&format!("Saved '{}'{}", tex_name, cloud_text), 2.0);
+                    }
+                }
+                // Now switch to pending object
+                if let Some(pending_idx) = state.unsaved_texture_pending_switch {
+                    state.force_select_object(pending_idx);
+                }
+            }
+            UnsavedTextureAction::Discard => {
+                // Discard changes and switch
+                if let Some(pending_idx) = state.unsaved_texture_pending_switch {
+                    state.force_select_object(pending_idx);
+                }
+            }
+            UnsavedTextureAction::Cancel => {
+                // Stay on current object, clear pending switch
+                state.unsaved_texture_pending_switch = None;
+            }
+        }
+    }
 }
 
 /// Action from delete texture confirmation dialog
@@ -2240,6 +2281,106 @@ fn draw_delete_texture_dialog(
 
     if ctx.mouse.clicked(&delete_rect) {
         return Some(DeleteTextureAction::Confirm);
+    }
+
+    None
+}
+
+/// Action from unsaved texture confirmation dialog
+#[derive(Debug, Clone, Copy)]
+enum UnsavedTextureAction {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// Draw the unsaved texture changes dialog (modal overlay)
+fn draw_unsaved_texture_dialog(
+    ctx: &mut UiContext,
+    state: &ModelerState,
+    _icon_font: Option<&Font>,
+) -> Option<UnsavedTextureAction> {
+    // Only show if there's a pending switch
+    let _pending_idx = state.unsaved_texture_pending_switch?;
+
+    // Get the texture name being edited
+    let texture_name = state.editing_texture.as_ref()
+        .map(|t| t.name.as_str())
+        .unwrap_or("texture");
+
+    // Dark overlay
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.6));
+
+    // Dialog dimensions (wider to fit 3 buttons)
+    let dialog_w = 360.0;
+    let dialog_h = 130.0;
+    let dialog_x = (screen_width() - dialog_w) / 2.0;
+    let dialog_y = (screen_height() - dialog_h) / 2.0;
+
+    // Dialog background
+    draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 55, 255));
+    draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Title bar (warning color)
+    draw_rectangle(dialog_x, dialog_y, dialog_w, 24.0, Color::from_rgba(120, 100, 50, 255));
+    draw_text("Unsaved Changes", dialog_x + 8.0, dialog_y + 17.0, 16.0, WHITE);
+
+    // Message
+    let msg = format!("'{}' has unsaved changes.", texture_name);
+    let msg_dims = measure_text(&msg, None, 14, 1.0);
+    draw_text(&msg, dialog_x + (dialog_w - msg_dims.width) / 2.0, dialog_y + 55.0, 14.0, WHITE);
+    let sub_msg = "Save before switching objects?";
+    let sub_dims = measure_text(sub_msg, None, 12, 1.0);
+    draw_text(sub_msg, dialog_x + (dialog_w - sub_dims.width) / 2.0, dialog_y + 75.0, 12.0, Color::from_rgba(180, 180, 180, 255));
+
+    // Buttons (3 buttons: Cancel, Discard, Save)
+    let btn_w = 80.0;
+    let btn_h = 28.0;
+    let btn_y = dialog_y + dialog_h - btn_h - 12.0;
+    let btn_spacing = 15.0;
+    let total_btn_w = btn_w * 3.0 + btn_spacing * 2.0;
+    let btn_start_x = dialog_x + (dialog_w - total_btn_w) / 2.0;
+
+    // Cancel button (leftmost)
+    let cancel_rect = Rect::new(btn_start_x, btn_y, btn_w, btn_h);
+    let cancel_hovered = ctx.mouse.inside(&cancel_rect);
+    let cancel_bg = if cancel_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
+    draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h, cancel_bg);
+    draw_rectangle_lines(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+    let cancel_text = "Cancel";
+    let cancel_dims = measure_text(cancel_text, None, 14, 1.0);
+    draw_text(cancel_text, cancel_rect.x + (cancel_rect.w - cancel_dims.width) / 2.0, cancel_rect.y + cancel_rect.h / 2.0 + 5.0, 14.0, if cancel_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+    if ctx.mouse.clicked(&cancel_rect) {
+        return Some(UnsavedTextureAction::Cancel);
+    }
+
+    // Discard button (middle, red-ish)
+    let discard_rect = Rect::new(btn_start_x + btn_w + btn_spacing, btn_y, btn_w, btn_h);
+    let discard_hovered = ctx.mouse.inside(&discard_rect);
+    let discard_bg = if discard_hovered { Color::from_rgba(140, 70, 70, 255) } else { Color::from_rgba(100, 55, 55, 255) };
+    draw_rectangle(discard_rect.x, discard_rect.y, discard_rect.w, discard_rect.h, discard_bg);
+    draw_rectangle_lines(discard_rect.x, discard_rect.y, discard_rect.w, discard_rect.h, 1.0, Color::from_rgba(140, 80, 80, 255));
+    let discard_text = "Discard";
+    let discard_dims = measure_text(discard_text, None, 14, 1.0);
+    draw_text(discard_text, discard_rect.x + (discard_rect.w - discard_dims.width) / 2.0, discard_rect.y + discard_rect.h / 2.0 + 5.0, 14.0, if discard_hovered { WHITE } else { Color::from_rgba(220, 180, 180, 255) });
+
+    if ctx.mouse.clicked(&discard_rect) {
+        return Some(UnsavedTextureAction::Discard);
+    }
+
+    // Save button (rightmost, green-ish)
+    let save_rect = Rect::new(btn_start_x + (btn_w + btn_spacing) * 2.0, btn_y, btn_w, btn_h);
+    let save_hovered = ctx.mouse.inside(&save_rect);
+    let save_bg = if save_hovered { Color::from_rgba(70, 130, 70, 255) } else { Color::from_rgba(55, 100, 55, 255) };
+    draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, save_bg);
+    draw_rectangle_lines(save_rect.x, save_rect.y, save_rect.w, save_rect.h, 1.0, Color::from_rgba(80, 140, 80, 255));
+    let save_text = "Save";
+    let save_dims = measure_text(save_text, None, 14, 1.0);
+    draw_text(save_text, save_rect.x + (save_rect.w - save_dims.width) / 2.0, save_rect.y + save_rect.h / 2.0 + 5.0, 14.0, if save_hovered { WHITE } else { Color::from_rgba(180, 220, 180, 255) });
+
+    if ctx.mouse.clicked(&save_rect) {
+        return Some(UnsavedTextureAction::Save);
     }
 
     None
@@ -2873,20 +3014,35 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         auto_unwrap_selected_faces(state);
     }
 
-    // Sync editing_texture back to selected object's atlas (only when actively editing)
-    // This prevents overwriting other objects' atlases when switching selection
+    // Sync editing_texture back to ALL objects that use this texture (not just selected)
+    // This ensures texture changes are visible on all objects sharing the same texture
     if state.editing_indexed_atlas {
         let editing_tex_data = state.editing_texture.clone();
         if let Some(editing_tex) = editing_tex_data {
-            // Sync to selected object's atlas for mesh preview
-            if let Some(atlas) = state.atlas_mut() {
-                atlas.width = editing_tex.width;
-                atlas.height = editing_tex.height;
-                atlas.depth = editing_tex.depth;
-                atlas.indices = editing_tex.indices.clone();
-                let default_clut_id = atlas.default_clut;
-                // Update the default CLUT with the texture's palette
-                if let Some(clut) = state.clut_pool.get_mut(default_clut_id) {
+            // Get the texture ID from the library to find all objects using it
+            let tex_id = state.user_textures.get(&tex_name).map(|t| t.id);
+
+            // Collect CLUT IDs that need updating (to avoid double borrow)
+            let mut clut_ids_to_update = Vec::new();
+
+            if let (Some(tex_id), Some(objects)) = (tex_id, state.objects_mut()) {
+                for obj in objects.iter_mut() {
+                    // Update all objects that reference this texture
+                    if let TextureRef::Id(obj_tex_id) = obj.texture_ref {
+                        if obj_tex_id == tex_id {
+                            obj.atlas.width = editing_tex.width;
+                            obj.atlas.height = editing_tex.height;
+                            obj.atlas.depth = editing_tex.depth;
+                            obj.atlas.indices = editing_tex.indices.clone();
+                            clut_ids_to_update.push(obj.atlas.default_clut);
+                        }
+                    }
+                }
+            }
+
+            // Update CLUTs after releasing objects borrow
+            for clut_id in clut_ids_to_update {
+                if let Some(clut) = state.clut_pool.get_mut(clut_id) {
                     clut.colors = editing_tex.palette.clone();
                     clut.depth = editing_tex.depth;
                 }
