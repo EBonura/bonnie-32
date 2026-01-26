@@ -7208,11 +7208,18 @@ fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
         y += item_height;
     }
 
-    // Handle click
+    // Handle click on menu item
     if let Some(size) = clicked_size {
         state.snap_settings.grid_size = size;
         state.snap_menu_open = false;
         state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
+        // Consume the click so it doesn't propagate to viewport
+        ctx.mouse.left_pressed = false;
+    }
+
+    // Consume clicks inside menu area (don't propagate to viewport)
+    if ctx.mouse.left_pressed && ctx.mouse.inside(&menu_rect) {
+        ctx.mouse.left_pressed = false;
     }
 
     // Close menu on click outside (but not on the button that opened it)
@@ -7221,6 +7228,8 @@ fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
         let clicking_button = state.snap_btn_rect.map_or(false, |r| ctx.mouse.inside(&r));
         if !clicking_button {
             state.snap_menu_open = false;
+            // Consume the click so it doesn't propagate to viewport
+            ctx.mouse.left_pressed = false;
         }
     }
 }
