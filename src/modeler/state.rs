@@ -842,6 +842,8 @@ pub struct ModelerState {
     pub lights_section_expanded: bool,          // Whether Lights section is expanded
     pub add_component_menu_open: bool,          // Whether the "Add Component" popup is open
     pub add_component_btn_rect: Option<crate::ui::Rect>, // Position of add button for popup positioning
+    pub snap_menu_open: bool,                   // Whether the snap size dropdown is open
+    pub snap_btn_rect: Option<crate::ui::Rect>, // Position of snap button for dropdown positioning
     pub hidden_components: std::collections::HashSet<usize>, // Hidden component indices
     pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
 
@@ -1129,6 +1131,8 @@ impl ModelerState {
             lights_section_expanded: true,
             add_component_menu_open: false,
             add_component_btn_rect: None,
+            snap_menu_open: false,
+            snap_btn_rect: None,
             hidden_components: std::collections::HashSet::new(),
             delete_component_dialog: None,
 

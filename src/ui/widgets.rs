@@ -287,6 +287,53 @@ impl Toolbar {
         icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active)
     }
 
+    /// Add an icon button with active state, returning the button rect for dropdown positioning
+    pub fn icon_button_active_with_rect(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str, is_active: bool) -> (bool, Rect) {
+        let size = (self.rect.h - 4.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), size, size);
+        self.cursor_x += size + self.spacing;
+        (icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active), btn_rect)
+    }
+
+    /// Add a small dropdown arrow button (half width)
+    pub fn dropdown_arrow(&mut self, ctx: &mut UiContext, icon_font: Option<&Font>, tooltip: &str) -> bool {
+        let height = (self.rect.h - 4.0).round();
+        let width = (height * 0.5).round();
+        let btn_rect = Rect::new(self.cursor_x.round() - self.spacing, (self.rect.y + 2.0).round(), width, height);
+        self.cursor_x += width;
+
+        // Draw button background
+        let hovered = ctx.mouse.inside(&btn_rect);
+        let bg = if hovered {
+            Color::from_rgba(70, 70, 80, 255)
+        } else {
+            Color::from_rgba(50, 50, 60, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        // Draw small down arrow
+        let arrow_char = '\u{E5CB}'; // chevron-down from lucide
+        if let Some(font) = icon_font {
+            let icon_size = 12.0;
+            let dims = measure_text(&arrow_char.to_string(), Some(font), icon_size as u16, 1.0);
+            let icon_x = btn_rect.x + (btn_rect.w - dims.width) / 2.0;
+            let icon_y = btn_rect.y + (btn_rect.h + dims.height) / 2.0 - 2.0;
+            draw_text_ex(&arrow_char.to_string(), icon_x, icon_y, TextParams {
+                font: Some(font),
+                font_size: icon_size as u16,
+                color: if hovered { WHITE } else { Color::from_rgba(180, 180, 180, 255) },
+                ..Default::default()
+            });
+        }
+
+        // Tooltip
+        if hovered {
+            ctx.set_tooltip(tooltip, btn_rect.x, btn_rect.bottom());
+        }
+
+        hovered && ctx.mouse.left_pressed
+    }
+
     /// Add a disabled icon button (grayed out, no click, shows tooltip)
     pub fn icon_button_disabled(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str) {
         let size = (self.rect.h - 4.0).round();

@@ -155,6 +155,7 @@ pub fn draw_modeler(
 
     // Draw popups and menus (on top of everything)
     draw_add_component_popup(ctx, left_rect, state, icon_font);
+    draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
 
     // Draw rename/delete dialogs (modal, on top of everything)
@@ -327,11 +328,21 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     }
     toolbar.separator();
 
-    // Snap toggle
-    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, &format!("Snap to Grid ({}) [S key]", state.snap_settings.grid_size), state.snap_settings.enabled) {
+    // Snap toggle with dropdown for grid size
+    let (snap_clicked, snap_rect) = toolbar.icon_button_active_with_rect(
+        ctx, icon::GRID, icon_font,
+        &format!("Snap to Grid ({}) [S key]", state.snap_settings.grid_size),
+        state.snap_settings.enabled
+    );
+    state.snap_btn_rect = Some(snap_rect);
+    if snap_clicked {
         state.snap_settings.enabled = !state.snap_settings.enabled;
         let mode = if state.snap_settings.enabled { "ON" } else { "OFF" };
         state.set_status(&format!("Grid Snap: {}", mode), 1.5);
+    }
+    // Dropdown arrow for snap size
+    if toolbar.dropdown_arrow(ctx, icon_font, "Change snap grid size") {
+        state.snap_menu_open = !state.snap_menu_open;
     }
     // Vertex linking toggle (move coincident vertices together)
     let link_icon = if state.vertex_linking { icon::LINK } else { icon::LINK_OFF };
@@ -7136,5 +7147,79 @@ fn screen_to_world_position(state: &ModelerState, _screen_x: f32, _screen_y: f32
             let center = state.ortho_side.center;
             Vec3::new(0.0, center.y, center.x)
         }
+    }
+}
+
+/// Draw the snap grid size dropdown menu
+fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
+    if !state.snap_menu_open {
+        return;
+    }
+
+    let snap_btn_rect = match state.snap_btn_rect {
+        Some(r) => r,
+        None => return,
+    };
+
+    // Preset snap sizes (in world units)
+    const SNAP_SIZES: &[f32] = &[8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
+
+    // Menu dimensions
+    let item_height = 22.0;
+    let menu_width = 80.0;
+    let menu_height = SNAP_SIZES.len() as f32 * item_height + 8.0;
+
+    // Position menu below the snap button
+    let menu_x = snap_btn_rect.x;
+    let menu_y = snap_btn_rect.bottom() + 2.0;
+
+    // Keep menu on screen
+    let menu_x = menu_x.min(screen_width() - menu_width - 5.0);
+    let menu_y = menu_y.min(screen_height() - menu_height - 5.0);
+
+    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
+
+    // Draw menu background with border
+    draw_rectangle(menu_rect.x - 1.0, menu_rect.y - 1.0, menu_rect.w + 2.0, menu_rect.h + 2.0, Color::from_rgba(80, 80, 85, 255));
+    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
+
+    let mut y = menu_rect.y + 4.0;
+    let mut clicked_size: Option<f32> = None;
+
+    for &size in SNAP_SIZES {
+        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+        let is_current = (state.snap_settings.grid_size - size).abs() < 0.1;
+
+        // Hover highlight
+        if ctx.mouse.inside(&item_rect) {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 60, 70, 255));
+            if ctx.mouse.left_pressed {
+                clicked_size = Some(size);
+            }
+        }
+
+        // Current selection indicator
+        let text_color = if is_current { ACCENT_COLOR } else { TEXT_COLOR };
+        let label = format!("{}", size as i32);
+        draw_text(&label, item_rect.x + 8.0, item_rect.y + 15.0, 13.0, text_color);
+
+        // Checkmark for current size
+        if is_current {
+            draw_text("✓", item_rect.right() - 18.0, item_rect.y + 15.0, 13.0, ACCENT_COLOR);
+        }
+
+        y += item_height;
+    }
+
+    // Handle click
+    if let Some(size) = clicked_size {
+        state.snap_settings.grid_size = size;
+        state.snap_menu_open = false;
+        state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
+    }
+
+    // Close menu on click outside
+    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
+        state.snap_menu_open = false;
     }
 }
