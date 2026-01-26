@@ -303,8 +303,14 @@ impl TextInputState {
 
         // Character input
         while let Some(ch) = get_char_pressed() {
-            // Filter control characters
-            if ch >= ' ' && ch != '\u{7f}' {
+            // Filter control characters and special keys
+            // Only accept printable characters (space through tilde for ASCII,
+            // plus common unicode letters/symbols, but not Private Use Area or function keys)
+            let codepoint = ch as u32;
+            let is_printable = (ch >= ' ' && ch <= '~')  // ASCII printable
+                || (codepoint >= 0x00A0 && codepoint < 0xE000)  // Latin Extended, etc (not Private Use Area)
+                || (codepoint >= 0xF900 && codepoint < 0xFB00); // CJK Compatibility
+            if is_printable {
                 self.insert_char(ch);
                 self.blink_timer = 0.0;
             }
