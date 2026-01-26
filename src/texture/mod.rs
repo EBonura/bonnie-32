@@ -36,7 +36,7 @@ pub use texture_editor::{
     TextureEditorState,
     TextureEditorMode, UvModalTransform, UvOperation, UvTool,
     UvOverlayData, UvVertex, UvFace,
-    draw_texture_canvas, draw_tool_panel, draw_palette_panel,
+    draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_palette_panel_constrained,
     draw_mode_tabs,
     ImportAction, draw_import_dialog,
 };

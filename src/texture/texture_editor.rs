@@ -512,6 +512,8 @@ pub struct TextureEditorState {
     pub undo_save_pending: Option<String>,
     /// Blend mode dropdown is open
     pub blend_dropdown_open: bool,
+    /// Sample colors popup is open
+    pub sample_colors_open: bool,
     /// Palette generator: 3 key colors for ramp generation
     pub palette_gen_colors: [(u8, u8, u8); 3],
     /// Palette generator: brightness range (0.3 = subtle, 1.0 = full range)
@@ -616,6 +618,7 @@ impl Default for TextureEditorState {
             move_original_pos: None,
             undo_save_pending: None,
             blend_dropdown_open: false,
+            sample_colors_open: false,
             // Palette generator defaults: warm skin, cool blue, earthy green
             palette_gen_colors: [(24, 16, 12), (8, 12, 20), (12, 18, 8)],
             palette_gen_brightness: 0.7,
@@ -1564,6 +1567,50 @@ pub fn screen_to_texture(
 
     Some((px, py))
 }
+
+// =============================================================================
+// Sample Colors
+// =============================================================================
+
+/// 32 sample colors in RGB555 format (r5, g5, b5)
+const SAMPLE_COLORS_32: [(u8, u8, u8); 32] = [
+    // Row 1: darks and neutrals
+    (0, 0, 0),       // black
+    (3, 5, 10),      // dark blue
+    (15, 4, 10),     // dark purple
+    (0, 16, 10),     // dark green
+    (21, 10, 6),     // brown
+    (11, 10, 9),     // dark gray
+    (24, 24, 24),    // light gray
+    (31, 29, 28),    // white
+    // Row 2: brights
+    (31, 0, 9),      // red
+    (31, 20, 0),     // orange
+    (31, 29, 4),     // yellow
+    (0, 28, 6),      // green
+    (5, 21, 31),     // blue
+    (16, 14, 19),    // lavender
+    (31, 14, 20),    // pink
+    (31, 25, 20),    // peach
+    // Row 3: darker variants
+    (5, 3, 2),       // darker brown
+    (2, 3, 6),       // darker blue
+    (8, 4, 6),       // darker purple
+    (2, 10, 11),     // teal
+    (14, 5, 5),      // dark rust
+    (9, 6, 7),       // dark mauve
+    (20, 16, 14),    // tan
+    (29, 29, 15),    // light yellow
+    // Row 4: accents
+    (23, 2, 9),      // crimson
+    (31, 13, 4),     // bright orange
+    (20, 28, 5),     // lime
+    (0, 22, 8),      // forest green
+    (0, 11, 22),     // royal blue
+    (14, 8, 12),     // purple gray
+    (31, 13, 11),    // coral
+    (31, 19, 15),    // salmon
+];
 
 // =============================================================================
 // Palette Generation (Color Ramps from Key Colors)
@@ -3050,13 +3097,28 @@ pub fn draw_palette_panel(
     rect: Rect,
     texture: &mut UserTexture,
     state: &mut TextureEditorState,
+    icon_font: Option<&Font>,
+) {
+    draw_palette_panel_constrained(ctx, rect, texture, state, icon_font, None)
+}
+
+/// Draw the palette panel with optional width constraint for top section
+pub fn draw_palette_panel_constrained(
+    ctx: &mut UiContext,
+    rect: Rect,
+    texture: &mut UserTexture,
+    state: &mut TextureEditorState,
     _icon_font: Option<&Font>,
+    top_section_w: Option<f32>,
 ) {
     let padding = 4.0;
     let mut y = rect.y + padding;
 
+    // Width for top sections (4/8-bit buttons, Gen) - can be constrained to avoid tool panel overlap
+    let top_w = top_section_w.unwrap_or(rect.w);
+
     // CLUT depth toggle buttons
-    let btn_w = (rect.w - padding * 3.0) / 2.0;
+    let btn_w = (top_w - padding * 3.0) / 2.0;
     let btn_h = 18.0;
 
     let btn_4bit = Rect::new(rect.x + padding, y, btn_w, btn_h);
@@ -3139,8 +3201,8 @@ pub fn draw_palette_panel(
             }
         }
 
-        // "Gen" button
-        let btn_gen_w = rect.w - swatches_w - padding * 3.0 - 4.0;
+        // "Gen" button (constrained to top section width)
+        let btn_gen_w = top_w - swatches_w - padding * 3.0 - 4.0;
         let btn_gen_x = swatch_x + swatches_w + 4.0;
         let btn_gen = Rect::new(btn_gen_x, y, btn_gen_w.max(30.0), swatch_size);
         let gen_hover = ctx.mouse.inside(&btn_gen);
@@ -3352,7 +3414,7 @@ pub fn draw_palette_panel(
             (color.r5(), color.g5(), color.b5(), format!("Color {}", selected_idx))
         };
 
-        // Label
+        // Label + Sample colors button
         draw_text(
             &label_text,
             rect.x + padding,
@@ -3360,7 +3422,88 @@ pub fn draw_palette_panel(
             12.0,
             TEXT_DIM,
         );
+
+        // Sample colors toggle button (small swatch icon on the right)
+        let sample_btn_size = 14.0;
+        let sample_btn_x = rect.x + rect.w - padding - sample_btn_size;
+        let sample_btn_rect = Rect::new(sample_btn_x, y, sample_btn_size, sample_btn_size);
+        let sample_btn_hovered = ctx.mouse.inside(&sample_btn_rect);
+
+        // Draw button as a small 2x2 color grid icon
+        let icon_cell = sample_btn_size / 2.0;
+        draw_rectangle(sample_btn_rect.x, sample_btn_rect.y, icon_cell, icon_cell,
+            Color::new(1.0, 0.3, 0.3, 1.0));
+        draw_rectangle(sample_btn_rect.x + icon_cell, sample_btn_rect.y, icon_cell, icon_cell,
+            Color::new(0.3, 1.0, 0.3, 1.0));
+        draw_rectangle(sample_btn_rect.x, sample_btn_rect.y + icon_cell, icon_cell, icon_cell,
+            Color::new(0.3, 0.3, 1.0, 1.0));
+        draw_rectangle(sample_btn_rect.x + icon_cell, sample_btn_rect.y + icon_cell, icon_cell, icon_cell,
+            Color::new(1.0, 1.0, 0.3, 1.0));
+
+        // Highlight if open or hovered
+        if state.sample_colors_open || sample_btn_hovered {
+            draw_rectangle_lines(sample_btn_rect.x - 1.0, sample_btn_rect.y - 1.0,
+                sample_btn_size + 2.0, sample_btn_size + 2.0, 1.0, WHITE);
+        }
+        if sample_btn_hovered {
+            ctx.set_tooltip("Toggle sample colors", ctx.mouse.x, ctx.mouse.y);
+        }
+
+        if ctx.mouse.clicked(&sample_btn_rect) {
+            state.sample_colors_open = !state.sample_colors_open;
+        }
+
         y += 16.0;
+
+        // Inline sample colors grid (when toggled on) - 2 rows of 16, full width
+        if state.sample_colors_open {
+            let cols = 16;
+            let rows = 2;
+            let gap = 2.0;
+            let grid_padding = 3.0;
+            let grid_w = rect.w - padding * 2.0;
+            let cell_size = ((grid_w - grid_padding * 2.0 - gap * (cols - 1) as f32) / cols as f32).floor();
+            let actual_grid_w = cell_size * cols as f32 + gap * (cols - 1) as f32 + grid_padding * 2.0;
+            let grid_h = cell_size * rows as f32 + gap * (rows - 1) as f32 + grid_padding * 2.0;
+            let grid_x = rect.x + padding;
+
+            // Only draw sample colors if the grid itself fits (sliders/effect have their own overflow checks)
+            if y + grid_h + 4.0 <= rect.bottom() {
+            // Background panel
+            draw_rectangle(grid_x, y, actual_grid_w, grid_h, Color::new(0.08, 0.08, 0.10, 1.0));
+            draw_rectangle_lines(grid_x, y, actual_grid_w, grid_h, 1.0, Color::new(0.25, 0.25, 0.28, 1.0));
+
+            for (i, &(r, g, b)) in SAMPLE_COLORS_32.iter().enumerate() {
+                let col = (i % cols) as f32;
+                let row = (i / cols) as f32;
+                let cx = grid_x + grid_padding + col * (cell_size + gap);
+                let cy = y + grid_padding + row * (cell_size + gap);
+                let cell_rect = Rect::new(cx, cy, cell_size, cell_size);
+
+                // Draw color swatch
+                let rgb = Color::new(r as f32 / 31.0, g as f32 / 31.0, b as f32 / 31.0, 1.0);
+                draw_rectangle(cx, cy, cell_size, cell_size, rgb);
+
+                // Hover highlight
+                if ctx.mouse.inside(&cell_rect) {
+                    draw_rectangle_lines(cx - 1.0, cy - 1.0, cell_size + 2.0, cell_size + 2.0, 2.0, WHITE);
+
+                    // Click to apply color
+                    if ctx.mouse.clicked(&cell_rect) {
+                        if let Some(key_idx) = editing_key_color {
+                            state.palette_gen_colors[key_idx] = (r, g, b);
+                        } else if selected_idx < texture.palette.len() {
+                            let semi = texture.palette[selected_idx].is_semi_transparent();
+                            texture.palette[selected_idx] = Color15::new_semi(r, g, b, semi);
+                            state.dirty = true;
+                        }
+                    }
+                }
+            }
+
+            y += grid_h + 4.0;
+            } // end if fits
+        }
 
         // RGB sliders - constrained to available space
         let slider_w = (rect.w - padding * 2.0 - 40.0).max(40.0);
@@ -3534,6 +3677,7 @@ pub fn draw_palette_panel(
             }
         }
     }
+
 }
 
 /// Calculate bounding box of selected UV vertices in UV space

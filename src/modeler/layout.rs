@@ -10,7 +10,7 @@ use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTrans
 use crate::asset::AssetComponent;
 use crate::texture::{
     UserTexture, TextureSize, generate_texture_id,
-    draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
+    draw_texture_canvas, draw_tool_panel, draw_palette_panel_constrained, draw_mode_tabs,
     TextureEditorMode, UvOverlayData, UvVertex, UvFace, draw_import_dialog, ImportAction,
     load_png_to_import_state,
 };
@@ -2807,12 +2807,14 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let tool_panel_w = 66.0;  // 2-column layout: 2 * 28px buttons + 2px gap + 4px padding each side
     let canvas_w = content_rect.w - tool_panel_w;
     // Tool panel needs ~280px height (6 tools + undo/redo/zoom/grid + size/shape options)
-    // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190
-    let min_canvas_h = 280.0;  // Minimum for tool panel to fit all buttons
-    let min_palette_h = 190.0;
-    let max_canvas_h = (content_rect.h - min_palette_h).min(canvas_w).max(min_canvas_h);
-    let canvas_h = max_canvas_h;
-    let palette_panel_h = (content_rect.h - canvas_h).max(min_palette_h);  // Remaining space goes to palette
+    // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190 base
+    let min_canvas_h: f32 = 280.0;  // Minimum for tool panel to fit all buttons
+    let min_palette_h: f32 = 190.0;  // Minimum palette panel height
+    // Calculate canvas height: try to be squarish (canvas_w), but MUST leave room for palette
+    let available_for_canvas = (content_rect.h - min_palette_h).max(0.0);
+    // Canvas is at least min_canvas_h, but not more than available_for_canvas, and prefer squarish
+    let canvas_h = available_for_canvas.min(canvas_w).max(min_canvas_h.min(available_for_canvas));
+    let palette_panel_h = content_rect.h - canvas_h;
 
     let canvas_rect = Rect::new(content_rect.x, content_rect.y, canvas_w, canvas_h);
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
@@ -2834,7 +2836,7 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     // Draw panels using the shared texture editor components
     draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor, uv_data.as_ref());
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
-    draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
+    draw_palette_panel_constrained(ctx, palette_rect, tex, &mut state.texture_editor, icon_font, Some(canvas_w));
 
     // Handle UV modal transforms (G/S/R) - apply to actual mesh vertices
     apply_uv_modal_transform(ctx, &canvas_rect, tex_width_f, tex_height_f, state);
