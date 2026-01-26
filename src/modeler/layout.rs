@@ -328,20 +328,17 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     }
     toolbar.separator();
 
-    // Snap toggle with dropdown for grid size
-    let (snap_clicked, snap_rect) = toolbar.icon_button_active_with_rect(
-        ctx, icon::GRID, icon_font,
-        &format!("Snap to Grid ({}) [S key]", state.snap_settings.grid_size),
-        state.snap_settings.enabled
-    );
-    state.snap_btn_rect = Some(snap_rect);
-    if snap_clicked {
+    // Snap toggle (icon) + grid size (clickable label)
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Snap to Grid [S key]", state.snap_settings.enabled) {
         state.snap_settings.enabled = !state.snap_settings.enabled;
         let mode = if state.snap_settings.enabled { "ON" } else { "OFF" };
         state.set_status(&format!("Grid Snap: {}", mode), 1.5);
     }
-    // Dropdown arrow for snap size
-    if toolbar.dropdown_arrow(ctx, icon_font, "Change snap grid size") {
+    // Clickable grid size label
+    let size_label = format!("{}", state.snap_settings.grid_size as i32);
+    let (size_clicked, size_rect) = toolbar.clickable_label(ctx, &size_label, "Click to change snap grid size");
+    state.snap_btn_rect = Some(size_rect);
+    if size_clicked {
         state.snap_menu_open = !state.snap_menu_open;
     }
     // Vertex linking toggle (move coincident vertices together)

@@ -295,43 +295,33 @@ impl Toolbar {
         (icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active), btn_rect)
     }
 
-    /// Add a small dropdown arrow button (half width)
-    pub fn dropdown_arrow(&mut self, ctx: &mut UiContext, icon_font: Option<&Font>, tooltip: &str) -> bool {
+    /// Add a clickable label that returns (clicked, rect) for dropdown positioning
+    pub fn clickable_label(&mut self, ctx: &mut UiContext, text: &str, tooltip: &str) -> (bool, Rect) {
         let height = (self.rect.h - 4.0).round();
-        let width = (height * 0.5).round();
-        let btn_rect = Rect::new(self.cursor_x.round() - self.spacing, (self.rect.y + 2.0).round(), width, height);
-        self.cursor_x += width;
+        let font_size = 12.0;
+        let text_dims = measure_text(text, None, font_size as u16, 1.0);
+        let width = (text_dims.width + 8.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), width, height);
+        self.cursor_x += width + self.spacing;
 
-        // Draw button background
+        // Draw background on hover
         let hovered = ctx.mouse.inside(&btn_rect);
-        let bg = if hovered {
-            Color::from_rgba(70, 70, 80, 255)
-        } else {
-            Color::from_rgba(50, 50, 60, 255)
-        };
-        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
-
-        // Draw small down arrow
-        let arrow_char = '\u{E5CB}'; // chevron-down from lucide
-        if let Some(font) = icon_font {
-            let icon_size = 12.0;
-            let dims = measure_text(&arrow_char.to_string(), Some(font), icon_size as u16, 1.0);
-            let icon_x = btn_rect.x + (btn_rect.w - dims.width) / 2.0;
-            let icon_y = btn_rect.y + (btn_rect.h + dims.height) / 2.0 - 2.0;
-            draw_text_ex(&arrow_char.to_string(), icon_x, icon_y, TextParams {
-                font: Some(font),
-                font_size: icon_size as u16,
-                color: if hovered { WHITE } else { Color::from_rgba(180, 180, 180, 255) },
-                ..Default::default()
-            });
+        if hovered {
+            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, Color::from_rgba(60, 60, 70, 255));
         }
+
+        // Draw text
+        let text_x = btn_rect.x + 4.0;
+        let text_y = btn_rect.y + (btn_rect.h + text_dims.height) / 2.0 - 2.0;
+        let text_color = if hovered { WHITE } else { Color::from_rgba(180, 180, 200, 255) };
+        draw_text(text, text_x, text_y, font_size, text_color);
 
         // Tooltip
         if hovered {
             ctx.set_tooltip(tooltip, btn_rect.x, btn_rect.bottom());
         }
 
-        hovered && ctx.mouse.left_pressed
+        (hovered && ctx.mouse.left_pressed, btn_rect)
     }
 
     /// Add a disabled icon button (grayed out, no click, shows tooltip)
