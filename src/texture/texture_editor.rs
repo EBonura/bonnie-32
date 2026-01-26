@@ -556,6 +556,9 @@ pub struct TextureEditorState {
     /// Caller should check this after UV input handling and call push_undo
     pub uv_undo_pending: Option<String>,
 
+    /// Signal to caller that auto-unwrap should be performed
+    pub auto_unwrap_requested: bool,
+
     // === Import State ===
     /// State for the texture import dialog
     pub import_state: super::import::TextureImportState,
@@ -635,6 +638,7 @@ impl Default for TextureEditorState {
             uv_scale_anchor: RastVec2::new(0.0, 0.0),
             uv_scale_original_bounds: (0.0, 0.0, 1.0, 1.0),
             uv_undo_pending: None,
+            auto_unwrap_requested: false,
             // Import state
             import_state: super::import::TextureImportState::default(),
         }
@@ -2644,6 +2648,13 @@ pub fn draw_tool_panel(
             if draw_action_button_small(ctx, col2_x, y, btn_size, icon::REFRESH_CW, "Reset UV", icon_font) {
                 state.uv_operation_pending = Some(UvOperation::ResetUVs);
                 state.set_status("Reset UVs");
+            }
+            y += btn_size + gap;
+
+            // Auto Unwrap
+            if draw_action_button_small(ctx, col1_x, y, btn_size, icon::UNFOLD_VERTICAL, "(U) Auto Unwrap", icon_font) {
+                state.auto_unwrap_requested = true;
+                state.set_status("Auto Unwrap");
             }
             y += btn_size + gap;
         }

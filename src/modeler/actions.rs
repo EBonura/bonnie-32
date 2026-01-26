@@ -355,6 +355,15 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .enabled_when(|ctx| ctx.has_face_selection),
     );
 
+    registry.register(
+        Action::new("uv.auto_unwrap")
+            .label("Auto Unwrap")
+            .shortcut(Shortcut::key(KeyCode::U))
+            .status_tip("Auto-unwrap selected faces preserving connectivity")
+            .category("UV")
+            .enabled_when(|ctx| ctx.has_face_selection),
+    );
+
     // ========================================================================
     // Context Menu Actions
     // ========================================================================

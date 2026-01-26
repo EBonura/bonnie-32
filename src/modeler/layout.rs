@@ -2865,6 +2865,12 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.redo();
     }
 
+    // Handle auto-unwrap button request from UV editor
+    if state.texture_editor.auto_unwrap_requested {
+        state.texture_editor.auto_unwrap_requested = false;
+        auto_unwrap_selected_faces(state);
+    }
+
     // Sync editing_texture back to selected object's atlas (only when actively editing)
     // This prevents overwriting other objects' atlases when switching selection
     if state.editing_indexed_atlas {
@@ -5495,6 +5501,35 @@ fn reset_selected_uvs(state: &mut ModelerState) {
     }
 }
 
+/// Auto-unwrap selected faces preserving edge connectivity
+fn auto_unwrap_selected_faces(state: &mut ModelerState) {
+    if let super::state::ModelerSelection::Faces(faces) = &state.selection.clone() {
+        if faces.is_empty() {
+            state.set_status("No faces selected", 1.0);
+            return;
+        }
+
+        let tex_width = state.atlas().width as f32;
+        let tex_height = state.atlas().height as f32;
+
+        state.push_undo("Auto Unwrap UVs");
+
+        if let Some(obj) = state.selected_object_mut() {
+            super::mesh_editor::auto_unwrap_faces(
+                &mut obj.mesh,
+                faces,
+                tex_width,
+                tex_height,
+            );
+        }
+
+        state.dirty = true;
+        state.set_status(&format!("Auto-unwrapped {} faces", faces.len()), 1.0);
+    } else {
+        state.set_status("Select faces to auto-unwrap", 1.0);
+    }
+}
+
 /// Handle all keyboard actions using the action registry
 /// Returns a ModelerAction if a file action was triggered
 fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &crate::ui::UiContext) -> ModelerAction {
@@ -5817,6 +5852,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     }
     if actions.triggered("uv.reset", &ctx) {
         reset_selected_uvs(state);
+    }
+    if actions.triggered("uv.auto_unwrap", &ctx) {
+        auto_unwrap_selected_faces(state);
     }
 
     // ========================================================================
