@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ebonura/bonnie-32/releases"><img src="https://img.shields.io/badge/version-0.1.9-blue.svg" alt="Version"></a>
+  <a href="https://github.com/ebonura/bonnie-32/releases"><img src="https://img.shields.io/badge/version-0.1.10-blue.svg" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-lightgrey.svg" alt="Platform">
 </p>
