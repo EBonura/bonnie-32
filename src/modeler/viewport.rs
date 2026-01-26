@@ -1031,12 +1031,8 @@ pub fn draw_modeler_viewport_ext(
 
         let mesh = &obj.mesh;
 
-        // Dim non-selected objects slightly
-        let base_color = if state.selected_object == Some(obj_idx) {
-            180u8
-        } else {
-            140u8
-        };
+        // All objects use same brightness (selection shown via corner brackets)
+        let base_color = 180u8;
 
         // Track vertex offset for this object
         let vertex_offset = all_vertices.len();
@@ -1157,6 +1153,9 @@ pub fn draw_modeler_viewport_ext(
             );
         }
     }
+
+    // Draw corner brackets around selected object's bounding box
+    draw_selected_object_brackets(state, fb);
 
     // Draw selection overlays
     draw_mesh_selection_overlays(state, fb);
@@ -1473,6 +1472,96 @@ fn apply_box_selection(
             }
         }
         _ => {}
+    }
+}
+
+/// Draw corner brackets around the selected object's bounding box
+fn draw_selected_object_brackets(state: &ModelerState, fb: &mut Framebuffer) {
+    // Only draw if an object is selected
+    let obj = match state.selected_object() {
+        Some(obj) if obj.visible => obj,
+        _ => return,
+    };
+
+    // Compute bounding box
+    let mesh = &obj.mesh;
+    if mesh.vertices.is_empty() {
+        return;
+    }
+
+    let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+    let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+    for v in &mesh.vertices {
+        min.x = min.x.min(v.pos.x);
+        min.y = min.y.min(v.pos.y);
+        min.z = min.z.min(v.pos.z);
+        max.x = max.x.max(v.pos.x);
+        max.y = max.y.max(v.pos.y);
+        max.z = max.z.max(v.pos.z);
+    }
+
+    // Add margin to avoid z-fighting with mesh geometry
+    let margin = 4.0;
+    min.x -= margin;
+    min.y -= margin;
+    min.z -= margin;
+    max.x += margin;
+    max.y += margin;
+    max.z += margin;
+
+    // Bracket length: proportion of smallest box dimension
+    let size = Vec3::new(max.x - min.x, max.y - min.y, max.z - min.z);
+    let bracket_len = size.x.min(size.y).min(size.z) * 0.25;
+
+    // Bracket color (cyan, matches accent color)
+    let color = RasterColor::new(0, 200, 230);
+
+    // Camera and projection info for screen-space conversion
+    let camera = &state.camera;
+    let ortho = state.raster_settings.ortho_projection.as_ref();
+
+    // 8 corners of the box
+    let corners = [
+        Vec3::new(min.x, min.y, min.z), // 0: bottom-back-left
+        Vec3::new(max.x, min.y, min.z), // 1: bottom-back-right
+        Vec3::new(max.x, min.y, max.z), // 2: bottom-front-right
+        Vec3::new(min.x, min.y, max.z), // 3: bottom-front-left
+        Vec3::new(min.x, max.y, min.z), // 4: top-back-left
+        Vec3::new(max.x, max.y, min.z), // 5: top-back-right
+        Vec3::new(max.x, max.y, max.z), // 6: top-front-right
+        Vec3::new(min.x, max.y, max.z), // 7: top-front-left
+    ];
+
+    // Direction vectors from each corner (normalized, towards adjacent corners)
+    let dirs: [(usize, [Vec3; 3]); 8] = [
+        (0, [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)]),   // corner 0
+        (1, [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)]),  // corner 1
+        (2, [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, -1.0)]), // corner 2
+        (3, [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, -1.0)]),  // corner 3
+        (4, [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)]),  // corner 4
+        (5, [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)]), // corner 5
+        (6, [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, -1.0)]),// corner 6
+        (7, [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, -1.0)]), // corner 7
+    ];
+
+    // Draw 3 bracket lines from each corner with z-buffer testing
+    for (corner_idx, edge_dirs) in &dirs {
+        let corner = corners[*corner_idx];
+        for dir in edge_dirs {
+            let end = Vec3::new(
+                corner.x + dir.x * bracket_len,
+                corner.y + dir.y * bracket_len,
+                corner.z + dir.z * bracket_len,
+            );
+
+            // Project both points to screen space with depth
+            if let (Some((sx0, sy0, z0)), Some((sx1, sy1, z1))) = (
+                world_to_screen_with_ortho_depth(corner, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho_depth(end, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+            ) {
+                fb.draw_line_3d(sx0 as i32, sy0 as i32, z0, sx1 as i32, sy1 as i32, z1, color);
+            }
+        }
     }
 }
 
