@@ -1980,7 +1980,7 @@ fn apply_uv_modal_transform_to_face(
                     }
                 }
             }
-            UvModalTransform::None | UvModalTransform::ScalePending => {}
+            UvModalTransform::None | UvModalTransform::ScalePending | UvModalTransform::HandleScale => {}
         }
 
         // Update the face's UV field

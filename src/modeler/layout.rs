@@ -2850,6 +2850,11 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.save_texture_undo();
     }
 
+    // Handle UV undo save signals (for UV transforms - saves mesh, not texture)
+    if let Some(description) = state.texture_editor.uv_undo_pending.take() {
+        state.push_undo(&description);
+    }
+
     // Handle undo/redo button requests (uses global undo system)
     if state.texture_editor.undo_requested {
         state.texture_editor.undo_requested = false;
@@ -3009,6 +3014,16 @@ fn apply_uv_modal_transform(
                     // Snap to pixel boundaries
                     v.uv.x = (new_u * tex_width).round() / tex_width;
                     v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+        }
+        UvModalTransform::HandleScale => {
+            // Bounding box handle scale - apply pre-calculated UVs directly
+            for (vi, new_uv) in &start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_uv.x * tex_width).round() / tex_width;
+                    v.uv.y = (new_uv.y * tex_height).round() / tex_height;
                 }
             }
         }
