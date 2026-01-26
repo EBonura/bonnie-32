@@ -1474,6 +1474,11 @@ async fn main() {
                     if tool == Tool::Test {
                         app.game.reset();
                     }
+                    // Close all modals when switching tabs to prevent orphaned modal state
+                    app.world_editor.level_browser.open = false;
+                    app.modeler.model_browser.open = false;
+                    app.modeler.obj_importer.open = false;
+                    app.tracker.song_browser.open = false;
                     app.set_active_tool(tool);
                 }
             }
