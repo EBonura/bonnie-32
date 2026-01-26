@@ -7215,8 +7215,12 @@ fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
         state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
     }
 
-    // Close menu on click outside
+    // Close menu on click outside (but not on the button that opened it)
     if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
-        state.snap_menu_open = false;
+        // Don't close if clicking the snap button (it handles its own toggle)
+        let clicking_button = state.snap_btn_rect.map_or(false, |r| ctx.mouse.inside(&r));
+        if !clicking_button {
+            state.snap_menu_open = false;
+        }
     }
 }
