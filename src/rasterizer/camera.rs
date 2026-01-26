@@ -5,7 +5,7 @@
 use super::math::Vec3;
 
 /// Camera state for 3D rendering
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Camera {
     pub position: Vec3,
     pub rotation_x: f32, // Pitch
@@ -37,10 +37,10 @@ impl Camera {
             position: Vec3::ZERO,
             rotation_x: 0.0,
             rotation_y: 0.0,
-            // Looking down -Y, so: right=+X, up=+Z, forward=-Y
-            basis_x: Vec3::new(1.0, 0.0, 0.0),   // Right
+            // Looking down +Y (from above), so: right=-X, up=+Z, forward=+Y
+            basis_x: Vec3::new(-1.0, 0.0, 0.0),  // Right (flipped to maintain handedness)
             basis_y: Vec3::new(0.0, 0.0, 1.0),   // Up (Z goes up on screen)
-            basis_z: Vec3::new(0.0, -1.0, 0.0),  // Forward (into the scene)
+            basis_z: Vec3::new(0.0, 1.0, 0.0),   // Forward (into the scene, +Y)
         }
     }
 

@@ -36,7 +36,7 @@ pub use icons::*;
 pub use theme::*;
 pub use actions::*;
 pub use drag_tracker::{
-    DragState, DragStatus, DragConfig, SnapMode, Axis, PickerType, apply_drag_update,
+    DragState, DragStatus, DragConfig, SnapMode, Axis, PickerType, apply_drag_update, snap_angle,
 };
 pub use tool::{Tool, ToolRegistry};
 pub use tool_box::ToolBox;

@@ -9,6 +9,7 @@ use crate::rasterizer::{
     Vertex as RasterVertex, Face as RasterFace, WIDTH, HEIGHT,
     world_to_screen_with_ortho, world_to_screen_with_ortho_depth, draw_floor_grid, point_in_triangle_2d,
     OrthoProjection, Camera, draw_3d_line_clipped,
+    screen_to_ray, ray_circle_angle,
 };
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
 use super::drag::{DragUpdateResult, ActiveDrag};
@@ -897,18 +898,35 @@ pub fn draw_modeler_viewport_ext(
                     );
                 }
                 ModalTransform::Rotate => {
-                    state.tool_box.tools.rotate.start_drag(Some(UiAxis::Y), 0.0);
-                    // For rotation, initial angle is 0
+                    // Convert screen mouse to framebuffer coordinates for initial angle calculation
+                    let fb_mouse = (
+                        (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+                        (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+                    );
+
+                    // Calculate initial angle using ray-circle intersection
+                    // Default to Y axis rotation
+                    let ref_vector = Vec3::new(1.0, 0.0, 0.0);
+                    let axis_vec = Vec3::new(0.0, 1.0, 0.0);
+                    let ray = screen_to_ray(fb_mouse.0, fb_mouse.1, fb_width, fb_height, &state.camera);
+                    let initial_angle = ray_circle_angle(&ray, center, axis_vec, ref_vector)
+                        .unwrap_or(0.0);
+
+                    state.tool_box.tools.rotate.start_drag(Some(UiAxis::Y), initial_angle);
                     state.drag_manager.start_rotate(
                         center,
-                        0.0, // initial angle
-                        mouse_pos,
-                        mouse_pos, // Use mouse_pos as center for screen-space rotation
+                        initial_angle,
+                        mouse_pos, // raw screen-space mouse (converted internally using viewport transform)
+                        mouse_pos, // screen-space center (fallback)
                         UiAxis::Y, // Default to Y axis rotation
                         indices,
                         initial_positions,
                         state.snap_settings.enabled,
                         15.0, // 15-degree snap increments
+                        &state.camera,
+                        fb_width,
+                        fb_height,
+                        (draw_x, draw_y, draw_w, draw_h), // viewport transform
                     );
                 }
                 ModalTransform::None => {}
@@ -2828,9 +2846,9 @@ fn handle_rotate_gizmo(
     // Handle ongoing drag with DragManager
     if is_dragging {
         if ctx.mouse.left_down {
-            // Rotation uses screen-space coordinates for angle calculation
+            // Pass RAW screen mouse - the drag manager converts it using stored viewport transform
             let result = state.drag_manager.update(
-                mouse_pos,  // screen-space mouse position
+                mouse_pos,  // raw screen-space mouse (converted internally)
                 &state.camera,
                 fb_width,
                 fb_height,
@@ -2922,12 +2940,29 @@ fn handle_rotate_gizmo(
             .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
             .collect();
 
-        // Calculate initial angle (for screen-space rotation)
-        let start_vec = (
-            mouse_pos.0 - setup.center_screen.0,
-            mouse_pos.1 - setup.center_screen.1,
+        // Calculate initial angle using ray-circle intersection (arc-following)
+        // Convert screen mouse to framebuffer coordinates for initial angle calculation
+        let fb_mouse = (
+            (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+            (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
         );
-        let initial_angle = start_vec.1.atan2(start_vec.0);
+
+        // Get reference vector for angle=0 (perpendicular to rotation axis)
+        let ref_vector = match axis {
+            Axis::X => Vec3::new(0.0, 1.0, 0.0),
+            Axis::Y => Vec3::new(1.0, 0.0, 0.0),
+            Axis::Z => Vec3::new(1.0, 0.0, 0.0),
+        };
+        let axis_vec = match axis {
+            Axis::X => Vec3::new(1.0, 0.0, 0.0),
+            Axis::Y => Vec3::new(0.0, 1.0, 0.0),
+            Axis::Z => Vec3::new(0.0, 0.0, 1.0),
+        };
+
+        // Cast ray from mouse position and find angle on rotation circle
+        let ray = screen_to_ray(fb_mouse.0, fb_mouse.1, fb_width, fb_height, &state.camera);
+        let initial_angle = ray_circle_angle(&ray, setup.center, axis_vec, ref_vector)
+            .unwrap_or(0.0);
 
         // Save undo state BEFORE starting the gizmo drag
         state.push_undo("Gizmo Rotate");
@@ -2938,13 +2973,17 @@ fn handle_rotate_gizmo(
         state.drag_manager.start_rotate(
             setup.center,
             initial_angle,
-            mouse_pos,           // screen-space mouse
-            setup.center_screen, // screen-space center for angle calculation
+            mouse_pos,           // raw screen-space mouse (converted internally using viewport transform)
+            setup.center_screen, // screen-space center (fallback)
             ui_axis,
             indices,
             initial_positions,
             state.snap_settings.enabled,
             15.0, // Snap to 15-degree increments
+            &state.camera,
+            fb_width,
+            fb_height,
+            (draw_x, draw_y, draw_w, draw_h), // viewport transform for consistent coordinate conversion
         );
     }
 
