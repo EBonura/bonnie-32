@@ -18,7 +18,7 @@ pub use rotate_tracker::RotateTracker;
 pub use scale_tracker::ScaleTracker;
 pub use box_select::BoxSelectTracker;
 
-use crate::rasterizer::{Vec3, Camera, screen_to_ray, ray_line_closest_point};
+use crate::rasterizer::{Vec3, Camera, screen_to_ray, ray_line_closest_point, ray_circle_angle};
 use crate::ui::{DragState, DragStatus, DragConfig, SnapMode, Axis, apply_drag_update};
 
 /// The type of active drag operation
@@ -147,7 +147,7 @@ impl DragManager {
         self.config = Some(config);
     }
 
-    /// Start a rotate drag operation
+    /// Start a rotate drag operation with camera snapshot for arc-following rotation
     pub fn start_rotate(
         &mut self,
         center: Vec3,
@@ -159,12 +159,25 @@ impl DragManager {
         initial_positions: Vec<(usize, Vec3)>,
         snap_enabled: bool,
         snap_degrees: f32,
+        camera: &Camera,
+        viewport_width: usize,
+        viewport_height: usize,
+        viewport_transform: (f32, f32, f32, f32), // (draw_x, draw_y, draw_w, draw_h)
     ) {
         let tracker = RotateTracker::new(axis, center, vertex_indices, initial_positions);
         let config = tracker.create_config(snap_enabled, snap_degrees);
 
         self.active = ActiveDrag::Rotate(tracker);
-        self.state = Some(DragState::new_rotation(center, initial_angle, initial_mouse, center_screen));
+        self.state = Some(DragState::new_rotation_3d(
+            center,
+            initial_angle,
+            initial_mouse,
+            center_screen,
+            camera.clone(),
+            viewport_width,
+            viewport_height,
+            viewport_transform,
+        ));
         self.config = Some(config);
     }
 
@@ -240,8 +253,45 @@ impl DragManager {
             }
 
             ActiveDrag::Rotate(tracker) => {
-                // Use screen-space angle calculation (more intuitive for gizmos)
-                // Calculate angle from vectors relative to center_screen
+                // Arc-following rotation: use ray-circle intersection with stored camera
+                // This makes rotation feel like grabbing the ring
+                //
+                // IMPORTANT: mouse_pos is in RAW SCREEN coordinates.
+                // We convert it to framebuffer coordinates using the stored viewport transform.
+                // This ensures consistent behavior regardless of which viewport calls update.
+                if let (Some(ref start_camera), Some((vp_w, vp_h)), Some((draw_x, draw_y, draw_w, draw_h))) =
+                    (&state.start_camera, state.start_viewport, state.start_viewport_transform)
+                {
+                    // Convert screen mouse to framebuffer coordinates using stored transform
+                    let fb_mouse = (
+                        (mouse_pos.0 - draw_x) / draw_w * vp_w as f32,
+                        (mouse_pos.1 - draw_y) / draw_h * vp_h as f32,
+                    );
+
+                    // Get reference vector for angle=0 (perpendicular to rotation axis)
+                    let ref_vector = match tracker.axis {
+                        Axis::X => Vec3::new(0.0, 1.0, 0.0),
+                        Axis::Y => Vec3::new(1.0, 0.0, 0.0),
+                        Axis::Z => Vec3::new(1.0, 0.0, 0.0),
+                    };
+                    let axis_vec = tracker.axis.unit_vector();
+
+                    // Cast ray from current mouse position using stored camera
+                    let ray = screen_to_ray(fb_mouse.0, fb_mouse.1, vp_w, vp_h, start_camera);
+                    if let Some(current_angle) = ray_circle_angle(&ray, tracker.center, axis_vec, ref_vector) {
+                        let angle_delta = current_angle - state.initial_angle;
+                        state.current_angle = current_angle;
+                        let new_positions = tracker.compute_new_positions(angle_delta);
+
+                        return DragUpdateResult::Rotate {
+                            status: DragStatus::Continue,
+                            angle: state.current_angle,
+                            positions: new_positions,
+                        };
+                    }
+                }
+
+                // Fallback to screen-space if ray casting fails
                 let start_vec = (
                     state.initial_mouse.0 - state.center_screen.0,
                     state.initial_mouse.1 - state.center_screen.1,

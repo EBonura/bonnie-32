@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15, Clut, ClutId};
 use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
 use crate::asset::Asset;
+use crate::ui::TextInputState;
 use super::mesh_editor::{
     EditableMesh, MeshPart, IndexedAtlas, EditFace, TextureRef, ClutPool,
     checkerboard_atlas, checkerboard_clut,
@@ -842,6 +843,8 @@ pub struct ModelerState {
     pub lights_section_expanded: bool,          // Whether Lights section is expanded
     pub add_component_menu_open: bool,          // Whether the "Add Component" popup is open
     pub add_component_btn_rect: Option<crate::ui::Rect>, // Position of add button for popup positioning
+    pub snap_menu_open: bool,                   // Whether the snap size dropdown is open
+    pub snap_btn_rect: Option<crate::ui::Rect>, // Position of snap button for dropdown positioning
     pub hidden_components: std::collections::HashSet<usize>, // Hidden component indices
     pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
 
@@ -978,11 +981,14 @@ pub struct ModelerState {
     // Flag to trigger user texture refresh from main loop
     pub pending_texture_refresh: bool,
 
-    // Object rename dialog state (object index, current text input)
-    pub rename_dialog: Option<(usize, String)>,
+    // Object rename dialog state (object index, text input state)
+    pub rename_dialog: Option<(usize, TextInputState)>,
 
     // Object delete confirmation dialog (object index)
     pub delete_dialog: Option<usize>,
+
+    // Unsaved texture changes - pending object switch (shows save/discard dialog)
+    pub unsaved_texture_pending_switch: Option<usize>,
 
     // Ambient light slider dragging state
     pub ambient_slider_active: bool,
@@ -1126,6 +1132,8 @@ impl ModelerState {
             lights_section_expanded: true,
             add_component_menu_open: false,
             add_component_btn_rect: None,
+            snap_menu_open: false,
+            snap_btn_rect: None,
             hidden_components: std::collections::HashSet::new(),
             delete_component_dialog: None,
 
@@ -1210,6 +1218,7 @@ impl ModelerState {
 
             rename_dialog: None,
             delete_dialog: None,
+            unsaved_texture_pending_switch: None,
             ambient_slider_active: false,
             light_color_slider: None,
         }
@@ -1512,8 +1521,14 @@ impl ModelerState {
     /// Select an object by index
     pub fn select_object(&mut self, index: usize) {
         if index < self.objects().len() {
-            // Clear editing state when switching objects
+            // Check for unsaved texture changes before switching
             if self.selected_object != Some(index) {
+                if self.editing_indexed_atlas && self.texture_editor.dirty {
+                    // Show save/discard dialog instead of switching immediately
+                    self.unsaved_texture_pending_switch = Some(index);
+                    return;
+                }
+                // Clear editing state when switching objects
                 self.editing_indexed_atlas = false;
                 self.editing_texture = None;
             }
@@ -1543,6 +1558,44 @@ impl ModelerState {
                 }
                 TextureRef::Embedded(_) => {
                     // Embedded textures don't have a library entry
+                    self.selected_user_texture = None;
+                }
+            }
+        }
+    }
+
+    /// Force object switch after unsaved texture dialog (bypasses dirty check)
+    pub fn force_select_object(&mut self, index: usize) {
+        if index < self.objects().len() {
+            // Clear editing state
+            self.editing_indexed_atlas = false;
+            self.editing_texture = None;
+            self.texture_editor.dirty = false;
+            self.unsaved_texture_pending_switch = None;
+
+            self.selected_object = Some(index);
+            self.selection.clear();
+
+            // Extract info before mutating self
+            let (obj_name, tex_ref) = self.objects().get(index)
+                .map(|obj| (obj.name.clone(), obj.texture_ref.clone()))
+                .unwrap_or_default();
+
+            self.set_status(&format!("Selected: {}", obj_name), 0.5);
+
+            // Sync texture selection to match this object's texture reference
+            match &tex_ref {
+                TextureRef::Id(id) => {
+                    if let Some(name) = self.user_textures.get_name_by_id(*id) {
+                        self.selected_user_texture = Some(name.to_string());
+                    } else {
+                        self.selected_user_texture = None;
+                    }
+                }
+                TextureRef::Checkerboard | TextureRef::None => {
+                    self.selected_user_texture = None;
+                }
+                TextureRef::Embedded(_) => {
                     self.selected_user_texture = None;
                 }
             }

@@ -2264,3 +2264,683 @@ impl std::fmt::Display for MeshEditorError {
 }
 
 impl std::error::Error for MeshEditorError {}
+
+// ============================================================================
+// UV Auto-Unwrap Module
+// ============================================================================
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Result of unwrapping a single face
+#[derive(Clone, Debug)]
+pub struct UnwrappedFace {
+    pub face_idx: usize,
+    /// UV coordinates in same order as face.vertices
+    pub uvs: Vec<Vec2>,
+}
+
+/// Quantize a position to a grid for position-based edge matching
+/// This handles floating point imprecision when comparing vertex positions
+fn quantize_pos(p: Vec3, epsilon: f32) -> (i32, i32, i32) {
+    (
+        (p.x / epsilon).round() as i32,
+        (p.y / epsilon).round() as i32,
+        (p.z / epsilon).round() as i32,
+    )
+}
+
+/// Create a canonical edge key from two positions (smaller position first)
+fn position_edge_key(p0: Vec3, p1: Vec3, epsilon: f32) -> ((i32, i32, i32), (i32, i32, i32)) {
+    let q0 = quantize_pos(p0, epsilon);
+    let q1 = quantize_pos(p1, epsilon);
+    if q0 <= q1 { (q0, q1) } else { (q1, q0) }
+}
+
+/// Build face adjacency graph for selected faces
+/// Uses vertex POSITIONS (not indices) to detect shared edges
+/// Returns: HashMap<face_idx, Vec<(neighbor_face_idx, shared_edge)>>
+fn build_face_adjacency(
+    mesh: &EditableMesh,
+    face_indices: &[usize],
+) -> HashMap<usize, Vec<(usize, (usize, usize))>> {
+    const EPSILON: f32 = 0.001;
+
+    // Build position-based edge -> (face_idx, vertex indices) map
+    // We store the vertex indices along with the face so we can return them
+    let mut edge_to_faces: HashMap<
+        ((i32, i32, i32), (i32, i32, i32)),
+        Vec<(usize, (usize, usize))>  // (face_idx, (v0_idx, v1_idx))
+    > = HashMap::new();
+
+    for &fi in face_indices {
+        if let Some(face) = mesh.faces.get(fi) {
+            for (v0, v1) in face.edges() {
+                let p0 = mesh.vertices[v0].pos;
+                let p1 = mesh.vertices[v1].pos;
+                let edge_key = position_edge_key(p0, p1, EPSILON);
+                edge_to_faces.entry(edge_key).or_default().push((fi, (v0, v1)));
+            }
+        }
+    }
+
+    // Build adjacency from position-matched edges
+    let mut adjacency: HashMap<usize, Vec<(usize, (usize, usize))>> = HashMap::new();
+
+    for (_edge_key, face_edges) in &edge_to_faces {
+        if face_edges.len() == 2 {
+            // Edge shared by exactly 2 faces (by position)
+            let (fi0, edge0) = face_edges[0];
+            let (fi1, edge1) = face_edges[1];
+
+            // Only add if they're different faces
+            if fi0 != fi1 {
+                adjacency.entry(fi0).or_default().push((fi1, edge0));
+                adjacency.entry(fi1).or_default().push((fi0, edge1));
+            }
+        }
+    }
+
+    adjacency
+}
+
+/// Find connected components in face graph
+fn find_connected_components(
+    adjacency: &HashMap<usize, Vec<(usize, (usize, usize))>>,
+    face_indices: &[usize],
+) -> Vec<Vec<usize>> {
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut components: Vec<Vec<usize>> = Vec::new();
+
+    for &start in face_indices {
+        if visited.contains(&start) { continue; }
+
+        let mut component = Vec::new();
+        let mut stack = vec![start];
+
+        while let Some(fi) = stack.pop() {
+            if visited.contains(&fi) { continue; }
+            visited.insert(fi);
+            component.push(fi);
+
+            if let Some(neighbors) = adjacency.get(&fi) {
+                for &(neighbor, _) in neighbors {
+                    if !visited.contains(&neighbor) {
+                        stack.push(neighbor);
+                    }
+                }
+            }
+        }
+
+        components.push(component);
+    }
+
+    components
+}
+
+/// Select best starting face for unwrap (largest area with cardinal-aligned normal)
+fn select_seed_face(mesh: &EditableMesh, face_indices: &[usize]) -> usize {
+    let mut best_face = face_indices[0];
+    let mut best_score = 0.0f32;
+
+    for &fi in face_indices {
+        if let Some(normal) = mesh.face_normal(fi) {
+            // Prefer faces with normals aligned to cardinal axes
+            let alignment = normal.x.abs().max(normal.y.abs()).max(normal.z.abs());
+
+            // Also consider face area for stability
+            let area = compute_face_area(mesh, fi);
+
+            let score = alignment * 0.7 + area.min(100.0) / 100.0 * 0.3;
+            if score > best_score {
+                best_score = score;
+                best_face = fi;
+            }
+        }
+    }
+    best_face
+}
+
+/// Compute face area using fan triangulation
+fn compute_face_area(mesh: &EditableMesh, face_idx: usize) -> f32 {
+    let Some(face) = mesh.faces.get(face_idx) else { return 0.0 };
+    if face.vertices.len() < 3 { return 0.0; }
+
+    let v0 = mesh.vertices[face.vertices[0]].pos;
+    let mut total_area = 0.0;
+
+    for i in 1..(face.vertices.len() - 1) {
+        let v1 = mesh.vertices[face.vertices[i]].pos;
+        let v2 = mesh.vertices[face.vertices[i + 1]].pos;
+        let cross = (v1 - v0).cross(v2 - v0);
+        total_area += cross.len() * 0.5;
+    }
+    total_area
+}
+
+/// Planar project a face to UV space
+fn planar_project_face(mesh: &EditableMesh, face_idx: usize) -> UnwrappedFace {
+    let face = &mesh.faces[face_idx];
+    let normal = mesh.face_normal(face_idx).unwrap_or(Vec3::new(0.0, 1.0, 0.0));
+
+    // Choose projection axes based on dominant normal component
+    let abs_n = Vec3::new(normal.x.abs(), normal.y.abs(), normal.z.abs());
+    let (u_axis, v_axis) = if abs_n.y >= abs_n.x && abs_n.y >= abs_n.z {
+        // Top/bottom - project onto XZ
+        (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+    } else if abs_n.x >= abs_n.z {
+        // Side face (X dominant) - project onto ZY
+        (Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 1.0, 0.0))
+    } else {
+        // Front/back face (Z dominant) - project onto XY
+        (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0))
+    };
+
+    let uvs: Vec<Vec2> = face.vertices.iter().map(|&vi| {
+        let pos = mesh.vertices[vi].pos;
+        Vec2::new(pos.dot(u_axis), pos.dot(v_axis))
+    }).collect();
+
+    UnwrappedFace { face_idx, uvs }
+}
+
+/// Unfold a face around a shared edge with an already-placed neighbor
+/// Uses position-based UV lookup to handle meshes with unshared vertices
+fn unfold_face_around_edge(
+    mesh: &EditableMesh,
+    face_idx: usize,
+    shared_edge: (usize, usize),
+    position_uvs: &HashMap<(i32, i32, i32), Vec2>,  // quantized position -> UV
+) -> UnwrappedFace {
+    const EPSILON: f32 = 0.001;
+    let face = &mesh.faces[face_idx];
+    let (edge_v0, edge_v1) = shared_edge;
+
+    // Get UV positions of shared edge vertices from neighbor (by position)
+    let pos_v0 = mesh.vertices[edge_v0].pos;
+    let pos_v1 = mesh.vertices[edge_v1].pos;
+    let key_v0 = quantize_pos(pos_v0, EPSILON);
+    let key_v1 = quantize_pos(pos_v1, EPSILON);
+
+    let uv_edge_v0 = position_uvs.get(&key_v0).copied().unwrap_or(Vec2::new(0.0, 0.0));
+    let uv_edge_v1 = position_uvs.get(&key_v1).copied().unwrap_or(Vec2::new(0.0, 0.0));
+
+    // Compute UV edge vector and length
+    let uv_edge = Vec2::new(uv_edge_v1.x - uv_edge_v0.x, uv_edge_v1.y - uv_edge_v0.y);
+    let uv_edge_len = (uv_edge.x * uv_edge.x + uv_edge.y * uv_edge.y).sqrt();
+
+    if uv_edge_len < 0.0001 {
+        // Degenerate edge, fall back to planar projection
+        return planar_project_face(mesh, face_idx);
+    }
+
+    let uv_edge_dir = Vec2::new(uv_edge.x / uv_edge_len, uv_edge.y / uv_edge_len);
+
+    // Perpendicular direction (90 degrees CCW)
+    let uv_perp = Vec2::new(-uv_edge_dir.y, uv_edge_dir.x);
+
+    // Get 3D edge
+    let pos_edge_v0 = mesh.vertices[edge_v0].pos;
+    let pos_edge_v1 = mesh.vertices[edge_v1].pos;
+    let edge_3d = pos_edge_v1 - pos_edge_v0;
+    let edge_3d_len = edge_3d.len();
+
+    if edge_3d_len < 0.0001 {
+        return planar_project_face(mesh, face_idx);
+    }
+
+    let edge_3d_dir = edge_3d * (1.0 / edge_3d_len);
+
+    // Get face normal to determine which side of the edge the face is on
+    let face_normal = mesh.face_normal(face_idx).unwrap_or(Vec3::new(0.0, 1.0, 0.0));
+
+    // Scale factor: 3D edge length maps to UV edge length
+    let scale = uv_edge_len / edge_3d_len;
+
+    let mut uvs = Vec::with_capacity(face.vertices.len());
+
+    for &vi in &face.vertices {
+        let vi_pos = mesh.vertices[vi].pos;
+        let vi_key = quantize_pos(vi_pos, EPSILON);
+
+        // Compare positions, not indices (for meshes with unshared vertices)
+        if vi_key == key_v0 {
+            uvs.push(uv_edge_v0);
+        } else if vi_key == key_v1 {
+            uvs.push(uv_edge_v1);
+        } else {
+            // Project this vertex onto the unfolded plane
+            let pos = mesh.vertices[vi].pos;
+
+            // Vector from edge_v0 to this vertex
+            let to_vertex = pos - pos_edge_v0;
+
+            // Component along the edge (u direction)
+            let along_edge = to_vertex.dot(edge_3d_dir);
+
+            // Component perpendicular to edge in the face plane
+            // First, project to_vertex onto the plane perpendicular to the edge
+            let along_component = edge_3d_dir * along_edge;
+            let perp_vector = to_vertex - along_component;
+            let perp_dist = perp_vector.len();
+
+            // Determine which side of the edge this vertex is on
+            // Use cross product to get consistent direction
+            let edge_cross_normal = edge_3d_dir.cross(face_normal);
+            let side = if perp_vector.dot(edge_cross_normal) >= 0.0 { 1.0 } else { -1.0 };
+
+            // Map to UV space
+            let u = uv_edge_v0.x + uv_edge_dir.x * along_edge * scale
+                  + uv_perp.x * perp_dist * scale * side;
+            let v = uv_edge_v0.y + uv_edge_dir.y * along_edge * scale
+                  + uv_perp.y * perp_dist * scale * side;
+
+            uvs.push(Vec2::new(u, v));
+        }
+    }
+
+    UnwrappedFace { face_idx, uvs }
+}
+
+/// Connected unwrap for a single component (island)
+fn connected_unwrap_component(
+    mesh: &EditableMesh,
+    component: &[usize],
+    adjacency: &HashMap<usize, Vec<(usize, (usize, usize))>>,
+) -> Vec<UnwrappedFace> {
+    const EPSILON: f32 = 0.001;
+
+    if component.is_empty() { return vec![]; }
+
+    let seed = select_seed_face(mesh, component);
+
+    // Unwrap seed face with planar projection
+    let seed_unwrapped = planar_project_face(mesh, seed);
+
+    let mut result = vec![seed_unwrapped.clone()];
+    let mut visited: HashSet<usize> = HashSet::from([seed]);
+    let mut queue: VecDeque<usize> = VecDeque::from([seed]);
+
+    // Build position-based UV lookup (uses quantized positions as keys)
+    // This handles meshes where vertices are not shared between faces
+    let mut position_uvs: HashMap<(i32, i32, i32), Vec2> = HashMap::new();
+    let seed_face = &mesh.faces[seed];
+    for (i, &vi) in seed_face.vertices.iter().enumerate() {
+        let pos_key = quantize_pos(mesh.vertices[vi].pos, EPSILON);
+        position_uvs.insert(pos_key, seed_unwrapped.uvs[i]);
+    }
+
+    while let Some(current) = queue.pop_front() {
+        if let Some(neighbors) = adjacency.get(&current) {
+            for &(neighbor_fi, shared_edge) in neighbors {
+                if visited.contains(&neighbor_fi) { continue; }
+
+                // Unfold neighbor around shared edge
+                let unwrapped = unfold_face_around_edge(
+                    mesh,
+                    neighbor_fi,
+                    shared_edge,
+                    &position_uvs,
+                );
+
+                // Update position-based UV lookup
+                let neighbor_face = &mesh.faces[neighbor_fi];
+                for (i, &vi) in neighbor_face.vertices.iter().enumerate() {
+                    let pos_key = quantize_pos(mesh.vertices[vi].pos, EPSILON);
+                    position_uvs.insert(pos_key, unwrapped.uvs[i]);
+                }
+
+                result.push(unwrapped);
+                visited.insert(neighbor_fi);
+                queue.push_back(neighbor_fi);
+            }
+        }
+    }
+
+    result
+}
+
+/// Find optimal rotation to align longest edge to axis (returns angle in radians)
+fn find_optimal_rotation(unwrapped: &[UnwrappedFace], _mesh: &EditableMesh) -> f32 {
+    let mut best_angle = 0.0f32;
+    let mut best_edge_len = 0.0f32;
+
+    for uf in unwrapped {
+        let n = uf.uvs.len();
+        if n < 2 { continue; }
+
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let uv0 = uf.uvs[i];
+            let uv1 = uf.uvs[j];
+
+            let dx = uv1.x - uv0.x;
+            let dy = uv1.y - uv0.y;
+            let len = (dx * dx + dy * dy).sqrt();
+
+            if len > best_edge_len {
+                best_edge_len = len;
+                // Angle to make this edge horizontal
+                best_angle = -dy.atan2(dx);
+            }
+        }
+    }
+
+    // Snap to 90-degree increments
+    let pi_over_2 = std::f32::consts::PI / 2.0;
+    (best_angle / pi_over_2).round() * pi_over_2
+}
+
+/// Rotate all UVs around center by given angle
+fn rotate_uvs(unwrapped: &mut [UnwrappedFace], angle: f32) {
+    if angle.abs() < 0.001 { return; }
+
+    // Compute center
+    let mut sum_x = 0.0f32;
+    let mut sum_y = 0.0f32;
+    let mut count = 0;
+    for uf in unwrapped.iter() {
+        for uv in &uf.uvs {
+            sum_x += uv.x;
+            sum_y += uv.y;
+            count += 1;
+        }
+    }
+    if count == 0 { return; }
+
+    let center_x = sum_x / count as f32;
+    let center_y = sum_y / count as f32;
+
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+
+    for uf in unwrapped.iter_mut() {
+        for uv in &mut uf.uvs {
+            let dx = uv.x - center_x;
+            let dy = uv.y - center_y;
+            uv.x = center_x + dx * cos_a - dy * sin_a;
+            uv.y = center_y + dx * sin_a + dy * cos_a;
+        }
+    }
+}
+
+/// Compute bounding box of unwrapped UVs
+fn compute_bounds(unwrapped: &[UnwrappedFace]) -> (f32, f32, f32, f32) {
+    let mut min_u = f32::MAX;
+    let mut min_v = f32::MAX;
+    let mut max_u = f32::MIN;
+    let mut max_v = f32::MIN;
+
+    for uf in unwrapped {
+        for uv in &uf.uvs {
+            min_u = min_u.min(uv.x);
+            min_v = min_v.min(uv.y);
+            max_u = max_u.max(uv.x);
+            max_v = max_v.max(uv.y);
+        }
+    }
+
+    (min_u, min_v, max_u, max_v)
+}
+
+/// Scale and translate UVs to fit 0-1 bounds with margin
+fn fit_to_uv_bounds(
+    unwrapped: &mut [UnwrappedFace],
+    tex_width: f32,
+    tex_height: f32,
+    margin_pixels: f32,
+) {
+    let (min_u, min_v, max_u, max_v) = compute_bounds(unwrapped);
+
+    let width = max_u - min_u;
+    let height = max_v - min_v;
+
+    if width <= 0.0 || height <= 0.0 { return; }
+
+    // Margin in UV space
+    let margin_u = margin_pixels / tex_width;
+    let margin_v = margin_pixels / tex_height;
+
+    // Scale to fit within bounds with margin (uniform scale to preserve aspect)
+    let scale_u = (1.0 - 2.0 * margin_u) / width;
+    let scale_v = (1.0 - 2.0 * margin_v) / height;
+    let scale = scale_u.min(scale_v);
+
+    // Transform: translate to origin, scale, translate to margin
+    for uf in unwrapped.iter_mut() {
+        for uv in &mut uf.uvs {
+            uv.x = (uv.x - min_u) * scale + margin_u;
+            uv.y = (uv.y - min_v) * scale + margin_v;
+
+            // Pixel snapping
+            uv.x = (uv.x * tex_width).round() / tex_width;
+            uv.y = (uv.y * tex_height).round() / tex_height;
+        }
+    }
+}
+
+/// Translate an island by offset
+fn translate_island(island: &mut [UnwrappedFace], offset_u: f32, offset_v: f32) {
+    for uf in island.iter_mut() {
+        for uv in &mut uf.uvs {
+            uv.x += offset_u;
+            uv.y += offset_v;
+        }
+    }
+}
+
+/// Fit island to minimal bounds (normalize to 0-based coordinates)
+fn fit_island_minimal(island: &mut [UnwrappedFace]) {
+    let (min_u, min_v, _, _) = compute_bounds(island);
+    translate_island(island, -min_u, -min_v);
+}
+
+/// Scale an island by a factor around origin
+fn scale_island(island: &mut [UnwrappedFace], scale: f32) {
+    for uf in island.iter_mut() {
+        for uv in &mut uf.uvs {
+            uv.x *= scale;
+            uv.y *= scale;
+        }
+    }
+}
+
+/// Pack multiple islands into UV space
+fn pack_islands(islands: &mut [Vec<UnwrappedFace>], tex_width: f32, tex_height: f32) {
+    if islands.is_empty() { return; }
+
+    let margin_pixels = 2.0;
+    let margin_u = margin_pixels / tex_width;
+    let margin_v = margin_pixels / tex_height;
+
+    // First, normalize each island to origin and calculate their sizes
+    let mut island_sizes: Vec<(f32, f32)> = Vec::new();
+    for island in islands.iter_mut() {
+        fit_island_minimal(island);
+        let (_, _, max_u, max_v) = compute_bounds(island);
+        island_sizes.push((max_u, max_v));
+    }
+
+    // Calculate total area needed (rough estimate for uniform scaling)
+    let total_area: f32 = island_sizes.iter().map(|(w, h)| w * h).sum();
+    let num_islands = islands.len() as f32;
+
+    // Target: fit all islands in roughly 0-1 space with margins
+    // Use sqrt of total area to estimate needed scale
+    let available_area = (1.0 - 2.0 * margin_u) * (1.0 - 2.0 * margin_v);
+    let scale = if total_area > 0.0 {
+        (available_area / total_area).sqrt() * 0.9 // 0.9 factor for packing inefficiency
+    } else {
+        1.0
+    };
+
+    // Scale all islands
+    for island in islands.iter_mut() {
+        scale_island(island, scale);
+    }
+
+    // Recalculate sizes after scaling
+    island_sizes.clear();
+    for island in islands.iter() {
+        let (_, _, max_u, max_v) = compute_bounds(island);
+        island_sizes.push((max_u, max_v));
+    }
+
+    // Simple row-based packing
+    let mut current_x = margin_u;
+    let mut current_y = margin_v;
+    let mut row_height = 0.0f32;
+
+    for (i, island) in islands.iter_mut().enumerate() {
+        let (width, height) = island_sizes[i];
+
+        // Check if fits in current row
+        if current_x + width > 1.0 - margin_u && current_x > margin_u {
+            // Start new row
+            current_x = margin_u;
+            current_y += row_height + margin_v;
+            row_height = 0.0;
+        }
+
+        // Translate island to position
+        translate_island(island, current_x, current_y);
+
+        current_x += width + margin_u;
+        row_height = row_height.max(height);
+    }
+
+    // Final pass: ensure everything fits in 0-1 by scaling down if needed
+    let mut all_uvs: Vec<&mut Vec<UnwrappedFace>> = islands.iter_mut().collect();
+    let (min_u, min_v, max_u, max_v) = {
+        let mut min_u = f32::MAX;
+        let mut min_v = f32::MAX;
+        let mut max_u = f32::MIN;
+        let mut max_v = f32::MIN;
+        for island in all_uvs.iter() {
+            for uf in island.iter() {
+                for uv in &uf.uvs {
+                    min_u = min_u.min(uv.x);
+                    min_v = min_v.min(uv.y);
+                    max_u = max_u.max(uv.x);
+                    max_v = max_v.max(uv.y);
+                }
+            }
+        }
+        (min_u, min_v, max_u, max_v)
+    };
+
+    // If bounds exceed 0-1, scale everything down
+    let width = max_u - min_u;
+    let height = max_v - min_v;
+    if width > 1.0 - 2.0 * margin_u || height > 1.0 - 2.0 * margin_v {
+        let scale_x = (1.0 - 2.0 * margin_u) / width;
+        let scale_y = (1.0 - 2.0 * margin_v) / height;
+        let final_scale = scale_x.min(scale_y);
+
+        for island in islands.iter_mut() {
+            for uf in island.iter_mut() {
+                for uv in &mut uf.uvs {
+                    uv.x = (uv.x - min_u) * final_scale + margin_u;
+                    uv.y = (uv.y - min_v) * final_scale + margin_v;
+                }
+            }
+        }
+    }
+
+    // Apply pixel snapping to all islands
+    for island in islands.iter_mut() {
+        for uf in island.iter_mut() {
+            for uv in &mut uf.uvs {
+                uv.x = (uv.x * tex_width).round() / tex_width;
+                uv.y = (uv.y * tex_height).round() / tex_height;
+            }
+        }
+    }
+}
+
+/// Main UV auto-unwrap function
+/// Unwraps selected faces preserving edge connectivity, with grid alignment and auto-fit
+pub fn auto_unwrap_faces(
+    mesh: &mut EditableMesh,
+    face_indices: &[usize],
+    tex_width: f32,
+    tex_height: f32,
+) {
+    if face_indices.is_empty() { return; }
+
+    println!("=== AUTO UNWRAP DEBUG ===");
+    println!("Selected faces: {:?}", face_indices);
+    println!("Tex size: {}x{}", tex_width, tex_height);
+
+    // 1. Build adjacency graph
+    let adjacency = build_face_adjacency(mesh, face_indices);
+    println!("Adjacency graph:");
+    for (face, neighbors) in &adjacency {
+        println!("  Face {}: neighbors {:?}", face, neighbors);
+    }
+
+    // 2. Find connected components (islands)
+    let components = find_connected_components(&adjacency, face_indices);
+    println!("Connected components: {} islands", components.len());
+    for (i, comp) in components.iter().enumerate() {
+        println!("  Island {}: faces {:?}", i, comp);
+    }
+
+    // 3. Unwrap each island
+    let mut islands: Vec<Vec<UnwrappedFace>> = components.iter()
+        .map(|component| connected_unwrap_component(mesh, component, &adjacency))
+        .collect();
+
+    // Debug: print unwrapped UVs before rotation
+    println!("Unwrapped UVs (before rotation):");
+    for (i, island) in islands.iter().enumerate() {
+        println!("  Island {}:", i);
+        for uf in island {
+            println!("    Face {}: uvs {:?}", uf.face_idx, uf.uvs);
+        }
+    }
+
+    // 4. Rotate each island for grid alignment
+    for (i, island) in islands.iter_mut().enumerate() {
+        let angle = find_optimal_rotation(island, mesh);
+        println!("Island {} rotation: {} radians ({} degrees)", i, angle, angle.to_degrees());
+        rotate_uvs(island, angle);
+    }
+
+    // Debug: print bounds before fitting
+    for (i, island) in islands.iter().enumerate() {
+        let (min_u, min_v, max_u, max_v) = compute_bounds(island);
+        println!("Island {} bounds before fit: u=[{}, {}], v=[{}, {}], size={}x{}",
+            i, min_u, max_u, min_v, max_v, max_u - min_u, max_v - min_v);
+    }
+
+    // 5. Handle single island vs multiple islands
+    if islands.len() == 1 {
+        // Single island: fit to full UV bounds
+        fit_to_uv_bounds(&mut islands[0], tex_width, tex_height, 1.0);
+    } else {
+        // Multiple islands: pack them
+        pack_islands(&mut islands, tex_width, tex_height);
+    }
+
+    // Debug: print final UVs
+    println!("Final UVs:");
+    for (i, island) in islands.iter().enumerate() {
+        println!("  Island {}:", i);
+        for uf in island {
+            println!("    Face {}: uvs {:?}", uf.face_idx, uf.uvs);
+        }
+    }
+
+    // 6. Apply final UVs to mesh
+    for island in &islands {
+        for uf in island {
+            let face = &mesh.faces[uf.face_idx];
+            for (i, &vi) in face.vertices.iter().enumerate() {
+                if let Some(vert) = mesh.vertices.get_mut(vi) {
+                    vert.uv = uf.uvs[i];
+                }
+            }
+        }
+    }
+    println!("=== END AUTO UNWRAP ===");
+}

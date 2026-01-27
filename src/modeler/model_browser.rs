@@ -24,6 +24,16 @@ pub enum AssetCategory {
     User,
 }
 
+impl AssetCategory {
+    /// Get the prefix for this category (used in library keys)
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            AssetCategory::Sample => "sample:",
+            AssetCategory::User => "user:",
+        }
+    }
+}
+
 /// Info about an asset file
 #[derive(Debug, Clone)]
 pub struct AssetInfo {
@@ -33,6 +43,14 @@ pub struct AssetInfo {
     pub path: PathBuf,
     /// Category (sample or user)
     pub category: AssetCategory,
+}
+
+impl AssetInfo {
+    /// Get the namespaced key for library lookups
+    /// e.g., "sample:asset_003" or "user:asset_003"
+    pub fn library_key(&self) -> String {
+        format!("{}{}", self.category.prefix(), self.name)
+    }
 }
 
 /// Discover sample asset files (read-only bundled assets)

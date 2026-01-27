@@ -3,8 +3,8 @@
 //! Provides proper inverse projection to convert screen coordinates
 //! back to 3D rays, matching the forward projection in math.rs.
 
+use super::camera::Camera;
 use super::math::Vec3;
-use super::render::Camera;
 
 /// A 3D ray with origin and direction
 #[derive(Debug, Clone, Copy)]

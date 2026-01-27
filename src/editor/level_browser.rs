@@ -7,8 +7,10 @@ use macroquad::prelude::*;
 use crate::storage::{Storage, PendingLoad, PendingList};
 use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::world::Level;
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
-use super::example_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex, Clut, ClutId};
+use crate::modeler::{checkerboard_clut, IndexedAtlas, TextureRef};
+use crate::asset::AssetComponent;
+use super::sample_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
 
 /// State for the level browser dialog
@@ -52,9 +54,6 @@ pub struct LevelBrowser {
     /// Local framebuffer for preview rendering (avoids resizing main fb)
     preview_fb: Framebuffer,
 }
-
-/// Legacy alias for backward compatibility
-pub type ExampleBrowser = LevelBrowser;
 
 impl Default for LevelBrowser {
     fn default() -> Self {
@@ -208,8 +207,8 @@ impl LevelBrowser {
         self.orbit_pitch = 0.4;
     }
 
-    /// Get the currently selected example info (legacy compatibility)
-    pub fn selected_example(&self) -> Option<&LevelInfo> {
+    /// Get the currently selected sample info
+    pub fn selected_sample(&self) -> Option<&LevelInfo> {
         self.selected_level()
     }
 }
@@ -242,6 +241,7 @@ pub fn draw_level_browser(
     icon_font: Option<&Font>,
     texture_packs: &[TexturePack],
     asset_library: &crate::asset::AssetLibrary,
+    user_textures: &crate::texture::TextureLibrary,
 ) -> BrowserAction {
     if !browser.open {
         return BrowserAction::None;
@@ -318,7 +318,7 @@ pub fn draw_level_browser(
 
     if has_preview {
         // Render 3D preview with orbit camera (uses browser's local framebuffer)
-        draw_orbit_preview(ctx, browser, preview_rect, texture_packs, asset_library);
+        draw_orbit_preview(ctx, browser, preview_rect, texture_packs, asset_library, user_textures);
 
         // Draw stats at bottom of preview
         if let Some(stats) = &browser.preview_stats {
@@ -394,19 +394,6 @@ pub fn draw_level_browser(
     }
 
     action
-}
-
-/// Legacy alias for backward compatibility
-pub fn draw_example_browser(
-    ctx: &mut UiContext,
-    browser: &mut LevelBrowser,
-    icon_font: Option<&Font>,
-    texture_packs: &[TexturePack],
-    asset_library: &crate::asset::AssetLibrary,
-) -> BrowserAction {
-    // Create a temporary storage for legacy calls (local-only)
-    let storage = Storage::new();
-    draw_level_browser(ctx, browser, &storage, icon_font, texture_packs, asset_library)
 }
 
 /// Draw the two-section list (Samples + My Levels)
@@ -570,10 +557,11 @@ fn draw_two_section_list(
 /// Draw the orbit preview of a level (uses browser's local framebuffer)
 fn draw_orbit_preview(
     ctx: &mut UiContext,
-    browser: &mut ExampleBrowser,
+    browser: &mut LevelBrowser,
     rect: Rect,
     texture_packs: &[TexturePack],
     asset_library: &crate::asset::AssetLibrary,
+    user_textures: &crate::texture::TextureLibrary,
 ) {
     use crate::rasterizer::WIDTH;
 
@@ -677,15 +665,35 @@ fn draw_orbit_preview(
     }
     // Collect lights from room objects (any asset with Light component)
     for room in &level.rooms {
-        for obj in room.objects.iter().filter(|o| {
-            o.enabled && asset_library.get_by_id(o.asset_id)
-                .map(|a| a.has_light())
-                .unwrap_or(false)
-        }) {
-            let world_pos = obj.world_position(room);
-            // Use default light settings
-            let light = Light::point(world_pos, 5000.0, 1.0);
-            lights.push(light);
+        for obj in room.objects.iter().filter(|o| o.enabled) {
+            let asset = match asset_library.get_by_id(obj.asset_id) {
+                Some(a) => a,
+                None => continue,
+            };
+            // Find Light component and extract its properties
+            for comp in &asset.components {
+                if let AssetComponent::Light { color, intensity, radius, offset } = comp {
+                    // Apply per-instance overrides if present
+                    let overrides = &obj.overrides.light;
+                    let final_color = overrides.as_ref().and_then(|o| o.color).unwrap_or(*color);
+                    let final_intensity = overrides.as_ref().and_then(|o| o.intensity).unwrap_or(*intensity);
+                    let final_radius = overrides.as_ref().and_then(|o| o.radius).unwrap_or(*radius);
+                    let final_offset = overrides.as_ref().and_then(|o| o.offset).unwrap_or(*offset);
+
+                    let base_pos = obj.world_position(room);
+                    // Apply light offset to get actual light position
+                    let light_pos = Vec3::new(
+                        base_pos.x + final_offset[0],
+                        base_pos.y + final_offset[1],
+                        base_pos.z + final_offset[2],
+                    );
+                    // Convert color from [u8; 3] to normalized RGB
+                    let r = final_color[0] as f32 / 255.0;
+                    let g = final_color[1] as f32 / 255.0;
+                    let b = final_color[2] as f32 / 255.0;
+                    lights.push(Light::point_colored(light_pos, final_radius, final_intensity, r, g, b));
+                }
+            }
         }
     }
     let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
@@ -699,11 +707,18 @@ fn draw_orbit_preview(
     };
 
     // Build flattened textures array and texture map (same as main viewport)
-    let textures: Vec<RasterTexture> = texture_packs
+    let mut textures: Vec<RasterTexture> = texture_packs
         .iter()
         .flat_map(|pack| &pack.textures)
         .cloned()
         .collect();
+
+    // Append user textures (they'll be indexed after pack textures)
+    for name in user_textures.names() {
+        if let Some(user_tex) = user_textures.get(name) {
+            textures.push(user_tex.to_raster_texture());
+        }
+    }
 
     // Maps (pack, name) -> (texture_idx, texture_width)
     let mut texture_map: std::collections::HashMap<(String, String), (usize, u32)> = std::collections::HashMap::new();
@@ -713,6 +728,12 @@ fn draw_orbit_preview(
             texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64)); // Pack textures are 64x64
             texture_idx += 1;
         }
+    }
+    // Add user textures (using _USER pack name convention)
+    for name in user_textures.names() {
+        let width = user_textures.get(name).map(|t| t.width as u32).unwrap_or(64);
+        texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), (texture_idx, width));
+        texture_idx += 1;
     }
 
     // Texture resolver - returns (texture_id, texture_width)
@@ -739,6 +760,99 @@ fn draw_orbit_preview(
                 render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
             } else {
                 render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+            }
+        }
+    }
+
+    // Render asset meshes placed in each room
+    let fallback_clut = checkerboard_clut();
+    for room in &level.rooms {
+        for obj in &room.objects {
+            if !obj.enabled {
+                continue;
+            }
+
+            // Get asset from library
+            let asset = match asset_library.get_by_id(obj.asset_id) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            // Get mesh parts from asset
+            let mesh_parts = match asset.mesh() {
+                Some(parts) => parts,
+                None => continue,
+            };
+
+            // Calculate world transform
+            let world_pos = obj.world_position(room);
+            let facing = obj.facing;
+            let cos_f = facing.cos();
+            let sin_f = facing.sin();
+
+            // Per-room render settings
+            let asset_settings = RasterSettings {
+                lights: settings.lights.clone(),
+                ambient,
+                ..settings.clone()
+            };
+
+            // Render each visible mesh part
+            for part in mesh_parts.iter().filter(|p| p.visible) {
+                let (local_vertices, faces) = part.mesh.to_render_data_textured();
+                if local_vertices.is_empty() {
+                    continue;
+                }
+
+                // Transform vertices: rotate around Y by facing, then translate
+                let transformed_vertices: Vec<Vertex> = local_vertices.iter().map(|v| {
+                    let rx = v.pos.x * cos_f - v.pos.z * sin_f;
+                    let rz = v.pos.x * sin_f + v.pos.z * cos_f;
+                    Vertex {
+                        pos: Vec3::new(rx + world_pos.x, v.pos.y + world_pos.y, rz + world_pos.z),
+                        uv: v.uv,
+                        normal: Vec3::new(
+                            v.normal.x * cos_f - v.normal.z * sin_f,
+                            v.normal.y,
+                            v.normal.x * sin_f + v.normal.z * cos_f,
+                        ),
+                        color: v.color,
+                        bone_index: v.bone_index,
+                    }
+                }).collect();
+
+                // Resolve texture: use UserTexture data for Id refs, otherwise use atlas with fallback
+                let (atlas, clut) = match &part.texture_ref {
+                    TextureRef::Id(id) => {
+                        // Find user texture by ID and create atlas + CLUT from it
+                        if let Some(tex) = user_textures.get_by_id(*id) {
+                            let atlas = IndexedAtlas {
+                                width: tex.width,
+                                height: tex.height,
+                                depth: tex.depth,
+                                indices: tex.indices.clone(),
+                                default_clut: ClutId::NONE,
+                            };
+                            let mut clut = Clut::new_4bit("preview_texture");
+                            clut.colors = tex.palette.clone();
+                            clut.depth = tex.depth;
+                            (atlas, clut)
+                        } else {
+                            (part.atlas.clone(), fallback_clut.clone())
+                        }
+                    }
+                    _ => (part.atlas.clone(), fallback_clut.clone()),
+                };
+
+                if use_rgb555 {
+                    let tex15 = atlas.to_texture15(&clut, "preview_asset");
+                    let part_textures = [tex15];
+                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &camera, &asset_settings, None);
+                } else {
+                    let tex = atlas.to_raster_texture(&clut, "preview_asset");
+                    let part_textures = [tex];
+                    render_mesh(fb, &transformed_vertices, &faces, &part_textures, &camera, &asset_settings);
+                }
             }
         }
     }

@@ -78,7 +78,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     registry.register(
-        Action::new("file.browse_meshes")
+        Action::new("file.import_obj")
             .label("Import OBJ")
             .icon(icon::FOLDER_OPEN)
             .status_tip("Import mesh from OBJ file")
@@ -351,6 +351,15 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .label("Reset UVs")
             .icon(icon::REFRESH_CW)
             .status_tip("Reset UVs to default")
+            .category("UV")
+            .enabled_when(|ctx| ctx.has_face_selection),
+    );
+
+    registry.register(
+        Action::new("uv.auto_unwrap")
+            .label("Auto Unwrap")
+            .shortcut(Shortcut::key(KeyCode::U))
+            .status_tip("Auto-unwrap selected faces preserving connectivity")
             .category("UV")
             .enabled_when(|ctx| ctx.has_face_selection),
     );

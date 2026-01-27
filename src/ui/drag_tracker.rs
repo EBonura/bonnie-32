@@ -43,6 +43,13 @@ pub struct DragState {
     pub current_angle: f32,
     /// Center in screen coords (for rotation - calculate angle from this point)
     pub center_screen: (f32, f32),
+    /// Camera snapshot at drag start (for consistent ray casting)
+    pub start_camera: Option<Camera>,
+    /// Viewport dimensions at drag start (framebuffer width, height)
+    pub start_viewport: Option<(usize, usize)>,
+    /// Viewport screen transform at drag start (draw_x, draw_y, draw_w, draw_h)
+    /// Used to convert screen mouse coords to framebuffer coords consistently
+    pub start_viewport_transform: Option<(f32, f32, f32, f32)>,
 }
 
 impl DragState {
@@ -61,6 +68,9 @@ impl DragState {
             initial_angle: 0.0,
             current_angle: 0.0,
             center_screen: (0.0, 0.0),
+            start_camera: None,
+            start_viewport: None,
+            start_viewport_transform: None,
         }
     }
 
@@ -80,6 +90,35 @@ impl DragState {
             initial_angle,
             current_angle: initial_angle,
             center_screen,
+            start_camera: None,
+            start_viewport: None,
+            start_viewport_transform: None,
+        }
+    }
+
+    /// Create drag state for rotation with camera snapshot for consistent ray casting
+    pub fn new_rotation_3d(
+        center: Vec3,
+        initial_angle: f32,
+        initial_mouse: (f32, f32),
+        center_screen: (f32, f32),
+        camera: Camera,
+        viewport_width: usize,
+        viewport_height: usize,
+        viewport_transform: (f32, f32, f32, f32), // (draw_x, draw_y, draw_w, draw_h)
+    ) -> Self {
+        Self {
+            initial_position: center,
+            current_position: center,
+            handle_offset: Vec3::ZERO,
+            initial_mouse,
+            current_mouse: initial_mouse,
+            initial_angle,
+            current_angle: initial_angle,
+            center_screen,
+            start_camera: Some(camera),
+            start_viewport: Some((viewport_width, viewport_height)),
+            start_viewport_transform: Some(viewport_transform),
         }
     }
 

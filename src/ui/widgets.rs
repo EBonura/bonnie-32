@@ -287,6 +287,43 @@ impl Toolbar {
         icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active)
     }
 
+    /// Add an icon button with active state, returning the button rect for dropdown positioning
+    pub fn icon_button_active_with_rect(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str, is_active: bool) -> (bool, Rect) {
+        let size = (self.rect.h - 4.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), size, size);
+        self.cursor_x += size + self.spacing;
+        (icon_button_active(ctx, btn_rect, icon, icon_font, tooltip, is_active), btn_rect)
+    }
+
+    /// Add a clickable label that returns (clicked, rect) for dropdown positioning
+    pub fn clickable_label(&mut self, ctx: &mut UiContext, text: &str, tooltip: &str) -> (bool, Rect) {
+        let height = (self.rect.h - 4.0).round();
+        let font_size = 12.0;
+        let text_dims = measure_text(text, None, font_size as u16, 1.0);
+        let width = (text_dims.width + 8.0).round();
+        let btn_rect = Rect::new(self.cursor_x.round(), (self.rect.y + 2.0).round(), width, height);
+        self.cursor_x += width + self.spacing;
+
+        // Draw background on hover
+        let hovered = ctx.mouse.inside(&btn_rect);
+        if hovered {
+            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, Color::from_rgba(60, 60, 70, 255));
+        }
+
+        // Draw text
+        let text_x = btn_rect.x + 4.0;
+        let text_y = btn_rect.y + (btn_rect.h + text_dims.height) / 2.0 - 2.0;
+        let text_color = if hovered { WHITE } else { Color::from_rgba(180, 180, 200, 255) };
+        draw_text(text, text_x, text_y, font_size, text_color);
+
+        // Tooltip
+        if hovered {
+            ctx.set_tooltip(tooltip, btn_rect.x, btn_rect.bottom());
+        }
+
+        (hovered && ctx.mouse.left_pressed, btn_rect)
+    }
+
     /// Add a disabled icon button (grayed out, no click, shows tooltip)
     pub fn icon_button_disabled(&mut self, ctx: &mut UiContext, icon: char, icon_font: Option<&Font>, tooltip: &str) {
         let size = (self.rect.h - 4.0).round();

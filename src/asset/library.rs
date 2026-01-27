@@ -36,6 +36,22 @@ pub enum AssetSource {
     User,
 }
 
+impl AssetSource {
+    /// Get the prefix for this source (used in library keys)
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            AssetSource::Sample => "sample:",
+            AssetSource::User => "user:",
+        }
+    }
+}
+
+/// Create a namespaced key for the asset library
+/// This prevents name collisions between sample and user assets
+fn make_asset_key(source: AssetSource, name: &str) -> String {
+    format!("{}{}", source.prefix(), name)
+}
+
 /// A library of assets
 ///
 /// Provides discovery, loading, and caching of assets from two directories:
@@ -123,22 +139,25 @@ impl AssetLibrary {
                     // Set the source
                     asset.source = source;
 
-                    // Use filename (without extension) as the key
-                    let name = path
+                    // Use filename (without extension) as the base name
+                    let base_name = path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or(&asset.name)
                         .to_string();
                     let id = asset.id;
 
-                    // Track in the appropriate list
+                    // Create namespaced key to prevent collisions between sources
+                    let key = make_asset_key(source, &base_name);
+
+                    // Track in the appropriate list (using base name for display)
                     match source {
-                        AssetSource::Sample => self.sample_names.push(name.clone()),
-                        AssetSource::User => self.user_names.push(name.clone()),
+                        AssetSource::Sample => self.sample_names.push(base_name.clone()),
+                        AssetSource::User => self.user_names.push(base_name.clone()),
                     }
 
-                    self.by_id.insert(id, name.clone());
-                    self.assets.insert(name, asset);
+                    self.by_id.insert(id, key.clone());
+                    self.assets.insert(key, asset);
                     count += 1;
                 }
                 Err(e) => {
@@ -167,30 +186,48 @@ impl AssetLibrary {
     ///
     /// Re-reads the asset file and updates the library entry.
     /// Useful for picking up changes made in the modeler.
+    /// Supports both namespaced keys and plain names.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reload_asset(&mut self, name: &str) -> Result<(), AssetError> {
-        // Determine directory from existing asset source
-        let dir = if let Some(asset) = self.assets.get(name) {
-            match asset.source {
-                AssetSource::Sample => SAMPLES_ASSETS_DIR,
-                AssetSource::User => USER_ASSETS_DIR,
-            }
+        // Determine the actual key and source
+        let (key, source, base_name) = if let Some(stripped) = name.strip_prefix("sample:") {
+            (name.to_string(), AssetSource::Sample, stripped.to_string())
+        } else if let Some(stripped) = name.strip_prefix("user:") {
+            (name.to_string(), AssetSource::User, stripped.to_string())
         } else {
-            USER_ASSETS_DIR // Default to user directory
+            // Plain name - check if exists, default to user
+            let user_key = make_asset_key(AssetSource::User, name);
+            if self.assets.contains_key(&user_key) {
+                (user_key, AssetSource::User, name.to_string())
+            } else {
+                let sample_key = make_asset_key(AssetSource::Sample, name);
+                if self.assets.contains_key(&sample_key) {
+                    (sample_key, AssetSource::Sample, name.to_string())
+                } else {
+                    // Default to user directory for new assets
+                    (make_asset_key(AssetSource::User, name), AssetSource::User, name.to_string())
+                }
+            }
         };
 
-        let path = PathBuf::from(dir).join(format!("{}.ron", name));
-        let mut asset = Asset::load(&path)?;
+        // Determine directory from source
+        let dir = match source {
+            AssetSource::Sample => SAMPLES_ASSETS_DIR,
+            AssetSource::User => USER_ASSETS_DIR,
+        };
 
-        // Preserve the source
-        if let Some(old_asset) = self.assets.get(name) {
-            asset.source = old_asset.source;
+        let path = PathBuf::from(dir).join(format!("{}.ron", base_name));
+        let mut asset = Asset::load(&path)?;
+        asset.source = source;
+
+        // Update ID index
+        if let Some(old_asset) = self.assets.get(&key) {
             self.by_id.remove(&old_asset.id);
         }
-        self.by_id.insert(asset.id, name.to_string());
+        self.by_id.insert(asset.id, key.clone());
 
         // Update the asset
-        self.assets.insert(name.to_string(), asset);
+        self.assets.insert(key, asset);
         Ok(())
     }
 
@@ -292,8 +329,17 @@ impl AssetLibrary {
     }
 
     /// Get an asset by name
+    ///
+    /// Supports both namespaced keys ("sample:asset_003", "user:asset_003")
+    /// and plain names ("asset_003"). For plain names, tries user first, then sample.
     pub fn get(&self, name: &str) -> Option<&Asset> {
-        self.assets.get(name)
+        // If already namespaced, look up directly
+        if name.starts_with("sample:") || name.starts_with("user:") {
+            return self.assets.get(name);
+        }
+        // Try user first (user assets take precedence for editing), then sample
+        self.assets.get(&make_asset_key(AssetSource::User, name))
+            .or_else(|| self.assets.get(&make_asset_key(AssetSource::Sample, name)))
     }
 
     /// Get an asset by its stable ID
@@ -312,60 +358,92 @@ impl AssetLibrary {
     }
 
     /// Get a mutable reference to an asset by name
+    ///
+    /// Supports both namespaced keys and plain names (tries user first, then sample)
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Asset> {
-        self.assets.get_mut(name)
+        // If already namespaced, look up directly
+        if name.starts_with("sample:") || name.starts_with("user:") {
+            return self.assets.get_mut(name);
+        }
+        // Try user first, then sample
+        let user_key = make_asset_key(AssetSource::User, name);
+        if self.assets.contains_key(&user_key) {
+            return self.assets.get_mut(&user_key);
+        }
+        let sample_key = make_asset_key(AssetSource::Sample, name);
+        self.assets.get_mut(&sample_key)
     }
 
     /// Check if an asset with the given name exists
+    ///
+    /// Supports both namespaced keys and plain names
     pub fn contains(&self, name: &str) -> bool {
-        self.assets.contains_key(name)
+        if name.starts_with("sample:") || name.starts_with("user:") {
+            return self.assets.contains_key(name);
+        }
+        self.assets.contains_key(&make_asset_key(AssetSource::User, name))
+            || self.assets.contains_key(&make_asset_key(AssetSource::Sample, name))
     }
 
     /// Add an asset to the library
     ///
-    /// If an asset with the same name exists, it will be replaced.
+    /// If an asset with the same name AND source exists, it will be replaced.
     /// Also updates the ID index. New assets are added to the appropriate
     /// list based on their source field.
     pub fn add(&mut self, asset: Asset) {
-        let name = asset.name.clone();
+        let base_name = asset.name.clone();
         let id = asset.id;
         let source = asset.source;
+        let key = make_asset_key(source, &base_name);
 
-        // If replacing, remove old ID mapping and from old list
-        if let Some(old_asset) = self.assets.get(&name) {
+        // If replacing, remove old ID mapping
+        if let Some(old_asset) = self.assets.get(&key) {
             self.by_id.remove(&old_asset.id);
-            // Remove from appropriate list
-            match old_asset.source {
-                AssetSource::Sample => self.sample_names.retain(|n| n != &name),
-                AssetSource::User => self.user_names.retain(|n| n != &name),
-            }
         }
 
-        // Add to appropriate list
+        // Add to appropriate list (using base name)
         match source {
             AssetSource::Sample => {
-                if !self.sample_names.contains(&name) {
-                    self.sample_names.push(name.clone());
+                if !self.sample_names.contains(&base_name) {
+                    self.sample_names.push(base_name.clone());
                 }
             }
             AssetSource::User => {
-                if !self.user_names.contains(&name) {
-                    self.user_names.push(name.clone());
+                if !self.user_names.contains(&base_name) {
+                    self.user_names.push(base_name);
                 }
             }
         }
 
-        self.by_id.insert(id, name.clone());
-        self.assets.insert(name, asset);
+        self.by_id.insert(id, key.clone());
+        self.assets.insert(key, asset);
     }
 
-    /// Remove an asset by name
+    /// Remove an asset by name (supports namespaced or plain names)
     pub fn remove(&mut self, name: &str) -> Option<Asset> {
-        if let Some(asset) = self.assets.remove(name) {
+        // Determine the actual key to use
+        let key = if name.starts_with("sample:") || name.starts_with("user:") {
+            name.to_string()
+        } else {
+            // Try user first, then sample
+            let user_key = make_asset_key(AssetSource::User, name);
+            if self.assets.contains_key(&user_key) {
+                user_key
+            } else {
+                make_asset_key(AssetSource::Sample, name)
+            }
+        };
+
+        if let Some(asset) = self.assets.remove(&key) {
+            // Extract base name from key for list cleanup
+            let base_name = key.strip_prefix("sample:")
+                .or_else(|| key.strip_prefix("user:"))
+                .unwrap_or(&key);
+
             // Remove from appropriate list
             match asset.source {
-                AssetSource::Sample => self.sample_names.retain(|n| n != name),
-                AssetSource::User => self.user_names.retain(|n| n != name),
+                AssetSource::Sample => self.sample_names.retain(|n| n != base_name),
+                AssetSource::User => self.user_names.retain(|n| n != base_name),
             }
             // Clean up ID index
             self.by_id.remove(&asset.id);
@@ -425,26 +503,44 @@ impl AssetLibrary {
         self.all_names()
     }
 
-    /// Iterate over sample assets
+    /// Iterate over sample assets (returns base name, not namespaced key)
     pub fn samples(&self) -> impl Iterator<Item = (&str, &Asset)> {
         self.sample_names
             .iter()
-            .filter_map(|name| self.assets.get(name).map(|asset| (name.as_str(), asset)))
+            .filter_map(|name| {
+                let key = make_asset_key(AssetSource::Sample, name);
+                self.assets.get(&key).map(|asset| (name.as_str(), asset))
+            })
     }
 
-    /// Iterate over user assets
+    /// Iterate over user assets (returns base name, not namespaced key)
     pub fn user_assets(&self) -> impl Iterator<Item = (&str, &Asset)> {
         self.user_names
             .iter()
-            .filter_map(|name| self.assets.get(name).map(|asset| (name.as_str(), asset)))
+            .filter_map(|name| {
+                let key = make_asset_key(AssetSource::User, name);
+                self.assets.get(&key).map(|asset| (name.as_str(), asset))
+            })
+    }
+
+    /// Iterate over all assets with their full namespaced keys
+    /// Returns ("sample:name", asset) or ("user:name", asset)
+    pub fn iter_with_keys(&self) -> impl Iterator<Item = (String, &Asset)> {
+        let samples = self.sample_names.iter().filter_map(|name| {
+            let key = make_asset_key(AssetSource::Sample, name);
+            self.assets.get(&key).map(|asset| (key, asset))
+        });
+        let users = self.user_names.iter().filter_map(|name| {
+            let key = make_asset_key(AssetSource::User, name);
+            self.assets.get(&key).map(|asset| (key, asset))
+        });
+        samples.chain(users)
     }
 
     /// Iterate over all assets (samples first, then user assets)
+    /// Returns base name for display, use iter_with_keys() for library keys
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Asset)> {
-        self.sample_names
-            .iter()
-            .chain(self.user_names.iter())
-            .filter_map(|name| self.assets.get(name).map(|asset| (name.as_str(), asset)))
+        self.samples().chain(self.user_assets())
     }
 
     /// Iterate over all assets mutably

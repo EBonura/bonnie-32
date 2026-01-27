@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::storage::Storage;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered, TextInputState, draw_text_input};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
@@ -10,7 +10,7 @@ use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTrans
 use crate::asset::AssetComponent;
 use crate::texture::{
     UserTexture, TextureSize, generate_texture_id,
-    draw_texture_canvas, draw_tool_panel, draw_palette_panel, draw_mode_tabs,
+    draw_texture_canvas, draw_tool_panel, draw_palette_panel_constrained, draw_mode_tabs,
     TextureEditorMode, UvOverlayData, UvVertex, UvFace, draw_import_dialog, ImportAction,
     load_png_to_import_state,
 };
@@ -61,7 +61,7 @@ pub enum ModelerAction {
     Export,         // Browser: download as file
     Import,         // Browser: upload file
     BrowseModels,   // Open model browser
-    BrowseMeshes,   // Open mesh browser (OBJ files)
+    ImportObj,      // Import OBJ file
 }
 
 /// Modeler layout state (split panel ratios)
@@ -103,6 +103,20 @@ pub fn draw_modeler(
     icon_font: Option<&Font>,
     storage: &Storage,
 ) -> ModelerAction {
+    // Save original mouse state for menus that need it after we block viewport clicks
+    let original_left_pressed = ctx.mouse.left_pressed;
+
+    // Block clicks if snap menu is open and mouse is in menu area
+    // (must happen before viewport processes clicks)
+    if state.snap_menu_open {
+        if let Some(btn_rect) = state.snap_btn_rect {
+            let menu_rect = Rect::new(btn_rect.x, btn_rect.bottom() + 2.0, 80.0, 7.0 * 22.0 + 8.0);
+            if ctx.mouse.inside(&menu_rect) {
+                ctx.mouse.left_pressed = false;
+            }
+        }
+    }
+
     let screen = bounds;
 
     // Toolbar at top
@@ -149,12 +163,20 @@ pub fn draw_modeler(
     // Draw status bar
     draw_status_bar(status_rect, state);
 
-    // Handle keyboard shortcuts using action registry
-    let keyboard_action = handle_actions(&layout.actions, state, ctx);
+    // Handle keyboard shortcuts using action registry (but not when a dialog is open)
+    let dialog_open = state.rename_dialog.is_some() || state.delete_dialog.is_some();
+    let keyboard_action = if dialog_open {
+        ModelerAction::None
+    } else {
+        handle_actions(&layout.actions, state, ctx)
+    };
     let action = if keyboard_action != ModelerAction::None { keyboard_action } else { action };
 
     // Draw popups and menus (on top of everything)
     draw_add_component_popup(ctx, left_rect, state, icon_font);
+    // Restore original click state for snap menu (we blocked it earlier to protect viewport)
+    ctx.mouse.left_pressed = original_left_pressed;
+    draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
 
     // Draw rename/delete dialogs (modal, on top of everything)
@@ -214,9 +236,9 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         action = ModelerAction::BrowseModels;
     }
 
-    // Mesh browser for OBJ files
-    if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Browse Meshes") {
-        action = ModelerAction::BrowseMeshes;
+    // Import OBJ file
+    if toolbar.icon_button(ctx, icon::FOLDER_OPEN, icon_font, "Import OBJ") {
+        action = ModelerAction::ImportObj;
     }
 
     toolbar.separator();
@@ -327,11 +349,18 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
     }
     toolbar.separator();
 
-    // Snap toggle
-    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, &format!("Snap to Grid ({}) [S key]", state.snap_settings.grid_size), state.snap_settings.enabled) {
+    // Snap toggle (icon) + grid size (clickable label)
+    if toolbar.icon_button_active(ctx, icon::GRID, icon_font, "Snap to Grid [S key]", state.snap_settings.enabled) {
         state.snap_settings.enabled = !state.snap_settings.enabled;
         let mode = if state.snap_settings.enabled { "ON" } else { "OFF" };
         state.set_status(&format!("Grid Snap: {}", mode), 1.5);
+    }
+    // Clickable grid size label
+    let size_label = format!("{}", state.snap_settings.grid_size as i32);
+    let (size_clicked, size_rect) = toolbar.clickable_label(ctx, &size_label, "Click to change snap grid size");
+    state.snap_btn_rect = Some(size_rect);
+    if size_clicked {
+        state.snap_menu_open = !state.snap_menu_open;
     }
     // Vertex linking toggle (move coincident vertices together)
     let link_icon = if state.vertex_linking { icon::LINK } else { icon::LINK_OFF };
@@ -1088,7 +1117,7 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
         }
     } else if let Some(idx) = rename_idx {
         let name = state.objects().get(idx).map(|o| o.name.clone()).unwrap_or_default();
-        state.rename_dialog = Some((idx, name));
+        state.rename_dialog = Some((idx, TextInputState::new(name)));
     } else if let Some(idx) = delete_idx {
         state.delete_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
@@ -2167,6 +2196,47 @@ fn draw_paint_section(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState,
             }
         }
     }
+
+    // Draw unsaved texture changes dialog (modal overlay) if active
+    if let Some(action) = draw_unsaved_texture_dialog(ctx, state, icon_font) {
+        match action {
+            UnsavedTextureAction::Save => {
+                // Save the texture first, then switch
+                if let Some(ref editing_tex) = state.editing_texture {
+                    let tex_name = editing_tex.name.clone();
+                    // Sync editing_texture to user_textures library
+                    if let Some(lib_tex) = state.user_textures.get_mut(&tex_name) {
+                        lib_tex.indices = editing_tex.indices.clone();
+                        lib_tex.palette = editing_tex.palette.clone();
+                        lib_tex.depth = editing_tex.depth;
+                        lib_tex.width = editing_tex.width;
+                        lib_tex.height = editing_tex.height;
+                    }
+                    // Save to storage
+                    if let Err(e) = state.user_textures.save_texture_with_storage(&tex_name, storage) {
+                        state.set_status(&format!("Failed to save: {}", e), 3.0);
+                    } else {
+                        let cloud_text = if storage.has_cloud() { " to cloud" } else { "" };
+                        state.set_status(&format!("Saved '{}'{}", tex_name, cloud_text), 2.0);
+                    }
+                }
+                // Now switch to pending object
+                if let Some(pending_idx) = state.unsaved_texture_pending_switch {
+                    state.force_select_object(pending_idx);
+                }
+            }
+            UnsavedTextureAction::Discard => {
+                // Discard changes and switch
+                if let Some(pending_idx) = state.unsaved_texture_pending_switch {
+                    state.force_select_object(pending_idx);
+                }
+            }
+            UnsavedTextureAction::Cancel => {
+                // Stay on current object, clear pending switch
+                state.unsaved_texture_pending_switch = None;
+            }
+        }
+    }
 }
 
 /// Action from delete texture confirmation dialog
@@ -2240,6 +2310,106 @@ fn draw_delete_texture_dialog(
 
     if ctx.mouse.clicked(&delete_rect) {
         return Some(DeleteTextureAction::Confirm);
+    }
+
+    None
+}
+
+/// Action from unsaved texture confirmation dialog
+#[derive(Debug, Clone, Copy)]
+enum UnsavedTextureAction {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// Draw the unsaved texture changes dialog (modal overlay)
+fn draw_unsaved_texture_dialog(
+    ctx: &mut UiContext,
+    state: &ModelerState,
+    _icon_font: Option<&Font>,
+) -> Option<UnsavedTextureAction> {
+    // Only show if there's a pending switch
+    let _pending_idx = state.unsaved_texture_pending_switch?;
+
+    // Get the texture name being edited
+    let texture_name = state.editing_texture.as_ref()
+        .map(|t| t.name.as_str())
+        .unwrap_or("texture");
+
+    // Dark overlay
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.6));
+
+    // Dialog dimensions (wider to fit 3 buttons)
+    let dialog_w = 360.0;
+    let dialog_h = 130.0;
+    let dialog_x = (screen_width() - dialog_w) / 2.0;
+    let dialog_y = (screen_height() - dialog_h) / 2.0;
+
+    // Dialog background
+    draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 55, 255));
+    draw_rectangle_lines(dialog_x, dialog_y, dialog_w, dialog_h, 2.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Title bar (warning color)
+    draw_rectangle(dialog_x, dialog_y, dialog_w, 24.0, Color::from_rgba(120, 100, 50, 255));
+    draw_text("Unsaved Changes", dialog_x + 8.0, dialog_y + 17.0, 16.0, WHITE);
+
+    // Message
+    let msg = format!("'{}' has unsaved changes.", texture_name);
+    let msg_dims = measure_text(&msg, None, 14, 1.0);
+    draw_text(&msg, dialog_x + (dialog_w - msg_dims.width) / 2.0, dialog_y + 55.0, 14.0, WHITE);
+    let sub_msg = "Save before switching objects?";
+    let sub_dims = measure_text(sub_msg, None, 12, 1.0);
+    draw_text(sub_msg, dialog_x + (dialog_w - sub_dims.width) / 2.0, dialog_y + 75.0, 12.0, Color::from_rgba(180, 180, 180, 255));
+
+    // Buttons (3 buttons: Cancel, Discard, Save)
+    let btn_w = 80.0;
+    let btn_h = 28.0;
+    let btn_y = dialog_y + dialog_h - btn_h - 12.0;
+    let btn_spacing = 15.0;
+    let total_btn_w = btn_w * 3.0 + btn_spacing * 2.0;
+    let btn_start_x = dialog_x + (dialog_w - total_btn_w) / 2.0;
+
+    // Cancel button (leftmost)
+    let cancel_rect = Rect::new(btn_start_x, btn_y, btn_w, btn_h);
+    let cancel_hovered = ctx.mouse.inside(&cancel_rect);
+    let cancel_bg = if cancel_hovered { Color::from_rgba(70, 70, 80, 255) } else { Color::from_rgba(55, 55, 65, 255) };
+    draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h, cancel_bg);
+    draw_rectangle_lines(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h, 1.0, Color::from_rgba(80, 80, 90, 255));
+    let cancel_text = "Cancel";
+    let cancel_dims = measure_text(cancel_text, None, 14, 1.0);
+    draw_text(cancel_text, cancel_rect.x + (cancel_rect.w - cancel_dims.width) / 2.0, cancel_rect.y + cancel_rect.h / 2.0 + 5.0, 14.0, if cancel_hovered { WHITE } else { Color::from_rgba(200, 200, 200, 255) });
+
+    if ctx.mouse.clicked(&cancel_rect) {
+        return Some(UnsavedTextureAction::Cancel);
+    }
+
+    // Discard button (middle, red-ish)
+    let discard_rect = Rect::new(btn_start_x + btn_w + btn_spacing, btn_y, btn_w, btn_h);
+    let discard_hovered = ctx.mouse.inside(&discard_rect);
+    let discard_bg = if discard_hovered { Color::from_rgba(140, 70, 70, 255) } else { Color::from_rgba(100, 55, 55, 255) };
+    draw_rectangle(discard_rect.x, discard_rect.y, discard_rect.w, discard_rect.h, discard_bg);
+    draw_rectangle_lines(discard_rect.x, discard_rect.y, discard_rect.w, discard_rect.h, 1.0, Color::from_rgba(140, 80, 80, 255));
+    let discard_text = "Discard";
+    let discard_dims = measure_text(discard_text, None, 14, 1.0);
+    draw_text(discard_text, discard_rect.x + (discard_rect.w - discard_dims.width) / 2.0, discard_rect.y + discard_rect.h / 2.0 + 5.0, 14.0, if discard_hovered { WHITE } else { Color::from_rgba(220, 180, 180, 255) });
+
+    if ctx.mouse.clicked(&discard_rect) {
+        return Some(UnsavedTextureAction::Discard);
+    }
+
+    // Save button (rightmost, green-ish)
+    let save_rect = Rect::new(btn_start_x + (btn_w + btn_spacing) * 2.0, btn_y, btn_w, btn_h);
+    let save_hovered = ctx.mouse.inside(&save_rect);
+    let save_bg = if save_hovered { Color::from_rgba(70, 130, 70, 255) } else { Color::from_rgba(55, 100, 55, 255) };
+    draw_rectangle(save_rect.x, save_rect.y, save_rect.w, save_rect.h, save_bg);
+    draw_rectangle_lines(save_rect.x, save_rect.y, save_rect.w, save_rect.h, 1.0, Color::from_rgba(80, 140, 80, 255));
+    let save_text = "Save";
+    let save_dims = measure_text(save_text, None, 14, 1.0);
+    draw_text(save_text, save_rect.x + (save_rect.w - save_dims.width) / 2.0, save_rect.y + save_rect.h / 2.0 + 5.0, 14.0, if save_hovered { WHITE } else { Color::from_rgba(180, 220, 180, 255) });
+
+    if ctx.mouse.clicked(&save_rect) {
+        return Some(UnsavedTextureAction::Save);
     }
 
     None
@@ -2618,6 +2788,10 @@ fn draw_modeler_texture_thumbnail(
 
     // Get texture for rendering
     if let Some(tex) = state.user_textures.get(name) {
+        // Draw checkerboard background for transparency
+        let check_size = (thumb_size / tex.width.max(tex.height) as f32 * 2.0).max(4.0);
+        draw_checkerboard(x, y, thumb_size, thumb_size, check_size);
+
         // Draw texture thumbnail
         let mq_tex = user_texture_to_mq_texture(tex);
         draw_texture_ex(
@@ -2676,23 +2850,45 @@ fn draw_modeler_texture_thumbnail(
     }
 }
 
-/// Convert a UserTexture to a macroquad texture for display
+/// Convert a UserTexture to a macroquad texture for display (with transparency)
 fn user_texture_to_mq_texture(texture: &UserTexture) -> Texture2D {
     let mut pixels = Vec::with_capacity(texture.width * texture.height * 4);
     for y in 0..texture.height {
         for x in 0..texture.width {
             let idx = texture.indices[y * texture.width + x] as usize;
             let color = texture.palette.get(idx).copied().unwrap_or_default();
+            // Index 0 is transparent
+            let alpha = if idx == 0 { 0 } else { 255 };
             pixels.push(color.r8());
             pixels.push(color.g8());
             pixels.push(color.b8());
-            pixels.push(255); // Full alpha
+            pixels.push(alpha);
         }
     }
 
     let tex = Texture2D::from_rgba8(texture.width as u16, texture.height as u16, &pixels);
     tex.set_filter(FilterMode::Nearest);
     tex
+}
+
+/// Draw a checkerboard pattern for transparency display
+fn draw_checkerboard(x: f32, y: f32, w: f32, h: f32, check_size: f32) {
+    let cols = (w / check_size).ceil() as i32;
+    let rows = (h / check_size).ceil() as i32;
+    for row in 0..rows {
+        for col in 0..cols {
+            let c = if (row + col) % 2 == 0 {
+                Color::new(0.25, 0.25, 0.28, 1.0)
+            } else {
+                Color::new(0.18, 0.18, 0.20, 1.0)
+            };
+            let cx = x + col as f32 * check_size;
+            let cy = y + row as f32 * check_size;
+            let cw = check_size.min(x + w - cx);
+            let ch = check_size.min(y + h - cy);
+            draw_rectangle(cx, cy, cw, ch, c);
+        }
+    }
 }
 
 /// Draw the texture editor panel (when editing a texture)
@@ -2710,11 +2906,11 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         None
     };
 
-    // Now get mutable reference to the texture
-    let tex = state.editing_texture.as_mut().unwrap();
-    // Extract dimensions for later use (to avoid borrow conflicts)
-    let tex_width_f = tex.width as f32;
-    let tex_height_f = tex.height as f32;
+    // Extract texture info before calculating layout (to avoid borrow conflicts later)
+    let (tex_width_f, tex_height_f, tex_name, is_dirty) = {
+        let tex = state.editing_texture.as_ref().unwrap();
+        (tex.width as f32, tex.height as f32, tex.name.clone(), state.texture_editor.dirty)
+    };
 
     // Header with texture name and buttons (match main toolbar sizing: 36px height, 32px buttons, 16px icons)
     let header_h = 36.0;
@@ -2722,8 +2918,6 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let icon_size = 16.0;
     let header_rect = Rect::new(rect.x, rect.y, rect.w, header_h);
     draw_rectangle(header_rect.x, header_rect.y, header_rect.w, header_rect.h, Color::from_rgba(45, 45, 55, 255));
-
-    let is_dirty = state.texture_editor.dirty;
 
     // Back button (arrow-big-left) - far right
     let back_rect = Rect::new(rect.right() - btn_size - 2.0, rect.y + 2.0, btn_size, btn_size);
@@ -2738,9 +2932,6 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.editing_indexed_atlas = false;
         return;
     }
-
-    // Get texture name for save and display (clone before we use tex mutably)
-    let tex_name = tex.name.clone();
 
     // Save/Download button - only visible when dirty
     let mut save_clicked = false;
@@ -2786,21 +2977,36 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     let tool_panel_w = 66.0;  // 2-column layout: 2 * 28px buttons + 2px gap + 4px padding each side
     let canvas_w = content_rect.w - tool_panel_w;
     // Tool panel needs ~280px height (6 tools + undo/redo/zoom/grid + size/shape options)
-    // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190
-    let min_canvas_h = 280.0;  // Minimum for tool panel to fit all buttons
-    let min_palette_h = 190.0;
-    let max_canvas_h = (content_rect.h - min_palette_h).min(canvas_w).max(min_canvas_h);
-    let canvas_h = max_canvas_h;
-    let palette_panel_h = (content_rect.h - canvas_h).max(min_palette_h);  // Remaining space goes to palette
+    // Palette needs: depth buttons (~22) + gen row (~24) + grid (~65) + color editor (~60) + effect (~18) = ~190 base
+    let min_canvas_h: f32 = 280.0;  // Minimum for tool panel to fit all buttons
+    let min_palette_h: f32 = 190.0;  // Minimum palette panel height
+    // Calculate canvas height: try to be squarish (canvas_w), but MUST leave room for palette
+    let available_for_canvas = (content_rect.h - min_palette_h).max(0.0);
+    // Canvas is at least min_canvas_h, but not more than available_for_canvas, and prefer squarish
+    let canvas_h = available_for_canvas.min(canvas_w).max(min_canvas_h.min(available_for_canvas));
+    let palette_panel_h = content_rect.h - canvas_h;
 
     let canvas_rect = Rect::new(content_rect.x, content_rect.y, canvas_w, canvas_h);
     let tool_rect = Rect::new(content_rect.x + canvas_w, content_rect.y, tool_panel_w, canvas_h);
     let palette_rect = Rect::new(content_rect.x, content_rect.y + canvas_h, content_rect.w, palette_panel_h);
 
+    // Save undo BEFORE drawing if a new stroke is starting AND cursor is inside canvas
+    if ctx.mouse.left_pressed
+        && ctx.mouse.inside(&canvas_rect)
+        && !state.texture_editor.drawing
+        && !state.texture_editor.panning
+        && state.texture_editor.tool.modifies_texture()
+    {
+        state.save_texture_undo();
+    }
+
+    // Now get mutable reference to the texture for drawing
+    let tex = state.editing_texture.as_mut().unwrap();
+
     // Draw panels using the shared texture editor components
     draw_texture_canvas(ctx, canvas_rect, tex, &mut state.texture_editor, uv_data.as_ref());
     draw_tool_panel(ctx, tool_rect, &mut state.texture_editor, icon_font);
-    draw_palette_panel(ctx, palette_rect, tex, &mut state.texture_editor, icon_font);
+    draw_palette_panel_constrained(ctx, palette_rect, tex, &mut state.texture_editor, icon_font, Some(canvas_w));
 
     // Handle UV modal transforms (G/S/R) - apply to actual mesh vertices
     apply_uv_modal_transform(ctx, &canvas_rect, tex_width_f, tex_height_f, state);
@@ -2811,9 +3017,14 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
     // Handle UV operations (flip/rotate/reset buttons)
     apply_uv_operation(tex_width_f, tex_height_f, state);
 
-    // Handle undo save signals from texture editor (save BEFORE the action is applied)
+    // Handle undo save signals from texture editor (for non-paint actions like selection move)
     if state.texture_editor.undo_save_pending.take().is_some() {
         state.save_texture_undo();
+    }
+
+    // Handle UV undo save signals (for UV transforms - saves mesh, not texture)
+    if let Some(description) = state.texture_editor.uv_undo_pending.take() {
+        state.push_undo(&description);
     }
 
     // Handle undo/redo button requests (uses global undo system)
@@ -2826,20 +3037,41 @@ fn draw_paint_texture_editor(ctx: &mut UiContext, rect: Rect, state: &mut Modele
         state.redo();
     }
 
-    // Sync editing_texture back to selected object's atlas (only when actively editing)
-    // This prevents overwriting other objects' atlases when switching selection
+    // Handle auto-unwrap button request from UV editor
+    if state.texture_editor.auto_unwrap_requested {
+        state.texture_editor.auto_unwrap_requested = false;
+        auto_unwrap_selected_faces(state);
+    }
+
+    // Sync editing_texture back to ALL objects that use this texture (not just selected)
+    // This ensures texture changes are visible on all objects sharing the same texture
     if state.editing_indexed_atlas {
         let editing_tex_data = state.editing_texture.clone();
         if let Some(editing_tex) = editing_tex_data {
-            // Sync to selected object's atlas for mesh preview
-            if let Some(atlas) = state.atlas_mut() {
-                atlas.width = editing_tex.width;
-                atlas.height = editing_tex.height;
-                atlas.depth = editing_tex.depth;
-                atlas.indices = editing_tex.indices.clone();
-                let default_clut_id = atlas.default_clut;
-                // Update the default CLUT with the texture's palette
-                if let Some(clut) = state.clut_pool.get_mut(default_clut_id) {
+            // Get the texture ID from the library to find all objects using it
+            let tex_id = state.user_textures.get(&tex_name).map(|t| t.id);
+
+            // Collect CLUT IDs that need updating (to avoid double borrow)
+            let mut clut_ids_to_update = Vec::new();
+
+            if let (Some(tex_id), Some(objects)) = (tex_id, state.objects_mut()) {
+                for obj in objects.iter_mut() {
+                    // Update all objects that reference this texture
+                    if let TextureRef::Id(obj_tex_id) = obj.texture_ref {
+                        if obj_tex_id == tex_id {
+                            obj.atlas.width = editing_tex.width;
+                            obj.atlas.height = editing_tex.height;
+                            obj.atlas.depth = editing_tex.depth;
+                            obj.atlas.indices = editing_tex.indices.clone();
+                            clut_ids_to_update.push(obj.atlas.default_clut);
+                        }
+                    }
+                }
+            }
+
+            // Update CLUTs after releasing objects borrow
+            for clut_id in clut_ids_to_update {
+                if let Some(clut) = state.clut_pool.get_mut(clut_id) {
                     clut.colors = editing_tex.palette.clone();
                     clut.depth = editing_tex.depth;
                 }
@@ -2975,6 +3207,16 @@ fn apply_uv_modal_transform(
                     // Snap to pixel boundaries
                     v.uv.x = (new_u * tex_width).round() / tex_width;
                     v.uv.y = (new_v * tex_height).round() / tex_height;
+                }
+            }
+        }
+        UvModalTransform::HandleScale => {
+            // Bounding box handle scale - apply pre-calculated UVs directly
+            for (vi, new_uv) in &start_uvs {
+                if let Some(v) = obj.mesh.vertices.get_mut(*vi) {
+                    // Snap to pixel boundaries
+                    v.uv.x = (new_uv.x * tex_width).round() / tex_width;
+                    v.uv.y = (new_uv.y * tex_height).round() / tex_height;
                 }
             }
         }
@@ -5446,6 +5688,35 @@ fn reset_selected_uvs(state: &mut ModelerState) {
     }
 }
 
+/// Auto-unwrap selected faces preserving edge connectivity
+fn auto_unwrap_selected_faces(state: &mut ModelerState) {
+    if let super::state::ModelerSelection::Faces(faces) = &state.selection.clone() {
+        if faces.is_empty() {
+            state.set_status("No faces selected", 1.0);
+            return;
+        }
+
+        let tex_width = state.atlas().width as f32;
+        let tex_height = state.atlas().height as f32;
+
+        state.push_undo("Auto Unwrap UVs");
+
+        if let Some(obj) = state.selected_object_mut() {
+            super::mesh_editor::auto_unwrap_faces(
+                &mut obj.mesh,
+                faces,
+                tex_width,
+                tex_height,
+            );
+        }
+
+        state.dirty = true;
+        state.set_status(&format!("Auto-unwrapped {} faces", faces.len()), 1.0);
+    } else {
+        state.set_status("Select faces to auto-unwrap", 1.0);
+    }
+}
+
 /// Handle all keyboard actions using the action registry
 /// Returns a ModelerAction if a file action was triggered
 fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &crate::ui::UiContext) -> ModelerAction {
@@ -5768,6 +6039,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     }
     if actions.triggered("uv.reset", &ctx) {
         reset_selected_uvs(state);
+    }
+    if actions.triggered("uv.auto_unwrap", &ctx) {
+        auto_unwrap_selected_faces(state);
     }
 
     // ========================================================================
@@ -6616,12 +6890,11 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
 /// Draw rename and delete dialogs for objects
 fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font: Option<&Font>) {
     // Handle rename dialog
-    if let Some((idx, ref current_name)) = state.rename_dialog.clone() {
+    if state.rename_dialog.is_some() {
         let dialog_w = 280.0;
         let dialog_h = 120.0;
         let dialog_x = (screen_width() - dialog_w) / 2.0;
         let dialog_y = (screen_height() - dialog_h) / 2.0;
-        let _dialog_rect = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
         // Background
         draw_rectangle(dialog_x, dialog_y, dialog_w, dialog_h, Color::from_rgba(45, 45, 50, 255));
@@ -6630,27 +6903,10 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
         // Title
         draw_text("Rename Object", dialog_x + 12.0, dialog_y + 22.0, 16.0, WHITE);
 
-        // Text input field
+        // Text input field - use the new widget
         let input_rect = Rect::new(dialog_x + 12.0, dialog_y + 40.0, dialog_w - 24.0, 28.0);
-        draw_rectangle(input_rect.x, input_rect.y, input_rect.w, input_rect.h, Color::from_rgba(30, 30, 35, 255));
-        draw_rectangle_lines(input_rect.x, input_rect.y, input_rect.w, input_rect.h, 1.0, ACCENT_COLOR);
-        draw_text(&current_name, input_rect.x + 8.0, input_rect.y + 19.0, 14.0, TEXT_COLOR);
-
-        // Handle text input
-        let mut new_name = current_name.clone();
-        // Check for character input
-        if let Some(ch) = get_char_pressed() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.' || ch == ' ' {
-                new_name.push(ch);
-            }
-        }
-        // Handle backspace
-        if is_key_pressed(KeyCode::Backspace) && !new_name.is_empty() {
-            new_name.pop();
-        }
-        // Update the dialog state with new name
-        if new_name != *current_name {
-            state.rename_dialog = Some((idx, new_name));
+        if let Some((_, ref mut input_state)) = state.rename_dialog {
+            draw_text_input(input_rect, input_state, 14.0);
         }
 
         // Buttons
@@ -6672,30 +6928,13 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
             if confirm_hover { Color::from_rgba(60, 100, 140, 255) } else { ACCENT_COLOR });
         draw_text("Rename", confirm_rect.x + 14.0, confirm_rect.y + 18.0, 14.0, WHITE);
 
-        // Handle button clicks (use clicked() for buttons, not left_pressed)
-        if ctx.mouse.clicked(&cancel_rect) {
+        // Handle button clicks
+        if ctx.mouse.clicked(&cancel_rect) || is_key_pressed(KeyCode::Escape) {
             state.rename_dialog = None;
-        } else if ctx.mouse.clicked(&confirm_rect) {
-            // Extract values before mutable borrow
-            let rename_data = state.rename_dialog.clone();
-            if let Some((idx, name)) = rename_data {
-                if !name.is_empty() && idx < state.objects().len() {
-                    if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(idx)) {
-                        obj.name = name.clone();
-                    }
-                    state.set_status(&format!("Renamed to '{}'", name), 1.0);
-                }
-            }
-            state.rename_dialog = None;
-        }
-
-        // Handle Enter/Escape keys
-        if is_key_pressed(KeyCode::Escape) {
-            state.rename_dialog = None;
-        } else if is_key_pressed(KeyCode::Enter) {
-            // Extract values before mutable borrow
-            let rename_data = state.rename_dialog.clone();
-            if let Some((idx, name)) = rename_data {
+        } else if ctx.mouse.clicked(&confirm_rect) || is_key_pressed(KeyCode::Enter) {
+            // Apply the rename
+            if let Some((idx, ref input_state)) = state.rename_dialog {
+                let name = input_state.text.clone();
                 if !name.is_empty() && idx < state.objects().len() {
                     if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(idx)) {
                         obj.name = name.clone();
@@ -6890,6 +7129,93 @@ fn screen_to_world_position(state: &ModelerState, _screen_x: f32, _screen_y: f32
             // Place on YZ plane
             let center = state.ortho_side.center;
             Vec3::new(0.0, center.y, center.x)
+        }
+    }
+}
+
+/// Draw the snap grid size dropdown menu
+fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
+    if !state.snap_menu_open {
+        return;
+    }
+
+    let snap_btn_rect = match state.snap_btn_rect {
+        Some(r) => r,
+        None => return,
+    };
+
+    // Preset snap sizes (in world units)
+    const SNAP_SIZES: &[f32] = &[8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
+
+    // Menu dimensions
+    let item_height = 22.0;
+    let menu_width = 80.0;
+    let menu_height = SNAP_SIZES.len() as f32 * item_height + 8.0;
+
+    // Position menu below the snap button
+    let menu_x = snap_btn_rect.x;
+    let menu_y = snap_btn_rect.bottom() + 2.0;
+
+    // Keep menu on screen
+    let menu_x = menu_x.min(screen_width() - menu_width - 5.0);
+    let menu_y = menu_y.min(screen_height() - menu_height - 5.0);
+
+    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
+
+    // Draw menu background with border
+    draw_rectangle(menu_rect.x - 1.0, menu_rect.y - 1.0, menu_rect.w + 2.0, menu_rect.h + 2.0, Color::from_rgba(80, 80, 85, 255));
+    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
+
+    let mut y = menu_rect.y + 4.0;
+    let mut clicked_size: Option<f32> = None;
+
+    for &size in SNAP_SIZES {
+        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+        let is_current = (state.snap_settings.grid_size - size).abs() < 0.1;
+
+        // Hover highlight
+        if ctx.mouse.inside(&item_rect) {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 60, 70, 255));
+            if ctx.mouse.left_pressed {
+                clicked_size = Some(size);
+            }
+        }
+
+        // Current selection indicator
+        let text_color = if is_current { ACCENT_COLOR } else { TEXT_COLOR };
+        let label = format!("{}", size as i32);
+        draw_text(&label, item_rect.x + 8.0, item_rect.y + 15.0, 13.0, text_color);
+
+        // Checkmark for current size
+        if is_current {
+            draw_text("✓", item_rect.right() - 18.0, item_rect.y + 15.0, 13.0, ACCENT_COLOR);
+        }
+
+        y += item_height;
+    }
+
+    // Handle click on menu item
+    if let Some(size) = clicked_size {
+        state.snap_settings.grid_size = size;
+        state.snap_menu_open = false;
+        state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
+        // Consume the click so it doesn't propagate to viewport
+        ctx.mouse.left_pressed = false;
+    }
+
+    // Consume clicks inside menu area (don't propagate to viewport)
+    if ctx.mouse.left_pressed && ctx.mouse.inside(&menu_rect) {
+        ctx.mouse.left_pressed = false;
+    }
+
+    // Close menu on click outside (but not on the button that opened it)
+    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
+        // Don't close if clicking the snap button (it handles its own toggle)
+        let clicking_button = state.snap_btn_rect.map_or(false, |r| ctx.mouse.inside(&r));
+        if !clicking_button {
+            state.snap_menu_open = false;
+            // Consume the click so it doesn't propagate to viewport
+            ctx.mouse.left_pressed = false;
         }
     }
 }

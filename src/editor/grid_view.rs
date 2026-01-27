@@ -403,32 +403,36 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
         if view_mode == GridViewMode::Top {
             let diag_color = Color::from_rgba(255, 180, 100, 200);
 
-            // Check floor split direction - draw the diagonal line
+            // Check floor split direction - draw diagonal only if it matters visually
             if let Some(floor) = &sector.floor {
-                match floor.split_direction {
-                    SplitDirection::NwSe => {
-                        // NW-SE diagonal: from sx0 (NW) to sx2 (SE)
-                        draw_line(sx0, sy0, sx2, sy2, 2.0, diag_color);
-                    }
-                    SplitDirection::NeSw => {
-                        // NE-SW diagonal: from sx1 (NE) to sx3 (SW)
-                        draw_line(sx1, sy1, sx3, sy3, 2.0, diag_color);
+                if floor.diagonal_matters() {
+                    match floor.split_direction {
+                        SplitDirection::NwSe => {
+                            // NW-SE diagonal: from sx0 (NW) to sx2 (SE)
+                            draw_line(sx0, sy0, sx2, sy2, 2.0, diag_color);
+                        }
+                        SplitDirection::NeSw => {
+                            // NE-SW diagonal: from sx1 (NE) to sx3 (SW)
+                            draw_line(sx1, sy1, sx3, sy3, 2.0, diag_color);
+                        }
                     }
                 }
             }
 
-            // Check ceiling split direction (draw with different color if different from floor)
+            // Check ceiling split direction - draw only if it matters and differs from floor
             if let Some(ceil) = &sector.ceiling {
-                let floor_split = sector.floor.as_ref().map(|f| f.split_direction).unwrap_or(SplitDirection::NwSe);
-                // Only draw if different from floor (avoid duplicate lines)
-                if ceil.split_direction != floor_split {
-                    let ceil_diag_color = Color::from_rgba(180, 100, 255, 200);
-                    match ceil.split_direction {
-                        SplitDirection::NwSe => {
-                            draw_line(sx0, sy0, sx2, sy2, 2.0, ceil_diag_color);
-                        }
-                        SplitDirection::NeSw => {
-                            draw_line(sx1, sy1, sx3, sy3, 2.0, ceil_diag_color);
+                if ceil.diagonal_matters() {
+                    let floor_split = sector.floor.as_ref().map(|f| f.split_direction);
+                    // Only draw if different from floor (avoid duplicate lines)
+                    if Some(ceil.split_direction) != floor_split {
+                        let ceil_diag_color = Color::from_rgba(180, 100, 255, 200);
+                        match ceil.split_direction {
+                            SplitDirection::NwSe => {
+                                draw_line(sx0, sy0, sx2, sy2, 2.0, ceil_diag_color);
+                            }
+                            SplitDirection::NeSw => {
+                                draw_line(sx1, sy1, sx3, sy3, 2.0, ceil_diag_color);
+                            }
                         }
                     }
                 }

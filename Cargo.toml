@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "bonnie-32"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "A fantasy console for PS1-era 3D games"
 authors = ["ebonura"]

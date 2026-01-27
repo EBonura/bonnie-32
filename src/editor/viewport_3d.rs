@@ -17,7 +17,7 @@ use crate::rasterizer::{
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
     world_to_screen, world_to_screen_with_depth,
     point_to_segment_distance, point_in_triangle_2d,
-    Light, RasterSettings,
+    Light, RasterSettings, Camera, draw_3d_line_clipped,
 };
 use crate::world::{SECTOR_SIZE, SplitDirection};
 use crate::input::{InputState, Action};
@@ -244,6 +244,49 @@ fn find_wall_path(
         None
     } else {
         Some(result)
+    }
+}
+
+/// Draw an asset as a wireframe preview at the given world position
+///
+/// Used for:
+/// - Placement preview (showing where a new object will be placed)
+/// - Drag preview (showing where an object is being moved to)
+fn draw_asset_wireframe(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    asset: &crate::asset::Asset,
+    world_pos: Vec3,
+    facing: f32,
+    color: RasterColor,
+) {
+    let Some(mesh_parts) = asset.mesh() else { return };
+    let (cos_f, sin_f) = (facing.cos(), facing.sin());
+
+    for part in mesh_parts.iter().filter(|p| p.visible) {
+        let verts = &part.mesh.vertices;
+        for face in &part.mesh.faces {
+            let indices = &face.vertices;
+            // Draw each edge of the face
+            for i in 0..indices.len() {
+                let v0 = &verts[indices[i]];
+                let v1 = &verts[indices[(i + 1) % indices.len()]];
+
+                // Transform: rotate by facing around Y axis, then translate to world position
+                let p0 = Vec3::new(
+                    v0.pos.x * cos_f - v0.pos.z * sin_f + world_pos.x,
+                    v0.pos.y + world_pos.y,
+                    v0.pos.x * sin_f + v0.pos.z * cos_f + world_pos.z,
+                );
+                let p1 = Vec3::new(
+                    v1.pos.x * cos_f - v1.pos.z * sin_f + world_pos.x,
+                    v1.pos.y + world_pos.y,
+                    v1.pos.x * sin_f + v1.pos.z * cos_f + world_pos.z,
+                );
+
+                draw_3d_line_clipped(fb, camera, p0, p1, color);
+            }
+        }
     }
 }
 
@@ -609,6 +652,48 @@ pub fn draw_viewport_3d(
     } else {
         None
     };
+
+    // Object placement preview for PlaceObject tool
+    // Shows wireframe preview of selected asset snapped to sector grid
+    state.object_placement_preview = None;
+    if inside_viewport && state.tool == EditorTool::PlaceObject && state.selected_asset.is_some() {
+        if let Some((mouse_fb_x, mouse_fb_y)) = screen_to_fb(mouse_pos.0, mouse_pos.1) {
+            let room_y = state.level.rooms.get(state.current_room)
+                .map(|r| r.position.y)
+                .unwrap_or(0.0);
+
+            // Find floor intersection point
+            if let Some(world_pos) = pick_plane(
+                Vec3::new(0.0, room_y, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::ZERO,
+                (mouse_fb_x, mouse_fb_y),
+                &state.camera_3d,
+                fb_width, fb_height,
+            ) {
+                // Snap to sector center (objects are placed at sector center)
+                let sector_x = (world_pos.x / SECTOR_SIZE).floor();
+                let sector_z = (world_pos.z / SECTOR_SIZE).floor();
+
+                // Convert to grid coords relative to room
+                if let Some(room) = state.level.rooms.get(state.current_room) {
+                    let gx = (sector_x - room.position.x / SECTOR_SIZE) as i32;
+                    let gz = (sector_z - room.position.z / SECTOR_SIZE) as i32;
+
+                    // Only show preview within room bounds
+                    if gx >= 0 && gx < room.width as i32 && gz >= 0 && gz < room.depth as i32 {
+                        // Get floor height at this sector for proper Y placement
+                        let floor_y = room.get_sector(gx as usize, gz as usize)
+                            .and_then(|s| s.floor.as_ref())
+                            .map(|f| f.avg_height())
+                            .unwrap_or(0.0);
+
+                        state.object_placement_preview = Some((gx as usize, gz as usize, room_y + floor_y));
+                    }
+                }
+            }
+        }
+    }
 
     // In drawing modes, find preview sector position
     if inside_viewport && (state.tool == EditorTool::DrawFloor || state.tool == EditorTool::DrawCeiling) {
@@ -1478,13 +1563,44 @@ pub fn draw_viewport_3d(
                         Selection::Object { room, index } if *room == obj_room_idx && *index == obj_idx);
 
                     if is_already_selected {
-                        // Start dragging the object (Y-axis)
+                        // Start dragging the object (XZ plane by default, Y with Shift)
                         if let Some(room) = state.level.rooms.get(obj_room_idx) {
                             if let Some(obj) = room.objects.get(obj_idx) {
-                                let world_pos = obj.world_position(room);
-                                state.dragging_object = Some((obj_room_idx, obj_idx));
-                                state.dragging_object_initial_y = world_pos.y;
-                                state.dragging_object_plane_y = world_pos.y;
+                                if shift_down {
+                                    // Shift+click: Start Y-axis drag (height adjustment)
+                                    let world_pos = obj.world_position(room);
+                                    state.dragging_object = Some((obj_room_idx, obj_idx));
+                                    state.dragging_object_initial_y = world_pos.y;
+                                    state.dragging_object_plane_y = world_pos.y;
+                                    state.viewport_drag_started = false;
+                                    state.set_status("Drag up/down to adjust height", 1.0);
+                                } else {
+                                    // Click without Shift: Start XZ-plane drag
+                                    let world_pos = obj.world_position(room);
+
+                                    // Calculate click offset so object doesn't jump to mouse
+                                    let mut click_offset = (0.0, 0.0);
+                                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                                        if let Some(click_pos) = pick_plane(
+                                            Vec3::new(0.0, world_pos.y, 0.0),
+                                            Vec3::new(0.0, 1.0, 0.0),
+                                            Vec3::ZERO,
+                                            (fb_x, fb_y),
+                                            &state.camera_3d,
+                                            fb.width, fb.height,
+                                        ) {
+                                            click_offset = (click_pos.x - world_pos.x, click_pos.z - world_pos.z);
+                                        }
+                                    }
+
+                                    state.object_xz_drag_active = true;
+                                    state.object_xz_drag_initial_sector = Some((obj.sector_x, obj.sector_z));
+                                    state.object_xz_drag_start = Some((world_pos.x, world_pos.z));
+                                    state.object_xz_drag_click_offset = Some(click_offset);
+                                    state.dragging_object = Some((obj_room_idx, obj_idx));
+                                    state.viewport_drag_started = false;
+                                    state.set_status("Drag to move object, Shift+drag for height", 1.0);
+                                }
                             }
                         }
                     } else {
@@ -1944,14 +2060,95 @@ pub fn draw_viewport_3d(
                     }
                 }
             }
-            // PlaceObject mode - select existing objects in 3D (placement is in 2D grid view)
+            // PlaceObject mode - place new objects or drag existing ones
             else if state.tool == EditorTool::PlaceObject {
+                let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
                 if let Some((obj_room_idx, obj_idx, _)) = hovered_object {
+                    // Clicked on existing object - select and start drag
                     state.save_selection_undo();
                     state.set_selection(Selection::Object { room: obj_room_idx, index: obj_idx });
-                    state.set_status("Object selected", 1.0);
-                } else {
-                    state.set_status("Use 2D grid view to place objects", 2.0);
+
+                    // Get object's current state for drag initialization
+                    if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                        if let Some(obj) = room.objects.get(obj_idx) {
+                            if shift_held {
+                                // Shift+click: Start Y-axis drag (existing behavior)
+                                state.dragging_object = Some((obj_room_idx, obj_idx));
+                                state.dragging_object_initial_y = obj.height;
+                                state.dragging_object_plane_y = obj.height;
+                                state.viewport_drag_started = false;
+                                state.set_status("Drag up/down to adjust height", 1.0);
+                            } else {
+                                // Click without Shift: Start XZ-plane drag
+                                let world_pos = obj.world_position(room);
+
+                                // Calculate click offset so object doesn't jump to mouse
+                                let mut click_offset = (0.0, 0.0);
+                                if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                                    if let Some(click_pos) = pick_plane(
+                                        Vec3::new(0.0, world_pos.y, 0.0),
+                                        Vec3::new(0.0, 1.0, 0.0),
+                                        Vec3::ZERO,
+                                        (fb_x, fb_y),
+                                        &state.camera_3d,
+                                        fb.width, fb.height,
+                                    ) {
+                                        click_offset = (click_pos.x - world_pos.x, click_pos.z - world_pos.z);
+                                    }
+                                }
+
+                                state.object_xz_drag_active = true;
+                                state.object_xz_drag_initial_sector = Some((obj.sector_x, obj.sector_z));
+                                state.object_xz_drag_start = Some((world_pos.x, world_pos.z));
+                                state.object_xz_drag_click_offset = Some(click_offset);
+                                state.dragging_object = Some((obj_room_idx, obj_idx));
+                                state.viewport_drag_started = false;
+                                state.set_status("Drag to move object, Shift+drag for height", 1.0);
+                            }
+                        }
+                    }
+                } else if let Some((preview_gx, preview_gz, _)) = state.object_placement_preview {
+                    // Click on empty space with valid preview - place new object
+                    if let Some(asset_name) = state.selected_asset.clone() {
+                        if let Some(asset) = state.asset_library.get(&asset_name) {
+                            // Check PlayerStart uniqueness - only one allowed per level
+                            if asset.has_spawn_point(true) {
+                                let has_existing_spawn = state.level.rooms.iter()
+                                    .flat_map(|r| r.objects.iter())
+                                    .any(|obj| {
+                                        state.asset_library.get_by_id(obj.asset_id)
+                                            .map(|a| a.has_spawn_point(true))
+                                            .unwrap_or(false)
+                                    });
+                                if has_existing_spawn {
+                                    state.set_status("Only one player spawn allowed per level", 2.0);
+                                } else {
+                                    // Place the spawn point
+                                    let asset_id = asset.id;
+                                    let new_object = crate::world::AssetInstance::new(preview_gx, preview_gz, asset_id);
+                                    state.save_undo();
+                                    if let Some(idx) = state.level.add_object(state.current_room, new_object) {
+                                        state.set_selection(Selection::Object { room: state.current_room, index: idx });
+                                        state.set_status(&format!("{} placed", asset_name), 1.0);
+                                    }
+                                }
+                            } else {
+                                // Normal asset placement
+                                let asset_id = asset.id;
+                                let new_object = crate::world::AssetInstance::new(preview_gx, preview_gz, asset_id);
+                                state.save_undo();
+                                if let Some(idx) = state.level.add_object(state.current_room, new_object) {
+                                    state.set_selection(Selection::Object { room: state.current_room, index: idx });
+                                    state.set_status(&format!("{} placed", asset_name), 1.0);
+                                }
+                            }
+                        } else {
+                            state.set_status(&format!("Asset '{}' not found", asset_name), 2.0);
+                        }
+                    } else {
+                        state.set_status("No asset selected", 2.0);
+                    }
                 }
             }
         }
@@ -2057,44 +2254,147 @@ pub fn draw_viewport_3d(
             }
         }
 
-        // Continue dragging object (Y-axis only)
+        // Continue dragging object (XZ plane without Shift, Y-axis with Shift)
+        // Shift can be pressed/released during drag to switch modes
         if ctx.mouse.left_down && state.dragging_object.is_some() {
-            use super::CLICK_HEIGHT;
-
-            if !state.viewport_drag_started {
-                state.save_undo();
-                state.viewport_drag_started = true;
-            }
-
-            // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
-            let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
-            let y_sensitivity = 5.0;
-            let y_delta = mouse_delta_y * y_sensitivity;
-
-            // Accumulate delta
-            state.dragging_object_plane_y += y_delta;
-
-            // Calculate snapped height
-            let delta_from_initial = state.dragging_object_plane_y - state.dragging_object_initial_y;
-            let new_y = state.dragging_object_initial_y + delta_from_initial;
-            let snapped_y = (new_y / CLICK_HEIGHT).round() * CLICK_HEIGHT;
-
-            // Apply to object's height offset
             if let Some((obj_room_idx, obj_idx)) = state.dragging_object {
-                // We need sector info first, then we can update the object
-                let sector_floor_y = state.level.rooms.get(obj_room_idx)
-                    .and_then(|room| {
-                        room.objects.get(obj_idx).and_then(|obj| {
-                            room.get_sector(obj.sector_x, obj.sector_z)
-                                .and_then(|s| s.floor.as_ref())
-                                .map(|f| f.avg_height())
-                                .or(Some(room.position.y))
-                        })
-                    });
+                // Check if mode changed (XZ <-> Y)
+                let was_xz_mode = state.object_xz_drag_active;
+                let want_y_mode = shift_down;
 
-                if let Some(floor_y) = sector_floor_y {
-                    if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
-                        obj.height = snapped_y - floor_y;
+                // Handle mode transition: XZ -> Y
+                if was_xz_mode && want_y_mode {
+                    // Initialize Y drag state from current object position
+                    if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                        if let Some(obj) = room.objects.get(obj_idx) {
+                            let world_pos = obj.world_position(room);
+                            state.dragging_object_initial_y = world_pos.y;
+                            state.dragging_object_plane_y = world_pos.y;
+                        }
+                    }
+                    state.object_xz_drag_active = false;
+                    state.set_status("Drag up/down to adjust height", 1.0);
+                }
+                // Handle mode transition: Y -> XZ
+                else if !was_xz_mode && !want_y_mode {
+                    // Initialize XZ drag state from current position
+                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                        if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                            if let Some(obj) = room.objects.get(obj_idx) {
+                                let world_pos = obj.world_position(room);
+                                // Recalculate click offset based on current mouse and object position
+                                if let Some(click_pos) = pick_plane(
+                                    Vec3::new(0.0, world_pos.y, 0.0),
+                                    Vec3::new(0.0, 1.0, 0.0),
+                                    Vec3::ZERO,
+                                    (fb_x, fb_y),
+                                    &state.camera_3d,
+                                    fb.width, fb.height,
+                                ) {
+                                    state.object_xz_drag_click_offset = Some((
+                                        click_pos.x - world_pos.x,
+                                        click_pos.z - world_pos.z,
+                                    ));
+                                }
+                                state.object_xz_drag_start = Some((world_pos.x, world_pos.z));
+                                state.object_xz_drag_initial_sector = Some((obj.sector_x, obj.sector_z));
+                            }
+                        }
+                    }
+                    state.object_xz_drag_active = true;
+                    state.set_status("Drag to move object, Shift+drag for height", 1.0);
+                }
+
+                // Now perform the drag based on current mode
+                if !shift_down {
+                    // XZ plane drag
+                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                        // Get the object's height for the ray-plane intersection
+                        let plane_y = state.level.rooms.get(obj_room_idx)
+                            .and_then(|room| room.objects.get(obj_idx))
+                            .map(|obj| {
+                                let room = &state.level.rooms[obj_room_idx];
+                                let floor_y = room.get_sector(obj.sector_x, obj.sector_z)
+                                    .and_then(|s| s.floor.as_ref())
+                                    .map(|f| f.avg_height())
+                                    .unwrap_or(0.0);
+                                room.position.y + floor_y + obj.height
+                            })
+                            .unwrap_or(0.0);
+
+                        if let Some(world_pos) = pick_plane(
+                            Vec3::new(0.0, plane_y, 0.0),
+                            Vec3::new(0.0, 1.0, 0.0),
+                            Vec3::ZERO,
+                            (fb_x, fb_y),
+                            &state.camera_3d,
+                            fb.width, fb.height,
+                        ) {
+                            // Save undo on first movement
+                            if !state.viewport_drag_started {
+                                state.save_undo();
+                                state.viewport_drag_started = true;
+                            }
+
+                            // Calculate new sector position (snap to grid)
+                            // Apply click offset so object doesn't jump to mouse
+                            let click_offset = state.object_xz_drag_click_offset.unwrap_or((0.0, 0.0));
+                            let effective_x = world_pos.x - click_offset.0;
+                            let effective_z = world_pos.z - click_offset.1;
+
+                            if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                                let new_sector_x = ((effective_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                                let new_sector_z = ((effective_z - room.position.z) / SECTOR_SIZE).floor() as i32;
+
+                                // Clamp to room bounds
+                                let new_sector_x = new_sector_x.clamp(0, room.width as i32 - 1) as usize;
+                                let new_sector_z = new_sector_z.clamp(0, room.depth as i32 - 1) as usize;
+
+                                // Update object position
+                                if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                    obj.sector_x = new_sector_x;
+                                    obj.sector_z = new_sector_z;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Y-axis drag (with Shift)
+                    use super::CLICK_HEIGHT;
+
+                    if !state.viewport_drag_started {
+                        state.save_undo();
+                        state.viewport_drag_started = true;
+                    }
+
+                    // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
+                    let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
+                    let y_sensitivity = 5.0;
+                    let y_delta = mouse_delta_y * y_sensitivity;
+
+                    // Accumulate delta
+                    state.dragging_object_plane_y += y_delta;
+
+                    // Calculate snapped height
+                    let delta_from_initial = state.dragging_object_plane_y - state.dragging_object_initial_y;
+                    let new_y = state.dragging_object_initial_y + delta_from_initial;
+                    let snapped_y = (new_y / CLICK_HEIGHT).round() * CLICK_HEIGHT;
+
+                    // Apply to object's height offset
+                    let sector_floor_y = state.level.rooms.get(obj_room_idx)
+                        .and_then(|room| {
+                            room.objects.get(obj_idx).and_then(|obj| {
+                                room.get_sector(obj.sector_x, obj.sector_z)
+                                    .and_then(|s| s.floor.as_ref())
+                                    .map(|f| f.avg_height())
+                                    .or(Some(room.position.y))
+                            })
+                        });
+
+                    if let Some(floor_y) = sector_floor_y {
+                        if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                            obj.height = snapped_y - floor_y;
+                        }
                     }
                 }
             }
@@ -2673,6 +2973,10 @@ pub fn draw_viewport_3d(
             state.dragging_sector_vertices.clear();
             state.drag_initial_heights.clear();
             state.dragging_object = None;
+            state.object_xz_drag_active = false;
+            state.object_xz_drag_start = None;
+            state.object_xz_drag_initial_sector = None;
+            state.object_xz_drag_click_offset = None;
             state.viewport_drag_started = false;
 
             // Finalize box select
@@ -4528,6 +4832,35 @@ pub fn draw_viewport_3d(
                             draw_3d_line(fb, p2, p3, &state.camera_3d, preview_color);
                             draw_3d_line(fb, p3, p0, &state.camera_3d, preview_color);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw object placement preview wireframe (green for new placement)
+    if let Some((preview_gx, preview_gz, floor_y)) = state.object_placement_preview {
+        if let (Some(asset_name), Some(room)) = (&state.selected_asset, state.level.rooms.get(state.current_room)) {
+            if let Some(asset) = state.asset_library.get(asset_name) {
+                // Calculate world position at sector center
+                let world_x = room.position.x + (preview_gx as f32 + 0.5) * SECTOR_SIZE;
+                let world_z = room.position.z + (preview_gz as f32 + 0.5) * SECTOR_SIZE;
+                let preview_pos = Vec3::new(world_x, floor_y, world_z);
+                let preview_color = RasterColor::new(100, 255, 100); // Green wireframe for placement
+                draw_asset_wireframe(fb, &state.camera_3d, asset, preview_pos, 0.0, preview_color);
+            }
+        }
+    }
+
+    // Draw drag preview wireframe for objects being dragged (cyan)
+    if state.object_xz_drag_active || (state.dragging_object.is_some() && !state.object_xz_drag_active) {
+        if let Some((obj_room_idx, obj_idx)) = state.dragging_object {
+            if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                if let Some(obj) = room.objects.get(obj_idx) {
+                    if let Some(asset) = state.asset_library.get_by_id(obj.asset_id) {
+                        let world_pos = obj.world_position(room);
+                        let drag_color = RasterColor::new(100, 200, 255); // Cyan wireframe for drag
+                        draw_asset_wireframe(fb, &state.camera_3d, asset, world_pos, obj.facing, drag_color);
                     }
                 }
             }
