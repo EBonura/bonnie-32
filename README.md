@@ -125,6 +125,8 @@ cd ~/Downloads/bonnie-32-macos-*
 | `Shift+WASD` | Fast pan |
 | `=` `-` | Zoom in/out |
 | `1-6` | Select tool |
+| `Drag object` | Move on XZ plane |
+| `Shift+Drag` | Adjust height (Y axis) |
 
 ### Music Tracker
 | Key | Action |
