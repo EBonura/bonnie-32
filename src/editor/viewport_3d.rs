@@ -1563,13 +1563,27 @@ pub fn draw_viewport_3d(
                         Selection::Object { room, index } if *room == obj_room_idx && *index == obj_idx);
 
                     if is_already_selected {
-                        // Start dragging the object (Y-axis)
+                        // Start dragging the object (XZ plane by default, Y with Shift)
                         if let Some(room) = state.level.rooms.get(obj_room_idx) {
                             if let Some(obj) = room.objects.get(obj_idx) {
-                                let world_pos = obj.world_position(room);
-                                state.dragging_object = Some((obj_room_idx, obj_idx));
-                                state.dragging_object_initial_y = world_pos.y;
-                                state.dragging_object_plane_y = world_pos.y;
+                                if shift_down {
+                                    // Shift+click: Start Y-axis drag (height adjustment)
+                                    let world_pos = obj.world_position(room);
+                                    state.dragging_object = Some((obj_room_idx, obj_idx));
+                                    state.dragging_object_initial_y = world_pos.y;
+                                    state.dragging_object_plane_y = world_pos.y;
+                                    state.viewport_drag_started = false;
+                                    state.set_status("Drag up/down to adjust height", 1.0);
+                                } else {
+                                    // Click without Shift: Start XZ-plane drag
+                                    state.object_xz_drag_active = true;
+                                    state.object_xz_drag_initial_sector = Some((obj.sector_x, obj.sector_z));
+                                    let world_pos = obj.world_position(room);
+                                    state.object_xz_drag_start = Some((world_pos.x, world_pos.z));
+                                    state.dragging_object = Some((obj_room_idx, obj_idx));
+                                    state.viewport_drag_started = false;
+                                    state.set_status("Drag to move object, Shift+drag for height", 1.0);
+                                }
                             }
                         }
                     } else {
