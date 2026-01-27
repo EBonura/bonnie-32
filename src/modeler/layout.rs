@@ -1271,6 +1271,8 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
     // Collect click actions
     let mut select_idx: Option<usize> = None;
     let mut delete_idx: Option<usize> = None;
+    let mut add_idx: Option<usize> = None;
+    let mut rename_idx: Option<usize> = None;
 
     // Draw root bones and their children recursively
     fn draw_bone_recursive(
@@ -1287,6 +1289,8 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
         icon_font: Option<&Font>,
         select_idx: &mut Option<usize>,
         delete_idx: &mut Option<usize>,
+        add_idx: &mut Option<usize>,
+        rename_idx: &mut Option<usize>,
     ) {
         if *y + line_height > rect_y + list_height {
             return;
@@ -1322,17 +1326,40 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
         };
         draw_icon_centered(icon_font, icon::BONE, &icon_rect, 11.0, icon_color);
 
-        // Delete icon (show when selected or hovered)
+        // Action icons (show when selected or hovered): Delete, Rename, Add Child
         let show_icons = is_selected || is_hovered;
         let icon_size = 14.0;
-        let delete_rect = Rect::new(x + width - icon_size - 4.0, *y + 2.0, icon_size, icon_size);
+        let icon_spacing = 2.0;
+        let mut icon_x = x + width - icon_size - 4.0;
 
         if show_icons {
+            // Delete icon (rightmost)
+            let delete_rect = Rect::new(icon_x, *y + 2.0, icon_size, icon_size);
             let delete_hover = ctx.mouse.inside(&delete_rect);
             let delete_color = if delete_hover { Color::from_rgba(255, 100, 100, 255) } else { TEXT_DIM };
             draw_icon_centered(icon_font, icon::TRASH, &delete_rect, 11.0, delete_color);
             if delete_hover && ctx.mouse.left_pressed {
                 *delete_idx = Some(bone_idx);
+            }
+            icon_x -= icon_size + icon_spacing;
+
+            // Rename icon
+            let rename_rect = Rect::new(icon_x, *y + 2.0, icon_size, icon_size);
+            let rename_hover = ctx.mouse.inside(&rename_rect);
+            let rename_color = if rename_hover { ACCENT_COLOR } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::PENCIL, &rename_rect, 11.0, rename_color);
+            if rename_hover && ctx.mouse.left_pressed {
+                *rename_idx = Some(bone_idx);
+            }
+            icon_x -= icon_size + icon_spacing;
+
+            // Add child icon
+            let add_rect = Rect::new(icon_x, *y + 2.0, icon_size, icon_size);
+            let add_hover = ctx.mouse.inside(&add_rect);
+            let add_color = if add_hover { Color::from_rgba(100, 255, 100, 255) } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::PLUS, &add_rect, 11.0, add_color);
+            if add_hover && ctx.mouse.left_pressed {
+                *add_idx = Some(bone_idx);
             }
         }
 
@@ -1340,9 +1367,10 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
         let name_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
         draw_text(&bone.name, x + 20.0 + indent, *y + 13.0, FONT_SIZE_HEADER, name_color);
 
-        // Handle selection click (not on delete icon)
-        let name_rect = Rect::new(x + 20.0 + indent, *y, width - 60.0 - indent, line_height);
-        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed && delete_idx.is_none() {
+        // Handle selection click (not on action icons)
+        let icons_width = if show_icons { (icon_size + icon_spacing) * 3.0 + 4.0 } else { 0.0 };
+        let name_rect = Rect::new(x + 20.0 + indent, *y, width - 24.0 - indent - icons_width, line_height);
+        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed {
             *select_idx = Some(bone_idx);
         }
 
@@ -1353,7 +1381,7 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
         for child_idx in children {
             draw_bone_recursive(
                 ctx, state, child_idx, depth + 1, x, y, width, line_height,
-                list_height, rect_y, icon_font, select_idx, delete_idx
+                list_height, rect_y, icon_font, select_idx, delete_idx, add_idx, rename_idx
             );
         }
     }
@@ -1363,14 +1391,33 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
     for root_idx in root_bones {
         draw_bone_recursive(
             ctx, state, root_idx, 0, x, &mut y, width, line_height,
-            list_height, rect.y, icon_font, &mut select_idx, &mut delete_idx
+            list_height, rect.y, icon_font, &mut select_idx, &mut delete_idx, &mut add_idx, &mut rename_idx
         );
     }
 
     // Apply actions after the loop
     if let Some(idx) = delete_idx {
+        state.save_undo_skeleton("Delete Bone");
         state.remove_bone(idx);
+        // Cancel rename mode if deleting
+        state.bone_rename_active = false;
+        state.bone_rename_buffer.clear();
+    } else if let Some(idx) = add_idx {
+        // Add child bone to this bone
+        create_child_bone(state, idx);
+    } else if let Some(idx) = rename_idx {
+        // Start rename mode for this bone
+        state.selected_bone = Some(idx); // Select the bone being renamed
+        if let Some(bone) = state.skeleton().get(idx) {
+            state.bone_rename_buffer = bone.name.clone();
+            state.bone_rename_active = true;
+        }
     } else if let Some(idx) = select_idx {
+        // Cancel rename mode when selecting different bone
+        if state.selected_bone != Some(idx) {
+            state.bone_rename_active = false;
+            state.bone_rename_buffer.clear();
+        }
         state.selected_bone = Some(idx);
         if let Some(bone) = state.skeleton().get(idx) {
             state.set_status(&format!("Selected bone: {}", bone.name), 1.0);
@@ -1399,17 +1446,45 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
             (bone.name.clone(), parent_name, bone.length)
         };
 
-        // Bone name header with Add Child button
-        draw_text(&bone_name, x + 4.0, y + 12.0, FONT_SIZE_HEADER, ACCENT_COLOR);
+        // Bone name (editable if rename mode active)
+        if state.bone_rename_active {
+            // Draw text input for rename
+            let input_rect = Rect::new(x + 4.0, y, width - 8.0, line_height);
+            draw_rectangle(input_rect.x, input_rect.y, input_rect.w, input_rect.h, Color::from_rgba(40, 45, 55, 255));
+            draw_rectangle_lines(input_rect.x, input_rect.y, input_rect.w, input_rect.h, 1.0, ACCENT_COLOR);
 
-        // "+" button to add child bone
-        let add_btn_rect = Rect::new(x + width - 24.0, y, 20.0, 16.0);
-        let add_hovered = ctx.mouse.inside(&add_btn_rect);
-        let add_color = if add_hovered { ACCENT_COLOR } else { TEXT_DIM };
-        draw_icon_centered(icon_font, icon::PLUS, &add_btn_rect, 12.0, add_color);
-        if add_hovered && ctx.mouse.left_pressed {
-            // Create child bone attached to this bone
-            create_child_bone(state, selected_idx);
+            // Handle text input
+            while let Some(ch) = get_char_pressed() {
+                if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == ' ' {
+                    state.bone_rename_buffer.push(ch);
+                }
+            }
+            if is_key_pressed(KeyCode::Backspace) && !state.bone_rename_buffer.is_empty() {
+                state.bone_rename_buffer.pop();
+            }
+
+            // Draw the text with cursor
+            let display_text = format!("{}|", state.bone_rename_buffer);
+            draw_text(&display_text, x + 6.0, y + 13.0, FONT_SIZE_HEADER, ACCENT_COLOR);
+
+            // Handle Enter to confirm or Escape to cancel
+            if is_key_pressed(KeyCode::Enter) {
+                if !state.bone_rename_buffer.is_empty() {
+                    state.save_undo_skeleton("Rename Bone");
+                    if let Some(bones) = state.asset.skeleton_mut() {
+                        if let Some(bone) = bones.get_mut(selected_idx) {
+                            bone.name = state.bone_rename_buffer.clone();
+                        }
+                    }
+                }
+                state.bone_rename_active = false;
+                state.bone_rename_buffer.clear();
+            } else if is_key_pressed(KeyCode::Escape) {
+                state.bone_rename_active = false;
+                state.bone_rename_buffer.clear();
+            }
+        } else {
+            draw_text(&bone_name, x + 4.0, y + 12.0, FONT_SIZE_HEADER, ACCENT_COLOR);
         }
         y += line_height;
 
@@ -1432,6 +1507,9 @@ fn create_child_bone(state: &mut ModelerState, parent_idx: usize) {
     use crate::rasterizer::Vec3;
 
     const DEFAULT_LENGTH: f32 = 200.0;
+
+    // Save undo before creating bone
+    state.save_undo_skeleton("Create Bone");
 
     // Get parent bone info
     let (parent_length, parent_rotation) = match state.skeleton().get(parent_idx) {

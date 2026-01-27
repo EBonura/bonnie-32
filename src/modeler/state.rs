@@ -350,6 +350,9 @@ pub struct BoneCreationState {
     pub start_pos: Vec3,
     /// Current world position of the drag (bone tip)
     pub end_pos: Vec3,
+    /// Offset from mouse world position to actual tip (tip_pos - initial_world_pos)
+    /// Used to prevent snapping when starting a drag
+    pub drag_offset: Vec3,
 }
 
 // ============================================================================
@@ -959,6 +962,10 @@ pub struct ModelerState {
     pub show_bones: bool,
     /// Active bone creation drag (start position, parent bone)
     pub bone_creation: Option<BoneCreationState>,
+    /// Bone rename mode active
+    pub bone_rename_active: bool,
+    /// Bone rename text buffer
+    pub bone_rename_buffer: String,
 
     // Edit state (undo/redo stores context-specific snapshots)
     pub dirty: bool,
@@ -1105,7 +1112,7 @@ impl ContextMenu {
     }
 }
 
-/// Unified undo event - mesh change, selection change, or texture change
+/// Unified undo event - mesh change, selection change, texture change, or skeleton change
 #[derive(Debug, Clone)]
 pub enum UndoEvent {
     /// Mesh edit (geometry, UVs, etc.)
@@ -1121,6 +1128,11 @@ pub enum UndoEvent {
     Texture {
         indices: Vec<u8>,
         palette: Vec<Color15>,
+    },
+    /// Skeleton edit (bone transforms)
+    Skeleton {
+        bones: Vec<RigBone>,
+        description: String,
     },
 }
 
@@ -1257,6 +1269,8 @@ impl ModelerState {
             hovered_bone_tip: None,
             show_bones: true,  // Default: show bones when they exist
             bone_creation: None,
+            bone_rename_active: false,
+            bone_rename_buffer: String::new(),
 
             dirty: false,
             status_message: None,
@@ -1846,7 +1860,23 @@ impl ModelerState {
         }
     }
 
-    /// Undo last action (mesh edit, selection, or texture)
+    /// Save current skeleton state for undo (before making bone changes)
+    pub fn save_undo_skeleton(&mut self, description: &str) {
+        let bones = self.skeleton().to_vec();
+        self.undo_stack.push(UndoEvent::Skeleton {
+            bones,
+            description: description.to_string(),
+        });
+        self.redo_stack.clear();
+        self.dirty = true;
+
+        // Limit stack size
+        if self.undo_stack.len() > self.max_undo_levels {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// Undo last action (mesh edit, selection, texture, or skeleton)
     pub fn undo(&mut self) -> bool {
         if let Some(event) = self.undo_stack.pop() {
             match event {
@@ -1904,6 +1934,19 @@ impl ModelerState {
                     }
                     self.set_status("Undo paint", 1.0);
                 }
+                UndoEvent::Skeleton { bones, description } => {
+                    // Save current skeleton to redo stack
+                    self.redo_stack.push(UndoEvent::Skeleton {
+                        bones: self.skeleton().to_vec(),
+                        description: description.clone(),
+                    });
+                    // Restore previous skeleton
+                    if let Some(skeleton_bones) = self.asset.skeleton_mut() {
+                        *skeleton_bones = bones;
+                    }
+                    self.dirty = true;
+                    self.set_status(&format!("Undo: {}", description), 1.0);
+                }
             }
             true
         } else {
@@ -1912,7 +1955,7 @@ impl ModelerState {
         }
     }
 
-    /// Redo last undone action (mesh edit, selection, or texture)
+    /// Redo last undone action (mesh edit, selection, texture, or skeleton)
     pub fn redo(&mut self) -> bool {
         if let Some(event) = self.redo_stack.pop() {
             match event {
@@ -1969,6 +2012,19 @@ impl ModelerState {
                         tex.palette = palette;
                     }
                     self.set_status("Redo paint", 1.0);
+                }
+                UndoEvent::Skeleton { bones, description } => {
+                    // Save current skeleton to undo stack
+                    self.undo_stack.push(UndoEvent::Skeleton {
+                        bones: self.skeleton().to_vec(),
+                        description: description.clone(),
+                    });
+                    // Apply redo state
+                    if let Some(skeleton_bones) = self.asset.skeleton_mut() {
+                        *skeleton_bones = bones;
+                    }
+                    self.dirty = true;
+                    self.set_status(&format!("Redo: {}", description), 1.0);
                 }
             }
             true

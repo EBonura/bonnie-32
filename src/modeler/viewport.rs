@@ -209,16 +209,20 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
             // Calculate new rotation from direction
             let new_rotation = direction_to_rotation(direction);
 
+            let old_length = state.skeleton().get(bone_idx).map(|b| b.length).unwrap_or(0.0);
             if let Some(bones) = state.asset.skeleton_mut() {
                 if let Some(bone) = bones.get_mut(bone_idx) {
                     bone.local_rotation = new_rotation;
                     bone.length = new_length;
                     state.dirty = true;
                 }
-                // Update children's local_position to stay connected at the new tip
+                // Smart mode: only update children that were at the tip
                 for bone in bones.iter_mut() {
                     if bone.parent == Some(bone_idx) {
-                        bone.local_position.y = new_length;
+                        let was_at_tip = (bone.local_position.y - old_length).abs() < 1.0;
+                        if was_at_tip {
+                            bone.local_position.y = new_length;
+                        }
                     }
                 }
             }
@@ -443,6 +447,8 @@ fn handle_drag_move(
                 }
             } else {
                 // Perspective mode: use ray casting via DragManager
+                // DEBUG: Free move uses PickerType::Screen which only uses deltas
+                // Both initial_mouse and mouse_pos are in screen coords, so delta is correct
                 let result = state.drag_manager.update(
                     mouse_pos,
                     &state.camera,
@@ -1313,7 +1319,7 @@ pub fn draw_modeler_viewport_ext(
         // Update hover state every frame (like world editor) - but not when gizmo is active
         let is_active_viewport = state.active_viewport == viewport_id;
         if is_active_viewport && !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
-            update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+            update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
         }
 
         // Handle box selection (left-drag without hitting an element or gizmo)
@@ -1348,7 +1354,7 @@ pub fn draw_modeler_viewport_ext(
         .unwrap_or(false);
 
     if skeleton_selected && inside_viewport {
-        handle_skeleton_interaction(ctx, state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+        handle_skeleton_interaction(ctx, state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
     }
 
     // Handle single-click selection using hover system (like world editor)
@@ -2366,6 +2372,7 @@ fn update_hover_state(
     draw_x: f32, draw_y: f32,
     draw_w: f32, draw_h: f32,
     fb_width: usize, fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     // Don't update hover during transforms or box select
     if state.modal_transform != ModalTransform::None || state.drag_manager.is_dragging() {
@@ -2400,7 +2407,7 @@ fn update_hover_state(
     state.hovered_bone_tip = None;
 
     if state.show_bones && !state.skeleton().is_empty() {
-        let (base, tip) = find_hovered_bone_part(state, (fb_x, fb_y), fb_width, fb_height);
+        let (base, tip) = find_hovered_bone_part(state, (fb_x, fb_y), fb_width, fb_height, viewport_id);
         state.hovered_bone = base;
         state.hovered_bone_tip = tip;
     }
@@ -2426,14 +2433,44 @@ fn find_hovered_bone_part(
     fb_pos: (f32, f32),
     fb_width: usize,
     fb_height: usize,
+    viewport_id: ViewportId,
 ) -> (Option<usize>, Option<usize>) {
+    use crate::rasterizer::{Camera, OrthoProjection};
+
     let skeleton = state.skeleton();
     if skeleton.is_empty() {
         return (None, None);
     }
 
-    let camera = &state.camera;
-    let ortho = state.raster_settings.ortho_projection.as_ref();
+    // Use ortho camera for ortho viewports, perspective camera otherwise
+    let is_ortho = viewport_id != ViewportId::Perspective;
+
+    // Construct camera and ortho projection based on viewport type
+    let (camera, ortho) = if is_ortho {
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        let view_distance = 50000.0;
+        let mut cam = match viewport_id {
+            ViewportId::Top => Camera::ortho_top(),
+            ViewportId::Front => Camera::ortho_front(),
+            ViewportId::Side => Camera::ortho_side(),
+            ViewportId::Perspective => unreachable!(),
+        };
+        match viewport_id {
+            ViewportId::Top => cam.position = Vec3::new(0.0, view_distance, 0.0),
+            ViewportId::Front => cam.position = Vec3::new(0.0, 0.0, view_distance),
+            ViewportId::Side => cam.position = Vec3::new(view_distance, 0.0, 0.0),
+            ViewportId::Perspective => unreachable!(),
+        }
+        let ortho_proj = OrthoProjection {
+            zoom: ortho_cam.zoom,
+            center_x: ortho_cam.center.x,
+            center_y: ortho_cam.center.y,
+        };
+        (cam, Some(ortho_proj))
+    } else {
+        (state.camera.clone(), None)
+    };
+    let ortho_ref = ortho.as_ref();
 
     // First, check if hovering near any bone's base or tip (screen space)
     const TIP_RADIUS: f32 = 12.0;  // Screen pixels for tip/base hover
@@ -2448,7 +2485,7 @@ fn find_hovered_bone_part(
         // Project base and tip to screen
         if let Some((base_sx, base_sy)) = world_to_screen_with_ortho(
             base_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
-            fb_width, fb_height, ortho
+            fb_width, fb_height, ortho_ref
         ) {
             let base_dist = ((fb_pos.0 - base_sx).powi(2) + (fb_pos.1 - base_sy).powi(2)).sqrt();
             if base_dist < TIP_RADIUS {
@@ -2460,7 +2497,7 @@ fn find_hovered_bone_part(
 
         if let Some((tip_sx, tip_sy)) = world_to_screen_with_ortho(
             tip_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
-            fb_width, fb_height, ortho
+            fb_width, fb_height, ortho_ref
         ) {
             let tip_dist = ((fb_pos.0 - tip_sx).powi(2) + (fb_pos.1 - tip_sy).powi(2)).sqrt();
             if tip_dist < TIP_RADIUS {
@@ -2489,7 +2526,7 @@ fn find_hovered_bone_part(
     }
 
     // If not hovering on base/tip, check bone body using ray intersection
-    let ray = screen_to_ray(fb_pos.0, fb_pos.1, fb_width, fb_height, camera);
+    let ray = screen_to_ray(fb_pos.0, fb_pos.1, fb_width, fb_height, &camera);
 
     let mut closest_bone: Option<usize> = None;
     let mut closest_dist = f32::MAX;
@@ -2535,34 +2572,60 @@ fn handle_skeleton_interaction(
     draw_x: f32, draw_y: f32,
     draw_w: f32, draw_h: f32,
     fb_width: usize, fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     // Convert screen to framebuffer coords
     let fb_x = (mouse_pos.0 - draw_x) / draw_w * fb_width as f32;
     let fb_y = (mouse_pos.1 - draw_y) / draw_h * fb_height as f32;
+    let is_ortho = viewport_id != ViewportId::Perspective;
 
-    // Get 3D position from screen coords using ray casting onto a plane
-    let ray = screen_to_ray(fb_x, fb_y, fb_width, fb_height, &state.camera);
+    // Get 3D position from screen coords
+    let world_pos = if is_ortho {
+        // Ortho mode: convert screen position directly to world position
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        let zoom = ortho_cam.zoom;
+        let center = ortho_cam.center;
 
-    // Project onto plane at the bone's base depth (perpendicular to camera)
-    // Use base position (not tip) because tip changes during drag, causing feedback loop
-    let world_pos = if let Some(bone_idx) = state.selected_bone {
-        let (base_pos, _) = state.get_bone_world_transform(bone_idx);
-        // Find intersection with plane at base_pos perpendicular to camera
-        let plane_normal = state.camera.basis_z;
-        let plane_d = base_pos.dot(plane_normal);
-        let denom = ray.direction.dot(plane_normal);
-        if denom.abs() > 0.001 {
-            let t = (plane_d - ray.origin.dot(plane_normal)) / denom;
-            if t > 0.0 {
-                ray.origin + ray.direction * t
+        // Screen center to world offset
+        let half_w = fb_width as f32 / 2.0;
+        let half_h = fb_height as f32 / 2.0;
+        let world_x = (fb_x - half_w) / zoom + center.x;
+        let world_y = -(fb_y - half_h) / zoom + center.y; // Y inverted
+
+        // Get bone's third coordinate (the one perpendicular to this view)
+        let bone_coord = state.selected_bone
+            .map(|idx| state.get_bone_tip_position(idx))
+            .unwrap_or(Vec3::ZERO);
+
+        match viewport_id {
+            ViewportId::Top => Vec3::new(world_x, bone_coord.y, world_y),    // XZ plane, keep Y
+            ViewportId::Front => Vec3::new(world_x, world_y, bone_coord.z),  // XY plane, keep Z
+            ViewportId::Side => Vec3::new(bone_coord.x, world_y, world_x),   // YZ plane, keep X
+            ViewportId::Perspective => Vec3::ZERO,
+        }
+    } else {
+        // Perspective mode: use ray casting onto a plane
+        let ray = screen_to_ray(fb_x, fb_y, fb_width, fb_height, &state.camera);
+
+        if let Some(bone_idx) = state.selected_bone {
+            let (base_pos, _) = state.get_bone_world_transform(bone_idx);
+            // Find intersection with plane at base_pos perpendicular to camera
+            let plane_normal = state.camera.basis_z;
+            let plane_d = base_pos.dot(plane_normal);
+            let denom = ray.direction.dot(plane_normal);
+            if denom.abs() > 0.001 {
+                let t = (plane_d - ray.origin.dot(plane_normal)) / denom;
+                if t > 0.0 {
+                    ray.origin + ray.direction * t
+                } else {
+                    ray.origin + ray.direction * 500.0
+                }
             } else {
                 ray.origin + ray.direction * 500.0
             }
         } else {
             ray.origin + ray.direction * 500.0
         }
-    } else {
-        ray.origin + ray.direction * 500.0
     };
 
     // Check if we should start dragging a bone tip
@@ -2588,11 +2651,17 @@ fn handle_skeleton_interaction(
             if let Some((tip_sx, tip_sy, _)) = tip_screen {
                 let dist = ((fb_x - tip_sx).powi(2) + (fb_y - tip_sy).powi(2)).sqrt();
                 if dist < 20.0 {
+                    // Compute offset so the tip doesn't snap to mouse position
+                    // drag_offset = tip_pos - world_pos, so during update: new_tip = world_pos + drag_offset
+                    let drag_offset = tip_pos - world_pos;
+                    // Save undo before starting drag
+                    state.save_undo_skeleton("Move Bone Tip");
                     // Start tip drag - use bone_creation state to track the drag
                     state.bone_creation = Some(super::state::BoneCreationState {
                         parent: Some(bone_idx), // Store which bone we're editing
                         start_pos: base_pos,
                         end_pos: tip_pos,
+                        drag_offset,
                     });
                     state.set_status("Drag to adjust bone", 1.0);
                 }
@@ -2604,13 +2673,17 @@ fn handle_skeleton_interaction(
     if ctx.mouse.left_down {
         if let Some(ref mut creation) = state.bone_creation {
             if let Some(bone_idx) = creation.parent {
+                // Apply drag_offset to prevent snapping to mouse position
+                // new_tip = world_pos + drag_offset (where drag_offset = original_tip - initial_world_pos)
+                let adjusted_pos = world_pos + creation.drag_offset;
+
                 // Apply snapping to the tip position (Z key disables snap)
                 let snap_disabled = is_key_down(KeyCode::Z);
                 let snap_enabled = state.snap_settings.enabled && !snap_disabled;
                 let snapped_pos = if snap_enabled {
-                    state.snap_settings.snap_vec3(world_pos)
+                    state.snap_settings.snap_vec3(adjusted_pos)
                 } else {
-                    world_pos
+                    adjusted_pos
                 };
 
                 // Update the tip position
@@ -2633,16 +2706,20 @@ fn handle_skeleton_interaction(
                 let new_rotation = world_rotation - parent_rotation;
 
                 // Apply to the bone
+                let old_length = state.skeleton().get(bone_idx).map(|b| b.length).unwrap_or(0.0);
                 if let Some(bones) = state.asset.skeleton_mut() {
                     if let Some(bone) = bones.get_mut(bone_idx) {
                         bone.length = new_length;
                         bone.local_rotation = new_rotation;
                         state.dirty = true;
                     }
-                    // Update children's local_position to stay connected at the new tip
+                    // Smart mode: only update children that were at the tip
                     for bone in bones.iter_mut() {
                         if bone.parent == Some(bone_idx) {
-                            bone.local_position.y = new_length;
+                            let was_at_tip = (bone.local_position.y - old_length).abs() < 1.0;
+                            if was_at_tip {
+                                bone.local_position.y = new_length;
+                            }
                         }
                     }
                 }
@@ -3060,27 +3137,52 @@ fn handle_move_gizmo(
                                 let parent_idx = state.skeleton().get(bone_idx).and_then(|b| b.parent);
 
                                 if let Some(parent_idx) = parent_idx {
-                                    // CHILD bone: moving base = moving parent's tip
-                                    let (parent_base, _) = state.get_bone_world_transform(parent_idx);
-                                    let parent_vec = new_pos - parent_base;
-                                    let new_parent_length = parent_vec.len().max(1.0);
-                                    let parent_world_rot = direction_to_rotation(parent_vec);
+                                    let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
-                                    let grandparent_rot = state.skeleton().get(parent_idx)
-                                        .and_then(|b| b.parent)
-                                        .map(|gp_idx| state.get_bone_world_transform(gp_idx).1)
-                                        .unwrap_or(Vec3::ZERO);
-                                    let new_parent_local_rot = parent_world_rot - grandparent_rot;
+                                    if shift_held {
+                                        // SHIFT held: old behavior - move parent's tip
+                                        let (parent_base, _) = state.get_bone_world_transform(parent_idx);
+                                        let parent_vec = new_pos - parent_base;
+                                        let new_parent_length = parent_vec.len().max(1.0);
+                                        let parent_world_rot = direction_to_rotation(parent_vec);
 
-                                    if let Some(bones) = state.asset.skeleton_mut() {
-                                        if let Some(parent) = bones.get_mut(parent_idx) {
-                                            parent.local_rotation = new_parent_local_rot;
-                                            parent.length = new_parent_length;
+                                        let grandparent_rot = state.skeleton().get(parent_idx)
+                                            .and_then(|b| b.parent)
+                                            .map(|gp_idx| state.get_bone_world_transform(gp_idx).1)
+                                            .unwrap_or(Vec3::ZERO);
+                                        let new_parent_local_rot = parent_world_rot - grandparent_rot;
+
+                                        let old_parent_length = state.skeleton().get(parent_idx).map(|b| b.length).unwrap_or(0.0);
+                                        if let Some(bones) = state.asset.skeleton_mut() {
+                                            if let Some(parent) = bones.get_mut(parent_idx) {
+                                                parent.local_rotation = new_parent_local_rot;
+                                                parent.length = new_parent_length;
+                                            }
+                                            // Smart mode: only update children that were at the tip
+                                            for bone in bones.iter_mut() {
+                                                if bone.parent == Some(parent_idx) {
+                                                    let was_at_tip = (bone.local_position.y - old_parent_length).abs() < 1.0;
+                                                    if was_at_tip {
+                                                        bone.local_position.y = new_parent_length;
+                                                    }
+                                                }
+                                            }
                                         }
-                                        // Update ALL children of the parent to stay connected
-                                        for bone in bones.iter_mut() {
-                                            if bone.parent == Some(parent_idx) {
-                                                bone.local_position.y = new_parent_length;
+                                    } else {
+                                        // Normal drag: slide attachment point along parent
+                                        let (parent_base, _) = state.get_bone_world_transform(parent_idx);
+                                        let parent_tip = state.get_bone_tip_position(parent_idx);
+                                        let parent_axis = (parent_tip - parent_base).normalize();
+                                        let parent_length = state.skeleton().get(parent_idx).map(|b| b.length).unwrap_or(200.0);
+
+                                        // Project drag position onto parent axis
+                                        let to_drag = new_pos - parent_base;
+                                        let along_parent = to_drag.dot(parent_axis).clamp(0.0, parent_length);
+
+                                        // Update child's local_position to slide along parent
+                                        if let Some(bones) = state.asset.skeleton_mut() {
+                                            if let Some(bone) = bones.get_mut(bone_idx) {
+                                                bone.local_position.y = along_parent;
                                             }
                                         }
                                     }
@@ -3096,7 +3198,14 @@ fn handle_move_gizmo(
                         } else if state.gizmo_bone_tip_drag {
                             // Apply to bone tips (changes rotation/length)
                             // new_pos is the new TIP world position
-                            for (idx, new_tip_pos) in updates {
+                            for (idx, mut new_tip_pos) in updates {
+                                // Apply snapping to tip position
+                                if snap_enabled {
+                                    new_tip_pos.x = (new_tip_pos.x / snap_size).round() * snap_size;
+                                    new_tip_pos.y = (new_tip_pos.y / snap_size).round() * snap_size;
+                                    new_tip_pos.z = (new_tip_pos.z / snap_size).round() * snap_size;
+                                }
+
                                 // Get the bone's base position (fixed during tip drag)
                                 let (base_pos, _) = state.get_bone_world_transform(idx);
                                 let bone_vec = new_tip_pos - base_pos;
@@ -3113,15 +3222,19 @@ fn handle_move_gizmo(
                                     .unwrap_or(Vec3::ZERO);
                                 let new_rotation = world_rotation - parent_rotation;
 
+                                let old_length = state.skeleton().get(idx).map(|b| b.length).unwrap_or(0.0);
                                 if let Some(bones) = state.asset.skeleton_mut() {
                                     if let Some(bone) = bones.get_mut(idx) {
                                         bone.local_rotation = new_rotation;
                                         bone.length = new_length;
                                     }
-                                    // Update children's local_position to stay connected at the new tip
+                                    // Smart mode: only update children that were at the tip
                                     for bone in bones.iter_mut() {
                                         if bone.parent == Some(idx) {
-                                            bone.local_position.y = new_length;
+                                            let was_at_tip = (bone.local_position.y - old_length).abs() < 1.0;
+                                            if was_at_tip {
+                                                bone.local_position.y = new_length;
+                                            }
                                         }
                                     }
                                 }
@@ -3179,29 +3292,52 @@ fn handle_move_gizmo(
                             let parent_idx = state.skeleton().get(bone_idx).and_then(|b| b.parent);
 
                             if let Some(parent_idx) = parent_idx {
-                                // CHILD bone: moving base = moving parent's tip
-                                // Calculate new parent rotation/length to position child's base at snapped
-                                let (parent_base, _) = state.get_bone_world_transform(parent_idx);
-                                let parent_vec = snapped - parent_base;
-                                let new_parent_length = parent_vec.len().max(1.0);
-                                let parent_world_rot = direction_to_rotation(parent_vec);
+                                let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
 
-                                // Get grandparent rotation for local conversion
-                                let grandparent_rot = state.skeleton().get(parent_idx)
-                                    .and_then(|b| b.parent)
-                                    .map(|gp_idx| state.get_bone_world_transform(gp_idx).1)
-                                    .unwrap_or(Vec3::ZERO);
-                                let new_parent_local_rot = parent_world_rot - grandparent_rot;
+                                if shift_held {
+                                    // SHIFT held: old behavior - move parent's tip
+                                    let (parent_base, _) = state.get_bone_world_transform(parent_idx);
+                                    let parent_vec = snapped - parent_base;
+                                    let new_parent_length = parent_vec.len().max(1.0);
+                                    let parent_world_rot = direction_to_rotation(parent_vec);
 
-                                if let Some(bones) = state.asset.skeleton_mut() {
-                                    if let Some(parent) = bones.get_mut(parent_idx) {
-                                        parent.local_rotation = new_parent_local_rot;
-                                        parent.length = new_parent_length;
+                                    let grandparent_rot = state.skeleton().get(parent_idx)
+                                        .and_then(|b| b.parent)
+                                        .map(|gp_idx| state.get_bone_world_transform(gp_idx).1)
+                                        .unwrap_or(Vec3::ZERO);
+                                    let new_parent_local_rot = parent_world_rot - grandparent_rot;
+
+                                    let old_parent_length = state.skeleton().get(parent_idx).map(|b| b.length).unwrap_or(0.0);
+                                    if let Some(bones) = state.asset.skeleton_mut() {
+                                        if let Some(parent) = bones.get_mut(parent_idx) {
+                                            parent.local_rotation = new_parent_local_rot;
+                                            parent.length = new_parent_length;
+                                        }
+                                        // Smart mode: only update children that were at the tip
+                                        for bone in bones.iter_mut() {
+                                            if bone.parent == Some(parent_idx) {
+                                                let was_at_tip = (bone.local_position.y - old_parent_length).abs() < 1.0;
+                                                if was_at_tip {
+                                                    bone.local_position.y = new_parent_length;
+                                                }
+                                            }
+                                        }
                                     }
-                                    // Update ALL children of the parent (including the one being dragged) to stay connected
-                                    for bone in bones.iter_mut() {
-                                        if bone.parent == Some(parent_idx) {
-                                            bone.local_position.y = new_parent_length;
+                                } else {
+                                    // Normal drag: slide attachment point along parent
+                                    let (parent_base, _) = state.get_bone_world_transform(parent_idx);
+                                    let parent_tip = state.get_bone_tip_position(parent_idx);
+                                    let parent_axis = (parent_tip - parent_base).normalize();
+                                    let parent_length = state.skeleton().get(parent_idx).map(|b| b.length).unwrap_or(200.0);
+
+                                    // Project drag position onto parent axis
+                                    let to_drag = snapped - parent_base;
+                                    let along_parent = to_drag.dot(parent_axis).clamp(0.0, parent_length);
+
+                                    // Update child's local_position to slide along parent
+                                    if let Some(bones) = state.asset.skeleton_mut() {
+                                        if let Some(bone) = bones.get_mut(bone_idx) {
+                                            bone.local_position.y = along_parent;
                                         }
                                     }
                                 }
@@ -3233,42 +3369,19 @@ fn handle_move_gizmo(
                                 .unwrap_or(Vec3::ZERO);
                             let new_rotation = world_rotation - parent_rotation;
 
-                            // DEBUG logging - comprehensive parent/child info
-                            let skeleton = state.skeleton();
-                            let bone = &skeleton[bone_idx];
-                            let parent_info = bone.parent.map(|p_idx| {
-                                let (p_base, p_rot) = state.get_bone_world_transform(p_idx);
-                                let p_tip = state.get_bone_tip_position(p_idx);
-                                let p_bone = &skeleton[p_idx];
-                                format!("PARENT[{}] base=({:.0},{:.0},{:.0}) tip=({:.0},{:.0},{:.0}) local_pos=({:.0},{:.0},{:.0}) len={:.0}",
-                                    p_idx, p_base.x, p_base.y, p_base.z, p_tip.x, p_tip.y, p_tip.z,
-                                    p_bone.local_position.x, p_bone.local_position.y, p_bone.local_position.z, p_bone.length)
-                            }).unwrap_or_else(|| "PARENT[none]".to_string());
-                            let children: Vec<_> = skeleton.iter().enumerate()
-                                .filter(|(_, b)| b.parent == Some(bone_idx))
-                                .map(|(c_idx, c_bone)| {
-                                    let (c_base, _) = state.get_bone_world_transform(c_idx);
-                                    format!("CHILD[{}] base=({:.0},{:.0},{:.0}) local_pos=({:.0},{:.0},{:.0})",
-                                        c_idx, c_base.x, c_base.y, c_base.z, c_bone.local_position.x, c_bone.local_position.y, c_bone.local_position.z)
-                                }).collect();
-                            let children_info = if children.is_empty() { "CHILDREN[none]".to_string() } else { children.join(" ") };
-                            println!("TIP_DRAG bone={} base=({:.0},{:.0},{:.0}) tip=({:.0},{:.0},{:.0}) local_pos=({:.0},{:.0},{:.0}) len={:.0} newlen={:.0} | {} | {}",
-                                bone_idx, base_pos.x, base_pos.y, base_pos.z, new_tip_pos.x, new_tip_pos.y, new_tip_pos.z,
-                                bone.local_position.x, bone.local_position.y, bone.local_position.z, bone.length, new_length, parent_info, children_info);
-
                             let old_length = state.skeleton().get(bone_idx).map(|b| b.length).unwrap_or(0.0);
                             if let Some(bones) = state.asset.skeleton_mut() {
                                 if let Some(bone) = bones.get_mut(bone_idx) {
                                     bone.local_rotation = new_rotation;
                                     bone.length = new_length;
                                 }
-                                // Update children's local_position to stay connected at the new tip
+                                // Smart mode: only update children that were at the tip
                                 for bone in bones.iter_mut() {
                                     if bone.parent == Some(bone_idx) {
-                                        // Child's local_position.y should equal parent's length
-                                        // (assuming child is attached at parent's tip with Y-up local frame)
-                                        bone.local_position.y = new_length;
-                                        println!("  -> Updated child local_pos.y from {:.0} to {:.0}", old_length, new_length);
+                                        let was_at_tip = (bone.local_position.y - old_length).abs() < 1.0;
+                                        if was_at_tip {
+                                            bone.local_position.y = new_length;
+                                        }
                                     }
                                 }
                             }
@@ -3339,8 +3452,6 @@ fn handle_move_gizmo(
             let positions: Vec<(usize, Vec3)> = tip_indices.iter()
                 .map(|&idx| {
                     let tip_pos = state.get_bone_tip_position(idx);
-                    let (base_pos, _) = state.get_bone_world_transform(idx);
-                    println!("DRAG_START bone={} tip=({:.0},{:.0},{:.0}) base=({:.0},{:.0},{:.0})", idx, tip_pos.x, tip_pos.y, tip_pos.z, base_pos.x, base_pos.y, base_pos.z);
                     (idx, tip_pos)
                 })
                 .collect();
@@ -3364,14 +3475,12 @@ fn handle_move_gizmo(
         state.gizmo_bone_tip_drag = is_bone_tip_drag;
 
         // Save undo state BEFORE starting the gizmo drag
-        let undo_name = if is_bone_drag {
-            "Gizmo Move Bones"
-        } else if is_bone_tip_drag {
-            "Gizmo Move Bone Tips"
+        if is_bone_drag || is_bone_tip_drag {
+            let undo_name = if is_bone_drag { "Move Bones" } else { "Move Bone Tips" };
+            state.save_undo_skeleton(undo_name);
         } else {
-            "Gizmo Move"
-        };
-        state.push_undo(undo_name);
+            state.push_undo("Gizmo Move");
+        }
 
         // Set up ortho-specific tracking
         if is_ortho {
