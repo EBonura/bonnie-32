@@ -632,16 +632,18 @@ fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, ic
     }
     if let Some(content) = props_content {
         if let Some(comp_idx) = state.selected_component {
-            // For Mesh, show embedded object list; for others, show property editor
-            let is_mesh = state.asset.components.get(comp_idx)
-                .map(|c| c.is_mesh())
-                .unwrap_or(false);
+            // For Mesh/Skeleton, show embedded content; for others, show property editor
+            let component_type = state.asset.components.get(comp_idx)
+                .map(|c| (c.is_mesh(), c.is_skeleton()))
+                .unwrap_or((false, false));
 
-            if is_mesh {
-                draw_mesh_editor_content(ctx, content, state, icon_font);
-            } else {
-                let mut cy = content.y;
-                draw_component_editor(ctx, content.x, &mut cy, content.w, state, icon_font);
+            match component_type {
+                (true, _) => draw_mesh_editor_content(ctx, content, state, icon_font),
+                (_, true) => draw_skeleton_editor_content(ctx, content, state, icon_font),
+                _ => {
+                    let mut cy = content.y;
+                    draw_component_editor(ctx, content.x, &mut cy, content.w, state, icon_font);
+                }
             }
         } else {
             draw_text("Select a component", content.x + 4.0, content.y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
@@ -678,6 +680,7 @@ fn component_icon(comp: &AssetComponent) -> char {
         AssetComponent::Particle { .. } => icon::BLEND,
         AssetComponent::CharacterController { .. } => icon::GAMEPAD_2,
         AssetComponent::SpawnPoint { .. } => icon::FOOTPRINTS,
+        AssetComponent::Skeleton { .. } => icon::BONE,
     }
 }
 
@@ -830,6 +833,7 @@ fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut Mode
     // All component types that can be added
     let component_types = [
         ("Mesh", icon::BOX),
+        ("Skeleton", icon::BONE),
         ("Collision", icon::SCAN),
         ("Light", icon::SUN),
         ("Trigger", icon::MAP_PIN),
@@ -945,6 +949,9 @@ fn create_default_component(type_name: &str) -> AssetComponent {
         "SpawnPoint" => AssetComponent::SpawnPoint {
             is_player_start: false,
         },
+        "Skeleton" => AssetComponent::Skeleton {
+            bones: Vec::new(),
+        },
         _ => AssetComponent::Collision {
             shape: CollisionShapeDef::FromMesh,
             is_trigger: false,
@@ -1009,6 +1016,11 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
         }
         AssetComponent::SpawnPoint { is_player_start } => {
             draw_spawn_point_editor(ctx, x, y, width, is_player_start, icon_font)
+        }
+        AssetComponent::Skeleton { bones: _ } => {
+            // Skeleton editing handled separately via bone tree in left panel
+            // TODO: Implement skeleton editor
+            false
         }
     };
 
@@ -1214,6 +1226,253 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
                 btn_x += btn_w + 2.0;
             }
         }
+    }
+}
+
+/// Draw skeleton component content (bone tree + per-bone properties)
+fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let line_height = 18.0;
+    let mut y = rect.y;
+    let x = rect.x;
+    let width = rect.w;
+
+    // --- BONE TREE ---
+    let skeleton = state.skeleton();
+    if skeleton.is_empty() {
+        draw_text("No bones", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        draw_text("Press Tab to add a bone", x + 4.0, y + 26.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        draw_text("Click bone to select", x + 4.0, y + 40.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        return;
+    }
+
+    // Calculate how much space for bone list (leave room for properties if bone selected)
+    let has_selection = state.selected_bone.is_some();
+    let props_height = if has_selection { 80.0 } else { 0.0 };
+    let list_height = (rect.h - props_height - 4.0).max(60.0);
+
+    // Collect click actions
+    let mut select_idx: Option<usize> = None;
+    let mut delete_idx: Option<usize> = None;
+
+    // Draw root bones and their children recursively
+    fn draw_bone_recursive(
+        ctx: &mut UiContext,
+        state: &ModelerState,
+        bone_idx: usize,
+        depth: usize,
+        x: f32,
+        y: &mut f32,
+        width: f32,
+        line_height: f32,
+        list_height: f32,
+        rect_y: f32,
+        icon_font: Option<&Font>,
+        select_idx: &mut Option<usize>,
+        delete_idx: &mut Option<usize>,
+    ) {
+        if *y + line_height > rect_y + list_height {
+            return;
+        }
+
+        let skeleton = state.skeleton();
+        let bone = match skeleton.get(bone_idx) {
+            Some(b) => b,
+            None => return,
+        };
+
+        let is_selected = state.selected_bone == Some(bone_idx);
+        let is_hovered_bone = state.hovered_bone == Some(bone_idx);
+        let indent = depth as f32 * 12.0;
+        let item_rect = Rect::new(x, *y, width, line_height);
+        let is_hovered = ctx.mouse.inside(&item_rect);
+
+        // Selection/hover highlight
+        if is_selected {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+        } else if is_hovered || is_hovered_bone {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
+        }
+
+        // Bone icon
+        let icon_rect = Rect::new(x + 2.0 + indent, *y + 1.0, 16.0, 16.0);
+        let icon_color = if bone.parent.is_none() {
+            Color::from_rgba(255, 220, 100, 255) // Yellow for root
+        } else if is_selected {
+            Color::from_rgba(80, 255, 80, 255) // Green when selected
+        } else {
+            TEXT_COLOR
+        };
+        draw_icon_centered(icon_font, icon::BONE, &icon_rect, 11.0, icon_color);
+
+        // Delete icon (show when selected or hovered)
+        let show_icons = is_selected || is_hovered;
+        let icon_size = 14.0;
+        let delete_rect = Rect::new(x + width - icon_size - 4.0, *y + 2.0, icon_size, icon_size);
+
+        if show_icons {
+            let delete_hover = ctx.mouse.inside(&delete_rect);
+            let delete_color = if delete_hover { Color::from_rgba(255, 100, 100, 255) } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::TRASH, &delete_rect, 11.0, delete_color);
+            if delete_hover && ctx.mouse.left_pressed {
+                *delete_idx = Some(bone_idx);
+            }
+        }
+
+        // Bone name
+        let name_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+        draw_text(&bone.name, x + 20.0 + indent, *y + 13.0, FONT_SIZE_HEADER, name_color);
+
+        // Handle selection click (not on delete icon)
+        let name_rect = Rect::new(x + 20.0 + indent, *y, width - 60.0 - indent, line_height);
+        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed && delete_idx.is_none() {
+            *select_idx = Some(bone_idx);
+        }
+
+        *y += line_height;
+
+        // Draw children
+        let children = state.bone_children(bone_idx);
+        for child_idx in children {
+            draw_bone_recursive(
+                ctx, state, child_idx, depth + 1, x, y, width, line_height,
+                list_height, rect_y, icon_font, select_idx, delete_idx
+            );
+        }
+    }
+
+    // Draw root bones (no parent)
+    let root_bones = state.root_bones();
+    for root_idx in root_bones {
+        draw_bone_recursive(
+            ctx, state, root_idx, 0, x, &mut y, width, line_height,
+            list_height, rect.y, icon_font, &mut select_idx, &mut delete_idx
+        );
+    }
+
+    // Apply actions after the loop
+    if let Some(idx) = delete_idx {
+        state.remove_bone(idx);
+    } else if let Some(idx) = select_idx {
+        state.selected_bone = Some(idx);
+        if let Some(bone) = state.skeleton().get(idx) {
+            state.set_status(&format!("Selected bone: {}", bone.name), 1.0);
+        }
+    }
+
+    // --- PER-BONE PROPERTIES ---
+    if let Some(selected_idx) = state.selected_bone {
+        y += 4.0;
+
+        // Separator line
+        draw_rectangle(x + 4.0, y, width - 8.0, 1.0, Color::from_rgba(60, 60, 70, 255));
+        y += 4.0;
+
+        // Get bone data
+        let (bone_name, parent_name, length) = {
+            let skeleton = state.skeleton();
+            let bone = match skeleton.get(selected_idx) {
+                Some(b) => b,
+                None => return,
+            };
+            let parent_name = bone.parent
+                .and_then(|p| skeleton.get(p))
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "(root)".to_string());
+            (bone.name.clone(), parent_name, bone.length)
+        };
+
+        // Bone name header
+        draw_text(&bone_name, x + 4.0, y + 12.0, FONT_SIZE_HEADER, ACCENT_COLOR);
+        y += line_height;
+
+        // Parent info
+        draw_text(&format!("Parent: {}", parent_name), x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        y += line_height;
+
+        // Length info
+        draw_text(&format!("Length: {:.0}", length), x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        y += line_height;
+
+        // Hint
+        draw_text("Drag tip to adjust", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 150, 200, 255));
+    }
+}
+
+/// Ensure a Skeleton component exists, creating one if needed
+fn ensure_skeleton_component(state: &mut ModelerState) {
+    use super::state::RigBone;
+    use crate::rasterizer::Vec3;
+
+    // Check if skeleton component already exists
+    let has_skeleton = state.asset.components.iter().any(|c| c.is_skeleton());
+    if has_skeleton {
+        return;
+    }
+
+    // Create default root bone at origin, pointing up (Y+)
+    let root_bone = RigBone {
+        name: "Root".to_string(),
+        parent: None,
+        local_position: Vec3::new(0.0, 0.0, 0.0),
+        local_rotation: Vec3::ZERO,
+        length: 200.0, // Match create_bone_at_default_position
+    };
+
+    // Create and add skeleton component with default root bone
+    let skeleton = crate::asset::AssetComponent::Skeleton {
+        bones: vec![root_bone],
+    };
+    state.asset.components.push(skeleton);
+
+    // Select the new skeleton component and root bone
+    state.selected_component = Some(state.asset.components.len() - 1);
+    state.selected_bone = Some(0);
+    state.selection = super::state::ModelerSelection::Bones(vec![0]);
+    state.dirty = true;
+    state.set_status("Created skeleton with Root bone", 1.0);
+}
+
+/// Create a bone at a sensible default position (Tab key handler for skeleton)
+fn create_bone_at_default_position(state: &mut ModelerState) {
+    use super::state::RigBone;
+    use crate::rasterizer::Vec3;
+
+    // Default bone properties
+    const DEFAULT_LENGTH: f32 = 200.0;
+
+    // Determine position and parent based on current selection
+    // Check bone selection first, then fall back to selected_bone
+    let parent_from_selection = state.selection.bones()
+        .and_then(|bones| bones.first().copied());
+    let parent_idx = parent_from_selection.or(state.selected_bone);
+
+    let (local_position, parent, local_rotation) = if let Some(selected_idx) = parent_idx {
+        // Create child bone at selected bone's tip, pointing same direction
+        let parent_rotation = state.skeleton().get(selected_idx)
+            .map(|b| b.local_rotation)
+            .unwrap_or(Vec3::ZERO);
+        (Vec3::ZERO, Some(selected_idx), parent_rotation)
+    } else {
+        // Create root bone at origin, pointing up (Y+)
+        (Vec3::new(0.0, 0.0, 0.0), None, Vec3::ZERO)
+    };
+
+    let new_bone = RigBone {
+        name: state.generate_bone_name(),
+        parent,
+        local_position,
+        local_rotation,
+        length: DEFAULT_LENGTH,
+    };
+
+    let bone_name = new_bone.name.clone();
+    if let Some(new_idx) = state.add_bone(new_bone) {
+        // Update both selection systems
+        state.selected_bone = Some(new_idx);
+        state.selection = super::state::ModelerSelection::Bones(vec![new_idx]);
+        state.set_status(&format!("Created bone: {} (G to move, drag tip to rotate)", bone_name), 2.0);
+    } else {
+        state.set_status("Failed to create bone", 1.5);
     }
 }
 
@@ -4563,7 +4822,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // Draw transform gizmo in ortho views (2-axis version)
     // =========================================================================
     if !state.selection.is_empty() && state.tool_box.active_transform_tool().is_some() {
-        if let Some(center) = state.selection.compute_center(state.mesh()) {
+        if let Some(center) = state.compute_selection_center() {
             // Project center to screen using world_to_ortho directly
             let (cx, cy) = match viewport_id {
                 ViewportId::Top => world_to_ortho(center.x, center.z),
@@ -5314,6 +5573,12 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         super::state::ModelerSelection::Faces(faces) => {
             draw_text(&format!("{} face(s)", faces.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
+        super::state::ModelerSelection::Bones(bones) => {
+            draw_text(&format!("{} bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::BoneTips(tips) => {
+            draw_text(&format!("{} bone tip(s)", tips.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
     }
 
     y += line_height * 2.0;
@@ -5813,6 +6078,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         state.set_selection(super::state::ModelerSelection::None);
         state.set_status("Face mode", 1.0);
     }
+
     if actions.triggered("select.all", &ctx) {
         select_all(state);
     }
@@ -6048,11 +6314,24 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     // Context Menu Actions
     // ========================================================================
     if actions.triggered("context.open_menu", &ctx) {
-        // Tab key opens context menu at mouse position
-        let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
-        let world_pos = screen_to_world_position(state, mx, my);
-        let snapped = state.snap_settings.snap_vec3(world_pos);
-        state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));
+        // Check if we're in bone mode (skeleton selected OR bone selection active)
+        let skeleton_selected = state.selected_component
+            .and_then(|idx| state.asset.components.get(idx))
+            .map(|c| c.is_skeleton())
+            .unwrap_or(false);
+        let bone_selection_active = state.selection.is_bone_selection();
+
+        if skeleton_selected || bone_selection_active {
+            // Create a new bone - auto-create Skeleton component if needed
+            ensure_skeleton_component(state);
+            create_bone_at_default_position(state);
+        } else {
+            // Tab key opens context menu at mouse position for mesh primitives
+            let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
+            let world_pos = screen_to_world_position(state, mx, my);
+            let snapped = state.snap_settings.snap_vec3(world_pos);
+            state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));
+        }
     }
     if actions.triggered("context.close", &ctx) {
         // Escape closes menus or cancels operations (priority order)
@@ -6344,7 +6623,7 @@ fn select_loop(state: &mut ModelerState) {
             }
         }
 
-        super::state::ModelerSelection::None | super::state::ModelerSelection::Mesh => {
+        super::state::ModelerSelection::None | super::state::ModelerSelection::Mesh | super::state::ModelerSelection::Bones(_) | super::state::ModelerSelection::BoneTips(_) => {
             state.set_status("No selection for loop select", 1.0);
         }
     }

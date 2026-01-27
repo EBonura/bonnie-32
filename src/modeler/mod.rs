@@ -16,6 +16,7 @@ mod mesh_editor;
 mod obj_import;
 mod obj_importer;
 mod quantize;
+mod skeleton;
 pub mod actions;
 pub mod drag;
 pub mod tools;

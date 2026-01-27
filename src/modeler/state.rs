@@ -307,6 +307,17 @@ pub struct RigPart {
     pub pivot: Vec3,
 }
 
+/// State for creating a new bone via click-drag in the viewport
+#[derive(Debug, Clone)]
+pub struct BoneCreationState {
+    /// Parent bone index (None = creating root bone)
+    pub parent: Option<usize>,
+    /// World position where the drag started (bone base)
+    pub start_pos: Vec3,
+    /// Current world position of the drag (bone tip)
+    pub end_pos: Vec3,
+}
+
 // ============================================================================
 // Selection Modes (PicoCAD-style: Vertex/Edge/Face)
 // ============================================================================
@@ -351,6 +362,10 @@ pub enum ModelerSelection {
     Edges(Vec<(usize, usize)>),
     /// Edit mode: selected faces
     Faces(Vec<usize>),
+    /// Skeleton mode: selected bone bases (G moves whole bone)
+    Bones(Vec<usize>),
+    /// Skeleton mode: selected bone tips (G changes direction/length)
+    BoneTips(Vec<usize>),
 }
 
 impl ModelerSelection {
@@ -361,7 +376,30 @@ impl ModelerSelection {
             ModelerSelection::Vertices(v) => v.is_empty(),
             ModelerSelection::Edges(v) => v.is_empty(),
             ModelerSelection::Faces(v) => v.is_empty(),
+            ModelerSelection::Bones(v) => v.is_empty(),
+            ModelerSelection::BoneTips(v) => v.is_empty(),
         }
+    }
+
+    /// Get selected bone bases if any
+    pub fn bones(&self) -> Option<&[usize]> {
+        match self {
+            ModelerSelection::Bones(bones) => Some(bones),
+            _ => None,
+        }
+    }
+
+    /// Get selected bone tips if any
+    pub fn bone_tips(&self) -> Option<&[usize]> {
+        match self {
+            ModelerSelection::BoneTips(tips) => Some(tips),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a bone base or tip selection
+    pub fn is_bone_selection(&self) -> bool {
+        matches!(self, ModelerSelection::Bones(_) | ModelerSelection::BoneTips(_))
     }
 
     pub fn clear(&mut self) {
@@ -395,9 +433,10 @@ impl ModelerSelection {
     /// Get all unique vertex indices affected by this selection
     /// For edges, returns both vertices of each edge
     /// For faces, returns all vertices of each face
+    /// For bones/tips, returns empty (bones don't affect mesh vertices)
     pub fn get_affected_vertex_indices(&self, mesh: &EditableMesh) -> Vec<usize> {
         match self {
-            ModelerSelection::None | ModelerSelection::Mesh => Vec::new(),
+            ModelerSelection::None | ModelerSelection::Mesh | ModelerSelection::Bones(_) | ModelerSelection::BoneTips(_) => Vec::new(),
             ModelerSelection::Vertices(verts) => verts.clone(),
             ModelerSelection::Edges(edges) => {
                 let mut indices: Vec<usize> = edges.iter()
@@ -874,6 +913,19 @@ pub struct ModelerState {
     pub playback_time: f64,
     pub selected_keyframes: Vec<usize>,
 
+    // Skeleton editing state (TR-style: bones define topology, not animation)
+    // Skeleton bones are stored in AssetComponent::Skeleton, accessed via asset.skeleton()
+    /// Currently selected bone index
+    pub selected_bone: Option<usize>,
+    /// Bone base under cursor (for hover highlighting)
+    pub hovered_bone: Option<usize>,
+    /// Bone tip under cursor (for hover highlighting)
+    pub hovered_bone_tip: Option<usize>,
+    /// Show bones in viewport (when Skeleton component selected)
+    pub show_bones: bool,
+    /// Active bone creation drag (start position, parent bone)
+    pub bone_creation: Option<BoneCreationState>,
+
     // Edit state (undo/redo stores context-specific snapshots)
     pub dirty: bool,
     pub status_message: Option<(String, f64)>,
@@ -939,6 +991,8 @@ pub struct ModelerState {
     pub gizmo_hovered_axis: Option<Axis>,
     /// Which gizmo axis is being hovered in ortho views
     pub ortho_gizmo_hovered_axis: Option<Axis>,
+    /// True when gizmo is dragging bones instead of mesh vertices
+    pub gizmo_bone_drag: bool,
 
     // Modal transform state (G/S/R keys) - now uses DragManager for actual transform
     pub modal_transform: ModalTransform,
@@ -1160,6 +1214,14 @@ impl ModelerState {
             playback_time: 0.0,
             selected_keyframes: Vec::new(),
 
+            // Skeleton editing state (TR-style)
+            // Bones stored in asset.skeleton(), not in ModelerState
+            selected_bone: None,
+            hovered_bone: None,
+            hovered_bone_tip: None,
+            show_bones: true,  // Default: show bones when they exist
+            bone_creation: None,
+
             dirty: false,
             status_message: None,
 
@@ -1195,6 +1257,7 @@ impl ModelerState {
 
             gizmo_hovered_axis: None,
             ortho_gizmo_hovered_axis: None,
+            gizmo_bone_drag: false,
 
             modal_transform: ModalTransform::None,
 
@@ -1910,6 +1973,210 @@ impl ModelerState {
     pub fn clear_selection(&mut self) {
         self.set_selection(ModelerSelection::None);
     }
+
+    // ========================================================================
+    // Skeleton/Bone Operations (TR-style: fixed offsets, not animated)
+    // Bones are stored in AssetComponent::Skeleton, accessed via asset.skeleton()
+    // ========================================================================
+
+    /// Get reference to skeleton bones (from first Skeleton component)
+    pub fn skeleton(&self) -> &[RigBone] {
+        self.asset.skeleton().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Compute center of current selection (handles both mesh elements and bones)
+    pub fn compute_selection_center(&self) -> Option<Vec3> {
+        match &self.selection {
+            ModelerSelection::Bones(bones) => {
+                // Bone base selection - center at base positions
+                if bones.is_empty() {
+                    return None;
+                }
+                let skeleton = self.skeleton();
+                let positions: Vec<Vec3> = bones.iter()
+                    .filter(|&&idx| idx < skeleton.len())
+                    .map(|&idx| {
+                        let (base_pos, _) = self.get_bone_world_transform(idx);
+                        base_pos
+                    })
+                    .collect();
+                if positions.is_empty() {
+                    return None;
+                }
+                let sum: Vec3 = positions.iter().fold(Vec3::ZERO, |acc, &p| acc + p);
+                Some(sum * (1.0 / positions.len() as f32))
+            }
+            ModelerSelection::BoneTips(tips) => {
+                // Bone tip selection - center at tip positions
+                if tips.is_empty() {
+                    return None;
+                }
+                let skeleton = self.skeleton();
+                let positions: Vec<Vec3> = tips.iter()
+                    .filter(|&&idx| idx < skeleton.len())
+                    .map(|&idx| self.get_bone_tip_position(idx))
+                    .collect();
+                if positions.is_empty() {
+                    return None;
+                }
+                let sum: Vec3 = positions.iter().fold(Vec3::ZERO, |acc, &p| acc + p);
+                Some(sum * (1.0 / positions.len() as f32))
+            }
+            _ => self.selection.compute_center(self.mesh()),
+        }
+    }
+
+    /// Add a bone to the skeleton and return its index
+    pub fn add_bone(&mut self, bone: RigBone) -> Option<usize> {
+        if let Some(bones) = self.asset.skeleton_mut() {
+            let idx = bones.len();
+            bones.push(bone);
+            self.dirty = true;
+            Some(idx)
+        } else {
+            None // No Skeleton component
+        }
+    }
+
+    /// Remove a bone from the skeleton
+    /// Children are reparented to the deleted bone's parent
+    pub fn remove_bone(&mut self, bone_idx: usize) {
+        let skeleton = match self.asset.skeleton_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        if bone_idx >= skeleton.len() {
+            return;
+        }
+
+        // Get the parent of the bone being removed
+        let parent = skeleton[bone_idx].parent;
+
+        // Reparent all children to the deleted bone's parent
+        for bone in skeleton.iter_mut() {
+            if bone.parent == Some(bone_idx) {
+                bone.parent = parent;
+            }
+            // Adjust indices for bones after the removed one
+            if let Some(p) = bone.parent {
+                if p > bone_idx {
+                    bone.parent = Some(p - 1);
+                }
+            }
+        }
+
+        // Remove the bone
+        skeleton.remove(bone_idx);
+
+        // Clear selection if it was the removed bone
+        if self.selected_bone == Some(bone_idx) {
+            self.selected_bone = None;
+        } else if let Some(sel) = self.selected_bone {
+            if sel > bone_idx {
+                self.selected_bone = Some(sel - 1);
+            }
+        }
+
+        self.dirty = true;
+    }
+
+    /// Get the world transform for a bone by walking up the hierarchy
+    /// Returns (position, rotation) in world space
+    pub fn get_bone_world_transform(&self, bone_idx: usize) -> (Vec3, Vec3) {
+        let skeleton = self.skeleton();
+        if bone_idx >= skeleton.len() {
+            return (Vec3::ZERO, Vec3::ZERO);
+        }
+
+        let mut position = Vec3::ZERO;
+        let mut rotation = Vec3::ZERO;
+
+        // Walk up the hierarchy, accumulating transforms
+        // TR-style: bones have fixed offsets, rotations accumulate
+        let mut current = Some(bone_idx);
+        let mut chain = Vec::new();
+
+        // Build chain from root to this bone
+        while let Some(idx) = current {
+            chain.push(idx);
+            current = skeleton[idx].parent;
+        }
+
+        // Apply transforms from root to leaf
+        for idx in chain.into_iter().rev() {
+            let bone = &skeleton[idx];
+            // For now, simple additive transforms
+            // TODO: proper matrix-based transform when we add rotation
+            position = position + bone.local_position;
+            rotation = rotation + bone.local_rotation;
+        }
+
+        (position, rotation)
+    }
+
+    /// Get the world position of a bone's tip (base + direction * length)
+    pub fn get_bone_tip_position(&self, bone_idx: usize) -> Vec3 {
+        let skeleton = self.skeleton();
+        if bone_idx >= skeleton.len() {
+            return Vec3::ZERO;
+        }
+
+        let (base_pos, rotation) = self.get_bone_world_transform(bone_idx);
+        let bone = &skeleton[bone_idx];
+
+        // Calculate direction from rotation (inverse of direction_to_rotation)
+        // rot_x = pitch (tilt forward/back), rot_z = yaw (turn left/right)
+        // Default direction is Y-up (0, 1, 0)
+        let rad_x = rotation.x.to_radians();
+        let rad_z = rotation.z.to_radians();
+        let cos_x = rad_x.cos();
+        let direction = Vec3::new(
+            rad_z.sin() * cos_x,   // X: horizontal component scaled by cos(pitch)
+            rad_z.cos() * cos_x,   // Y: forward component scaled by cos(pitch)
+            -rad_x.sin(),          // Z: vertical tilt from pitch
+        ).normalize();
+
+        base_pos + direction * bone.length
+    }
+
+    /// Get indices of root bones (no parent)
+    pub fn root_bones(&self) -> Vec<usize> {
+        self.skeleton()
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.parent.is_none())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Get indices of children for a bone
+    pub fn bone_children(&self, parent_idx: usize) -> Vec<usize> {
+        self.skeleton()
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.parent == Some(parent_idx))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Generate a unique bone name
+    pub fn generate_bone_name(&self) -> String {
+        let skeleton = self.skeleton();
+        let existing: std::collections::HashSet<&str> = skeleton
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
+
+        for i in 0..100 {
+            let name = format!("Bone.{:02}", i);
+            if !existing.contains(name.as_str()) {
+                return name;
+            }
+        }
+        format!("Bone.{}", skeleton.len())
+    }
+
 }
 
 impl Default for ModelerState {

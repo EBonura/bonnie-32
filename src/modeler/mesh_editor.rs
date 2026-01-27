@@ -237,6 +237,10 @@ pub struct MeshPart {
     /// If true, backface culling is disabled (both sides render)
     #[serde(default)]
     pub double_sided: bool,
+    /// Bone index this mesh part is bound to (for skeletal animation)
+    /// None = not bound to any bone
+    #[serde(default)]
+    pub bone_index: Option<usize>,
     /// Per-part mirror settings (replaces global mirror)
     #[serde(default)]
     pub mirror: Option<MirrorSettings>,
@@ -255,6 +259,7 @@ impl MeshPart {
             locked: false,
             color: None,
             double_sided: false,
+            bone_index: None,
             mirror: None,
         }
     }
@@ -269,6 +274,7 @@ impl MeshPart {
             locked: false,
             color: None,
             double_sided: false,
+            bone_index: None,
             mirror: None,
         }
     }
@@ -284,6 +290,7 @@ impl MeshPart {
             locked: false,
             color: None,
             double_sided: false,
+            bone_index: None,
             mirror: None,
         }
     }

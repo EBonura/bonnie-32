@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use crate::modeler::{MeshPart, MeshProject};
+use crate::modeler::{MeshPart, MeshProject, RigBone};
 use crate::rasterizer::Vec3;
 use super::component::AssetComponent;
 use super::library::AssetSource;
@@ -191,6 +191,22 @@ impl Asset {
     pub fn mesh_mut(&mut self) -> Option<&mut Vec<MeshPart>> {
         self.components.iter_mut().find_map(|c| match c {
             AssetComponent::Mesh { parts } => Some(parts),
+            _ => None,
+        })
+    }
+
+    /// Get reference to the first Skeleton component's bones
+    pub fn skeleton(&self) -> Option<&Vec<RigBone>> {
+        self.components.iter().find_map(|c| match c {
+            AssetComponent::Skeleton { bones } => Some(bones),
+            _ => None,
+        })
+    }
+
+    /// Get mutable reference to the first Skeleton component's bones
+    pub fn skeleton_mut(&mut self) -> Option<&mut Vec<RigBone>> {
+        self.components.iter_mut().find_map(|c| match c {
+            AssetComponent::Skeleton { bones } => Some(bones),
             _ => None,
         })
     }

@@ -7,7 +7,7 @@
 //! not a special field. This enables mesh-less assets (pure triggers, lights, etc.)
 
 use serde::{Deserialize, Serialize};
-use crate::modeler::MeshPart;
+use crate::modeler::{MeshPart, RigBone};
 use crate::game::components::{EnemyType, ItemType};
 
 /// Components that can be attached to an asset
@@ -161,6 +161,15 @@ pub enum AssetComponent {
         #[serde(default)]
         is_player_start: bool,
     },
+
+    /// Skeleton for animation (TR-style: bones define fixed structure)
+    ///
+    /// Bones define hierarchy and offsets. Animation keyframes store rotations.
+    /// Each MeshPart can be bound to a bone via bone_index.
+    Skeleton {
+        /// The bone hierarchy
+        bones: Vec<RigBone>,
+    },
 }
 
 fn default_volume() -> f32 {
@@ -187,6 +196,7 @@ impl AssetComponent {
             AssetComponent::Particle { .. } => "Particle",
             AssetComponent::CharacterController { .. } => "CharacterController",
             AssetComponent::SpawnPoint { .. } => "SpawnPoint",
+            AssetComponent::Skeleton { .. } => "Skeleton",
         }
     }
 
@@ -205,6 +215,7 @@ impl AssetComponent {
             AssetComponent::Particle { .. } => '\u{E3A5}', // sparkle icon
             AssetComponent::CharacterController { .. } => '\u{E7FD}', // person icon
             AssetComponent::SpawnPoint { .. } => '\u{E566}', // location icon
+            AssetComponent::Skeleton { .. } => '\u{E91B}', // accessibility icon (stick figure)
         }
     }
 
@@ -236,6 +247,11 @@ impl AssetComponent {
     /// Check if this is a SpawnPoint component
     pub fn is_spawn_point(&self) -> bool {
         matches!(self, AssetComponent::SpawnPoint { .. })
+    }
+
+    /// Check if this is a Skeleton component
+    pub fn is_skeleton(&self) -> bool {
+        matches!(self, AssetComponent::Skeleton { .. })
     }
 }
 
