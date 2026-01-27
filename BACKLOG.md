@@ -25,7 +25,6 @@ This document tracks planned features, known issues, and future improvements.
 
 - [ ] Context-sensitive bottom bar: Show left/right click actions; when right-clicking show WASD/QE bindings
 - [ ] **Camera floor limit**: Add a minimum camera height so users can't accidentally go below the floor level. Should be slightly below the camera's current position.
-- [x] **Object movement like cells**: Move objects by dragging on Z/X axis, with Shift for Y axis movement (same as cell movement)
 
 ---
 
