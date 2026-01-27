@@ -75,7 +75,6 @@ This document tracks planned features, known issues, and future improvements.
 #### UX Improvements
 - [ ] **Full undo support**: Ctrl-Z should extend to palette changes, component creation/deletion, and generally every action in the asset editor
 - [ ] **Uniform scale from gizmo center**: Click center of gizmo to scale uniformly across all axes
-- [ ] **Configurable grid snap granularity**: Allow changing the Snap to Grid step size
 - [ ] **Rotation pivot from selection**: Allow selecting an edge as rotation pivot (secondary selection mode) - similar to Blender's 3D cursor but simpler
 
 #### Future
