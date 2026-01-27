@@ -20,6 +20,40 @@ use super::drag::DragManager;
 use super::tools::ModelerToolBox;
 
 // ============================================================================
+// Math Helpers
+// ============================================================================
+
+/// Rotate a vector by euler angles (X rotation = pitch, Z rotation = yaw)
+/// Matches spherical coordinate convention used in get_bone_tip_position:
+/// direction = (sin(z)*cos(x), cos(z)*cos(x), -sin(x))
+/// Order: X rotation (pitch) first, then Z rotation (yaw)
+fn rotate_by_euler(v: Vec3, rotation: Vec3) -> Vec3 {
+    if rotation.x.abs() < 0.001 && rotation.z.abs() < 0.001 {
+        return v;  // No rotation
+    }
+
+    let rad_x = rotation.x.to_radians();
+    let rad_z = rotation.z.to_radians();
+
+    let cos_x = rad_x.cos();
+    let sin_x = rad_x.sin();
+    let cos_z = rad_z.cos();
+    let sin_z = rad_z.sin();
+
+    // Apply X rotation (pitch) FIRST - tilts Y toward negative Z
+    let x1 = v.x;
+    let y1 = v.y * cos_x + v.z * sin_x;
+    let z1 = -v.y * sin_x + v.z * cos_x;
+
+    // Apply Z rotation (yaw) SECOND - turns Y toward positive X
+    let x2 = x1 * cos_z + y1 * sin_z;
+    let y2 = -x1 * sin_z + y1 * cos_z;
+    let z2 = z1;
+
+    Vec3::new(x2, y2, z2)
+}
+
+// ============================================================================
 // Resolved Texture
 // ============================================================================
 
@@ -991,8 +1025,10 @@ pub struct ModelerState {
     pub gizmo_hovered_axis: Option<Axis>,
     /// Which gizmo axis is being hovered in ortho views
     pub ortho_gizmo_hovered_axis: Option<Axis>,
-    /// True when gizmo is dragging bones instead of mesh vertices
+    /// True when gizmo is dragging bone bases (moves local_position)
     pub gizmo_bone_drag: bool,
+    /// True when gizmo is dragging bone tips (changes rotation/length)
+    pub gizmo_bone_tip_drag: bool,
 
     // Modal transform state (G/S/R keys) - now uses DragManager for actual transform
     pub modal_transform: ModalTransform,
@@ -1258,6 +1294,7 @@ impl ModelerState {
             gizmo_hovered_axis: None,
             ortho_gizmo_hovered_axis: None,
             gizmo_bone_drag: false,
+            gizmo_bone_tip_drag: false,
 
             modal_transform: ModalTransform::None,
 
@@ -2093,7 +2130,6 @@ impl ModelerState {
         let mut rotation = Vec3::ZERO;
 
         // Walk up the hierarchy, accumulating transforms
-        // TR-style: bones have fixed offsets, rotations accumulate
         let mut current = Some(bone_idx);
         let mut chain = Vec::new();
 
@@ -2106,9 +2142,9 @@ impl ModelerState {
         // Apply transforms from root to leaf
         for idx in chain.into_iter().rev() {
             let bone = &skeleton[idx];
-            // For now, simple additive transforms
-            // TODO: proper matrix-based transform when we add rotation
-            position = position + bone.local_position;
+            // Rotate the local_position by the accumulated rotation, then add
+            let rotated_pos = rotate_by_euler(bone.local_position, rotation);
+            position = position + rotated_pos;
             rotation = rotation + bone.local_rotation;
         }
 

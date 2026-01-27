@@ -881,9 +881,17 @@ fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut Mode
         // Click to add component
         if hovered && ctx.mouse.left_pressed {
             let new_component = create_default_component(type_name);
+            let is_skeleton = new_component.is_skeleton();
             state.asset.components.push(new_component);
             state.selected_component = Some(state.asset.components.len() - 1);
             state.add_component_menu_open = false;
+
+            // For Skeleton, also select the default Root bone
+            if is_skeleton {
+                state.selected_bone = Some(0);
+                state.selection = super::state::ModelerSelection::Bones(vec![0]);
+                state.set_status("Created skeleton with Root bone", 1.0);
+            }
         }
 
         item_y += item_height;
@@ -949,8 +957,18 @@ fn create_default_component(type_name: &str) -> AssetComponent {
         "SpawnPoint" => AssetComponent::SpawnPoint {
             is_player_start: false,
         },
-        "Skeleton" => AssetComponent::Skeleton {
-            bones: Vec::new(),
+        "Skeleton" => {
+            use super::state::RigBone;
+            use crate::rasterizer::Vec3;
+            AssetComponent::Skeleton {
+                bones: vec![RigBone {
+                    name: "Root".to_string(),
+                    parent: None,
+                    local_position: Vec3::ZERO,
+                    local_rotation: Vec3::ZERO,
+                    length: 200.0,
+                }],
+            }
         },
         _ => AssetComponent::Collision {
             shape: CollisionShapeDef::FromMesh,
@@ -1240,8 +1258,8 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
     let skeleton = state.skeleton();
     if skeleton.is_empty() {
         draw_text("No bones", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
-        draw_text("Press Tab to add a bone", x + 4.0, y + 26.0, FONT_SIZE_CONTENT, TEXT_DIM);
-        draw_text("Click bone to select", x + 4.0, y + 40.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        draw_text("Add Skeleton component", x + 4.0, y + 26.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        draw_text("to create root bone", x + 4.0, y + 40.0, FONT_SIZE_CONTENT, TEXT_DIM);
         return;
     }
 
@@ -1381,8 +1399,18 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
             (bone.name.clone(), parent_name, bone.length)
         };
 
-        // Bone name header
+        // Bone name header with Add Child button
         draw_text(&bone_name, x + 4.0, y + 12.0, FONT_SIZE_HEADER, ACCENT_COLOR);
+
+        // "+" button to add child bone
+        let add_btn_rect = Rect::new(x + width - 24.0, y, 20.0, 16.0);
+        let add_hovered = ctx.mouse.inside(&add_btn_rect);
+        let add_color = if add_hovered { ACCENT_COLOR } else { TEXT_DIM };
+        draw_icon_centered(icon_font, icon::PLUS, &add_btn_rect, 12.0, add_color);
+        if add_hovered && ctx.mouse.left_pressed {
+            // Create child bone attached to this bone
+            create_child_bone(state, selected_idx);
+        }
         y += line_height;
 
         // Parent info
@@ -1394,7 +1422,37 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
         y += line_height;
 
         // Hint
-        draw_text("Drag tip to adjust", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 150, 200, 255));
+        draw_text("Drag tip to rotate", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 150, 200, 255));
+    }
+}
+
+/// Create a child bone attached to the given parent bone
+fn create_child_bone(state: &mut ModelerState, parent_idx: usize) {
+    use super::state::RigBone;
+    use crate::rasterizer::Vec3;
+
+    const DEFAULT_LENGTH: f32 = 200.0;
+
+    // Get parent bone info
+    let (parent_length, parent_rotation) = match state.skeleton().get(parent_idx) {
+        Some(b) => (b.length, b.local_rotation),
+        None => return,
+    };
+
+    // Child is positioned at parent's tip in parent's local space
+    let new_bone = RigBone {
+        name: state.generate_bone_name(),
+        parent: Some(parent_idx),
+        local_position: Vec3::new(0.0, parent_length, 0.0),
+        local_rotation: parent_rotation, // Inherit parent's rotation
+        length: DEFAULT_LENGTH,
+    };
+
+    let bone_name = new_bone.name.clone();
+    if let Some(new_idx) = state.add_bone(new_bone) {
+        state.selected_bone = Some(new_idx);
+        state.selection = super::state::ModelerSelection::Bones(vec![new_idx]);
+        state.set_status(&format!("Created child bone: {}", bone_name), 1.0);
     }
 }
 
@@ -1448,10 +1506,11 @@ fn create_bone_at_default_position(state: &mut ModelerState) {
 
     let (local_position, parent, local_rotation) = if let Some(selected_idx) = parent_idx {
         // Create child bone at selected bone's tip, pointing same direction
-        let parent_rotation = state.skeleton().get(selected_idx)
-            .map(|b| b.local_rotation)
-            .unwrap_or(Vec3::ZERO);
-        (Vec3::ZERO, Some(selected_idx), parent_rotation)
+        // local_position is in parent's local space, so Y = parent.length puts us at the tip
+        let (parent_length, parent_rotation) = state.skeleton().get(selected_idx)
+            .map(|b| (b.length, b.local_rotation))
+            .unwrap_or((DEFAULT_LENGTH, Vec3::ZERO));
+        (Vec3::new(0.0, parent_length, 0.0), Some(selected_idx), parent_rotation)
     } else {
         // Create root bone at origin, pointing up (Y+)
         (Vec3::new(0.0, 0.0, 0.0), None, Vec3::ZERO)
