@@ -1576,10 +1576,27 @@ pub fn draw_viewport_3d(
                                     state.set_status("Drag up/down to adjust height", 1.0);
                                 } else {
                                     // Click without Shift: Start XZ-plane drag
+                                    let world_pos = obj.world_position(room);
+
+                                    // Calculate click offset so object doesn't jump to mouse
+                                    let mut click_offset = (0.0, 0.0);
+                                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                                        if let Some(click_pos) = pick_plane(
+                                            Vec3::new(0.0, world_pos.y, 0.0),
+                                            Vec3::new(0.0, 1.0, 0.0),
+                                            Vec3::ZERO,
+                                            (fb_x, fb_y),
+                                            &state.camera_3d,
+                                            fb.width, fb.height,
+                                        ) {
+                                            click_offset = (click_pos.x - world_pos.x, click_pos.z - world_pos.z);
+                                        }
+                                    }
+
                                     state.object_xz_drag_active = true;
                                     state.object_xz_drag_initial_sector = Some((obj.sector_x, obj.sector_z));
-                                    let world_pos = obj.world_position(room);
                                     state.object_xz_drag_start = Some((world_pos.x, world_pos.z));
+                                    state.object_xz_drag_click_offset = Some(click_offset);
                                     state.dragging_object = Some((obj_room_idx, obj_idx));
                                     state.viewport_drag_started = false;
                                     state.set_status("Drag to move object, Shift+drag for height", 1.0);
@@ -2064,10 +2081,27 @@ pub fn draw_viewport_3d(
                                 state.set_status("Drag up/down to adjust height", 1.0);
                             } else {
                                 // Click without Shift: Start XZ-plane drag
+                                let world_pos = obj.world_position(room);
+
+                                // Calculate click offset so object doesn't jump to mouse
+                                let mut click_offset = (0.0, 0.0);
+                                if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                                    if let Some(click_pos) = pick_plane(
+                                        Vec3::new(0.0, world_pos.y, 0.0),
+                                        Vec3::new(0.0, 1.0, 0.0),
+                                        Vec3::ZERO,
+                                        (fb_x, fb_y),
+                                        &state.camera_3d,
+                                        fb.width, fb.height,
+                                    ) {
+                                        click_offset = (click_pos.x - world_pos.x, click_pos.z - world_pos.z);
+                                    }
+                                }
+
                                 state.object_xz_drag_active = true;
                                 state.object_xz_drag_initial_sector = Some((obj.sector_x, obj.sector_z));
-                                let world_pos = obj.world_position(room);
                                 state.object_xz_drag_start = Some((world_pos.x, world_pos.z));
+                                state.object_xz_drag_click_offset = Some(click_offset);
                                 state.dragging_object = Some((obj_room_idx, obj_idx));
                                 state.viewport_drag_started = false;
                                 state.set_status("Drag to move object, Shift+drag for height", 1.0);
@@ -2252,9 +2286,14 @@ pub fn draw_viewport_3d(
                         }
 
                         // Calculate new sector position (snap to grid)
+                        // Apply click offset so object doesn't jump to mouse
+                        let click_offset = state.object_xz_drag_click_offset.unwrap_or((0.0, 0.0));
+                        let effective_x = world_pos.x - click_offset.0;
+                        let effective_z = world_pos.z - click_offset.1;
+
                         if let Some(room) = state.level.rooms.get(obj_room_idx) {
-                            let new_sector_x = ((world_pos.x - room.position.x) / SECTOR_SIZE).floor() as i32;
-                            let new_sector_z = ((world_pos.z - room.position.z) / SECTOR_SIZE).floor() as i32;
+                            let new_sector_x = ((effective_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                            let new_sector_z = ((effective_z - room.position.z) / SECTOR_SIZE).floor() as i32;
 
                             // Clamp to room bounds
                             let new_sector_x = new_sector_x.clamp(0, room.width as i32 - 1) as usize;
@@ -2889,6 +2928,7 @@ pub fn draw_viewport_3d(
             state.object_xz_drag_active = false;
             state.object_xz_drag_start = None;
             state.object_xz_drag_initial_sector = None;
+            state.object_xz_drag_click_offset = None;
             state.viewport_drag_started = false;
 
             // Finalize box select

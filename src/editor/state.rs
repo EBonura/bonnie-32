@@ -508,6 +508,7 @@ pub struct EditorState {
     pub object_xz_drag_active: bool,
     pub object_xz_drag_start: Option<(f32, f32)>,  // Initial world XZ position
     pub object_xz_drag_initial_sector: Option<(usize, usize)>, // Initial sector coords
+    pub object_xz_drag_click_offset: Option<(f32, f32)>, // Offset from click point to object center
 
     /// 3D viewport object placement preview (for PlaceObject tool)
     pub object_placement_preview: Option<(usize, usize, f32)>, // (sector_x, sector_z, floor_y)
@@ -788,6 +789,7 @@ impl EditorState {
             object_xz_drag_active: false,
             object_xz_drag_start: None,
             object_xz_drag_initial_sector: None,
+            object_xz_drag_click_offset: None,
             object_placement_preview: None,
             xz_drag_active: false,
             xz_drag_initial_positions: Vec::new(),
