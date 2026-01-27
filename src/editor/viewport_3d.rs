@@ -2254,99 +2254,147 @@ pub fn draw_viewport_3d(
             }
         }
 
-        // Continue dragging object on XZ plane (without Shift)
-        if ctx.mouse.left_down && state.object_xz_drag_active {
-            if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
-                if let Some((obj_room_idx, obj_idx)) = state.dragging_object {
-                    // Get the object's height for the ray-plane intersection
-                    let plane_y = state.level.rooms.get(obj_room_idx)
-                        .and_then(|room| room.objects.get(obj_idx))
-                        .map(|obj| {
-                            let room = &state.level.rooms[obj_room_idx];
-                            let floor_y = room.get_sector(obj.sector_x, obj.sector_z)
-                                .and_then(|s| s.floor.as_ref())
-                                .map(|f| f.avg_height())
-                                .unwrap_or(0.0);
-                            room.position.y + floor_y + obj.height
-                        })
-                        .unwrap_or(0.0);
+        // Continue dragging object (XZ plane without Shift, Y-axis with Shift)
+        // Shift can be pressed/released during drag to switch modes
+        if ctx.mouse.left_down && state.dragging_object.is_some() {
+            if let Some((obj_room_idx, obj_idx)) = state.dragging_object {
+                // Check if mode changed (XZ <-> Y)
+                let was_xz_mode = state.object_xz_drag_active;
+                let want_y_mode = shift_down;
 
-                    if let Some(world_pos) = pick_plane(
-                        Vec3::new(0.0, plane_y, 0.0),
-                        Vec3::new(0.0, 1.0, 0.0),
-                        Vec3::ZERO,
-                        (fb_x, fb_y),
-                        &state.camera_3d,
-                        fb.width, fb.height,
-                    ) {
-                        // Save undo on first movement
-                        if !state.viewport_drag_started {
-                            state.save_undo();
-                            state.viewport_drag_started = true;
+                // Handle mode transition: XZ -> Y
+                if was_xz_mode && want_y_mode {
+                    // Initialize Y drag state from current object position
+                    if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                        if let Some(obj) = room.objects.get(obj_idx) {
+                            let world_pos = obj.world_position(room);
+                            state.dragging_object_initial_y = world_pos.y;
+                            state.dragging_object_plane_y = world_pos.y;
                         }
-
-                        // Calculate new sector position (snap to grid)
-                        // Apply click offset so object doesn't jump to mouse
-                        let click_offset = state.object_xz_drag_click_offset.unwrap_or((0.0, 0.0));
-                        let effective_x = world_pos.x - click_offset.0;
-                        let effective_z = world_pos.z - click_offset.1;
-
+                    }
+                    state.object_xz_drag_active = false;
+                    state.set_status("Drag up/down to adjust height", 1.0);
+                }
+                // Handle mode transition: Y -> XZ
+                else if !was_xz_mode && !want_y_mode {
+                    // Initialize XZ drag state from current position
+                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
                         if let Some(room) = state.level.rooms.get(obj_room_idx) {
-                            let new_sector_x = ((effective_x - room.position.x) / SECTOR_SIZE).floor() as i32;
-                            let new_sector_z = ((effective_z - room.position.z) / SECTOR_SIZE).floor() as i32;
-
-                            // Clamp to room bounds
-                            let new_sector_x = new_sector_x.clamp(0, room.width as i32 - 1) as usize;
-                            let new_sector_z = new_sector_z.clamp(0, room.depth as i32 - 1) as usize;
-
-                            // Update object position
-                            if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
-                                obj.sector_x = new_sector_x;
-                                obj.sector_z = new_sector_z;
+                            if let Some(obj) = room.objects.get(obj_idx) {
+                                let world_pos = obj.world_position(room);
+                                // Recalculate click offset based on current mouse and object position
+                                if let Some(click_pos) = pick_plane(
+                                    Vec3::new(0.0, world_pos.y, 0.0),
+                                    Vec3::new(0.0, 1.0, 0.0),
+                                    Vec3::ZERO,
+                                    (fb_x, fb_y),
+                                    &state.camera_3d,
+                                    fb.width, fb.height,
+                                ) {
+                                    state.object_xz_drag_click_offset = Some((
+                                        click_pos.x - world_pos.x,
+                                        click_pos.z - world_pos.z,
+                                    ));
+                                }
+                                state.object_xz_drag_start = Some((world_pos.x, world_pos.z));
+                                state.object_xz_drag_initial_sector = Some((obj.sector_x, obj.sector_z));
                             }
                         }
                     }
+                    state.object_xz_drag_active = true;
+                    state.set_status("Drag to move object, Shift+drag for height", 1.0);
                 }
-            }
-        }
-        // Continue dragging object (Y-axis only, with Shift)
-        else if ctx.mouse.left_down && state.dragging_object.is_some() && !state.object_xz_drag_active {
-            use super::CLICK_HEIGHT;
 
-            if !state.viewport_drag_started {
-                state.save_undo();
-                state.viewport_drag_started = true;
-            }
+                // Now perform the drag based on current mode
+                if !shift_down {
+                    // XZ plane drag
+                    if let Some((fb_x, fb_y)) = screen_to_fb(ctx.mouse.x, ctx.mouse.y) {
+                        // Get the object's height for the ray-plane intersection
+                        let plane_y = state.level.rooms.get(obj_room_idx)
+                            .and_then(|room| room.objects.get(obj_idx))
+                            .map(|obj| {
+                                let room = &state.level.rooms[obj_room_idx];
+                                let floor_y = room.get_sector(obj.sector_x, obj.sector_z)
+                                    .and_then(|s| s.floor.as_ref())
+                                    .map(|f| f.avg_height())
+                                    .unwrap_or(0.0);
+                                room.position.y + floor_y + obj.height
+                            })
+                            .unwrap_or(0.0);
 
-            // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
-            let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
-            let y_sensitivity = 5.0;
-            let y_delta = mouse_delta_y * y_sensitivity;
+                        if let Some(world_pos) = pick_plane(
+                            Vec3::new(0.0, plane_y, 0.0),
+                            Vec3::new(0.0, 1.0, 0.0),
+                            Vec3::ZERO,
+                            (fb_x, fb_y),
+                            &state.camera_3d,
+                            fb.width, fb.height,
+                        ) {
+                            // Save undo on first movement
+                            if !state.viewport_drag_started {
+                                state.save_undo();
+                                state.viewport_drag_started = true;
+                            }
 
-            // Accumulate delta
-            state.dragging_object_plane_y += y_delta;
+                            // Calculate new sector position (snap to grid)
+                            // Apply click offset so object doesn't jump to mouse
+                            let click_offset = state.object_xz_drag_click_offset.unwrap_or((0.0, 0.0));
+                            let effective_x = world_pos.x - click_offset.0;
+                            let effective_z = world_pos.z - click_offset.1;
 
-            // Calculate snapped height
-            let delta_from_initial = state.dragging_object_plane_y - state.dragging_object_initial_y;
-            let new_y = state.dragging_object_initial_y + delta_from_initial;
-            let snapped_y = (new_y / CLICK_HEIGHT).round() * CLICK_HEIGHT;
+                            if let Some(room) = state.level.rooms.get(obj_room_idx) {
+                                let new_sector_x = ((effective_x - room.position.x) / SECTOR_SIZE).floor() as i32;
+                                let new_sector_z = ((effective_z - room.position.z) / SECTOR_SIZE).floor() as i32;
 
-            // Apply to object's height offset
-            if let Some((obj_room_idx, obj_idx)) = state.dragging_object {
-                // We need sector info first, then we can update the object
-                let sector_floor_y = state.level.rooms.get(obj_room_idx)
-                    .and_then(|room| {
-                        room.objects.get(obj_idx).and_then(|obj| {
-                            room.get_sector(obj.sector_x, obj.sector_z)
-                                .and_then(|s| s.floor.as_ref())
-                                .map(|f| f.avg_height())
-                                .or(Some(room.position.y))
-                        })
-                    });
+                                // Clamp to room bounds
+                                let new_sector_x = new_sector_x.clamp(0, room.width as i32 - 1) as usize;
+                                let new_sector_z = new_sector_z.clamp(0, room.depth as i32 - 1) as usize;
 
-                if let Some(floor_y) = sector_floor_y {
-                    if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
-                        obj.height = snapped_y - floor_y;
+                                // Update object position
+                                if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                                    obj.sector_x = new_sector_x;
+                                    obj.sector_z = new_sector_z;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Y-axis drag (with Shift)
+                    use super::CLICK_HEIGHT;
+
+                    if !state.viewport_drag_started {
+                        state.save_undo();
+                        state.viewport_drag_started = true;
+                    }
+
+                    // Calculate Y delta from mouse movement (inverted: mouse up = positive Y)
+                    let mouse_delta_y = state.viewport_last_mouse.1 - mouse_pos.1;
+                    let y_sensitivity = 5.0;
+                    let y_delta = mouse_delta_y * y_sensitivity;
+
+                    // Accumulate delta
+                    state.dragging_object_plane_y += y_delta;
+
+                    // Calculate snapped height
+                    let delta_from_initial = state.dragging_object_plane_y - state.dragging_object_initial_y;
+                    let new_y = state.dragging_object_initial_y + delta_from_initial;
+                    let snapped_y = (new_y / CLICK_HEIGHT).round() * CLICK_HEIGHT;
+
+                    // Apply to object's height offset
+                    let sector_floor_y = state.level.rooms.get(obj_room_idx)
+                        .and_then(|room| {
+                            room.objects.get(obj_idx).and_then(|obj| {
+                                room.get_sector(obj.sector_x, obj.sector_z)
+                                    .and_then(|s| s.floor.as_ref())
+                                    .map(|f| f.avg_height())
+                                    .or(Some(room.position.y))
+                            })
+                        });
+
+                    if let Some(floor_y) = sector_floor_y {
+                        if let Some(obj) = state.level.get_object_mut(obj_room_idx, obj_idx) {
+                            obj.height = snapped_y - floor_y;
+                        }
                     }
                 }
             }
