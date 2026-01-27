@@ -117,6 +117,18 @@ pub fn draw_modeler(
         }
     }
 
+    // Block clicks when add component menu is open
+    // (prevents clicks from bleeding through to component list underneath)
+    // But allow clicks on the add button itself so user can toggle the menu closed
+    if state.add_component_menu_open {
+        let on_add_button = state.add_component_btn_rect
+            .map(|r| ctx.mouse.inside(&r))
+            .unwrap_or(false);
+        if !on_add_button {
+            ctx.mouse.left_pressed = false;
+        }
+    }
+
     let screen = bounds;
 
     // Toolbar at top
@@ -173,9 +185,9 @@ pub fn draw_modeler(
     let action = if keyboard_action != ModelerAction::None { keyboard_action } else { action };
 
     // Draw popups and menus (on top of everything)
-    draw_add_component_popup(ctx, left_rect, state, icon_font);
-    // Restore original click state for snap menu (we blocked it earlier to protect viewport)
+    // Restore click state so menus can process their clicks
     ctx.mouse.left_pressed = original_left_pressed;
+    draw_add_component_popup(ctx, left_rect, state, icon_font);
     draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
 
