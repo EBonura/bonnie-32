@@ -966,6 +966,10 @@ pub struct ModelerState {
     pub bone_rename_active: bool,
     /// Bone rename text buffer
     pub bone_rename_buffer: String,
+    /// Bone picker popup open (for mesh-to-bone assignment)
+    pub bone_picker_open: bool,
+    /// Target mesh index for bone picker
+    pub bone_picker_target_mesh: Option<usize>,
 
     // Edit state (undo/redo stores context-specific snapshots)
     pub dirty: bool,
@@ -1271,6 +1275,8 @@ impl ModelerState {
             bone_creation: None,
             bone_rename_active: false,
             bone_rename_buffer: String::new(),
+            bone_picker_open: false,
+            bone_picker_target_mesh: None,
 
             dirty: false,
             status_message: None,

@@ -129,6 +129,11 @@ pub fn draw_modeler(
         }
     }
 
+    // Block clicks when bone picker is open
+    if state.bone_picker_open {
+        ctx.mouse.left_pressed = false;
+    }
+
     let screen = bounds;
 
     // Toolbar at top
@@ -188,6 +193,7 @@ pub fn draw_modeler(
     // Restore click state so menus can process their clicks
     ctx.mouse.left_pressed = original_left_pressed;
     draw_add_component_popup(ctx, left_rect, state, icon_font);
+    draw_bone_picker_popup(ctx, left_rect, state, icon_font);
     draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
 
@@ -1175,8 +1181,8 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
         y += 4.0;
 
         // Get object data (capture values to avoid borrow issues)
-        let (obj_name, double_sided, mirror) = match state.objects().get(selected_idx) {
-            Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror),
+        let (obj_name, double_sided, mirror, bone_index) = match state.objects().get(selected_idx) {
+            Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror, obj.bone_index),
             None => return,
         };
 
@@ -1255,6 +1261,41 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
                 }
                 btn_x += btn_w + 2.0;
             }
+        }
+
+        y += line_height;
+
+        // Bone Assignment (only if skeleton exists)
+        let skeleton = state.skeleton();
+        if !skeleton.is_empty() {
+            draw_text("Bone", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+            // Get current bone name
+            let bone_name = bone_index
+                .and_then(|idx| skeleton.get(idx))
+                .map(|b| b.name.as_str())
+                .unwrap_or("(None)");
+
+            // Draw clickable selector
+            let selector_rect = Rect::new(x + 50.0, y, width - 54.0, line_height);
+            let hovered = ctx.mouse.inside(&selector_rect);
+            let bg_color = if hovered {
+                Color::from_rgba(60, 60, 70, 255)
+            } else {
+                Color::from_rgba(50, 50, 55, 255)
+            };
+            draw_rectangle(selector_rect.x, selector_rect.y, selector_rect.w, selector_rect.h, bg_color);
+            draw_text(bone_name, selector_rect.x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+            // Draw dropdown arrow
+            draw_icon_centered(icon_font, icon::CHEVRON_DOWN, &Rect::new(selector_rect.right() - 16.0, y, 16.0, line_height), 10.0, TEXT_DIM);
+
+            if hovered && ctx.mouse.left_pressed {
+                state.bone_picker_open = true;
+                state.bone_picker_target_mesh = Some(selected_idx);
+            }
+
+            y += line_height;
         }
     }
 }
@@ -1510,6 +1551,25 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
 
         // Hint
         draw_text("Drag tip to rotate", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 150, 200, 255));
+        y += line_height;
+
+        // Show meshes attached to this bone
+        let attached_meshes: Vec<String> = state.objects()
+            .iter()
+            .filter(|obj| obj.bone_index == Some(selected_idx))
+            .map(|obj| obj.name.clone())
+            .collect();
+
+        if !attached_meshes.is_empty() {
+            y += 4.0;
+            draw_text("Attached:", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            y += line_height;
+
+            for name in attached_meshes {
+                draw_text(&format!("• {}", name), x + 8.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+                y += line_height;
+            }
+        }
     }
 }
 
@@ -7168,6 +7228,105 @@ fn draw_add_component_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut M
     let menu_y = add_btn_rect.bottom() + 2.0;
 
     draw_add_component_menu(ctx, menu_x, menu_y, state, icon_font, add_btn_rect);
+}
+
+/// Draw the bone picker popup for mesh-to-bone assignment
+fn draw_bone_picker_popup(ctx: &mut UiContext, left_rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    if !state.bone_picker_open {
+        return;
+    }
+
+    let target_mesh = match state.bone_picker_target_mesh {
+        Some(idx) => idx,
+        None => {
+            state.bone_picker_open = false;
+            return;
+        }
+    };
+
+    // Collect bone names first to avoid borrow issues
+    let bone_names: Vec<String> = state.skeleton().iter().map(|b| b.name.clone()).collect();
+    if bone_names.is_empty() {
+        state.bone_picker_open = false;
+        return;
+    }
+
+    // Menu dimensions
+    let item_height = 20.0;
+    let menu_width = 140.0;
+    // +1 for "(None)" option
+    let menu_height = (bone_names.len() + 1) as f32 * item_height + 4.0;
+
+    // Position menu in the left panel area
+    let menu_x = left_rect.x + 50.0;
+    let menu_y = left_rect.y + 100.0; // Approximate position near the selector
+
+    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
+
+    // Draw menu background
+    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
+    draw_rectangle_lines(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
+
+    // Close if clicking outside
+    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
+        state.bone_picker_open = false;
+        return;
+    }
+
+    let mut item_y = menu_y + 2.0;
+
+    // "(None)" option first
+    {
+        let item_rect = Rect::new(menu_x + 2.0, item_y, menu_width - 4.0, item_height);
+        let hovered = ctx.mouse.inside(&item_rect);
+
+        if hovered {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+        }
+
+        draw_text("(None)", item_rect.x + 4.0, item_y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+        if hovered && ctx.mouse.left_pressed {
+            state.push_undo("Unbind bone");
+            if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
+                obj.bone_index = None;
+            }
+            state.dirty = true;
+            state.bone_picker_open = false;
+            state.set_status("Unbound mesh from bone", 1.0);
+        }
+
+        item_y += item_height;
+    }
+
+    // List all bones
+    for (bone_idx, bone_name) in bone_names.iter().enumerate() {
+        let item_rect = Rect::new(menu_x + 2.0, item_y, menu_width - 4.0, item_height);
+        let hovered = ctx.mouse.inside(&item_rect);
+
+        if hovered {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+        }
+
+        // Icon
+        let icon_rect = Rect::new(item_rect.x + 2.0, item_y + 2.0, 16.0, 16.0);
+        draw_icon_centered(icon_font, icon::BONE, &icon_rect, 11.0, TEXT_COLOR);
+
+        // Label
+        draw_text(bone_name, item_rect.x + 22.0, item_y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+        if hovered && ctx.mouse.left_pressed {
+            state.push_undo("Assign bone");
+            if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
+                obj.bone_index = Some(bone_idx);
+            }
+            state.dirty = true;
+            state.bone_picker_open = false;
+            state.set_status(&format!("Bound mesh to '{}'", bone_name), 1.0);
+        }
+
+        item_y += item_height;
+    }
 }
 
 /// Draw and handle context menu
