@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::rasterizer::{Camera, Vec2, Vec3, Color, RasterSettings, BlendMode, Color15, Clut, ClutId};
 use crate::texture::{TextureLibrary, TextureEditorState, UserTexture};
 use crate::asset::Asset;
-use crate::ui::TextInputState;
+use crate::ui::{TextInputState, DropdownState};
 use super::mesh_editor::{
     EditableMesh, MeshPart, IndexedAtlas, EditFace, TextureRef, ClutPool,
     checkerboard_atlas, checkerboard_clut,
@@ -917,10 +917,8 @@ pub struct ModelerState {
     pub components_section_expanded: bool,      // Whether Components section is expanded
     pub properties_section_expanded: bool,      // Whether Properties section is expanded
     pub lights_section_expanded: bool,          // Whether Lights section is expanded
-    pub add_component_menu_open: bool,          // Whether the "Add Component" popup is open
-    pub add_component_btn_rect: Option<crate::ui::Rect>, // Position of add button for popup positioning
-    pub snap_menu_open: bool,                   // Whether the snap size dropdown is open
-    pub snap_btn_rect: Option<crate::ui::Rect>, // Position of snap button for dropdown positioning
+    /// Unified dropdown menu state (replaces individual menu_open/btn_rect fields)
+    pub dropdown: DropdownState,
     pub hidden_components: std::collections::HashSet<usize>, // Hidden component indices
     pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
 
@@ -966,9 +964,7 @@ pub struct ModelerState {
     pub bone_rename_active: bool,
     /// Bone rename text buffer
     pub bone_rename_buffer: String,
-    /// Bone picker popup open (for mesh-to-bone assignment)
-    pub bone_picker_open: bool,
-    /// Target mesh index for bone picker
+    /// Target mesh index for bone picker (dropdown id: "bone_picker")
     pub bone_picker_target_mesh: Option<usize>,
 
     // Edit state (undo/redo stores context-specific snapshots)
@@ -1236,10 +1232,7 @@ impl ModelerState {
             components_section_expanded: true,
             properties_section_expanded: true,
             lights_section_expanded: true,
-            add_component_menu_open: false,
-            add_component_btn_rect: None,
-            snap_menu_open: false,
-            snap_btn_rect: None,
+            dropdown: DropdownState::new(),
             hidden_components: std::collections::HashSet::new(),
             delete_component_dialog: None,
 
@@ -1275,7 +1268,6 @@ impl ModelerState {
             bone_creation: None,
             bone_rename_active: false,
             bone_rename_buffer: String::new(),
-            bone_picker_open: false,
             bone_picker_target_mesh: None,
 
             dirty: false,

@@ -2,7 +2,7 @@
 
 use macroquad::prelude::*;
 use crate::storage::Storage;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered, TextInputState, draw_text_input};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered, TextInputState, draw_text_input, dropdown_block_clicks, draw_dropdown_trigger, begin_dropdown, dropdown_item, dropdown_menu_rect};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
@@ -103,36 +103,11 @@ pub fn draw_modeler(
     icon_font: Option<&Font>,
     storage: &Storage,
 ) -> ModelerAction {
-    // Save original mouse state for menus that need it after we block viewport clicks
+    // Save original click state for menus (restored before processing dropdowns)
     let original_left_pressed = ctx.mouse.left_pressed;
 
-    // Block clicks if snap menu is open and mouse is in menu area
-    // (must happen before viewport processes clicks)
-    if state.snap_menu_open {
-        if let Some(btn_rect) = state.snap_btn_rect {
-            let menu_rect = Rect::new(btn_rect.x, btn_rect.bottom() + 2.0, 80.0, 7.0 * 22.0 + 8.0);
-            if ctx.mouse.inside(&menu_rect) {
-                ctx.mouse.left_pressed = false;
-            }
-        }
-    }
-
-    // Block clicks when add component menu is open
-    // (prevents clicks from bleeding through to component list underneath)
-    // But allow clicks on the add button itself so user can toggle the menu closed
-    if state.add_component_menu_open {
-        let on_add_button = state.add_component_btn_rect
-            .map(|r| ctx.mouse.inside(&r))
-            .unwrap_or(false);
-        if !on_add_button {
-            ctx.mouse.left_pressed = false;
-        }
-    }
-
-    // Block clicks when bone picker is open
-    if state.bone_picker_open {
-        ctx.mouse.left_pressed = false;
-    }
+    // Block clicks when any dropdown is open (unified dropdown system)
+    dropdown_block_clicks(ctx, &state.dropdown);
 
     let screen = bounds;
 
@@ -373,12 +348,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.snap_settings.enabled { "ON" } else { "OFF" };
         state.set_status(&format!("Grid Snap: {}", mode), 1.5);
     }
-    // Clickable grid size label
+    // Clickable grid size label (opens snap menu dropdown)
     let size_label = format!("{}", state.snap_settings.grid_size as i32);
     let (size_clicked, size_rect) = toolbar.clickable_label(ctx, &size_label, "Click to change snap grid size");
-    state.snap_btn_rect = Some(size_rect);
     if size_clicked {
-        state.snap_menu_open = !state.snap_menu_open;
+        state.dropdown.toggle("snap_menu", size_rect);
     }
     // Vertex linking toggle (move coincident vertices together)
     let link_icon = if state.vertex_linking { icon::LINK } else { icon::LINK_OFF };
@@ -711,13 +685,10 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
     let comp_count = state.asset.components.len();
     draw_text(&format!("{} component(s)", comp_count), x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
 
-    // Add button
+    // Add button (opens add component dropdown)
     let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
     if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add component") {
-        state.add_component_menu_open = !state.add_component_menu_open;
-        if state.add_component_menu_open {
-            state.add_component_btn_rect = Some(add_rect);
-        }
+        state.dropdown.toggle("add_component", add_rect);
     }
 
     // Remove button (disabled for Mesh, requires selection)
@@ -844,76 +815,6 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
         }
     }
 
-}
-
-/// Draw the "Add Component" popup menu
-fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut ModelerState, icon_font: Option<&Font>, add_btn_rect: Rect) {
-    // All component types that can be added
-    let component_types = [
-        ("Mesh", icon::BOX),
-        ("Skeleton", icon::BONE),
-        ("Collision", icon::SCAN),
-        ("Light", icon::SUN),
-        ("Trigger", icon::MAP_PIN),
-        ("Pickup", icon::PLUS),
-        ("Enemy", icon::PERSON_STANDING),
-        ("Checkpoint", icon::SKIP_BACK),
-        ("Door", icon::DOOR_CLOSED),
-        ("Audio", icon::MUSIC),
-        ("Particle", icon::BLEND),
-        ("CharacterController", icon::GAMEPAD_2),
-        ("SpawnPoint", icon::FOOTPRINTS),
-    ];
-
-    let item_height = 20.0;
-    let menu_width = 140.0;
-    let menu_height = component_types.len() as f32 * item_height + 4.0;
-
-    // Menu background
-    let menu_rect = Rect::new(x, y, menu_width, menu_height);
-    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
-    draw_rectangle_lines(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
-
-    // Close menu if clicking outside (but not on the add button that opened it)
-    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) && !ctx.mouse.inside(&add_btn_rect) {
-        state.add_component_menu_open = false;
-        return;
-    }
-
-    let mut item_y = y + 2.0;
-    for (type_name, icon_char) in component_types {
-        let item_rect = Rect::new(x + 2.0, item_y, menu_width - 4.0, item_height);
-        let hovered = ctx.mouse.inside(&item_rect);
-
-        if hovered {
-            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
-        }
-
-        // Icon
-        let icon_rect = Rect::new(item_rect.x + 2.0, item_y + 2.0, 16.0, 16.0);
-        draw_icon_centered(icon_font, icon_char, &icon_rect, 11.0, TEXT_COLOR);
-
-        // Label
-        draw_text(type_name, item_rect.x + 22.0, item_y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-
-        // Click to add component
-        if hovered && ctx.mouse.left_pressed {
-            let new_component = create_default_component(type_name);
-            let is_skeleton = new_component.is_skeleton();
-            state.asset.components.push(new_component);
-            state.selected_component = Some(state.asset.components.len() - 1);
-            state.add_component_menu_open = false;
-
-            // For Skeleton, also select the default Root bone
-            if is_skeleton {
-                state.selected_bone = Some(0);
-                state.selection = super::state::ModelerSelection::Bones(vec![0]);
-                state.set_status("Created skeleton with Root bone", 1.0);
-            }
-        }
-
-        item_y += item_height;
-    }
 }
 
 /// Create a default component of the given type
@@ -1276,23 +1177,11 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
                 .map(|b| b.name.as_str())
                 .unwrap_or("(None)");
 
-            // Draw clickable selector
+            // Draw dropdown trigger for bone selection
             let selector_rect = Rect::new(x + 50.0, y, width - 54.0, line_height);
-            let hovered = ctx.mouse.inside(&selector_rect);
-            let bg_color = if hovered {
-                Color::from_rgba(60, 60, 70, 255)
-            } else {
-                Color::from_rgba(50, 50, 55, 255)
-            };
-            draw_rectangle(selector_rect.x, selector_rect.y, selector_rect.w, selector_rect.h, bg_color);
-            draw_text(bone_name, selector_rect.x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-
-            // Draw dropdown arrow
-            draw_icon_centered(icon_font, icon::CHEVRON_DOWN, &Rect::new(selector_rect.right() - 16.0, y, 16.0, line_height), 10.0, TEXT_DIM);
-
-            if hovered && ctx.mouse.left_pressed {
-                state.bone_picker_open = true;
+            if draw_dropdown_trigger(ctx, selector_rect, bone_name, icon_font) {
                 state.bone_picker_target_mesh = Some(selected_idx);
+                state.dropdown.toggle("bone_picker", selector_rect);
             }
 
             y += line_height;
@@ -7214,32 +7103,69 @@ impl PrimitiveType {
 
 /// Draw the "Add Component" popup at the top level (above all panels)
 fn draw_add_component_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
-    if !state.add_component_menu_open {
+    let trigger_rect = match state.dropdown.trigger_rect {
+        Some(r) if state.dropdown.is_open("add_component") => r,
+        _ => return,
+    };
+
+    // All component types that can be added
+    let component_types = [
+        ("Mesh", icon::BOX),
+        ("Skeleton", icon::BONE),
+        ("Collision", icon::SCAN),
+        ("Light", icon::SUN),
+        ("Trigger", icon::MAP_PIN),
+        ("Pickup", icon::PLUS),
+        ("Enemy", icon::PERSON_STANDING),
+        ("Checkpoint", icon::SKIP_BACK),
+        ("Door", icon::DOOR_CLOSED),
+        ("Audio", icon::MUSIC),
+        ("Particle", icon::BLEND),
+        ("CharacterController", icon::GAMEPAD_2),
+        ("SpawnPoint", icon::FOOTPRINTS),
+    ];
+
+    let item_height = 20.0;
+    let menu_rect = dropdown_menu_rect(trigger_rect, component_types.len(), item_height, Some(140.0));
+
+    if !begin_dropdown(ctx, &mut state.dropdown, "add_component", menu_rect) {
         return;
     }
 
-    let add_btn_rect = match state.add_component_btn_rect {
-        Some(r) => r,
-        None => return,
-    };
+    let mut item_y = menu_rect.y + 2.0;
+    for (type_name, icon_char) in component_types {
+        let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
 
-    // Position menu below the add button
-    let menu_x = add_btn_rect.x;
-    let menu_y = add_btn_rect.bottom() + 2.0;
+        if dropdown_item(ctx, item_rect, type_name, Some((icon_char, icon_font)), false) {
+            let new_component = create_default_component(type_name);
+            let is_skeleton = new_component.is_skeleton();
+            state.asset.components.push(new_component);
+            state.selected_component = Some(state.asset.components.len() - 1);
+            state.dropdown.close();
 
-    draw_add_component_menu(ctx, menu_x, menu_y, state, icon_font, add_btn_rect);
+            // For Skeleton, also select the default Root bone
+            if is_skeleton {
+                state.selected_bone = Some(0);
+                state.selection = super::state::ModelerSelection::Bones(vec![0]);
+                state.set_status("Created skeleton with Root bone", 1.0);
+            }
+        }
+
+        item_y += item_height;
+    }
 }
 
 /// Draw the bone picker popup for mesh-to-bone assignment
-fn draw_bone_picker_popup(ctx: &mut UiContext, left_rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
-    if !state.bone_picker_open {
-        return;
-    }
+fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let trigger_rect = match state.dropdown.trigger_rect {
+        Some(r) if state.dropdown.is_open("bone_picker") => r,
+        _ => return,
+    };
 
     let target_mesh = match state.bone_picker_target_mesh {
         Some(idx) => idx,
         None => {
-            state.bone_picker_open = false;
+            state.dropdown.close();
             return;
         }
     };
@@ -7247,52 +7173,37 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, left_rect: Rect, state: &mut Mode
     // Collect bone names first to avoid borrow issues
     let bone_names: Vec<String> = state.skeleton().iter().map(|b| b.name.clone()).collect();
     if bone_names.is_empty() {
-        state.bone_picker_open = false;
+        state.dropdown.close();
         return;
     }
 
-    // Menu dimensions
-    let item_height = 20.0;
-    let menu_width = 140.0;
+    // Get current bone index for highlighting
+    let current_bone_index = state.objects()
+        .get(target_mesh)
+        .and_then(|obj| obj.bone_index);
+
     // +1 for "(None)" option
-    let menu_height = (bone_names.len() + 1) as f32 * item_height + 4.0;
+    let item_height = 20.0;
+    let menu_rect = dropdown_menu_rect(trigger_rect, bone_names.len() + 1, item_height, Some(140.0));
 
-    // Position menu in the left panel area
-    let menu_x = left_rect.x + 50.0;
-    let menu_y = left_rect.y + 100.0; // Approximate position near the selector
-
-    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
-
-    // Draw menu background
-    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
-    draw_rectangle_lines(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
-
-    // Close if clicking outside
-    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
-        state.bone_picker_open = false;
+    if !begin_dropdown(ctx, &mut state.dropdown, "bone_picker", menu_rect) {
         return;
     }
 
-    let mut item_y = menu_y + 2.0;
+    let mut item_y = menu_rect.y + 2.0;
 
     // "(None)" option first
     {
-        let item_rect = Rect::new(menu_x + 2.0, item_y, menu_width - 4.0, item_height);
-        let hovered = ctx.mouse.inside(&item_rect);
+        let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
+        let is_selected = current_bone_index.is_none();
 
-        if hovered {
-            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
-        }
-
-        draw_text("(None)", item_rect.x + 4.0, item_y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-
-        if hovered && ctx.mouse.left_pressed {
+        if dropdown_item(ctx, item_rect, "(None)", None, is_selected) {
             state.push_undo("Unbind bone");
             if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
                 obj.bone_index = None;
             }
             state.dirty = true;
-            state.bone_picker_open = false;
+            state.dropdown.close();
             state.set_status("Unbound mesh from bone", 1.0);
         }
 
@@ -7301,27 +7212,16 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, left_rect: Rect, state: &mut Mode
 
     // List all bones
     for (bone_idx, bone_name) in bone_names.iter().enumerate() {
-        let item_rect = Rect::new(menu_x + 2.0, item_y, menu_width - 4.0, item_height);
-        let hovered = ctx.mouse.inside(&item_rect);
+        let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
+        let is_selected = current_bone_index == Some(bone_idx);
 
-        if hovered {
-            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
-        }
-
-        // Icon
-        let icon_rect = Rect::new(item_rect.x + 2.0, item_y + 2.0, 16.0, 16.0);
-        draw_icon_centered(icon_font, icon::BONE, &icon_rect, 11.0, TEXT_COLOR);
-
-        // Label
-        draw_text(bone_name, item_rect.x + 22.0, item_y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-
-        if hovered && ctx.mouse.left_pressed {
+        if dropdown_item(ctx, item_rect, bone_name, Some((icon::BONE, icon_font)), is_selected) {
             state.push_undo("Assign bone");
             if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
                 obj.bone_index = Some(bone_idx);
             }
             state.dirty = true;
-            state.bone_picker_open = false;
+            state.dropdown.close();
             state.set_status(&format!("Bound mesh to '{}'", bone_name), 1.0);
         }
 
@@ -7722,87 +7622,39 @@ fn screen_to_world_position(state: &ModelerState, _screen_x: f32, _screen_y: f32
 
 /// Draw the snap grid size dropdown menu
 fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
-    if !state.snap_menu_open {
-        return;
-    }
-
-    let snap_btn_rect = match state.snap_btn_rect {
-        Some(r) => r,
-        None => return,
+    let trigger_rect = match state.dropdown.trigger_rect {
+        Some(r) if state.dropdown.is_open("snap_menu") => r,
+        _ => return,
     };
 
     // Preset snap sizes (in world units)
     const SNAP_SIZES: &[f32] = &[8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
 
-    // Menu dimensions
     let item_height = 22.0;
-    let menu_width = 80.0;
-    let menu_height = SNAP_SIZES.len() as f32 * item_height + 8.0;
-
-    // Position menu below the snap button
-    let menu_x = snap_btn_rect.x;
-    let menu_y = snap_btn_rect.bottom() + 2.0;
+    let menu_rect = dropdown_menu_rect(trigger_rect, SNAP_SIZES.len(), item_height, Some(80.0));
 
     // Keep menu on screen
-    let menu_x = menu_x.min(screen_width() - menu_width - 5.0);
-    let menu_y = menu_y.min(screen_height() - menu_height - 5.0);
+    let menu_x = menu_rect.x.min(screen_width() - menu_rect.w - 5.0);
+    let menu_y = menu_rect.y.min(screen_height() - menu_rect.h - 5.0);
+    let menu_rect = Rect::new(menu_x, menu_y, menu_rect.w, menu_rect.h);
 
-    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
+    if !begin_dropdown(ctx, &mut state.dropdown, "snap_menu", menu_rect) {
+        return;
+    }
 
-    // Draw menu background with border
-    draw_rectangle(menu_rect.x - 1.0, menu_rect.y - 1.0, menu_rect.w + 2.0, menu_rect.h + 2.0, Color::from_rgba(80, 80, 85, 255));
-    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
-
-    let mut y = menu_rect.y + 4.0;
-    let mut clicked_size: Option<f32> = None;
+    let mut y = menu_rect.y + 2.0;
 
     for &size in SNAP_SIZES {
-        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_rect.w - 4.0, item_height);
         let is_current = (state.snap_settings.grid_size - size).abs() < 0.1;
-
-        // Hover highlight
-        if ctx.mouse.inside(&item_rect) {
-            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 60, 70, 255));
-            if ctx.mouse.left_pressed {
-                clicked_size = Some(size);
-            }
-        }
-
-        // Current selection indicator
-        let text_color = if is_current { ACCENT_COLOR } else { TEXT_COLOR };
         let label = format!("{}", size as i32);
-        draw_text(&label, item_rect.x + 8.0, item_rect.y + 15.0, 13.0, text_color);
 
-        // Checkmark for current size
-        if is_current {
-            draw_text("✓", item_rect.right() - 18.0, item_rect.y + 15.0, 13.0, ACCENT_COLOR);
+        if dropdown_item(ctx, item_rect, &label, None, is_current) {
+            state.snap_settings.grid_size = size;
+            state.dropdown.close();
+            state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
         }
 
         y += item_height;
-    }
-
-    // Handle click on menu item
-    if let Some(size) = clicked_size {
-        state.snap_settings.grid_size = size;
-        state.snap_menu_open = false;
-        state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
-        // Consume the click so it doesn't propagate to viewport
-        ctx.mouse.left_pressed = false;
-    }
-
-    // Consume clicks inside menu area (don't propagate to viewport)
-    if ctx.mouse.left_pressed && ctx.mouse.inside(&menu_rect) {
-        ctx.mouse.left_pressed = false;
-    }
-
-    // Close menu on click outside (but not on the button that opened it)
-    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
-        // Don't close if clicking the snap button (it handles its own toggle)
-        let clicking_button = state.snap_btn_rect.map_or(false, |r| ctx.mouse.inside(&r));
-        if !clicking_button {
-            state.snap_menu_open = false;
-            // Consume the click so it doesn't propagate to viewport
-            ctx.mouse.left_pressed = false;
-        }
     }
 }
