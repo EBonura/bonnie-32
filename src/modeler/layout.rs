@@ -5252,14 +5252,10 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         // This prevents snapping - delta starts at 0 and accumulates from here.
                         let drag_start_mouse = (ctx.mouse.x, ctx.mouse.y);
 
-                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes in Global mode)
-                        let bone_rotation = if state.transform_orientation == super::state::TransformOrientation::Global {
-                            state.selected_object()
-                                .and_then(|obj| obj.bone_index)
-                                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
-                        } else {
-                            None
-                        };
+                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes)
+                        let bone_rotation = state.selected_object()
+                            .and_then(|obj| obj.bone_index)
+                            .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
 
                         // Get axis direction from orientation basis if axis is constrained
                         let axis_direction = state.ortho_drag_axis.map(|axis| {

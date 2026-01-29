@@ -544,14 +544,10 @@ fn handle_drag_move(
                             state.ortho_drag_zoom = state.get_ortho_camera(viewport_id).zoom;
                         }
 
-                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes in Global mode)
-                        let bone_rotation = if state.transform_orientation == super::state::TransformOrientation::Global {
-                            state.selected_object()
-                                .and_then(|obj| obj.bone_index)
-                                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
-                        } else {
-                            None
-                        };
+                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes)
+                        let bone_rotation = state.selected_object()
+                            .and_then(|obj| obj.bone_index)
+                            .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
 
                         // Start free move drag (axis = None for screen-space movement)
                         state.drag_manager.start_move_with_bone(
@@ -983,14 +979,10 @@ pub fn draw_modeler_viewport_ext(
             let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
             let center = sum * (1.0 / initial_positions.len() as f32);
 
-            // Get bone rotation for world-to-local delta transformation (for bone-bound meshes in Global mode)
-            let bone_rotation = if state.transform_orientation == super::state::TransformOrientation::Global {
-                state.selected_object()
-                    .and_then(|obj| obj.bone_index)
-                    .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
-            } else {
-                None
-            };
+            // Get bone rotation for world-to-local delta transformation (for bone-bound meshes)
+            let bone_rotation = state.selected_object()
+                .and_then(|obj| obj.bone_index)
+                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
 
             // Save undo state before starting transform
             state.push_undo(mode.label());
@@ -3628,8 +3620,12 @@ fn handle_move_gizmo(
         let ui_axis = to_ui_axis(axis);
         state.tool_box.tools.move_tool.start_drag(Some(ui_axis));
 
-        // Get bone rotation for world-to-local delta transformation (vertex moves on bone-bound meshes in Global mode)
-        let bone_rotation = if !is_bone_drag && !is_bone_tip_drag && state.transform_orientation == super::state::TransformOrientation::Global {
+        // Get bone rotation for world-to-local delta transformation (vertex moves on bone-bound meshes)
+        // This is needed in BOTH Global and Local modes because:
+        // - Vertices are stored in bone-local space
+        // - Drag delta is computed in world space (along world or local axes)
+        // - Delta must be inverse-transformed to bone-local before applying
+        let bone_rotation = if !is_bone_drag && !is_bone_tip_drag {
             state.selected_object()
                 .and_then(|obj| obj.bone_index)
                 .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
