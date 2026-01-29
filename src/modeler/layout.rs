@@ -250,6 +250,18 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         }
     }
 
+    // Transform orientation toggle (Global/Local)
+    {
+        use super::state::TransformOrientation;
+        let is_local = state.transform_orientation == TransformOrientation::Local;
+        let icon_char = if is_local { icon::FOCUS } else { icon::GLOBE };
+        let tooltip = if is_local { "Orientation: Local (click for Global)" } else { "Orientation: Global (click for Local)" };
+        if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_local) {
+            state.transform_orientation = state.transform_orientation.toggle();
+            state.set_status(&format!("Transform orientation: {}", state.transform_orientation.label()), 1.5);
+        }
+    }
+
     toolbar.separator();
 
     // PS1 effect toggles
@@ -4933,17 +4945,54 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             if cx >= rect.x && cx <= rect.right() && cy >= rect.y && cy <= rect.bottom() {
                 let gizmo_length = 40.0; // Fixed screen-space length
 
-                // Determine which world axes map to screen X and Y for this ortho view
-                let (x_color, y_color) = match viewport_id {
-                    ViewportId::Top => (RED, BLUE),    // X right, Z up
-                    ViewportId::Front => (RED, GREEN), // X right, Y up
-                    ViewportId::Side => (BLUE, GREEN), // Z right, Y up
-                    ViewportId::Perspective => (WHITE, WHITE),
+                // Get orientation basis (local or global axes)
+                let (local_x, local_y, local_z) = state.compute_orientation_basis();
+
+                // Project local axes to screen coordinates for this ortho view
+                // Returns (screen_dx, screen_dy) for each axis - how much the axis moves on screen
+                let (axis1_screen, axis2_screen, axis1_world, axis2_world) = match viewport_id {
+                    ViewportId::Top => {
+                        // Top view: X-Z plane, screen X = world X, screen Y = -world Z
+                        ((local_x.x, -local_x.z), (local_z.x, -local_z.z), super::state::Axis::X, super::state::Axis::Z)
+                    }
+                    ViewportId::Front => {
+                        // Front view: X-Y plane, screen X = world X, screen Y = -world Y
+                        ((local_x.x, -local_x.y), (local_y.x, -local_y.y), super::state::Axis::X, super::state::Axis::Y)
+                    }
+                    ViewportId::Side => {
+                        // Side view: Z-Y plane, screen X = world Z, screen Y = -world Y
+                        ((local_z.z, -local_z.y), (local_y.z, -local_y.y), super::state::Axis::Z, super::state::Axis::Y)
+                    }
+                    ViewportId::Perspective => ((1.0, 0.0), (0.0, -1.0), super::state::Axis::X, super::state::Axis::Y),
                 };
 
-                // Screen directions: right is +X, up is -Y (screen coords)
-                let x_end = (cx + gizmo_length, cy);
-                let y_end = (cx, cy - gizmo_length);
+                // Normalize and scale to gizmo length
+                let normalize_and_scale = |dx: f32, dy: f32| -> (f32, f32) {
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len > 0.001 {
+                        (dx / len * gizmo_length, dy / len * gizmo_length)
+                    } else {
+                        (gizmo_length, 0.0) // Fallback
+                    }
+                };
+
+                let (dx1, dy1) = normalize_and_scale(axis1_screen.0, axis1_screen.1);
+                let (dx2, dy2) = normalize_and_scale(axis2_screen.0, axis2_screen.1);
+
+                let x_end = (cx + dx1, cy + dy1);
+                let y_end = (cx + dx2, cy + dy2);
+
+                // Axis colors based on which world axis they represent
+                let axis1_color = match axis1_world {
+                    super::state::Axis::X => RED,
+                    super::state::Axis::Y => GREEN,
+                    super::state::Axis::Z => BLUE,
+                };
+                let axis2_color = match axis2_world {
+                    super::state::Axis::X => RED,
+                    super::state::Axis::Y => GREEN,
+                    super::state::Axis::Z => BLUE,
+                };
 
                 // Check which axis is hovered
                 let dist_to_x = point_to_line_dist(ctx.mouse.x, ctx.mouse.y, cx, cy, x_end.0, x_end.1);
@@ -4955,26 +5004,16 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
                 // Update gizmo hover state for ortho views
                 if x_hovered {
-                    state.ortho_gizmo_hovered_axis = Some(match viewport_id {
-                        ViewportId::Top => super::state::Axis::X,
-                        ViewportId::Front => super::state::Axis::X,
-                        ViewportId::Side => super::state::Axis::Z,
-                        _ => super::state::Axis::X,
-                    });
+                    state.ortho_gizmo_hovered_axis = Some(axis1_world);
                 } else if y_hovered {
-                    state.ortho_gizmo_hovered_axis = Some(match viewport_id {
-                        ViewportId::Top => super::state::Axis::Z,
-                        ViewportId::Front => super::state::Axis::Y,
-                        ViewportId::Side => super::state::Axis::Y,
-                        _ => super::state::Axis::Y,
-                    });
+                    state.ortho_gizmo_hovered_axis = Some(axis2_world);
                 } else if inside_viewport {
                     state.ortho_gizmo_hovered_axis = None;
                 }
 
                 // Draw colors (brighten on hover)
-                let x_draw_color = if x_hovered { YELLOW } else { Color::new(x_color.r * 0.8, x_color.g * 0.8, x_color.b * 0.8, 1.0) };
-                let y_draw_color = if y_hovered { YELLOW } else { Color::new(y_color.r * 0.8, y_color.g * 0.8, y_color.b * 0.8, 1.0) };
+                let x_draw_color = if x_hovered { YELLOW } else { Color::new(axis1_color.r * 0.8, axis1_color.g * 0.8, axis1_color.b * 0.8, 1.0) };
+                let y_draw_color = if y_hovered { YELLOW } else { Color::new(axis2_color.r * 0.8, axis2_color.g * 0.8, axis2_color.b * 0.8, 1.0) };
 
                 // Draw gizmo lines
                 let line_thickness = 2.0;
@@ -4984,20 +5023,25 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 // Draw arrowheads for move gizmo
                 if matches!(state.tool_box.active_transform_tool(), Some(ModelerToolId::Move)) {
                     let arrow_size = 8.0;
-                    // X arrow (pointing right)
-                    draw_triangle(
-                        Vec2::new(x_end.0, x_end.1),
-                        Vec2::new(x_end.0 - arrow_size, x_end.1 - arrow_size * 0.5),
-                        Vec2::new(x_end.0 - arrow_size, x_end.1 + arrow_size * 0.5),
-                        x_draw_color,
-                    );
-                    // Y arrow (pointing up)
-                    draw_triangle(
-                        Vec2::new(y_end.0, y_end.1),
-                        Vec2::new(y_end.0 - arrow_size * 0.5, y_end.1 + arrow_size),
-                        Vec2::new(y_end.0 + arrow_size * 0.5, y_end.1 + arrow_size),
-                        y_draw_color,
-                    );
+                    // Calculate arrow direction based on line direction
+                    let draw_arrow = |end: (f32, f32), dx: f32, dy: f32, color: Color| {
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len > 0.001 {
+                            let nx = dx / len;
+                            let ny = dy / len;
+                            // Perpendicular
+                            let px = -ny;
+                            let py = nx;
+                            draw_triangle(
+                                Vec2::new(end.0, end.1),
+                                Vec2::new(end.0 - nx * arrow_size + px * arrow_size * 0.5, end.1 - ny * arrow_size + py * arrow_size * 0.5),
+                                Vec2::new(end.0 - nx * arrow_size - px * arrow_size * 0.5, end.1 - ny * arrow_size - py * arrow_size * 0.5),
+                                color,
+                            );
+                        }
+                    };
+                    draw_arrow(x_end, dx1, dy1, x_draw_color);
+                    draw_arrow(y_end, dx2, dy2, y_draw_color);
                 }
 
                 // Draw small squares for scale gizmo
@@ -5208,15 +5252,36 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         // This prevents snapping - delta starts at 0 and accumulates from here.
                         let drag_start_mouse = (ctx.mouse.x, ctx.mouse.y);
 
+                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes in Global mode)
+                        let bone_rotation = if state.transform_orientation == super::state::TransformOrientation::Global {
+                            state.selected_object()
+                                .and_then(|obj| obj.bone_index)
+                                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
+                        } else {
+                            None
+                        };
+
+                        // Get axis direction from orientation basis if axis is constrained
+                        let axis_direction = state.ortho_drag_axis.map(|axis| {
+                            let (basis_x, basis_y, basis_z) = state.compute_orientation_basis();
+                            match axis {
+                                crate::ui::drag_tracker::Axis::X => basis_x,
+                                crate::ui::drag_tracker::Axis::Y => basis_y,
+                                crate::ui::drag_tracker::Axis::Z => basis_z,
+                            }
+                        });
+
                         // Start move drag (constrained if gizmo axis was clicked)
-                        state.drag_manager.start_move(
+                        state.drag_manager.start_move_with_bone(
                             center,
                             drag_start_mouse,
                             state.ortho_drag_axis, // Use captured axis constraint
+                            axis_direction,
                             indices,
                             initial_positions,
                             state.snap_settings.enabled,
                             state.snap_settings.grid_size,
+                            bone_rotation,
                         );
                     }
 
@@ -6264,6 +6329,10 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         } else {
             state.set_status("Switch to Face mode (3) to extrude", 1.0);
         }
+    }
+    if actions.triggered("transform.toggle_orientation", &ctx) {
+        state.transform_orientation = state.transform_orientation.toggle();
+        state.set_status(&format!("Transform orientation: {}", state.transform_orientation.label()), 1.5);
     }
 
     // ========================================================================

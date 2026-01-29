@@ -536,6 +536,40 @@ impl ModelerSelection {
     }
 }
 
+/// Transform orientation mode (like Blender's orientation modes)
+/// Determines how the gizmo is oriented and how movements are applied
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransformOrientation {
+    /// Gizmo aligned to world XYZ axes
+    #[default]
+    Global,
+    /// Gizmo aligned to selection normal (face normal, bone direction, etc.)
+    Local,
+}
+
+impl TransformOrientation {
+    pub fn toggle(&self) -> Self {
+        match self {
+            TransformOrientation::Global => TransformOrientation::Local,
+            TransformOrientation::Local => TransformOrientation::Global,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            TransformOrientation::Global => "Global",
+            TransformOrientation::Local => "Local",
+        }
+    }
+
+    pub fn icon(&self) -> char {
+        match self {
+            TransformOrientation::Global => '🌐',  // Globe for global
+            TransformOrientation::Local => '📐',   // Triangle ruler for local
+        }
+    }
+}
+
 /// Modal transform mode (Blender-style G/S/R)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalTransform {
@@ -900,6 +934,8 @@ pub struct ModelerState {
     // View/edit state
     pub select_mode: SelectMode,
     pub selection: ModelerSelection,
+    /// Transform gizmo orientation (Global = world axes, Local = selection normal)
+    pub transform_orientation: TransformOrientation,
 
     // Camera (free or orbit mode for perspective view)
     pub camera: Camera,
@@ -1217,6 +1253,7 @@ impl ModelerState {
 
             select_mode: SelectMode::Face, // PicoCAD: face-centric
             selection: ModelerSelection::None,
+            transform_orientation: TransformOrientation::Global,
 
             camera,
             camera_mode: CameraMode::Free, // Default to free camera (like world editor)
@@ -2141,8 +2178,175 @@ impl ModelerState {
                 let sum: Vec3 = positions.iter().fold(Vec3::ZERO, |acc, &p| acc + p);
                 Some(sum * (1.0 / positions.len() as f32))
             }
-            _ => self.selection.compute_center(self.mesh()),
+            _ => {
+                // Mesh element selection (vertices, edges, faces)
+                // Apply bone transform if the selected object is bound to a bone
+                let mesh = self.mesh();
+                let indices = self.selection.get_affected_vertex_indices(mesh);
+                if indices.is_empty() {
+                    return None;
+                }
+
+                // Get bone transform if selected object is bound
+                let bone_transform = self.selected_object()
+                    .and_then(|obj| obj.bone_index)
+                    .map(|bone_idx| self.get_bone_world_transform(bone_idx));
+
+                let sum: Vec3 = indices.iter()
+                    .filter_map(|&idx| mesh.vertices.get(idx))
+                    .map(|v| {
+                        if let Some((bone_pos, bone_rot)) = bone_transform {
+                            rotate_by_euler(v.pos, bone_rot) + bone_pos
+                        } else {
+                            v.pos
+                        }
+                    })
+                    .fold(Vec3::ZERO, |acc, pos| acc + pos);
+                Some(sum * (1.0 / indices.len() as f32))
+            }
         }
+    }
+
+    /// Compute the local orientation basis for transform gizmo
+    /// Returns (x_axis, y_axis, z_axis) - three orthonormal vectors
+    ///
+    /// In Local mode:
+    /// - For face selections: Uses face normal (transformed by bone if applicable)
+    /// - For bone-bound meshes (non-face selection): Uses bone rotation
+    /// - Otherwise: Falls back to world axes
+    ///
+    /// In Global mode: Always returns world axes
+    pub fn compute_orientation_basis(&self) -> (Vec3, Vec3, Vec3) {
+        let world_x = Vec3::new(1.0, 0.0, 0.0);
+        let world_y = Vec3::new(0.0, 1.0, 0.0);
+        let world_z = Vec3::new(0.0, 0.0, 1.0);
+
+        if self.transform_orientation == TransformOrientation::Global {
+            return (world_x, world_y, world_z);
+        }
+
+        // Local mode - try to compute local basis
+
+        // For bone selections, use the selected bone's rotation
+        if let ModelerSelection::Bones(bones) = &self.selection {
+            if let Some(&bone_idx) = bones.first() {
+                let (_, bone_rot) = self.get_bone_world_transform(bone_idx);
+                let local_x = rotate_by_euler(world_x, bone_rot);
+                let local_y = rotate_by_euler(world_y, bone_rot);
+                let local_z = rotate_by_euler(world_z, bone_rot);
+                return (local_x, local_y, local_z);
+            }
+        }
+
+        // For bone tip selections, use the bone's rotation
+        if let ModelerSelection::BoneTips(tips) = &self.selection {
+            if let Some(&bone_idx) = tips.first() {
+                let (_, bone_rot) = self.get_bone_world_transform(bone_idx);
+                let local_x = rotate_by_euler(world_x, bone_rot);
+                let local_y = rotate_by_euler(world_y, bone_rot);
+                let local_z = rotate_by_euler(world_z, bone_rot);
+                return (local_x, local_y, local_z);
+            }
+        }
+
+        // Get bone transform if mesh is bone-bound
+        let bone_transform = self.selected_object()
+            .and_then(|obj| obj.bone_index)
+            .map(|bone_idx| self.get_bone_world_transform(bone_idx));
+
+        // For face selections, use face normal (priority over bone rotation)
+        if let ModelerSelection::Faces(faces) = &self.selection {
+            if !faces.is_empty() {
+                let mesh = self.mesh();
+                // Compute average face normal (in local/bone space)
+                let mut avg_normal = Vec3::ZERO;
+                let mut count = 0;
+                for &face_idx in faces {
+                    if let Some(normal) = mesh.face_normal(face_idx) {
+                        avg_normal = avg_normal + normal;
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    avg_normal = avg_normal * (1.0 / count as f32);
+                    let len = (avg_normal.x * avg_normal.x + avg_normal.y * avg_normal.y + avg_normal.z * avg_normal.z).sqrt();
+                    if len > 0.001 {
+                        avg_normal = avg_normal * (1.0 / len);
+
+                        // If bone-bound, transform normal to world space
+                        if let Some((_, bone_rot)) = bone_transform {
+                            avg_normal = rotate_by_euler(avg_normal, bone_rot);
+                        }
+
+                        // Build orthonormal basis with normal as Z
+                        // Find a vector not parallel to normal for cross product
+                        let up = if avg_normal.y.abs() < 0.9 {
+                            Vec3::new(0.0, 1.0, 0.0)
+                        } else {
+                            Vec3::new(1.0, 0.0, 0.0)
+                        };
+
+                        // X = up × normal (normalized)
+                        let local_x = Vec3::new(
+                            up.y * avg_normal.z - up.z * avg_normal.y,
+                            up.z * avg_normal.x - up.x * avg_normal.z,
+                            up.x * avg_normal.y - up.y * avg_normal.x,
+                        );
+                        let len_x = (local_x.x * local_x.x + local_x.y * local_x.y + local_x.z * local_x.z).sqrt();
+                        let local_x = if len_x > 0.001 {
+                            local_x * (1.0 / len_x)
+                        } else {
+                            world_x
+                        };
+
+                        // Z = X × normal (for right-handed coordinate system where Y = normal)
+                        let local_z = Vec3::new(
+                            local_x.y * avg_normal.z - local_x.z * avg_normal.y,
+                            local_x.z * avg_normal.x - local_x.x * avg_normal.z,
+                            local_x.x * avg_normal.y - local_x.y * avg_normal.x,
+                        );
+
+                        // Y = face normal (up from face), Z = tangent
+                        return (local_x, avg_normal, local_z);
+                    }
+                }
+            }
+        }
+
+        // For bone-bound meshes (non-face selection), use bone rotation
+        if let Some((_, bone_rot)) = bone_transform {
+            let local_x = rotate_by_euler(world_x, bone_rot);
+            let local_y = rotate_by_euler(world_y, bone_rot);
+            let local_z = rotate_by_euler(world_z, bone_rot);
+            return (local_x, local_y, local_z);
+        }
+
+        // Fallback to world axes
+        (world_x, world_y, world_z)
+    }
+
+    /// Transform a world-space delta to local space for the current orientation
+    /// Used when applying transforms in Global mode on bone-bound meshes
+    pub fn world_to_local_delta(&self, delta: Vec3) -> Vec3 {
+        // If bone-bound, we need to inverse-rotate the delta
+        if let Some(obj) = self.selected_object() {
+            if let Some(bone_idx) = obj.bone_index {
+                let (_, bone_rot) = self.get_bone_world_transform(bone_idx);
+                return inverse_rotate_by_euler(delta, bone_rot);
+            }
+        }
+        delta
+    }
+
+    /// Transform a local-space delta to world space
+    pub fn local_to_world_delta(&self, delta: Vec3) -> Vec3 {
+        if let Some(obj) = self.selected_object() {
+            if let Some(bone_idx) = obj.bone_index {
+                let (_, bone_rot) = self.get_bone_world_transform(bone_idx);
+                return rotate_by_euler(delta, bone_rot);
+            }
+        }
+        delta
     }
 
     /// Add a bone to the skeleton and return its index

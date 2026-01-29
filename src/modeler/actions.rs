@@ -228,6 +228,15 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .enabled_when(|ctx| ctx.has_face_selection),
     );
 
+    registry.register(
+        Action::new("transform.toggle_orientation")
+            .label("Toggle Orientation")
+            .shortcut(Shortcut::key(KeyCode::Comma))
+            .icon(icon::GLOBE)
+            .status_tip("Toggle between Global and Local orientation (,)")
+            .category("Transform"),
+    );
+
     // ========================================================================
     // View Actions
     // ========================================================================

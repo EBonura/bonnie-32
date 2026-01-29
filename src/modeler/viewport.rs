@@ -544,15 +544,26 @@ fn handle_drag_move(
                             state.ortho_drag_zoom = state.get_ortho_camera(viewport_id).zoom;
                         }
 
+                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes in Global mode)
+                        let bone_rotation = if state.transform_orientation == super::state::TransformOrientation::Global {
+                            state.selected_object()
+                                .and_then(|obj| obj.bone_index)
+                                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
+                        } else {
+                            None
+                        };
+
                         // Start free move drag (axis = None for screen-space movement)
-                        state.drag_manager.start_move(
+                        state.drag_manager.start_move_with_bone(
                             center,
                             drag_start_mouse,
                             None,      // No axis = free movement
+                            None,      // No axis direction for free movement
                             indices,
                             initial_positions,
                             state.snap_settings.enabled,
                             state.snap_settings.grid_size,
+                            bone_rotation,
                         );
 
                         state.set_status("Drag to move (hold Shift for fine)", 3.0);
@@ -972,6 +983,15 @@ pub fn draw_modeler_viewport_ext(
             let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
             let center = sum * (1.0 / initial_positions.len() as f32);
 
+            // Get bone rotation for world-to-local delta transformation (for bone-bound meshes in Global mode)
+            let bone_rotation = if state.transform_orientation == super::state::TransformOrientation::Global {
+                state.selected_object()
+                    .and_then(|obj| obj.bone_index)
+                    .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
+            } else {
+                None
+            };
+
             // Save undo state before starting transform
             state.push_undo(mode.label());
 
@@ -979,14 +999,16 @@ pub fn draw_modeler_viewport_ext(
             match mode {
                 ModalTransform::Grab => {
                     state.tool_box.tools.move_tool.start_drag(None);
-                    state.drag_manager.start_move(
+                    state.drag_manager.start_move_with_bone(
                         center,
                         mouse_pos,
                         None, // No axis constraint initially
+                        None, // No axis direction for free movement
                         indices,
                         initial_positions,
                         state.snap_settings.enabled,
                         state.snap_settings.grid_size,
+                        bone_rotation,
                     );
                 }
                 ModalTransform::Scale => {
@@ -3087,7 +3109,8 @@ fn setup_gizmo(
         }
         sum * (1.0 / count as f32)
     } else {
-        state.selection.compute_center(state.mesh())?
+        // Use compute_selection_center which handles bone transforms for bound meshes
+        state.compute_selection_center()?
     };
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
@@ -3097,10 +3120,12 @@ fn setup_gizmo(
         None => return None,
     };
 
+    // Get orientation basis (respects Global/Local mode and bone transforms)
+    let (basis_x, basis_y, basis_z) = state.compute_orientation_basis();
     let axis_dirs = [
-        (Axis::X, Vec3::new(1.0, 0.0, 0.0), RED),
-        (Axis::Y, Vec3::new(0.0, 1.0, 0.0), GREEN),
-        (Axis::Z, Vec3::new(0.0, 0.0, 1.0), BLUE),
+        (Axis::X, basis_x, RED),
+        (Axis::Y, basis_y, GREEN),
+        (Axis::Z, basis_z, BLUE),
     ];
 
     // In ortho mode, use a fixed world-space size scaled by zoom
@@ -3601,16 +3626,35 @@ fn handle_move_gizmo(
         let ui_axis = to_ui_axis(axis);
         state.tool_box.tools.move_tool.start_drag(Some(ui_axis));
 
+        // Get bone rotation for world-to-local delta transformation (vertex moves on bone-bound meshes in Global mode)
+        let bone_rotation = if !is_bone_drag && !is_bone_tip_drag && state.transform_orientation == super::state::TransformOrientation::Global {
+            state.selected_object()
+                .and_then(|obj| obj.bone_index)
+                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
+        } else {
+            None
+        };
+
+        // Get axis direction from orientation basis (for Local mode)
+        let (basis_x, basis_y, basis_z) = state.compute_orientation_basis();
+        let axis_direction = match axis {
+            Axis::X => basis_x,
+            Axis::Y => basis_y,
+            Axis::Z => basis_z,
+        };
+
         if is_ortho {
             // For ortho, use screen coordinates (we calculate delta from screen, not ray casting)
-            state.drag_manager.start_move(
+            state.drag_manager.start_move_with_bone(
                 setup.center,
                 mouse_pos,  // Use screen coordinates directly
                 Some(ui_axis),
+                Some(axis_direction),
                 indices,
                 initial_positions,
                 state.snap_settings.enabled,
                 state.snap_settings.grid_size,
+                bone_rotation,
             );
         } else {
             // For perspective, use framebuffer coordinates for ray casting
@@ -3618,10 +3662,11 @@ fn handle_move_gizmo(
                 (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
                 (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
             );
-            state.drag_manager.start_move_3d(
+            state.drag_manager.start_move_3d_with_bone(
                 setup.center,
                 fb_mouse,
                 Some(ui_axis),
+                Some(axis_direction),
                 indices,
                 initial_positions,
                 state.snap_settings.enabled,
@@ -3629,6 +3674,7 @@ fn handle_move_gizmo(
                 &state.camera,
                 fb_width,
                 fb_height,
+                bone_rotation,
             );
         }
     }

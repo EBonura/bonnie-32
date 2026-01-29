@@ -91,6 +91,7 @@ impl DragManager {
     }
 
     /// Start a move drag operation
+    /// `bone_rotation` - If Some, deltas will be transformed from world to bone-local space
     pub fn start_move(
         &mut self,
         initial_position: Vec3,
@@ -101,7 +102,25 @@ impl DragManager {
         snap_enabled: bool,
         grid_size: f32,
     ) {
-        let tracker = MoveTracker::new(axis, vertex_indices, initial_positions);
+        self.start_move_with_bone(initial_position, initial_mouse, axis, None, vertex_indices, initial_positions, snap_enabled, grid_size, None);
+    }
+
+    /// Start a move drag operation with bone rotation and optional axis direction for Local mode
+    pub fn start_move_with_bone(
+        &mut self,
+        initial_position: Vec3,
+        initial_mouse: (f32, f32),
+        axis: Option<Axis>,
+        axis_direction: Option<Vec3>,
+        vertex_indices: Vec<usize>,
+        initial_positions: Vec<(usize, Vec3)>,
+        snap_enabled: bool,
+        grid_size: f32,
+        bone_rotation: Option<Vec3>,
+    ) {
+        let tracker = MoveTracker::new(axis, vertex_indices, initial_positions)
+            .with_bone_rotation(bone_rotation)
+            .with_axis_direction(axis_direction);
         let config = tracker.create_config(initial_position, snap_enabled, grid_size);
 
         self.active = ActiveDrag::Move(tracker);
@@ -124,15 +143,38 @@ impl DragManager {
         viewport_width: usize,
         viewport_height: usize,
     ) {
-        let tracker = MoveTracker::new(axis, vertex_indices, initial_positions);
+        self.start_move_3d_with_bone(initial_position, initial_mouse, axis, None, vertex_indices, initial_positions, snap_enabled, grid_size, camera, viewport_width, viewport_height, None);
+    }
+
+    /// Start a move drag operation with camera info, bone rotation, and optional axis direction
+    pub fn start_move_3d_with_bone(
+        &mut self,
+        initial_position: Vec3,
+        initial_mouse: (f32, f32),
+        axis: Option<Axis>,
+        axis_direction: Option<Vec3>,
+        vertex_indices: Vec<usize>,
+        initial_positions: Vec<(usize, Vec3)>,
+        snap_enabled: bool,
+        grid_size: f32,
+        camera: &Camera,
+        viewport_width: usize,
+        viewport_height: usize,
+        bone_rotation: Option<Vec3>,
+    ) {
+        let tracker = MoveTracker::new(axis, vertex_indices, initial_positions)
+            .with_bone_rotation(bone_rotation)
+            .with_axis_direction(axis_direction);
         let config = tracker.create_config(initial_position, snap_enabled, grid_size);
 
         // Calculate handle_offset so the first pick returns initial_position
         // This prevents snapping when clicking on a gizmo axis
+        // Use custom axis direction if provided (Local mode), otherwise world axis
         let handle_offset = if let Some(axis) = axis {
+            let dir = axis_direction.unwrap_or_else(|| axis.unit_vector());
             // Cast ray from mouse click and find where it intersects the axis line
             let ray = screen_to_ray(initial_mouse.0, initial_mouse.1, viewport_width, viewport_height, camera);
-            if let Some((closest, _dist)) = ray_line_closest_point(&ray, initial_position, axis.unit_vector()) {
+            if let Some((closest, _dist)) = ray_line_closest_point(&ray, initial_position, dir) {
                 // offset = initial_position - closest, so closest + offset = initial_position
                 initial_position - closest
             } else {
