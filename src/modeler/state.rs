@@ -2259,18 +2259,11 @@ impl ModelerState {
             if !faces.is_empty() {
                 let mesh = self.mesh();
                 let mut avg_normal = Vec3::ZERO;
-                let mut first_edge = Vec3::ZERO; // First edge direction for tangent
+                let mut first_edge = Vec3::ZERO;
                 let mut count = 0;
-                let mut debug_verts = String::new();
 
                 for &face_idx in faces {
                     if let Some(face) = mesh.faces.get(face_idx) {
-                        // Collect vertex positions for debug
-                        let verts: Vec<String> = face.vertices.iter()
-                            .filter_map(|&vi| mesh.vertices.get(vi).map(|v| format!("({:.1},{:.1},{:.1})", v.pos.x, v.pos.y, v.pos.z)))
-                            .collect();
-                        debug_verts = format!("f{}[{}]", face_idx, verts.join(","));
-
                         // Get first edge direction (for tangent calculation)
                         if face.vertices.len() >= 2 && first_edge.len() < 0.001 {
                             if let (Some(v0), Some(v1)) = (
@@ -2291,21 +2284,12 @@ impl ModelerState {
                     let len = (avg_normal.x * avg_normal.x + avg_normal.y * avg_normal.y + avg_normal.z * avg_normal.z).sqrt();
                     if len > 0.001 {
                         avg_normal = avg_normal * (1.0 / len);
-                        let n_local = format!("n_local({:.2},{:.2},{:.2})", avg_normal.x, avg_normal.y, avg_normal.z);
-                        let edge_local = format!("edge_local({:.2},{:.2},{:.2})", first_edge.x, first_edge.y, first_edge.z);
 
                         // If bone-bound, transform normal AND edge to world space
-                        let bone_str = if let Some((bp, br)) = bone_transform {
+                        if let Some((_, br)) = bone_transform {
                             avg_normal = rotate_by_euler(avg_normal, br);
                             first_edge = rotate_by_euler(first_edge, br);
-                            format!("bone(p:{:.1},{:.1},{:.1} r:{:.1},{:.1},{:.1})", bp.x, bp.y, bp.z, br.x, br.y, br.z)
-                        } else {
-                            "NO_BONE".to_string()
-                        };
-
-                        eprintln!("[FACE] {} {} n_world({:.2},{:.2},{:.2}) {} edge_world({:.2},{:.2},{:.2})",
-                            bone_str, n_local, avg_normal.x, avg_normal.y, avg_normal.z, debug_verts,
-                            first_edge.x, first_edge.y, first_edge.z);
+                        }
 
                         // Normalize the edge to get X axis (tangent along first edge)
                         let edge_len = first_edge.len();
