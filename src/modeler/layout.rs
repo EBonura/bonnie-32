@@ -6,7 +6,7 @@ use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, dra
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
-use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode, Axis, MirrorSettings};
+use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode, Axis, MirrorSettings, rotate_by_euler, inverse_rotate_by_euler};
 use crate::asset::AssetComponent;
 use crate::texture::{
     UserTexture, TextureSize, generate_texture_id,
@@ -7192,14 +7192,27 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut Mod
 
     let mut item_y = menu_rect.y + 2.0;
 
-    // "(None)" option first
+    // "(None)" option first - unbind from bone
     {
         let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
         let is_selected = current_bone_index.is_none();
 
         if dropdown_item(ctx, item_rect, "(None)", None, is_selected) {
+            // Get current bone transform BEFORE mutating, so we can convert vertices back to world space
+            let old_bone_transform = current_bone_index.map(|idx| state.get_bone_world_transform(idx));
+
             state.push_undo("Unbind bone");
             if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
+                // Convert vertices from bone-local space back to world space
+                if let Some((bone_pos, bone_rot)) = old_bone_transform {
+                    for v in &mut obj.mesh.vertices {
+                        // Rotate by bone rotation, then translate by bone position
+                        let rotated = rotate_by_euler(v.pos, bone_rot);
+                        v.pos = rotated + bone_pos;
+                        // Rotate normal too (no translation for normals)
+                        v.normal = rotate_by_euler(v.normal, bone_rot);
+                    }
+                }
                 obj.bone_index = None;
             }
             state.dirty = true;
@@ -7216,8 +7229,37 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut Mod
         let is_selected = current_bone_index == Some(bone_idx);
 
         if dropdown_item(ctx, item_rect, bone_name, Some((icon::BONE, icon_font)), is_selected) {
+            // Get transforms BEFORE mutating state
+            // Old bone transform (if previously bound to a different bone)
+            let old_bone_transform = current_bone_index
+                .filter(|&old_idx| old_idx != bone_idx)
+                .map(|idx| state.get_bone_world_transform(idx));
+            // New bone transform
+            let (new_bone_pos, new_bone_rot) = state.get_bone_world_transform(bone_idx);
+
             state.push_undo("Assign bone");
             if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
+                // If already bound to a different bone, first convert to world space
+                if let Some((old_pos, old_rot)) = old_bone_transform {
+                    for v in &mut obj.mesh.vertices {
+                        let rotated = rotate_by_euler(v.pos, old_rot);
+                        v.pos = rotated + old_pos;
+                        v.normal = rotate_by_euler(v.normal, old_rot);
+                    }
+                }
+
+                // Now convert from world space to new bone-local space
+                // Only if not already bound (or was bound to different bone, which we just converted above)
+                if current_bone_index != Some(bone_idx) {
+                    for v in &mut obj.mesh.vertices {
+                        // Translate to bone origin, then inverse-rotate
+                        let relative = v.pos - new_bone_pos;
+                        v.pos = inverse_rotate_by_euler(relative, new_bone_rot);
+                        // Inverse-rotate normal (no translation for normals)
+                        v.normal = inverse_rotate_by_euler(v.normal, new_bone_rot);
+                    }
+                }
+
                 obj.bone_index = Some(bone_idx);
             }
             state.dirty = true;

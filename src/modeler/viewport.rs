@@ -11,7 +11,7 @@ use crate::rasterizer::{
     OrthoProjection, Camera, draw_3d_line_clipped,
     screen_to_ray, ray_circle_angle,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
+use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId, rotate_by_euler};
 use super::drag::{DragUpdateResult, ActiveDrag};
 use super::tools::ModelerToolId;
 use super::skeleton::{draw_skeleton, ray_bone_intersect};
@@ -1103,6 +1103,10 @@ pub fn draw_modeler_viewport_ext(
     let mut all_textures_15: Vec<crate::rasterizer::Texture15> = Vec::new();
     let mut all_blend_modes: Vec<crate::rasterizer::BlendMode> = Vec::new();
 
+    // Cache transformed vertex positions for the selected object (for selection overlays)
+    // This avoids redundant bone transforms - compute once, use everywhere
+    let mut selected_object_world_vertices: Option<Vec<Vec3>> = None;
+
     // Track if any object needs backface culling disabled
     let mut any_double_sided = false;
 
@@ -1140,24 +1144,69 @@ pub fn draw_modeler_viewport_ext(
         // Track vertex offset for this object
         let vertex_offset = all_vertices.len();
 
-        // Add vertices from this object
+        // Check if this mesh is bound to a bone - vertices are stored in bone-local space
+        let bone_transform = obj.bone_index.map(|bone_idx| state.get_bone_world_transform(bone_idx));
+
+        // For selected object, we'll cache world positions for selection overlays
+        let is_selected = state.selected_object == Some(obj_idx);
+        let mut world_positions: Vec<Vec3> = if is_selected {
+            Vec::with_capacity(mesh.vertices.len())
+        } else {
+            Vec::new()
+        };
+
+        // Add vertices from this object (with bone transform if bound)
         for v in &mesh.vertices {
+            let (pos, normal) = if let Some((bone_pos, bone_rot)) = bone_transform {
+                // Vertices are in bone-local space, transform to world space
+                let rotated = rotate_by_euler(v.pos, bone_rot);
+                let world_pos = rotated + bone_pos;
+                // Rotate normal (no translation)
+                let world_normal = rotate_by_euler(v.normal, bone_rot);
+                (world_pos, world_normal)
+            } else {
+                (v.pos, v.normal)
+            };
+
+            // Cache world position for selected object
+            if is_selected {
+                world_positions.push(pos);
+            }
+
             all_vertices.push(RasterVertex {
-                pos: v.pos,
-                normal: v.normal,
+                pos,
+                normal,
                 uv: v.uv,
                 color: RasterColor::new(base_color, base_color, base_color),
                 bone_index: None,
             });
         }
 
+        // Store cached positions for selected object
+        if is_selected {
+            selected_object_world_vertices = Some(world_positions);
+        }
+
         // Add mirrored vertices if mirror mode is enabled for selected object
         let mirror_vertex_offset = if state.current_mirror_settings().enabled && state.selected_object == Some(obj_idx) {
             let offset = all_vertices.len();
             for v in &mesh.vertices {
+                // First mirror in local space, then apply bone transform
+                let mirrored_pos = state.current_mirror_settings().mirror_position(v.pos);
+                let mirrored_normal = state.current_mirror_settings().mirror_normal(v.normal);
+
+                let (pos, normal) = if let Some((bone_pos, bone_rot)) = bone_transform {
+                    let rotated = rotate_by_euler(mirrored_pos, bone_rot);
+                    let world_pos = rotated + bone_pos;
+                    let world_normal = rotate_by_euler(mirrored_normal, bone_rot);
+                    (world_pos, world_normal)
+                } else {
+                    (mirrored_pos, mirrored_normal)
+                };
+
                 all_vertices.push(RasterVertex {
-                    pos: state.current_mirror_settings().mirror_position(v.pos),
-                    normal: state.current_mirror_settings().mirror_normal(v.normal),
+                    pos,
+                    normal,
                     uv: v.uv,
                     color: RasterColor::new(
                         (base_color as f32 * 0.85) as u8,
@@ -1260,8 +1309,8 @@ pub fn draw_modeler_viewport_ext(
     // Draw corner brackets around selected object's bounding box
     draw_selected_object_brackets(state, fb);
 
-    // Draw selection overlays
-    draw_mesh_selection_overlays(state, fb);
+    // Draw selection overlays (using cached world positions to avoid redundant bone transforms)
+    draw_mesh_selection_overlays(state, fb, selected_object_world_vertices.as_deref());
 
     // Draw component gizmos (lights, etc.)
     draw_component_gizmos(state, fb, &state.hidden_components);
@@ -1279,7 +1328,7 @@ pub fn draw_modeler_viewport_ext(
             let fb_y0 = (min_y - draw_y) / draw_h * fb_height as f32;
             let fb_x1 = (max_x - draw_x) / draw_w * fb_width as f32;
             let fb_y1 = (max_y - draw_y) / draw_h * fb_height as f32;
-            draw_box_selection_preview(state, fb, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id);
+            draw_box_selection_preview(state, fb, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id, selected_object_world_vertices.as_deref());
         }
     }
 
@@ -1605,15 +1654,24 @@ fn draw_selected_object_brackets(state: &ModelerState, fb: &mut Framebuffer) {
         return;
     }
 
+    // Get bone transform if bound (vertices are in bone-local space)
+    let bone_transform = obj.bone_index.map(|bone_idx| state.get_bone_world_transform(bone_idx));
+
     let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
     let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
     for v in &mesh.vertices {
-        min.x = min.x.min(v.pos.x);
-        min.y = min.y.min(v.pos.y);
-        min.z = min.z.min(v.pos.z);
-        max.x = max.x.max(v.pos.x);
-        max.y = max.y.max(v.pos.y);
-        max.z = max.z.max(v.pos.z);
+        // Transform vertex to world space
+        let pos = if let Some((bone_pos, bone_rot)) = bone_transform {
+            rotate_by_euler(v.pos, bone_rot) + bone_pos
+        } else {
+            v.pos
+        };
+        min.x = min.x.min(pos.x);
+        min.y = min.y.min(pos.y);
+        min.z = min.z.min(pos.z);
+        max.x = max.x.max(pos.x);
+        max.y = max.y.max(pos.y);
+        max.z = max.z.max(pos.z);
     }
 
     // Add margin to avoid z-fighting with mesh geometry
@@ -1682,7 +1740,10 @@ fn draw_selected_object_brackets(state: &ModelerState, fb: &mut Framebuffer) {
 }
 
 /// Draw selection and hover overlays for mesh editing (like world editor)
-fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
+///
+/// `world_vertices` - Pre-computed world-space vertex positions (with bone transforms applied).
+/// If None, falls back to reading positions directly from mesh (for non-bone-bound meshes).
+fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer, world_vertices: Option<&[Vec3]>) {
     let mesh = state.mesh();
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
@@ -1690,6 +1751,15 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
     let select_color = RasterColor::new(100, 180, 255);  // Blue for selection
     let edge_overlay_color = RasterColor::new(80, 80, 80);  // Gray for edge overlay
+
+    // Helper to get vertex world position - uses cached positions if available
+    let get_pos = |idx: usize| -> Option<Vec3> {
+        if let Some(positions) = world_vertices {
+            positions.get(idx).copied()
+        } else {
+            mesh.vertices.get(idx).map(|v| v.pos)
+        }
+    };
 
     // =========================================================================
     // Draw all edges with semi-transparent overlay (always visible in solid mode)
@@ -1699,10 +1769,10 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if !state.raster_settings.wireframe_overlay {
         for face in &mesh.faces {
             for (v0_idx, v1_idx) in face.edges() {
-                if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                if let (Some(p0), Some(p1)) = (get_pos(v0_idx), get_pos(v1_idx)) {
                     if let (Some((sx0, sy0, z0)), Some((sx1, sy1, z1))) = (
-                        world_to_screen_with_ortho_depth(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                        world_to_screen_with_ortho_depth(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                        world_to_screen_with_ortho_depth(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                        world_to_screen_with_ortho_depth(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                     ) {
                         fb.draw_line_3d_alpha(sx0 as i32, sy0 as i32, z0, sx1 as i32, sy1 as i32, z1, edge_overlay_color, 191);
                     }
@@ -1712,18 +1782,20 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
 
         // Draw vertex dots with semi-transparent overlay
         let vertex_overlay_color = RasterColor::new(40, 40, 50);
-        for vert in &mesh.vertices {
-            if let Some((sx, sy)) = world_to_screen_with_ortho(
-                vert.pos,
-                camera.position,
-                camera.basis_x,
-                camera.basis_y,
-                camera.basis_z,
-                fb.width,
-                fb.height,
-                ortho,
-            ) {
-                fb.draw_circle_alpha(sx as i32, sy as i32, 3, vertex_overlay_color, 140);
+        for idx in 0..mesh.vertices.len() {
+            if let Some(pos) = get_pos(idx) {
+                if let Some((sx, sy)) = world_to_screen_with_ortho(
+                    pos,
+                    camera.position,
+                    camera.basis_x,
+                    camera.basis_y,
+                    camera.basis_z,
+                    fb.width,
+                    fb.height,
+                    ortho,
+                ) {
+                    fb.draw_circle_alpha(sx as i32, sy as i32, 3, vertex_overlay_color, 140);
+                }
             }
         }
     }
@@ -1732,9 +1804,9 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // Draw hovered vertex (if any) - orange dot
     // =========================================================================
     if let Some(hovered_idx) = state.hovered_vertex {
-        if let Some(vert) = mesh.vertices.get(hovered_idx) {
+        if let Some(pos) = get_pos(hovered_idx) {
             if let Some((sx, sy)) = world_to_screen_with_ortho(
-                vert.pos,
+                pos,
                 camera.position,
                 camera.basis_x,
                 camera.basis_y,
@@ -1752,10 +1824,10 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // Draw hovered edge (if any) - orange line
     // =========================================================================
     if let Some((v0_idx, v1_idx)) = state.hovered_edge {
-        if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+        if let (Some(p0), Some(p1)) = (get_pos(v0_idx), get_pos(v1_idx)) {
             if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
             ) {
                 fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, hover_color);
                 // Draw thicker by drawing adjacent lines
@@ -1772,8 +1844,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
         if let Some(face) = mesh.faces.get(hovered_idx) {
             // Draw face edges (all edges of n-gon)
             let screen_positions: Vec<_> = face.vertices.iter()
-                .filter_map(|&vi| mesh.vertices.get(vi))
-                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                .filter_map(|&vi| get_pos(vi))
+                .filter_map(|p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                 .collect();
 
             let n = screen_positions.len();
@@ -1798,9 +1870,9 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // =========================================================================
     if let ModelerSelection::Vertices(selected_verts) = &state.selection {
         for &idx in selected_verts {
-            if let Some(vert) = mesh.vertices.get(idx) {
+            if let Some(pos) = get_pos(idx) {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1820,10 +1892,10 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // =========================================================================
     if let ModelerSelection::Edges(selected_edges) = &state.selection {
         for (v0_idx, v1_idx) in selected_edges {
-            if let (Some(v0), Some(v1)) = (mesh.vertices.get(*v0_idx), mesh.vertices.get(*v1_idx)) {
+            if let (Some(p0), Some(p1)) = (get_pos(*v0_idx), get_pos(*v1_idx)) {
                 if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                 ) {
                     fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, select_color);
                     fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
@@ -1843,7 +1915,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
             if let Some(face) = mesh.faces.get(face_idx) {
                 // Collect world positions and screen positions
                 let world_positions: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| v.pos))
+                    .filter_map(|&vi| get_pos(vi))
                     .collect();
                 let screen_positions: Vec<_> = world_positions.iter()
                     .filter_map(|&p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
@@ -1887,6 +1959,7 @@ fn draw_box_selection_preview(
     fb_x1: f32,
     fb_y1: f32,
     viewport_id: ViewportId,
+    world_vertices: Option<&[Vec3]>,
 ) {
     let is_ortho = matches!(viewport_id, ViewportId::Top | ViewportId::Front | ViewportId::Side);
 
@@ -1918,23 +1991,34 @@ fn draw_box_selection_preview(
     let mesh = state.mesh();
     let preview_color = RasterColor::new(255, 220, 100); // Yellow/gold for preview
 
+    // Helper to get vertex world position - uses cached positions if available
+    let get_pos = |idx: usize| -> Option<Vec3> {
+        if let Some(positions) = world_vertices {
+            positions.get(idx).copied()
+        } else {
+            mesh.vertices.get(idx).map(|v| v.pos)
+        }
+    };
+
     match state.select_mode {
         SelectMode::Vertex => {
             // Highlight vertices inside the box
-            for vert in &mesh.vertices {
-                if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
-                    camera.position,
-                    camera.basis_x,
-                    camera.basis_y,
-                    camera.basis_z,
-                    fb.width,
-                    fb.height,
-                    ortho,
-                ) {
-                    if sx >= fb_x0 && sx <= fb_x1 && sy >= fb_y0 && sy <= fb_y1 {
-                        // Draw highlighted vertex
-                        fb.draw_circle(sx as i32, sy as i32, 6, preview_color);
+            for idx in 0..mesh.vertices.len() {
+                if let Some(pos) = get_pos(idx) {
+                    if let Some((sx, sy)) = world_to_screen_with_ortho(
+                        pos,
+                        camera.position,
+                        camera.basis_x,
+                        camera.basis_y,
+                        camera.basis_z,
+                        fb.width,
+                        fb.height,
+                        ortho,
+                    ) {
+                        if sx >= fb_x0 && sx <= fb_x1 && sy >= fb_y0 && sy <= fb_y1 {
+                            // Draw highlighted vertex
+                            fb.draw_circle(sx as i32, sy as i32, 6, preview_color);
+                        }
                     }
                 }
             }
@@ -1949,10 +2033,10 @@ fn draw_box_selection_preview(
                         continue;
                     }
 
-                    if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                    if let (Some(p0), Some(p1)) = (get_pos(v0_idx), get_pos(v1_idx)) {
                         if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                            world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                            world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                         ) {
                             // Check if midpoint is inside box
                             let mid_x = (sx0 + sx1) / 2.0;
@@ -1970,11 +2054,11 @@ fn draw_box_selection_preview(
         SelectMode::Face => {
             // Highlight faces where center is inside the box
             for face in &mesh.faces {
-                let verts: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi))
+                let world_positions: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| get_pos(vi))
                     .collect();
-                if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                if !world_positions.is_empty() {
+                    let center = world_positions.iter().copied().fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / world_positions.len() as f32);
                     if let Some((cx, cy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
@@ -1987,8 +2071,8 @@ fn draw_box_selection_preview(
                     ) {
                         if cx >= fb_x0 && cx <= fb_x1 && cy >= fb_y0 && cy <= fb_y1 {
                             // Draw face outline in preview color
-                            let screen_positions: Vec<_> = verts.iter()
-                                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                            let screen_positions: Vec<_> = world_positions.iter()
+                                .filter_map(|&p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                                 .collect();
                             let n = screen_positions.len();
                             if n >= 3 {
@@ -2149,6 +2233,22 @@ fn find_hovered_element(
     let mesh = state.mesh();
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
+    // Get bone transform for selected object (vertices are in bone-local space)
+    let bone_transform = state.selected_object()
+        .and_then(|obj| obj.bone_index)
+        .map(|bone_idx| state.get_bone_world_transform(bone_idx));
+
+    // Helper to transform vertex position to world space
+    let get_world_pos = |idx: usize| -> Option<Vec3> {
+        mesh.vertices.get(idx).map(|v| {
+            if let Some((bone_pos, bone_rot)) = bone_transform {
+                rotate_by_euler(v.pos, bone_rot) + bone_pos
+            } else {
+                v.pos
+            }
+        })
+    };
+
     // Check if current object is double-sided (allow selecting backfaces)
     let double_sided = state.selected_object()
         .map(|obj| obj.double_sided)
@@ -2168,16 +2268,16 @@ fn find_hovered_element(
     for face in &mesh.faces {
         // For backface culling, use first 3 vertices (like face_normal calculation)
         if face.vertices.len() >= 3 {
-            if let (Some(v0), Some(v1), Some(v2)) = (
-                mesh.vertices.get(face.vertices[0]),
-                mesh.vertices.get(face.vertices[1]),
-                mesh.vertices.get(face.vertices[2]),
+            if let (Some(p0), Some(p1), Some(p2)) = (
+                get_world_pos(face.vertices[0]),
+                get_world_pos(face.vertices[1]),
+                get_world_pos(face.vertices[2]),
             ) {
                 // Use screen-space signed area for backface culling (same as rasterizer)
                 if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(p2, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                 ) {
                     // 2D screen-space signed area (PS1-style) - positive = front-facing
                     let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -2202,28 +2302,32 @@ fn find_hovered_element(
     }
 
     // Check vertices first (highest priority) - only if on front-facing face (unless X-ray or double-sided)
-    for (idx, vert) in mesh.vertices.iter().enumerate() {
+    for idx in 0..mesh.vertices.len() {
         if !state.xray_mode && !double_sided && !vertex_on_front_face[idx] {
             continue; // Skip vertices only on backfaces (X-ray/double-sided allows selecting through)
         }
-        // Skip vertices on the non-editable side when mirror is enabled
-        if !state.current_mirror_settings().is_editable_side(vert.pos) {
-            continue;
-        }
-        if let Some((sx, sy)) = world_to_screen_with_ortho(
-            vert.pos,
-            camera.position,
-            camera.basis_x,
-            camera.basis_y,
-            camera.basis_z,
-            fb_width,
-            fb_height,
-            ortho,
-        ) {
-            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-            if dist < VERTEX_THRESHOLD {
-                if hovered_vertex.map_or(true, |(_, best_dist)| dist < best_dist) {
-                    hovered_vertex = Some((idx, dist));
+        if let Some(pos) = get_world_pos(idx) {
+            // Skip vertices on the non-editable side when mirror is enabled
+            // Note: mirror check uses local position since mirror plane is in local space
+            let local_pos = mesh.vertices[idx].pos;
+            if !state.current_mirror_settings().is_editable_side(local_pos) {
+                continue;
+            }
+            if let Some((sx, sy)) = world_to_screen_with_ortho(
+                pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb_width,
+                fb_height,
+                ortho,
+            ) {
+                let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                if dist < VERTEX_THRESHOLD {
+                    if hovered_vertex.map_or(true, |(_, best_dist)| dist < best_dist) {
+                        hovered_vertex = Some((idx, dist));
+                    }
                 }
             }
         }
@@ -2242,14 +2346,17 @@ fn find_hovered_element(
                     continue;
                 }
 
-                if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                if let (Some(p0), Some(p1)) = (get_world_pos(v0_idx), get_world_pos(v1_idx)) {
                     // Skip edges with any vertex on non-editable side when mirror is enabled
-                    if !state.current_mirror_settings().is_editable_side(v0.pos) || !state.current_mirror_settings().is_editable_side(v1.pos) {
+                    // Note: mirror check uses local positions
+                    let local_p0 = mesh.vertices[v0_idx].pos;
+                    let local_p1 = mesh.vertices[v1_idx].pos;
+                    if !state.current_mirror_settings().is_editable_side(local_p0) || !state.current_mirror_settings().is_editable_side(local_p1) {
                         continue;
                     }
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         let dist = point_to_line_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
                         if dist < EDGE_THRESHOLD {
@@ -2267,6 +2374,7 @@ fn find_hovered_element(
     if hovered_vertex.is_none() && hovered_edge.is_none() {
         for (idx, face) in mesh.faces.iter().enumerate() {
             // Skip faces with any vertex on non-editable side when mirror is enabled
+            // Note: mirror check uses local positions
             let face_on_editable_side = face.vertices.iter().all(|&vi| {
                 mesh.vertices.get(vi)
                     .map(|v| state.current_mirror_settings().is_editable_side(v.pos))
@@ -2277,16 +2385,16 @@ fn find_hovered_element(
             }
             // Triangulate the n-gon face and check each triangle
             for [i0, i1, i2] in face.triangulate() {
-                if let (Some(v0), Some(v1), Some(v2)) = (
-                    mesh.vertices.get(i0),
-                    mesh.vertices.get(i1),
-                    mesh.vertices.get(i2),
+                if let (Some(p0), Some(p1), Some(p2)) = (
+                    get_world_pos(i0),
+                    get_world_pos(i1),
+                    get_world_pos(i2),
                 ) {
                     // Use screen-space signed area for backface culling (same as rasterizer)
                     if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p2, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -2299,9 +2407,9 @@ fn find_hovered_element(
                             // Calculate depth at mouse position for Z-ordering
                             let depth = interpolate_depth_in_triangle(
                                 mouse_fb_x, mouse_fb_y,
-                                sx0, sy0, (v0.pos - camera.position).dot(camera.basis_z),
-                                sx1, sy1, (v1.pos - camera.position).dot(camera.basis_z),
-                                sx2, sy2, (v2.pos - camera.position).dot(camera.basis_z),
+                                sx0, sy0, (p0 - camera.position).dot(camera.basis_z),
+                                sx1, sy1, (p1 - camera.position).dot(camera.basis_z),
+                                sx2, sy2, (p2 - camera.position).dot(camera.basis_z),
                             );
                             // Pick the closest (smallest depth) face
                             if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {

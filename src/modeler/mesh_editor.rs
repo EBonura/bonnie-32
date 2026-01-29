@@ -238,7 +238,8 @@ pub struct MeshPart {
     #[serde(default)]
     pub double_sided: bool,
     /// Bone index this mesh part is bound to (for skeletal animation)
-    /// None = not bound to any bone
+    /// None = not bound to any bone (vertices in world space)
+    /// Some(idx) = bound to bone (vertices in bone-local space)
     #[serde(default)]
     pub bone_index: Option<usize>,
     /// Per-part mirror settings (replaces global mirror)

@@ -27,7 +27,7 @@ use super::tools::ModelerToolBox;
 /// Matches spherical coordinate convention used in get_bone_tip_position:
 /// direction = (sin(z)*cos(x), cos(z)*cos(x), -sin(x))
 /// Order: X rotation (pitch) first, then Z rotation (yaw)
-fn rotate_by_euler(v: Vec3, rotation: Vec3) -> Vec3 {
+pub fn rotate_by_euler(v: Vec3, rotation: Vec3) -> Vec3 {
     if rotation.x.abs() < 0.001 && rotation.z.abs() < 0.001 {
         return v;  // No rotation
     }
@@ -49,6 +49,34 @@ fn rotate_by_euler(v: Vec3, rotation: Vec3) -> Vec3 {
     let x2 = x1 * cos_z + y1 * sin_z;
     let y2 = -x1 * sin_z + y1 * cos_z;
     let z2 = z1;
+
+    Vec3::new(x2, y2, z2)
+}
+
+/// Inverse rotation by euler angles (undoes rotate_by_euler)
+/// Order: inverse of X-then-Z is (-Z)-then-(-X)
+pub fn inverse_rotate_by_euler(v: Vec3, rotation: Vec3) -> Vec3 {
+    if rotation.x.abs() < 0.001 && rotation.z.abs() < 0.001 {
+        return v;  // No rotation
+    }
+
+    let rad_x = rotation.x.to_radians();
+    let rad_z = rotation.z.to_radians();
+
+    let cos_x = rad_x.cos();
+    let sin_x = rad_x.sin();
+    let cos_z = rad_z.cos();
+    let sin_z = rad_z.sin();
+
+    // Apply inverse Z rotation FIRST (undo the second rotation)
+    let x1 = v.x * cos_z - v.y * sin_z;
+    let y1 = v.x * sin_z + v.y * cos_z;
+    let z1 = v.z;
+
+    // Apply inverse X rotation SECOND (undo the first rotation)
+    let x2 = x1;
+    let y2 = y1 * cos_x - z1 * sin_x;
+    let z2 = y1 * sin_x + z1 * cos_x;
 
     Vec3::new(x2, y2, z2)
 }
