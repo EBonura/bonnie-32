@@ -2254,14 +2254,33 @@ impl ModelerState {
             .and_then(|obj| obj.bone_index)
             .map(|bone_idx| self.get_bone_world_transform(bone_idx));
 
-        // For face selections, use face normal (priority over bone rotation)
+        // For face selections, use face normal and edge directions
         if let ModelerSelection::Faces(faces) = &self.selection {
             if !faces.is_empty() {
                 let mesh = self.mesh();
-                // Compute average face normal (in local/bone space)
                 let mut avg_normal = Vec3::ZERO;
+                let mut first_edge = Vec3::ZERO; // First edge direction for tangent
                 let mut count = 0;
+                let mut debug_verts = String::new();
+
                 for &face_idx in faces {
+                    if let Some(face) = mesh.faces.get(face_idx) {
+                        // Collect vertex positions for debug
+                        let verts: Vec<String> = face.vertices.iter()
+                            .filter_map(|&vi| mesh.vertices.get(vi).map(|v| format!("({:.1},{:.1},{:.1})", v.pos.x, v.pos.y, v.pos.z)))
+                            .collect();
+                        debug_verts = format!("f{}[{}]", face_idx, verts.join(","));
+
+                        // Get first edge direction (for tangent calculation)
+                        if face.vertices.len() >= 2 && first_edge.len() < 0.001 {
+                            if let (Some(v0), Some(v1)) = (
+                                mesh.vertices.get(face.vertices[0]),
+                                mesh.vertices.get(face.vertices[1])
+                            ) {
+                                first_edge = v1.pos - v0.pos;
+                            }
+                        }
+                    }
                     if let Some(normal) = mesh.face_normal(face_idx) {
                         avg_normal = avg_normal + normal;
                         count += 1;
@@ -2272,41 +2291,46 @@ impl ModelerState {
                     let len = (avg_normal.x * avg_normal.x + avg_normal.y * avg_normal.y + avg_normal.z * avg_normal.z).sqrt();
                     if len > 0.001 {
                         avg_normal = avg_normal * (1.0 / len);
+                        let n_local = format!("n_local({:.2},{:.2},{:.2})", avg_normal.x, avg_normal.y, avg_normal.z);
+                        let edge_local = format!("edge_local({:.2},{:.2},{:.2})", first_edge.x, first_edge.y, first_edge.z);
 
-                        // If bone-bound, transform normal to world space
-                        if let Some((_, bone_rot)) = bone_transform {
-                            avg_normal = rotate_by_euler(avg_normal, bone_rot);
-                        }
-
-                        // Build orthonormal basis with normal as Z
-                        // Find a vector not parallel to normal for cross product
-                        let up = if avg_normal.y.abs() < 0.9 {
-                            Vec3::new(0.0, 1.0, 0.0)
+                        // If bone-bound, transform normal AND edge to world space
+                        let bone_str = if let Some((bp, br)) = bone_transform {
+                            avg_normal = rotate_by_euler(avg_normal, br);
+                            first_edge = rotate_by_euler(first_edge, br);
+                            format!("bone(p:{:.1},{:.1},{:.1} r:{:.1},{:.1},{:.1})", bp.x, bp.y, bp.z, br.x, br.y, br.z)
                         } else {
-                            Vec3::new(1.0, 0.0, 0.0)
+                            "NO_BONE".to_string()
                         };
 
-                        // X = up × normal (normalized)
-                        let local_x = Vec3::new(
-                            up.y * avg_normal.z - up.z * avg_normal.y,
-                            up.z * avg_normal.x - up.x * avg_normal.z,
-                            up.x * avg_normal.y - up.y * avg_normal.x,
-                        );
-                        let len_x = (local_x.x * local_x.x + local_x.y * local_x.y + local_x.z * local_x.z).sqrt();
-                        let local_x = if len_x > 0.001 {
-                            local_x * (1.0 / len_x)
+                        eprintln!("[FACE] {} {} n_world({:.2},{:.2},{:.2}) {} edge_world({:.2},{:.2},{:.2})",
+                            bone_str, n_local, avg_normal.x, avg_normal.y, avg_normal.z, debug_verts,
+                            first_edge.x, first_edge.y, first_edge.z);
+
+                        // Normalize the edge to get X axis (tangent along first edge)
+                        let edge_len = first_edge.len();
+                        let local_x = if edge_len > 0.001 {
+                            first_edge * (1.0 / edge_len)
                         } else {
-                            world_x
+                            // Fallback: use cross product with up vector
+                            let up = if avg_normal.y.abs() < 0.9 { world_y } else { world_x };
+                            let cross = Vec3::new(
+                                up.y * avg_normal.z - up.z * avg_normal.y,
+                                up.z * avg_normal.x - up.x * avg_normal.z,
+                                up.x * avg_normal.y - up.y * avg_normal.x,
+                            );
+                            let cross_len = cross.len();
+                            if cross_len > 0.001 { cross * (1.0 / cross_len) } else { world_x }
                         };
 
-                        // Z = X × normal (for right-handed coordinate system where Y = normal)
+                        // Z = X × Y (where Y is normal) for right-handed system
                         let local_z = Vec3::new(
                             local_x.y * avg_normal.z - local_x.z * avg_normal.y,
                             local_x.z * avg_normal.x - local_x.x * avg_normal.z,
                             local_x.x * avg_normal.y - local_x.y * avg_normal.x,
                         );
 
-                        // Y = face normal (up from face), Z = tangent
+                        // Y = face normal
                         return (local_x, avg_normal, local_z);
                     }
                 }

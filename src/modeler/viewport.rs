@@ -3122,6 +3122,8 @@ fn setup_gizmo(
 
     // Get orientation basis (respects Global/Local mode and bone transforms)
     let (basis_x, basis_y, basis_z) = state.compute_orientation_basis();
+    eprintln!("[GIZMO] mode:{:?} X({:.2},{:.2},{:.2}) Y({:.2},{:.2},{:.2}) Z({:.2},{:.2},{:.2})",
+        state.transform_orientation, basis_x.x, basis_x.y, basis_x.z, basis_y.x, basis_y.y, basis_y.z, basis_z.x, basis_z.y, basis_z.z);
     let axis_dirs = [
         (Axis::X, basis_x, RED),
         (Axis::Y, basis_y, GREEN),
