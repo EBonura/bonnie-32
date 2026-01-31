@@ -172,6 +172,9 @@ pub fn draw_modeler(
     draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
 
+    // Draw radial menu (new hold-to-show menu)
+    draw_and_handle_radial_menu(ctx, state);
+
     // Draw rename/delete dialogs (modal, on top of everything)
     draw_object_dialogs(ctx, state, icon_font);
 
@@ -259,6 +262,31 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_local) {
             state.transform_orientation = state.transform_orientation.toggle();
             state.set_status(&format!("Transform orientation: {}", state.transform_orientation.label()), 1.5);
+        }
+    }
+
+    toolbar.separator();
+
+    // Selection mode buttons (Vertex/Edge/Face)
+    {
+        let is_vertex = state.select_mode == SelectMode::Vertex;
+        let is_edge = state.select_mode == SelectMode::Edge;
+        let is_face = state.select_mode == SelectMode::Face;
+
+        if toolbar.icon_button_active(ctx, icon::CIRCLE, icon_font, "Vertex Mode (1)", is_vertex) {
+            state.select_mode = SelectMode::Vertex;
+            state.selection.clear();
+            state.set_status("Vertex selection mode", 1.0);
+        }
+        if toolbar.icon_button_active(ctx, icon::MINUS, icon_font, "Edge Mode (2)", is_edge) {
+            state.select_mode = SelectMode::Edge;
+            state.selection.clear();
+            state.set_status("Edge selection mode", 1.0);
+        }
+        if toolbar.icon_button_active(ctx, icon::SQUARE, icon_font, "Face Mode (3)", is_face) {
+            state.select_mode = SelectMode::Face;
+            state.selection.clear();
+            state.set_status("Face selection mode", 1.0);
         }
     }
 
@@ -1095,7 +1123,7 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
 
         // Get object data (capture values to avoid borrow issues)
         let (obj_name, double_sided, mirror, bone_index) = match state.objects().get(selected_idx) {
-            Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror, obj.bone_index),
+            Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror, obj.default_bone_index),
             None => return,
         };
 
@@ -1457,7 +1485,7 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
         // Show meshes attached to this bone
         let attached_meshes: Vec<String> = state.objects()
             .iter()
-            .filter(|obj| obj.bone_index == Some(selected_idx))
+            .filter(|obj| obj.default_bone_index == Some(selected_idx))
             .map(|obj| obj.name.clone())
             .collect();
 
@@ -1470,6 +1498,25 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
                 draw_text(&format!("• {}", name), x + 8.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
                 y += line_height;
             }
+        }
+
+        // Per-vertex bone assignment info
+        let vertex_count = state.count_vertices_for_bone(selected_idx);
+        if vertex_count > 0 {
+            y += 4.0;
+            draw_text(&format!("Vertices: {}", vertex_count), x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+            // "Select" button to select all vertices for this bone
+            let btn_rect = Rect::new(x + 70.0, y, 50.0, line_height - 2.0);
+            let btn_hover = ctx.mouse.inside(&btn_rect);
+            let btn_color = if btn_hover { Color::from_rgba(80, 100, 120, 255) } else { Color::from_rgba(50, 60, 70, 255) };
+            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, btn_color);
+            draw_text("Select", btn_rect.x + 6.0, btn_rect.y + 12.0, FONT_SIZE_CONTENT, if btn_hover { ACCENT_COLOR } else { TEXT_COLOR });
+
+            if btn_hover && ctx.mouse.left_pressed {
+                state.select_vertices_for_bone(selected_idx);
+            }
+            y += line_height;
         }
     }
 }
@@ -5254,7 +5301,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
                         // Get bone rotation for world-to-local delta transformation (bone-bound meshes)
                         let bone_rotation = state.selected_object()
-                            .and_then(|obj| obj.bone_index)
+                            .and_then(|obj| obj.default_bone_index)
                             .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
 
                         // Get axis direction from orientation basis if axis is constrained
@@ -6175,6 +6222,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         is_paint_mode,
         uv_editor_focused,
         state.clipboard.has_content(),
+        state.selected_bone.is_some(),
     );
 
     let mut action = ModelerAction::None;
@@ -6379,6 +6427,18 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     }
 
     // ========================================================================
+    // Skeleton / Bone Binding Actions
+    // ========================================================================
+    if actions.triggered("skeleton.bind_vertices_to_bone", &ctx) {
+        if let Some(bone_idx) = state.selected_bone {
+            state.assign_selected_vertices_to_bone(bone_idx);
+        }
+    }
+    if actions.triggered("skeleton.unbind_vertices", &ctx) {
+        state.unassign_selected_vertices();
+    }
+
+    // ========================================================================
     // View Actions
     // ========================================================================
     if actions.triggered("view.toggle_fullscreen", &ctx) {
@@ -6489,11 +6549,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             ensure_skeleton_component(state);
             create_bone_at_default_position(state);
         } else {
-            // Tab key opens context menu at mouse position for mesh primitives
+            // Tab key opens radial menu at mouse position
             let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
-            let world_pos = screen_to_world_position(state, mx, my);
-            let snapped = state.snap_settings.snap_vec3(world_pos);
-            state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));
+            open_radial_menu(state, mx, my);
         }
     }
     if actions.triggered("context.close", &ctx) {
@@ -7245,7 +7303,7 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut Mod
     // Get current bone index for highlighting
     let current_bone_index = state.objects()
         .get(target_mesh)
-        .and_then(|obj| obj.bone_index);
+        .and_then(|obj| obj.default_bone_index);
 
     // +1 for "(None)" option
     let item_height = 20.0;
@@ -7278,7 +7336,7 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut Mod
                         v.normal = rotate_by_euler(v.normal, bone_rot);
                     }
                 }
-                obj.bone_index = None;
+                obj.default_bone_index = None;
             }
             state.dirty = true;
             state.dropdown.close();
@@ -7325,7 +7383,7 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut Mod
                     }
                 }
 
-                obj.bone_index = Some(bone_idx);
+                obj.default_bone_index = Some(bone_idx);
             }
             state.dirty = true;
             state.dropdown.close();
@@ -7338,12 +7396,148 @@ fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut Mod
 
 /// Draw and handle context menu
 fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
+    use super::state::ContextMenuType;
     // Note: Tab/Escape shortcuts are now handled through ActionRegistry in handle_actions()
 
     let menu = match &state.context_menu {
         Some(m) => m.clone(),
         None => return,
     };
+
+    // Dispatch based on menu type
+    match menu.menu_type {
+        ContextMenuType::Primitives => draw_primitives_context_menu(ctx, state, &menu),
+        ContextMenuType::VertexOps => draw_vertex_ops_context_menu(ctx, state, &menu),
+        ContextMenuType::FaceOps | ContextMenuType::EdgeOps => {
+            // TODO: Implement face/edge context menus
+            // For now, fall back to primitives menu
+            draw_primitives_context_menu(ctx, state, &menu)
+        }
+    }
+}
+
+/// Draw vertex operations context menu (bone assignment, etc.)
+fn draw_vertex_ops_context_menu(ctx: &mut UiContext, state: &mut ModelerState, menu: &super::state::ContextMenu) {
+    let item_height = 24.0;
+    let menu_width = 160.0;
+
+    // Get skeleton bones for the submenu
+    let skeleton = state.skeleton();
+    let bone_count = skeleton.len();
+    let has_bones = bone_count > 0;
+
+    // Calculate menu height
+    let header_height = item_height;
+    let assign_item_height = if has_bones { item_height + (bone_count as f32 * item_height) } else { item_height };
+    let unbind_height = item_height;
+    let menu_height = header_height + assign_item_height + unbind_height + 16.0;
+
+    // Keep menu on screen
+    let menu_x = menu.x.min(screen_width() - menu_width - 5.0);
+    let menu_y = menu.y.min(screen_height() - menu_height - 5.0);
+
+    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
+
+    // Draw menu background
+    draw_rectangle(menu_rect.x - 1.0, menu_rect.y - 1.0, menu_rect.w + 2.0, menu_rect.h + 2.0, Color::from_rgba(80, 80, 85, 255));
+    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
+
+    let mut y = menu_rect.y + 4.0;
+
+    // Header showing vertex count
+    let vert_count = match &state.selection {
+        super::state::ModelerSelection::Vertices(v) => v.len(),
+        _ => 0,
+    };
+    draw_text(&format!("{} vertices selected", vert_count), menu_rect.x + 8.0, y + 14.0, 12.0, TEXT_DIM);
+    y += item_height;
+
+    // Track actions
+    let mut assign_to_bone: Option<usize> = None;
+    let mut unbind_clicked = false;
+    let mut new_hovered_bone: Option<usize> = None;
+
+    if has_bones {
+        // "Assign to Bone" section header
+        draw_text("Assign to Bone:", menu_rect.x + 8.0, y + 14.0, 12.0, ACCENT_COLOR);
+        y += item_height;
+
+        // List all bones
+        let skeleton = state.skeleton();
+        for (idx, bone) in skeleton.iter().enumerate() {
+            let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+
+            // Hover highlight
+            let is_hovered = ctx.mouse.inside(&item_rect);
+            if is_hovered {
+                draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+                new_hovered_bone = Some(idx);
+
+                if ctx.mouse.left_pressed {
+                    assign_to_bone = Some(idx);
+                }
+            }
+
+            // Bone icon and name
+            let icon_color = if bone.parent.is_none() {
+                Color::from_rgba(255, 220, 100, 255) // Yellow for root
+            } else {
+                TEXT_COLOR
+            };
+            draw_text("◆", item_rect.x + 8.0, item_rect.y + 15.0, 10.0, icon_color);
+            draw_text(&bone.name, item_rect.x + 22.0, item_rect.y + 16.0, 14.0, TEXT_COLOR);
+
+            y += item_height;
+        }
+    } else {
+        // No bones available
+        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+        draw_text("No bones (add skeleton)", item_rect.x + 8.0, item_rect.y + 16.0, 12.0, TEXT_DIM);
+        y += item_height;
+    }
+
+    // Separator
+    y += 4.0;
+    draw_line(menu_rect.x + 8.0, y, menu_rect.right() - 8.0, y, 1.0, Color::from_rgba(70, 70, 75, 255));
+    y += 8.0;
+
+    // "Unbind from Bone" option
+    let unbind_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+    if ctx.mouse.inside(&unbind_rect) {
+        draw_rectangle(unbind_rect.x, unbind_rect.y, unbind_rect.w, unbind_rect.h, Color::from_rgba(60, 60, 70, 255));
+        if ctx.mouse.left_pressed {
+            unbind_clicked = true;
+        }
+    }
+    draw_text("Unbind from Bone", unbind_rect.x + 8.0, unbind_rect.y + 16.0, 14.0, TEXT_COLOR);
+
+    // Update hovered bone for viewport highlighting
+    if let Some(cm) = &mut state.context_menu {
+        cm.hovered_bone = new_hovered_bone;
+    }
+    // Also set hovered_bone on state for 3D highlighting
+    state.hovered_bone = new_hovered_bone;
+
+    // Handle actions
+    if let Some(bone_idx) = assign_to_bone {
+        state.assign_selected_vertices_to_bone(bone_idx);
+        state.context_menu = None;
+    }
+
+    if unbind_clicked {
+        state.unassign_selected_vertices();
+        state.context_menu = None;
+    }
+
+    // Close if clicked outside menu
+    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
+        state.context_menu = None;
+        state.hovered_bone = None;
+    }
+}
+
+/// Draw primitives context menu (original functionality)
+fn draw_primitives_context_menu(ctx: &mut UiContext, state: &mut ModelerState, menu: &super::state::ContextMenu) {
 
     // Menu dimensions
     let item_height = 24.0;
@@ -7764,4 +7958,107 @@ fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
 
         y += item_height;
     }
+}
+
+// ============================================================================
+// Radial Menu (Hold-Tab Context Menu)
+// ============================================================================
+
+/// Open the radial menu at the given position with context-appropriate items
+fn open_radial_menu(state: &mut ModelerState, x: f32, y: f32) {
+    use super::radial_menu::{RadialMenuItem, build_context_items};
+
+    // Determine what's selected
+    let has_vertex_selection = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if !v.is_empty());
+    let has_face_selection = matches!(&state.selection, super::state::ModelerSelection::Faces(f) if !f.is_empty());
+    let has_edge_selection = matches!(&state.selection, super::state::ModelerSelection::Edges(e) if !e.is_empty());
+
+    // Get bone names if skeleton exists
+    let bone_names: Vec<String> = state.skeleton().iter().map(|b| b.name.clone()).collect();
+
+    // Build context-sensitive items
+    let items = build_context_items(has_vertex_selection, has_face_selection, has_edge_selection, &bone_names);
+
+    state.radial_menu.open(x, y, items);
+}
+
+/// Draw and handle the radial menu
+fn draw_and_handle_radial_menu(ctx: &mut UiContext, state: &mut ModelerState) {
+    use super::radial_menu::{draw_radial_menu, RadialMenuConfig};
+
+    // Check if Tab is released - close menu and select
+    if state.radial_menu.is_open && !is_key_down(KeyCode::Tab) {
+        if let Some(selected_id) = state.radial_menu.close(true) {
+            handle_radial_menu_action(state, &selected_id);
+        }
+        return;
+    }
+
+    // Draw and handle the menu
+    let config = RadialMenuConfig::default();
+    if let Some(selected_id) = draw_radial_menu(&mut state.radial_menu, &config, ctx.mouse.x, ctx.mouse.y) {
+        handle_radial_menu_action(state, &selected_id);
+    }
+}
+
+/// Handle a radial menu action by ID
+fn handle_radial_menu_action(state: &mut ModelerState, action_id: &str) {
+    // Handle bone assignment (bone_0, bone_1, etc.)
+    if let Some(idx_str) = action_id.strip_prefix("bone_") {
+        if let Ok(bone_idx) = idx_str.parse::<usize>() {
+            state.assign_selected_vertices_to_bone(bone_idx);
+            return;
+        }
+    }
+
+    match action_id {
+        "unbind" => {
+            state.unassign_selected_vertices();
+        }
+        "merge" => {
+            // TODO: Implement merge vertices
+            state.set_status("Merge vertices (not yet implemented)", 1.5);
+        }
+        "split" => {
+            // TODO: Implement split
+            state.set_status("Split (not yet implemented)", 1.5);
+        }
+        "extrude" => {
+            // TODO: Trigger extrude
+            state.set_status("Extrude (not yet implemented)", 1.5);
+        }
+        "inset" => {
+            state.set_status("Inset (not yet implemented)", 1.5);
+        }
+        "flip" => {
+            state.set_status("Flip normal (not yet implemented)", 1.5);
+        }
+        "prim_cube" => {
+            add_primitive_at_origin(state, PrimitiveType::Cube);
+        }
+        "prim_plane" => {
+            add_primitive_at_origin(state, PrimitiveType::Plane);
+        }
+        "prim_cylinder" => {
+            add_primitive_at_origin(state, PrimitiveType::Cylinder);
+        }
+        "prim_prism" => {
+            add_primitive_at_origin(state, PrimitiveType::Prism);
+        }
+        _ => {
+            // Unknown action
+        }
+    }
+}
+
+/// Add a primitive at origin as a new object
+fn add_primitive_at_origin(state: &mut ModelerState, prim: PrimitiveType) {
+    state.push_undo(&format!("Add {}", prim.label()));
+    let size = 512.0;
+    let new_mesh = prim.create(size);
+    let base_name = prim.label().split_whitespace().next().unwrap_or("Object");
+    let name = state.generate_unique_object_name(base_name);
+    let obj = MeshPart::with_mesh(&name, new_mesh);
+    state.add_object(obj);
+    state.set_status(&format!("Added {}", prim.label()), 1.0);
 }

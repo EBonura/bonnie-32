@@ -237,11 +237,11 @@ pub struct MeshPart {
     /// If true, backface culling is disabled (both sides render)
     #[serde(default)]
     pub double_sided: bool,
-    /// Bone index this mesh part is bound to (for skeletal animation)
-    /// None = not bound to any bone (vertices in world space)
-    /// Some(idx) = bound to bone (vertices in bone-local space)
-    #[serde(default)]
-    pub bone_index: Option<usize>,
+    /// Default bone for vertices without explicit per-vertex assignment
+    /// Used as fallback when vertex.bone_index is None
+    /// None = vertices in world space, Some(idx) = vertices in bone-local space
+    #[serde(default, alias = "bone_index")]
+    pub default_bone_index: Option<usize>,
     /// Per-part mirror settings (replaces global mirror)
     #[serde(default)]
     pub mirror: Option<MirrorSettings>,
@@ -260,7 +260,7 @@ impl MeshPart {
             locked: false,
             color: None,
             double_sided: false,
-            bone_index: None,
+            default_bone_index: None,
             mirror: None,
         }
     }
@@ -275,7 +275,7 @@ impl MeshPart {
             locked: false,
             color: None,
             double_sided: false,
-            bone_index: None,
+            default_bone_index: None,
             mirror: None,
         }
     }
@@ -291,7 +291,7 @@ impl MeshPart {
             locked: false,
             color: None,
             double_sided: false,
-            bone_index: None,
+            default_bone_index: None,
             mirror: None,
         }
     }
@@ -1583,6 +1583,7 @@ impl EditableMesh {
     /// Convert to render data (vertices and faces for the rasterizer) - no texture
     ///
     /// N-gon faces are triangulated here using fan triangulation.
+    /// Preserves per-vertex bone_index for skeletal animation.
     pub fn to_render_data(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
         use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
 
@@ -1592,7 +1593,7 @@ impl EditableMesh {
                 uv: v.uv,
                 normal: v.normal,
                 color: v.color,
-                bone_index: None,
+                bone_index: v.bone_index, // Preserve per-vertex bone assignment
             }
         }).collect();
 
@@ -1617,6 +1618,7 @@ impl EditableMesh {
     /// Convert to render data with texture atlas (texture_id = 0 for all faces)
     ///
     /// N-gon faces are triangulated here using fan triangulation.
+    /// Preserves per-vertex bone_index for skeletal animation.
     pub fn to_render_data_textured(&self) -> (Vec<crate::rasterizer::Vertex>, Vec<crate::rasterizer::Face>) {
         use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace};
 
@@ -1626,7 +1628,7 @@ impl EditableMesh {
                 uv: v.uv,
                 normal: v.normal,
                 color: v.color,
-                bone_index: None,
+                bone_index: v.bone_index, // Preserve per-vertex bone assignment
             }
         }).collect();
 
@@ -1646,6 +1648,68 @@ impl EditableMesh {
         }
 
         (raster_vertices, raster_faces)
+    }
+
+    // ========================================================================
+    // Per-Vertex Bone Assignment (Rigid Skinning)
+    // ========================================================================
+
+    /// Assign vertices to a bone by index.
+    /// Pass `None` to unassign vertices (they will use mesh's default_bone_index).
+    pub fn assign_vertices_to_bone(&mut self, indices: &[usize], bone: Option<usize>) {
+        for &idx in indices {
+            if let Some(v) = self.vertices.get_mut(idx) {
+                v.bone_index = bone;
+            }
+        }
+    }
+
+    /// Get all vertex indices assigned to a specific bone.
+    pub fn get_vertices_for_bone(&self, bone_idx: usize) -> Vec<usize> {
+        self.vertices
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                if v.bone_index == Some(bone_idx) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get all vertex indices that have no explicit bone assignment.
+    /// These vertices will use the mesh part's default_bone_index during rendering.
+    pub fn get_unassigned_vertices(&self) -> Vec<usize> {
+        self.vertices
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                if v.bone_index.is_none() {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get bone assignment for a vertex (if any).
+    pub fn get_vertex_bone(&self, idx: usize) -> Option<usize> {
+        self.vertices.get(idx).and_then(|v| v.bone_index)
+    }
+
+    /// Count vertices assigned to each bone.
+    /// Returns a map from bone index to vertex count.
+    pub fn count_vertices_per_bone(&self) -> std::collections::HashMap<usize, usize> {
+        let mut counts = std::collections::HashMap::new();
+        for v in &self.vertices {
+            if let Some(bone_idx) = v.bone_index {
+                *counts.entry(bone_idx).or_insert(0) += 1;
+            }
+        }
+        counts
     }
 
     /// Merge vertices that are within a distance threshold.

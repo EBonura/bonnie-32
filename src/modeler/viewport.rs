@@ -344,7 +344,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
         state.set_status("Transform applied", 1.0);
     }
 
-    // Cancel on right click (Escape is handled through ActionRegistry in handle_actions())
+    // Cancel on right click (context menu handled separately in main viewport function)
     if ctx.mouse.right_pressed {
         // Sync tool state before cancelling
         match state.modal_transform {
@@ -546,7 +546,7 @@ fn handle_drag_move(
 
                         // Get bone rotation for world-to-local delta transformation (bone-bound meshes)
                         let bone_rotation = state.selected_object()
-                            .and_then(|obj| obj.bone_index)
+                            .and_then(|obj| obj.default_bone_index)
                             .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
 
                         // Start free move drag (axis = None for screen-space movement)
@@ -981,7 +981,7 @@ pub fn draw_modeler_viewport_ext(
 
             // Get bone rotation for world-to-local delta transformation (for bone-bound meshes)
             let bone_rotation = state.selected_object()
-                .and_then(|obj| obj.bone_index)
+                .and_then(|obj| obj.default_bone_index)
                 .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
 
             // Save undo state before starting transform
@@ -1158,8 +1158,11 @@ pub fn draw_modeler_viewport_ext(
         // Track vertex offset for this object
         let vertex_offset = all_vertices.len();
 
-        // Check if this mesh is bound to a bone - vertices are stored in bone-local space
-        let bone_transform = obj.bone_index.map(|bone_idx| state.get_bone_world_transform(bone_idx));
+        // Pre-compute all bone transforms for per-vertex skinning
+        // Each vertex can have its own bone_index, with fallback to mesh's default_bone_index
+        let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+            .map(|i| state.get_bone_world_transform(i))
+            .collect();
 
         // For selected object, we'll cache world positions for selection overlays
         let is_selected = state.selected_object == Some(obj_idx);
@@ -1169,8 +1172,12 @@ pub fn draw_modeler_viewport_ext(
             Vec::new()
         };
 
-        // Add vertices from this object (with bone transform if bound)
+        // Add vertices from this object (with per-vertex bone transforms)
         for v in &mesh.vertices {
+            // Per-vertex bone assignment with fallback to mesh default
+            let bone_idx = v.bone_index.or(obj.default_bone_index);
+            let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
             let (pos, normal) = if let Some((bone_pos, bone_rot)) = bone_transform {
                 // Vertices are in bone-local space, transform to world space
                 let rotated = rotate_by_euler(v.pos, bone_rot);
@@ -1187,11 +1194,19 @@ pub fn draw_modeler_viewport_ext(
                 world_positions.push(pos);
             }
 
+            // Highlight vertices assigned to selected bone (green tint)
+            let color = if is_selected && state.selected_bone.is_some() && bone_idx == state.selected_bone {
+                // Bright green for vertices on selected bone
+                RasterColor::new(100, 220, 120)
+            } else {
+                RasterColor::new(base_color, base_color, base_color)
+            };
+
             all_vertices.push(RasterVertex {
                 pos,
                 normal,
                 uv: v.uv,
-                color: RasterColor::new(base_color, base_color, base_color),
+                color,
                 bone_index: None,
             });
         }
@@ -1205,9 +1220,13 @@ pub fn draw_modeler_viewport_ext(
         let mirror_vertex_offset = if state.current_mirror_settings().enabled && state.selected_object == Some(obj_idx) {
             let offset = all_vertices.len();
             for v in &mesh.vertices {
-                // First mirror in local space, then apply bone transform
+                // First mirror in local space, then apply per-vertex bone transform
                 let mirrored_pos = state.current_mirror_settings().mirror_position(v.pos);
                 let mirrored_normal = state.current_mirror_settings().mirror_normal(v.normal);
+
+                // Per-vertex bone assignment with fallback to mesh default
+                let bone_idx = v.bone_index.or(obj.default_bone_index);
+                let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
 
                 let (pos, normal) = if let Some((bone_pos, bone_rot)) = bone_transform {
                     let rotated = rotate_by_euler(mirrored_pos, bone_rot);
@@ -1668,12 +1687,18 @@ fn draw_selected_object_brackets(state: &ModelerState, fb: &mut Framebuffer) {
         return;
     }
 
-    // Get bone transform if bound (vertices are in bone-local space)
-    let bone_transform = obj.bone_index.map(|bone_idx| state.get_bone_world_transform(bone_idx));
+    // Pre-compute all bone transforms for per-vertex skinning
+    let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
 
     let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
     let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
     for v in &mesh.vertices {
+        // Per-vertex bone assignment with fallback to mesh default
+        let bone_idx = v.bone_index.or(obj.default_bone_index);
+        let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
         // Transform vertex to world space
         let pos = if let Some((bone_pos, bone_rot)) = bone_transform {
             rotate_by_euler(v.pos, bone_rot) + bone_pos
@@ -2247,14 +2272,21 @@ fn find_hovered_element(
     let mesh = state.mesh();
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
-    // Get bone transform for selected object (vertices are in bone-local space)
-    let bone_transform = state.selected_object()
-        .and_then(|obj| obj.bone_index)
-        .map(|bone_idx| state.get_bone_world_transform(bone_idx));
+    // Pre-compute all bone transforms for per-vertex skinning
+    let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
 
-    // Helper to transform vertex position to world space
+    // Get mesh's default bone index
+    let default_bone_idx = state.selected_object().and_then(|obj| obj.default_bone_index);
+
+    // Helper to transform vertex position to world space (per-vertex bone)
     let get_world_pos = |idx: usize| -> Option<Vec3> {
         mesh.vertices.get(idx).map(|v| {
+            // Per-vertex bone assignment with fallback to mesh default
+            let bone_idx = v.bone_index.or(default_bone_idx);
+            let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
             if let Some((bone_pos, bone_rot)) = bone_transform {
                 rotate_by_euler(v.pos, bone_rot) + bone_pos
             } else {
@@ -3625,7 +3657,7 @@ fn handle_move_gizmo(
         // - Delta must be inverse-transformed to bone-local before applying
         let bone_rotation = if !is_bone_drag && !is_bone_tip_drag {
             state.selected_object()
-                .and_then(|obj| obj.bone_index)
+                .and_then(|obj| obj.default_bone_index)
                 .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
         } else {
             None

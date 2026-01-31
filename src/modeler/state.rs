@@ -1104,8 +1104,11 @@ pub struct ModelerState {
     // Modal transform state (G/S/R keys) - now uses DragManager for actual transform
     pub modal_transform: ModalTransform,
 
-    // Context menu state
+    // Context menu state (legacy)
     pub context_menu: Option<ContextMenu>,
+
+    // Radial menu state (new hold-to-show menu)
+    pub radial_menu: super::radial_menu::RadialMenuState,
 
     // Unified drag manager (new system - replaces scattered gizmo_drag_* fields)
     pub drag_manager: DragManager,
@@ -1158,8 +1161,20 @@ pub struct ModelerState {
     pub light_color_slider: Option<usize>,
 }
 
-/// Context menu for right-click actions
-#[derive(Debug, Clone)]
+/// Type of context menu being displayed (auto-detected from selection)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenuType {
+    /// Default menu for adding primitives (no selection or object mode)
+    Primitives,
+    /// Vertex operations (assign to bone, etc.)
+    VertexOps,
+    /// Face operations (materials, etc.) - future
+    FaceOps,
+    /// Edge operations - future
+    EdgeOps,
+}
+
+#[derive(Clone)]
 pub struct ContextMenu {
     /// Screen position of menu
     pub x: f32,
@@ -1168,11 +1183,37 @@ pub struct ContextMenu {
     pub world_pos: Vec3,
     /// Which viewport the menu was opened in
     pub viewport: ViewportId,
+    /// Type of context menu (auto-detected from selection)
+    pub menu_type: ContextMenuType,
+    /// Hovered bone index for highlighting (when in bone assignment submenu)
+    pub hovered_bone: Option<usize>,
 }
 
 impl ContextMenu {
+    /// Create context menu at position, auto-detecting type from selection
+    pub fn at_cursor(x: f32, y: f32, world_pos: Vec3, viewport: ViewportId, selection: &ModelerSelection) -> Self {
+        let menu_type = match selection {
+            ModelerSelection::Vertices(v) if !v.is_empty() => ContextMenuType::VertexOps,
+            ModelerSelection::Faces(f) if !f.is_empty() => ContextMenuType::FaceOps,
+            ModelerSelection::Edges(e) if !e.is_empty() => ContextMenuType::EdgeOps,
+            _ => ContextMenuType::Primitives,
+        };
+        Self { x, y, world_pos, viewport, menu_type, hovered_bone: None }
+    }
+
+    /// Legacy constructor for primitives menu
     pub fn new(x: f32, y: f32, world_pos: Vec3, viewport: ViewportId) -> Self {
-        Self { x, y, world_pos, viewport }
+        Self { x, y, world_pos, viewport, menu_type: ContextMenuType::Primitives, hovered_bone: None }
+    }
+
+    pub fn vertex_ops(x: f32, y: f32) -> Self {
+        Self {
+            x, y,
+            world_pos: Vec3::ZERO,
+            viewport: ViewportId::Perspective,
+            menu_type: ContextMenuType::VertexOps,
+            hovered_bone: None,
+        }
     }
 }
 
@@ -1376,6 +1417,7 @@ impl ModelerState {
             modal_transform: ModalTransform::None,
 
             context_menu: None,
+            radial_menu: super::radial_menu::RadialMenuState::new(),
 
             drag_manager: DragManager::new(),
 
@@ -2189,7 +2231,7 @@ impl ModelerState {
 
                 // Get bone transform if selected object is bound
                 let bone_transform = self.selected_object()
-                    .and_then(|obj| obj.bone_index)
+                    .and_then(|obj| obj.default_bone_index)
                     .map(|bone_idx| self.get_bone_world_transform(bone_idx));
 
                 let sum: Vec3 = indices.iter()
@@ -2251,7 +2293,7 @@ impl ModelerState {
 
         // Get bone transform if mesh is bone-bound
         let bone_transform = self.selected_object()
-            .and_then(|obj| obj.bone_index)
+            .and_then(|obj| obj.default_bone_index)
             .map(|bone_idx| self.get_bone_world_transform(bone_idx));
 
         // For face selections, use face normal and edge directions
@@ -2338,7 +2380,7 @@ impl ModelerState {
     pub fn world_to_local_delta(&self, delta: Vec3) -> Vec3 {
         // If bone-bound, we need to inverse-rotate the delta
         if let Some(obj) = self.selected_object() {
-            if let Some(bone_idx) = obj.bone_index {
+            if let Some(bone_idx) = obj.default_bone_index {
                 let (_, bone_rot) = self.get_bone_world_transform(bone_idx);
                 return inverse_rotate_by_euler(delta, bone_rot);
             }
@@ -2349,7 +2391,7 @@ impl ModelerState {
     /// Transform a local-space delta to world space
     pub fn local_to_world_delta(&self, delta: Vec3) -> Vec3 {
         if let Some(obj) = self.selected_object() {
-            if let Some(bone_idx) = obj.bone_index {
+            if let Some(bone_idx) = obj.default_bone_index {
                 let (_, bone_rot) = self.get_bone_world_transform(bone_idx);
                 return rotate_by_euler(delta, bone_rot);
             }
@@ -2505,6 +2547,108 @@ impl ModelerState {
             }
         }
         format!("Bone.{}", skeleton.len())
+    }
+
+    // ========================================================================
+    // Per-Vertex Bone Assignment (Rigid Skinning)
+    // ========================================================================
+
+    /// Assign currently selected vertices to a bone.
+    /// Only works in vertex selection mode.
+    pub fn assign_selected_vertices_to_bone(&mut self, bone_idx: usize) {
+        // Verify bone exists
+        if bone_idx >= self.skeleton().len() {
+            return;
+        }
+
+        // Get selected vertices
+        let vertex_indices: Vec<usize> = match &self.selection {
+            ModelerSelection::Vertices(v) => v.clone(),
+            _ => return,
+        };
+
+        if vertex_indices.is_empty() {
+            return;
+        }
+
+        // Get bone name before mutable borrow
+        let bone_name = self.skeleton().get(bone_idx).map(|b| b.name.clone()).unwrap_or_else(|| "bone".to_string());
+        let obj_idx = self.selected_object.unwrap_or(0);
+
+        // Save undo state
+        self.save_undo("Assign Vertices to Bone");
+
+        // Assign vertices to bone
+        if let Some(objects) = self.objects_mut() {
+            if let Some(obj) = objects.get_mut(obj_idx) {
+                obj.mesh.assign_vertices_to_bone(&vertex_indices, Some(bone_idx));
+            }
+        }
+
+        // Set status message
+        self.set_status(&format!("Assigned {} vertices to '{}'", vertex_indices.len(), bone_name), 2.0);
+    }
+
+    /// Unassign currently selected vertices (they will use mesh's default_bone_index).
+    /// Only works in vertex selection mode.
+    pub fn unassign_selected_vertices(&mut self) {
+        // Get selected vertices
+        let vertex_indices: Vec<usize> = match &self.selection {
+            ModelerSelection::Vertices(v) => v.clone(),
+            _ => return,
+        };
+
+        if vertex_indices.is_empty() {
+            return;
+        }
+
+        let obj_idx = self.selected_object.unwrap_or(0);
+
+        // Save undo state
+        self.save_undo("Unassign Vertices from Bone");
+
+        // Unassign vertices
+        if let Some(objects) = self.objects_mut() {
+            if let Some(obj) = objects.get_mut(obj_idx) {
+                obj.mesh.assign_vertices_to_bone(&vertex_indices, None);
+            }
+        }
+
+        self.set_status(&format!("Unassigned {} vertices from bone", vertex_indices.len()), 2.0);
+    }
+
+    /// Select all vertices assigned to a specific bone.
+    /// Switches to vertex selection mode if not already.
+    pub fn select_vertices_for_bone(&mut self, bone_idx: usize) {
+        // Get bone name first
+        let bone_name = self.skeleton().get(bone_idx).map(|b| b.name.clone()).unwrap_or_else(|| "bone".to_string());
+
+        // Get current mesh
+        let vertex_indices = if let Some(obj) = self.selected_object() {
+            obj.mesh.get_vertices_for_bone(bone_idx)
+        } else {
+            return;
+        };
+
+        if vertex_indices.is_empty() {
+            self.set_status(&format!("No vertices assigned to '{}'", bone_name), 1.5);
+            return;
+        }
+
+        // Switch to edit mode vertex selection
+        self.interaction_mode = InteractionMode::Edit;
+        self.selection = ModelerSelection::Vertices(vertex_indices.clone());
+
+        self.set_status(&format!("Selected {} vertices for '{}'", vertex_indices.len(), bone_name), 2.0);
+    }
+
+    /// Get count of vertices assigned to a specific bone for the selected mesh.
+    pub fn count_vertices_for_bone(&self, bone_idx: usize) -> usize {
+        if let Some(obj) = self.selected_object() {
+            obj.mesh.get_vertices_for_bone(bone_idx).len()
+        } else {
+            0
+        }
     }
 
 }

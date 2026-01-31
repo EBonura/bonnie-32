@@ -20,6 +20,7 @@ mod skeleton;
 pub mod actions;
 pub mod drag;
 pub mod tools;
+pub mod radial_menu;
 
 // Re-export public API
 #[allow(unused_imports)]
