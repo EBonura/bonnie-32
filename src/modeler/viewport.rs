@@ -1589,6 +1589,26 @@ fn apply_box_selection(
 
     let mesh = state.mesh();
 
+    // Pre-compute all bone transforms for per-vertex skinning (same as find_hovered_element)
+    let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
+
+    // Get mesh's default bone index
+    let default_bone_idx = state.selected_object().and_then(|obj| obj.default_bone_index);
+
+    // Helper to transform vertex position to world space (per-vertex bone)
+    let get_world_pos = |v: &crate::rasterizer::Vertex| -> Vec3 {
+        let bone_idx = v.bone_index.or(default_bone_idx);
+        let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+        if let Some((bone_pos, bone_rot)) = bone_transform {
+            rotate_by_euler(v.pos, bone_rot) + bone_pos
+        } else {
+            v.pos
+        }
+    };
+
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
                         || is_key_down(KeyCode::X);
@@ -1602,8 +1622,9 @@ fn apply_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
+                let world_pos = get_world_pos(vert);
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    world_pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1636,12 +1657,12 @@ fn apply_box_selection(
             };
 
             for (idx, face) in mesh.faces.iter().enumerate() {
-                // Use face center for box selection (average of all vertices)
-                let verts: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi))
+                // Use face center for box selection (average of transformed vertices)
+                let world_positions: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| get_world_pos(v)))
                     .collect();
-                if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                if !world_positions.is_empty() {
+                    let center = world_positions.iter().fold(Vec3::ZERO, |acc, &p| acc + p) * (1.0 / world_positions.len() as f32);
                     if let Some((sx, sy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,

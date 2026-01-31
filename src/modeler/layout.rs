@@ -5492,7 +5492,27 @@ fn apply_ortho_box_selection(
         sx >= min_sx && sx <= max_sx && sy >= min_sy && sy <= max_sy
     };
 
+    // Pre-compute all bone transforms for per-vertex skinning
+    let bone_transforms: Vec<(crate::rasterizer::Vec3, crate::rasterizer::Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
+
+    // Get mesh's default bone index
+    let default_bone_idx = state.selected_object().and_then(|obj| obj.default_bone_index);
+
     let mesh = state.mesh();
+
+    // Helper to transform vertex position to world space (per-vertex bone)
+    let get_world_pos = |v: &crate::rasterizer::Vertex| -> crate::rasterizer::Vec3 {
+        let bone_idx = v.bone_index.or(default_bone_idx);
+        let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+        if let Some((bone_pos, bone_rot)) = bone_transform {
+            rotate_by_euler(v.pos, bone_rot) + bone_pos
+        } else {
+            v.pos
+        }
+    };
 
     match state.select_mode {
         SelectMode::Vertex => {
@@ -5503,9 +5523,8 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
-                let (_sx, _sy) = world_to_screen(vert.pos);
-                let in_box = is_in_box(vert.pos);
-                if in_box && !selected.contains(&idx) {
+                let world_pos = get_world_pos(vert);
+                if is_in_box(world_pos) && !selected.contains(&idx) {
                     selected.push(idx);
                 }
             }
@@ -5533,9 +5552,9 @@ fn apply_ortho_box_selection(
                     let v1 = face.vertices[(i + 1) % face.vertices.len()];
                     let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
                     if edges_checked.insert(edge) {
-                        // Check if edge center is in box
+                        // Check if edge center is in box (using transformed positions)
                         if let (Some(p0), Some(p1)) = (mesh.vertices.get(v0), mesh.vertices.get(v1)) {
-                            let center = (p0.pos + p1.pos) * 0.5;
+                            let center = (get_world_pos(p0) + get_world_pos(p1)) * 0.5;
                             if is_in_box(center) {
                                 let e = (v0, v1);
                                 if !selected.iter().any(|&(a, b)| (a, b) == e || (b, a) == e) {
@@ -5563,13 +5582,13 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, face) in mesh.faces.iter().enumerate() {
-                // Calculate face center
-                let verts: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi))
+                // Calculate face center using transformed positions
+                let world_positions: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| get_world_pos(v)))
                     .collect();
-                if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(crate::rasterizer::Vec3::ZERO, |acc, p| acc + p)
-                        * (1.0 / verts.len() as f32);
+                if !world_positions.is_empty() {
+                    let center = world_positions.iter().fold(crate::rasterizer::Vec3::ZERO, |acc, &p| acc + p)
+                        * (1.0 / world_positions.len() as f32);
                     if is_in_box(center) && !selected.contains(&idx) {
                         selected.push(idx);
                     }
