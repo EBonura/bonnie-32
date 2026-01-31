@@ -5120,7 +5120,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // Handle click to select in ortho views
     // =========================================================================
     // Skip selection if gizmo is hovered - gizmo takes precedence
-    if inside_viewport && state.active_viewport == viewport_id && ctx.mouse.left_pressed && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() && state.ortho_gizmo_hovered_axis.is_none() {
+    // Skip if radial menu is open - menu consumes clicks
+    if inside_viewport && state.active_viewport == viewport_id && ctx.mouse.left_pressed && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() && state.ortho_gizmo_hovered_axis.is_none() && !state.radial_menu.is_open {
         let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_key_down(KeyCode::X);
 
         if let Some(vert_idx) = state.hovered_vertex {

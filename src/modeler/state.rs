@@ -2561,13 +2561,38 @@ impl ModelerState {
             return;
         }
 
-        // Get selected vertices
+        // Get vertex indices from current selection (vertices, faces, or edges)
         let vertex_indices: Vec<usize> = match &self.selection {
             ModelerSelection::Vertices(v) => v.clone(),
-            _ => return,
+            ModelerSelection::Faces(faces) => {
+                // Get all vertices from selected faces
+                let face_indices = faces.clone();
+                let mesh = self.mesh();
+                let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for &face_idx in &face_indices {
+                    if let Some(face) = mesh.faces.get(face_idx) {
+                        verts.extend(face.vertices.iter().copied());
+                    }
+                }
+                verts.into_iter().collect()
+            }
+            ModelerSelection::Edges(edges) => {
+                // Get both vertices from each selected edge
+                let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for &(a, b) in edges {
+                    verts.insert(a);
+                    verts.insert(b);
+                }
+                verts.into_iter().collect()
+            }
+            _ => {
+                self.set_status("Select vertices, faces, or edges to assign", 2.0);
+                return;
+            }
         };
 
         if vertex_indices.is_empty() {
+            self.set_status("No geometry selected", 2.0);
             return;
         }
 
@@ -2590,15 +2615,38 @@ impl ModelerState {
     }
 
     /// Unassign currently selected vertices (they will use mesh's default_bone_index).
-    /// Only works in vertex selection mode.
+    /// Works with vertex, face, or edge selection.
     pub fn unassign_selected_vertices(&mut self) {
-        // Get selected vertices
+        // Get vertex indices from current selection (vertices, faces, or edges)
         let vertex_indices: Vec<usize> = match &self.selection {
             ModelerSelection::Vertices(v) => v.clone(),
-            _ => return,
+            ModelerSelection::Faces(faces) => {
+                let face_indices = faces.clone();
+                let mesh = self.mesh();
+                let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for &face_idx in &face_indices {
+                    if let Some(face) = mesh.faces.get(face_idx) {
+                        verts.extend(face.vertices.iter().copied());
+                    }
+                }
+                verts.into_iter().collect()
+            }
+            ModelerSelection::Edges(edges) => {
+                let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for &(a, b) in edges {
+                    verts.insert(a);
+                    verts.insert(b);
+                }
+                verts.into_iter().collect()
+            }
+            _ => {
+                self.set_status("Select vertices, faces, or edges to unassign", 2.0);
+                return;
+            }
         };
 
         if vertex_indices.is_empty() {
+            self.set_status("No geometry selected", 2.0);
             return;
         }
 

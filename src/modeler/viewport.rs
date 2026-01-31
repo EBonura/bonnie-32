@@ -1206,7 +1206,12 @@ pub fn draw_modeler_viewport_ext(
             }
 
             // Highlight vertices assigned to selected bone (green tint)
-            let color = if is_selected && state.selected_bone.is_some() && bone_idx == state.selected_bone {
+            // Only show when skeleton component is selected AND a specific bone is selected
+            let skeleton_component_selected = state.selected_component
+                .and_then(|idx| state.asset.components.get(idx))
+                .map(|c| c.is_skeleton())
+                .unwrap_or(false);
+            let color = if is_selected && skeleton_component_selected && state.selected_bone.is_some() && bone_idx == state.selected_bone {
                 // Bright green for vertices on selected bone
                 RasterColor::new(100, 220, 120)
             } else {
@@ -1452,10 +1457,12 @@ pub fn draw_modeler_viewport_ext(
 
     // Handle single-click selection using hover system (like world editor)
     // Handles both mesh selection and bone selection (click-based)
+    // Skip if radial menu is open - menu consumes clicks
     if inside_viewport && ctx.mouse.left_pressed
         && state.modal_transform == ModalTransform::None
         && state.gizmo_hovered_axis.is_none()
         && !state.drag_manager.is_dragging()
+        && !state.radial_menu.is_open
     {
         handle_hover_click(state);
     }
@@ -2617,28 +2624,32 @@ fn update_hover_state(
     let fb_x = (mouse_pos.0 - draw_x) / draw_w * fb_width as f32;
     let fb_y = (mouse_pos.1 - draw_y) / draw_h * fb_height as f32;
 
-    // Check for bone hover first (if bones are visible)
-    // Distinguish between base (bone) and tip hover
+    // Determine which component type is selected for hover isolation
+    let selected_component_type = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx));
+    let mesh_component_selected = selected_component_type.map(|c| c.is_mesh()).unwrap_or(false);
+    let skeleton_component_selected = selected_component_type.map(|c| c.is_skeleton()).unwrap_or(false);
+
+    // Clear all hover states first
     state.hovered_bone = None;
     state.hovered_bone_tip = None;
+    state.hovered_vertex = None;
+    state.hovered_edge = None;
+    state.hovered_face = None;
 
-    if state.show_bones && !state.skeleton().is_empty() {
+    // Only check bone hover when skeleton component is selected
+    if skeleton_component_selected && state.show_bones && !state.skeleton().is_empty() {
         let (base, tip) = find_hovered_bone_part(state, (fb_x, fb_y), fb_width, fb_height, viewport_id);
         state.hovered_bone = base;
         state.hovered_bone_tip = tip;
     }
 
-    // If not hovering over a bone, check mesh elements
-    if state.hovered_bone.is_none() && state.hovered_bone_tip.is_none() {
+    // Only check mesh hover when mesh component is selected (and not hovering over bone)
+    if mesh_component_selected && state.hovered_bone.is_none() && state.hovered_bone_tip.is_none() {
         let (vert, edge, face) = find_hovered_element(state, (fb_x, fb_y), fb_width, fb_height);
         state.hovered_vertex = vert;
         state.hovered_edge = edge;
         state.hovered_face = face;
-    } else {
-        // Clear mesh hover when hovering over bone
-        state.hovered_vertex = None;
-        state.hovered_edge = None;
-        state.hovered_face = None;
     }
 }
 

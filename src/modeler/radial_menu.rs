@@ -452,31 +452,32 @@ pub fn build_context_items(
 ) -> Vec<RadialMenuItem> {
     let mut items = Vec::new();
 
-    if has_vertex_selection && !bone_names.is_empty() {
-        // Vertex mode with skeleton - show bone assignment
+    // Show bone assignment for any geometry selection (vertex, face, or edge)
+    let has_any_selection = has_vertex_selection || has_face_selection || has_edge_selection;
+    if has_any_selection && !bone_names.is_empty() {
         let bone_items: Vec<RadialMenuItem> = bone_names
             .iter()
             .enumerate()
-            .map(|(i, name)| RadialMenuItem::new(format!("bone_{}", i), name.clone()).with_icon('◆'))
+            .map(|(i, name)| RadialMenuItem::new(format!("bone_{}", i), name.clone()).with_icon('*'))
             .collect();
 
         items.push(
             RadialMenuItem::new("assign_bone", "Assign to Bone")
-                .with_icon('🦴')
+                .with_icon('B')
                 .with_children(bone_items)
         );
-        items.push(RadialMenuItem::new("unbind", "Unbind").with_icon('✕'));
+        items.push(RadialMenuItem::new("unbind", "Unbind").with_icon('X'));
     }
 
     if has_vertex_selection {
-        items.push(RadialMenuItem::new("merge", "Merge").with_icon('⊕'));
-        items.push(RadialMenuItem::new("split", "Split").with_icon('✂'));
+        items.push(RadialMenuItem::new("merge", "Merge").with_icon('M'));
+        items.push(RadialMenuItem::new("split", "Split").with_icon('S'));
     }
 
     if has_face_selection {
-        items.push(RadialMenuItem::new("extrude", "Extrude").with_icon('↑'));
-        items.push(RadialMenuItem::new("inset", "Inset").with_icon('◇'));
-        items.push(RadialMenuItem::new("flip", "Flip Normal").with_icon('↕'));
+        items.push(RadialMenuItem::new("extrude", "Extrude").with_icon('E'));
+        items.push(RadialMenuItem::new("inset", "Inset").with_icon('I'));
+        items.push(RadialMenuItem::new("flip", "Flip Normal").with_icon('F'));
     }
 
     // Always show primitives option
