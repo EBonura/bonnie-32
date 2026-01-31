@@ -755,7 +755,7 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
 
     // List components
     let mut select_idx: Option<usize> = None;
-    let mut toggle_vis_idx: Option<usize> = None;
+    let mut set_opacity_idx: Option<(usize, u8)> = None; // (component_idx, opacity_level)
     let mut delete_idx: Option<usize> = None;
 
     // Ensure opacity vec is sized correctly
@@ -774,14 +774,37 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
         }
 
-        // Visibility toggle (eye icon)
-        let vis_rect = Rect::new(x + 2.0, *y + 1.0, 16.0, 16.0);
-        let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
-        let vis_color = if is_hidden { TEXT_DIM } else { TEXT_COLOR };
-        draw_icon_centered(icon_font, vis_icon, &vis_rect, 11.0, vis_color);
+        // Opacity slider (8 dots: 0=visible ... 7=hidden)
+        let opacity = state.get_component_opacity(i);
+        let dot_size = 4.0;
+        let dot_spacing = 2.0;
+        let slider_width = 8.0 * dot_size + 7.0 * dot_spacing; // 8 dots with spacing
+        let slider_x = x + 2.0;
+        let slider_y = *y + (line_height - dot_size) / 2.0;
+        let slider_rect = Rect::new(slider_x, *y, slider_width + 4.0, line_height);
 
-        if ctx.mouse.inside(&vis_rect) && ctx.mouse.left_pressed {
-            toggle_vis_idx = Some(i);
+        // Draw 8 dots (0-7)
+        for dot_idx in 0..8u8 {
+            let dx = slider_x + dot_idx as f32 * (dot_size + dot_spacing);
+            let dot_color = if dot_idx <= opacity {
+                // Filled (darker = more hidden)
+                let brightness = 255 - (dot_idx as u8 * 25);
+                Color::from_rgba(brightness, brightness, brightness, 255)
+            } else {
+                // Empty
+                Color::from_rgba(60, 60, 65, 255)
+            };
+            draw_rectangle(dx, slider_y, dot_size, dot_size, dot_color);
+        }
+
+        // Click to set opacity
+        if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_pressed {
+            // Calculate which dot was clicked
+            let click_x = ctx.mouse.x - slider_x;
+            let dot_idx = (click_x / (dot_size + dot_spacing)).floor() as u8;
+            if dot_idx <= 7 {
+                set_opacity_idx = Some((i, dot_idx));
+            }
         }
 
         // Component icon
@@ -828,10 +851,10 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             }
         }
 
-        // Click to select (not on visibility or delete)
-        let name_rect = Rect::new(x + 20.0, *y, width - 40.0, line_height);
+        // Click to select (not on opacity slider or delete)
+        let name_rect = Rect::new(x + 56.0, *y, width - 76.0, line_height);
         if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed
-            && toggle_vis_idx.is_none() && delete_idx.is_none() {
+            && set_opacity_idx.is_none() && delete_idx.is_none() {
             select_idx = Some(i);
         }
 
@@ -839,10 +862,8 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
     }
 
     // Apply actions
-    if let Some(idx) = toggle_vis_idx {
-        // Toggle between visible (0) and hidden (7)
-        let current = state.get_component_opacity(idx);
-        state.set_component_opacity(idx, if current >= 7 { 0 } else { 7 });
+    if let Some((idx, opacity)) = set_opacity_idx {
+        state.set_component_opacity(idx, opacity);
     } else if let Some(idx) = delete_idx {
         // Open delete confirmation dialog
         state.delete_component_dialog = Some(idx);

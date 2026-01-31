@@ -1106,12 +1106,19 @@ pub fn draw_modeler_viewport_ext(
     // This ensures proper depth sorting across all objects (painter's algorithm and z-buffer)
     let use_rgb555 = state.raster_settings.use_rgb555;
 
-    // Check if the Mesh component itself is hidden
-    let mesh_component_hidden = state.asset.components.iter()
+    // Check if the Mesh component itself is hidden and get its opacity
+    let mesh_component_info = state.asset.components.iter()
         .enumerate()
-        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }));
+    let mesh_component_hidden = mesh_component_info
         .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
+    let mesh_component_opacity = mesh_component_info
+        .map(|(idx, _)| state.get_component_opacity(idx))
+        .unwrap_or(0);
+    // Scale base color by opacity (0=full brightness, 6=dim, 7=hidden)
+    let opacity_alpha = ModelerState::opacity_to_alpha(mesh_component_opacity);
+    let mesh_brightness_scale = opacity_alpha as f32 / 255.0;
 
     // Fallback CLUT for objects with no assigned CLUT
     let fallback_clut = state.clut_pool.first_id()
@@ -1164,7 +1171,8 @@ pub fn draw_modeler_viewport_ext(
         let mesh = &obj.mesh;
 
         // All objects use same brightness (selection shown via corner brackets)
-        let base_color = 180u8;
+        // Scale by component opacity (0=full, 6=dim, 7=hidden)
+        let base_color = (180.0 * mesh_brightness_scale) as u8;
 
         // Track vertex offset for this object
         let vertex_offset = all_vertices.len();
@@ -1212,8 +1220,12 @@ pub fn draw_modeler_viewport_ext(
                 .map(|c| c.is_skeleton())
                 .unwrap_or(false);
             let color = if is_selected && skeleton_component_selected && state.selected_bone.is_some() && bone_idx == state.selected_bone {
-                // Bright green for vertices on selected bone
-                RasterColor::new(100, 220, 120)
+                // Bright green for vertices on selected bone (also scaled by mesh opacity)
+                RasterColor::new(
+                    (100.0 * mesh_brightness_scale) as u8,
+                    (220.0 * mesh_brightness_scale) as u8,
+                    (120.0 * mesh_brightness_scale) as u8,
+                )
             } else {
                 RasterColor::new(base_color, base_color, base_color)
             };

@@ -51,15 +51,30 @@ pub fn draw_skeleton(
         return;
     }
 
-    // Skip if Skeleton component is hidden
-    let skeleton_hidden = state.asset.components.iter()
+    // Get Skeleton component opacity (0=visible, 7=hidden)
+    let skeleton_info = state.asset.components.iter()
         .enumerate()
-        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Skeleton { .. }))
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Skeleton { .. }));
+    let skeleton_hidden = skeleton_info
         .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
     if skeleton_hidden {
         return;
     }
+    let skeleton_opacity = skeleton_info
+        .map(|(idx, _)| state.get_component_opacity(idx))
+        .unwrap_or(0);
+    let opacity_alpha = ModelerState::opacity_to_alpha(skeleton_opacity);
+    let brightness_scale = opacity_alpha as f32 / 255.0;
+
+    // Helper to scale color by opacity
+    let scale_color = |c: RasterColor| -> RasterColor {
+        RasterColor::new(
+            (c.r as f32 * brightness_scale) as u8,
+            (c.g as f32 * brightness_scale) as u8,
+            (c.b as f32 * brightness_scale) as u8,
+        )
+    };
 
     let camera = &state.camera;
 
@@ -69,20 +84,20 @@ pub fn draw_skeleton(
             let (child_pos, _) = state.get_bone_world_transform(idx);
             let (parent_pos, _) = state.get_bone_world_transform(parent_idx);
 
-            draw_3d_line_clipped(fb, camera, parent_pos, child_pos, bone_color_hierarchy_line());
+            draw_3d_line_clipped(fb, camera, parent_pos, child_pos, scale_color(bone_color_hierarchy_line()));
         }
     }
 
     // Draw each bone as an octahedron
     for (idx, bone) in skeleton.iter().enumerate() {
         let color = if state.selected_bone == Some(idx) {
-            bone_color_selected()
+            scale_color(bone_color_selected())
         } else if state.hovered_bone == Some(idx) {
-            bone_color_hovered()
+            scale_color(bone_color_hovered())
         } else if bone.parent.is_none() {
-            bone_color_root()
+            scale_color(bone_color_root())
         } else {
-            bone_color_default()
+            scale_color(bone_color_default())
         };
 
         let (base_pos, _rotation) = state.get_bone_world_transform(idx);
@@ -91,7 +106,7 @@ pub fn draw_skeleton(
         draw_bone_octahedron(fb, camera, ortho, base_pos, tip_pos, color);
     }
 
-    // Draw bone creation preview
+    // Draw bone creation preview (full brightness - active action)
     if let Some(ref creation) = state.bone_creation {
         draw_bone_octahedron(
             fb, camera, ortho,
