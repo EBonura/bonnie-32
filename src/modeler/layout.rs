@@ -6548,10 +6548,45 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             // Create a new bone - auto-create Skeleton component if needed
             ensure_skeleton_component(state);
             create_bone_at_default_position(state);
-        } else {
-            // Tab key opens radial menu at mouse position
+        } else if !state.radial_menu.is_open {
+            // Tab key opens radial menu at mouse position (hold behavior)
             let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
             open_radial_menu(state, mx, my);
+        }
+    }
+
+    // Tab release: enter submenu if has children, otherwise close and select
+    // Use is_key_released so this only fires once, not every frame
+    if state.radial_menu.is_open && is_key_released(KeyCode::Tab) {
+        // Check if highlighted item has children (submenu)
+        let has_children = state.radial_menu.highlighted
+            .and_then(|idx| state.radial_menu.items.get(idx))
+            .map(|item| !item.children.is_empty())
+            .unwrap_or(false);
+
+        if has_children {
+            // Enter submenu, keep menu open
+            if let Some(idx) = state.radial_menu.highlighted {
+                state.radial_menu.enter_submenu(idx);
+            }
+        } else if state.radial_menu.highlighted.is_none() {
+            // In center zone - check for back vs exit in submenu
+            let in_submenu = !state.radial_menu.menu_stack.is_empty();
+            let (cx, cy) = state.radial_menu.center;
+            let mouse_on_left = ui_ctx.mouse.x < cx;
+
+            if in_submenu && mouse_on_left {
+                // Back to parent menu
+                state.radial_menu.back();
+            } else {
+                // Exit/cancel
+                state.radial_menu.close(false);
+            }
+        } else {
+            // Close and select
+            if let Some(selected_id) = state.radial_menu.close(true) {
+                handle_radial_menu_action(state, &selected_id);
+            }
         }
     }
     if actions.triggered("context.close", &ctx) {
@@ -7986,11 +8021,13 @@ fn open_radial_menu(state: &mut ModelerState, x: f32, y: f32) {
 fn draw_and_handle_radial_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     use super::radial_menu::{draw_radial_menu, RadialMenuConfig};
 
-    // Check if Tab is released - close menu and select
-    if state.radial_menu.is_open && !is_key_down(KeyCode::Tab) {
-        if let Some(selected_id) = state.radial_menu.close(true) {
-            handle_radial_menu_action(state, &selected_id);
-        }
+    if !state.radial_menu.is_open {
+        return;
+    }
+
+    // Close on Escape
+    if is_key_pressed(KeyCode::Escape) {
+        state.radial_menu.close(false);
         return;
     }
 
@@ -7999,6 +8036,9 @@ fn draw_and_handle_radial_menu(ctx: &mut UiContext, state: &mut ModelerState) {
     if let Some(selected_id) = draw_radial_menu(&mut state.radial_menu, &config, ctx.mouse.x, ctx.mouse.y) {
         handle_radial_menu_action(state, &selected_id);
     }
+
+    // Close if clicked outside (check after drawing so we know the menu bounds)
+    // The draw function handles click-to-select internally
 }
 
 /// Handle a radial menu action by ID
