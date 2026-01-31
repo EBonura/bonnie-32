@@ -5956,6 +5956,7 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
         shortcuts.push("[R] Rotate");
         shortcuts.push("[T] Scale");
         shortcuts.push("[Del] Delete");
+        shortcuts.push("[Tab] Menu");
     }
 
     // View shortcuts (always available)
@@ -6668,6 +6669,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             // Cancel box selection via DragManager
             state.drag_manager.cancel();
             state.box_select_pending_start = None;
+        } else if !state.selection.is_empty() {
+            // Clear selection if nothing else to cancel
+            state.set_selection(super::state::ModelerSelection::None);
         }
     }
 
