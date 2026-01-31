@@ -383,6 +383,19 @@ pub struct BoneCreationState {
     pub drag_offset: Vec3,
 }
 
+/// State for dragging the component opacity slider
+#[derive(Debug, Clone, Copy)]
+pub struct OpacityDrag {
+    /// Which component is being adjusted
+    pub component_idx: usize,
+    /// Starting mouse Y position
+    pub start_y: f32,
+    /// Opacity value when drag started
+    pub start_opacity: u8,
+    /// X position to draw the vertical slider popup
+    pub popup_x: f32,
+}
+
 // ============================================================================
 // Selection Modes (PicoCAD-style: Vertex/Edge/Face)
 // ============================================================================
@@ -986,6 +999,8 @@ pub struct ModelerState {
     /// Component opacity levels (0 = fully visible, 7 = hidden)
     /// Auto-grows as components are added
     pub component_opacity: Vec<u8>,
+    /// Active opacity drag (vertical slider interaction)
+    pub opacity_drag: Option<OpacityDrag>,
     pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
 
     // Component gizmo dragging (for Light offset, etc.)
@@ -1342,6 +1357,7 @@ impl ModelerState {
             lights_section_expanded: true,
             dropdown: DropdownState::new(),
             component_opacity: Vec::new(),
+            opacity_drag: None,
             delete_component_dialog: None,
 
             // Component gizmo dragging

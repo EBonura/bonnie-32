@@ -169,6 +169,7 @@ pub fn draw_modeler(
     ctx.mouse.left_pressed = original_left_pressed;
     draw_add_component_popup(ctx, left_rect, state, icon_font);
     draw_bone_picker_popup(ctx, left_rect, state, icon_font);
+    draw_opacity_slider_popup(ctx, state);
     draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
 
@@ -755,7 +756,6 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
 
     // List components
     let mut select_idx: Option<usize> = None;
-    let mut set_opacity_idx: Option<(usize, u8)> = None; // (component_idx, opacity_level)
     let mut delete_idx: Option<usize> = None;
 
     // Ensure opacity vec is sized correctly
@@ -774,37 +774,40 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
         }
 
-        // Opacity slider (8 dots: 0=visible ... 7=hidden)
+        // Opacity indicator (click to drag vertical slider)
         let opacity = state.get_component_opacity(i);
-        let dot_size = 4.0;
-        let dot_spacing = 2.0;
-        let slider_width = 8.0 * dot_size + 7.0 * dot_spacing; // 8 dots with spacing
-        let slider_x = x + 2.0;
-        let slider_y = *y + (line_height - dot_size) / 2.0;
-        let slider_rect = Rect::new(slider_x, *y, slider_width + 4.0, line_height);
+        let indicator_size = 14.0;
+        let indicator_x = x + 2.0;
+        let indicator_y = *y + (line_height - indicator_size) / 2.0;
+        let indicator_rect = Rect::new(indicator_x, *y, indicator_size + 2.0, line_height);
 
-        // Draw 8 dots (0-7)
-        for dot_idx in 0..8u8 {
-            let dx = slider_x + dot_idx as f32 * (dot_size + dot_spacing);
-            let dot_color = if dot_idx <= opacity {
-                // Filled (darker = more hidden)
-                let brightness = 255 - (dot_idx as u8 * 25);
-                Color::from_rgba(brightness, brightness, brightness, 255)
-            } else {
-                // Empty
-                Color::from_rgba(60, 60, 65, 255)
-            };
-            draw_rectangle(dx, slider_y, dot_size, dot_size, dot_color);
+        // Draw opacity indicator: vertical bar showing current level
+        let bar_height = indicator_size - 2.0;
+        let bar_width = 4.0;
+        let bar_x = indicator_x + (indicator_size - bar_width) / 2.0;
+        let bar_y = indicator_y + 1.0;
+
+        // Background bar
+        draw_rectangle(bar_x, bar_y, bar_width, bar_height, Color::from_rgba(40, 40, 45, 255));
+
+        // Filled portion (inverted: 0=full, 7=empty)
+        let fill_ratio = 1.0 - (opacity as f32 / 7.0);
+        let fill_height = bar_height * fill_ratio;
+        let fill_y = bar_y + (bar_height - fill_height);
+        if fill_height > 0.0 {
+            let brightness = (200.0 * fill_ratio) as u8 + 55;
+            draw_rectangle(bar_x, fill_y, bar_width, fill_height, Color::from_rgba(brightness, brightness, brightness, 255));
         }
 
-        // Click to set opacity
-        if ctx.mouse.inside(&slider_rect) && ctx.mouse.left_pressed {
-            // Calculate which dot was clicked
-            let click_x = ctx.mouse.x - slider_x;
-            let dot_idx = (click_x / (dot_size + dot_spacing)).floor() as u8;
-            if dot_idx <= 7 {
-                set_opacity_idx = Some((i, dot_idx));
-            }
+        // Click to start opacity drag
+        if ctx.mouse.inside(&indicator_rect) && ctx.mouse.left_pressed && state.opacity_drag.is_none() {
+            use super::state::OpacityDrag;
+            state.opacity_drag = Some(OpacityDrag {
+                component_idx: i,
+                start_y: ctx.mouse.y,
+                start_opacity: opacity,
+                popup_x: x + width + 8.0, // Position popup to the right of the panel
+            });
         }
 
         // Component icon
@@ -851,10 +854,10 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             }
         }
 
-        // Click to select (not on opacity slider or delete)
+        // Click to select (not on opacity drag or delete)
         let name_rect = Rect::new(x + 56.0, *y, width - 76.0, line_height);
         if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed
-            && set_opacity_idx.is_none() && delete_idx.is_none() {
+            && state.opacity_drag.is_none() && delete_idx.is_none() {
             select_idx = Some(i);
         }
 
@@ -862,9 +865,7 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
     }
 
     // Apply actions
-    if let Some((idx, opacity)) = set_opacity_idx {
-        state.set_component_opacity(idx, opacity);
-    } else if let Some(idx) = delete_idx {
+    if let Some(idx) = delete_idx {
         // Open delete confirmation dialog
         state.delete_component_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
@@ -877,6 +878,79 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
         }
     }
 
+}
+
+/// Draw and handle the vertical opacity slider popup
+fn draw_opacity_slider_popup(ctx: &mut UiContext, state: &mut ModelerState) {
+    let drag = match state.opacity_drag {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Slider dimensions
+    let slider_height = 120.0;
+    let slider_width = 24.0;
+    let padding = 8.0;
+    let popup_width = slider_width + padding * 2.0;
+    let popup_height = slider_height + padding * 2.0 + 20.0; // Extra space for label
+
+    // Position popup near the component (centered vertically on start position)
+    let popup_x = drag.popup_x;
+    let popup_y = (drag.start_y - popup_height / 2.0).max(10.0);
+
+    // Draw popup background
+    draw_rectangle(popup_x, popup_y, popup_width, popup_height, Color::from_rgba(35, 38, 45, 250));
+    draw_rectangle_lines(popup_x, popup_y, popup_width, popup_height, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Calculate current opacity from mouse Y delta
+    // Moving UP = more visible (lower opacity), moving DOWN = more hidden (higher opacity)
+    let delta_y = ctx.mouse.y - drag.start_y;
+    let sensitivity = 15.0; // pixels per opacity level
+    let opacity_delta = (delta_y / sensitivity).round() as i32;
+    let new_opacity = (drag.start_opacity as i32 + opacity_delta).clamp(0, 7) as u8;
+
+    // Apply the new opacity
+    state.set_component_opacity(drag.component_idx, new_opacity);
+
+    // Draw slider track
+    let track_x = popup_x + padding;
+    let track_y = popup_y + padding + 16.0; // Leave room for label
+    draw_rectangle(track_x, track_y, slider_width, slider_height, Color::from_rgba(25, 28, 35, 255));
+
+    // Draw 8 segments (0 at top = visible, 7 at bottom = hidden)
+    let segment_height = slider_height / 8.0;
+    for i in 0..8u8 {
+        let seg_y = track_y + i as f32 * segment_height;
+        let is_active = i <= new_opacity;
+        let brightness = if is_active {
+            255 - (i * 28) // Darker as we go down
+        } else {
+            50
+        };
+        let color = Color::from_rgba(brightness, brightness, brightness, 255);
+        draw_rectangle(track_x + 2.0, seg_y + 1.0, slider_width - 4.0, segment_height - 2.0, color);
+    }
+
+    // Draw current position indicator (horizontal line)
+    let indicator_y = track_y + (new_opacity as f32 + 0.5) * segment_height;
+    draw_rectangle(track_x - 2.0, indicator_y - 1.0, slider_width + 4.0, 3.0, ACCENT_COLOR);
+
+    // Draw label at top
+    let label = match new_opacity {
+        0 => "Visible",
+        7 => "Hidden",
+        _ => "",
+    };
+    if !label.is_empty() {
+        draw_text(label, popup_x + padding, popup_y + padding + 10.0, 12.0, TEXT_COLOR);
+    } else {
+        draw_text(&format!("{}%", ((7 - new_opacity) as f32 / 7.0 * 100.0) as u8), popup_x + padding, popup_y + padding + 10.0, 12.0, TEXT_COLOR);
+    }
+
+    // End drag on mouse release
+    if !ctx.mouse.left_down {
+        state.opacity_drag = None;
+    }
 }
 
 /// Create a default component of the given type
