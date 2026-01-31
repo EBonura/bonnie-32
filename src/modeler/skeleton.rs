@@ -51,6 +51,16 @@ pub fn draw_skeleton(
         return;
     }
 
+    // Skip if Skeleton component is hidden
+    let skeleton_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Skeleton { .. }))
+        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .unwrap_or(false);
+    if skeleton_hidden {
+        return;
+    }
+
     let camera = &state.camera;
 
     // Draw hierarchy lines first (behind bones)

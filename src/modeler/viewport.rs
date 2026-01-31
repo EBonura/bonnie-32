@@ -1106,6 +1106,13 @@ pub fn draw_modeler_viewport_ext(
     // This ensures proper depth sorting across all objects (painter's algorithm and z-buffer)
     let use_rgb555 = state.raster_settings.use_rgb555;
 
+    // Check if the Mesh component itself is hidden
+    let mesh_component_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .unwrap_or(false);
+
     // Fallback CLUT for objects with no assigned CLUT
     let fallback_clut = state.clut_pool.first_id()
         .and_then(|id| state.clut_pool.get(id));
@@ -1125,6 +1132,10 @@ pub fn draw_modeler_viewport_ext(
     let mut any_double_sided = false;
 
     for (obj_idx, obj) in state.objects().iter().enumerate() {
+        // Skip all mesh objects if Mesh component is hidden
+        if mesh_component_hidden {
+            continue;
+        }
         // Skip hidden objects
         if !obj.visible {
             continue;
@@ -1557,6 +1568,16 @@ fn apply_box_selection(
     fb_height: usize,
     viewport_id: ViewportId,
 ) {
+    // Skip if Mesh component is hidden - nothing to select
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return;
+    }
+
     // For ortho viewports, we need to set up the ortho projection from the viewport's camera
     // The raster_settings.ortho_projection is None at this point because it gets reset after rendering
     let is_ortho = matches!(viewport_id, ViewportId::Top | ViewportId::Front | ViewportId::Side);
@@ -1804,6 +1825,16 @@ fn draw_selected_object_brackets(state: &ModelerState, fb: &mut Framebuffer) {
 /// `world_vertices` - Pre-computed world-space vertex positions (with bone transforms applied).
 /// If None, falls back to reading positions directly from mesh (for non-bone-bound meshes).
 fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer, world_vertices: Option<&[Vec3]>) {
+    // Skip if Mesh component is hidden
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return;
+    }
+
     let mesh = state.mesh();
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
@@ -2288,6 +2319,16 @@ fn find_hovered_element(
     fb_width: usize,
     fb_height: usize,
 ) -> (Option<usize>, Option<(usize, usize)>, Option<usize>) {
+    // Skip if Mesh component is hidden - nothing to hover
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return (None, None, None);
+    }
+
     let (mouse_fb_x, mouse_fb_y) = mouse_fb;
     let camera = &state.camera;
     let mesh = state.mesh();

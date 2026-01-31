@@ -5460,6 +5460,16 @@ fn apply_ortho_box_selection(
     ortho_zoom: f32,
     ortho_center: crate::rasterizer::Vec2,
 ) {
+    // Skip if Mesh component is hidden - nothing to select
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return;
+    }
+
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
         || is_key_down(KeyCode::X);
