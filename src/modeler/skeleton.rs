@@ -55,7 +55,7 @@ pub fn draw_skeleton(
     let skeleton_hidden = state.asset.components.iter()
         .enumerate()
         .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Skeleton { .. }))
-        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
     if skeleton_hidden {
         return;

@@ -1110,7 +1110,7 @@ pub fn draw_modeler_viewport_ext(
     let mesh_component_hidden = state.asset.components.iter()
         .enumerate()
         .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
-        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
 
     // Fallback CLUT for objects with no assigned CLUT
@@ -1313,7 +1313,7 @@ pub fn draw_modeler_viewport_ext(
 
         // Add lights from Light components to the render settings
         for (comp_idx, component) in state.asset.components.iter().enumerate() {
-            if state.hidden_components.contains(&comp_idx) {
+            if state.is_component_hidden(comp_idx) {
                 continue;
             }
             if let crate::asset::AssetComponent::Light { color, intensity, radius, offset } = component {
@@ -1362,7 +1362,7 @@ pub fn draw_modeler_viewport_ext(
     draw_mesh_selection_overlays(state, fb, selected_object_world_vertices.as_deref());
 
     // Draw component gizmos (lights, etc.)
-    draw_component_gizmos(state, fb, &state.hidden_components);
+    draw_component_gizmos(state, fb);
 
     // Draw skeleton bones (if visible or in skeleton mode)
     let ortho_proj = state.raster_settings.ortho_projection.as_ref();
@@ -1579,7 +1579,7 @@ fn apply_box_selection(
     let mesh_hidden = state.asset.components.iter()
         .enumerate()
         .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
-        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
     if mesh_hidden {
         return;
@@ -1836,7 +1836,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer, worl
     let mesh_hidden = state.asset.components.iter()
         .enumerate()
         .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
-        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
     if mesh_hidden {
         return;
@@ -2330,7 +2330,7 @@ fn find_hovered_element(
     let mesh_hidden = state.asset.components.iter()
         .enumerate()
         .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
-        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
     if mesh_hidden {
         return (None, None, None);
@@ -4216,14 +4216,13 @@ fn handle_rotate_gizmo(
 fn draw_component_gizmos(
     state: &ModelerState,
     fb: &mut Framebuffer,
-    hidden_components: &std::collections::HashSet<usize>,
 ) {
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
     // Draw all visible light components as octahedrons
     for (comp_idx, component) in state.asset.components.iter().enumerate() {
-        if hidden_components.contains(&comp_idx) {
+        if state.is_component_hidden(comp_idx) {
             continue;
         }
 

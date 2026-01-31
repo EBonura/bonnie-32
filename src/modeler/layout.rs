@@ -758,9 +758,12 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
     let mut toggle_vis_idx: Option<usize> = None;
     let mut delete_idx: Option<usize> = None;
 
+    // Ensure opacity vec is sized correctly
+    state.ensure_opacity_vec();
+
     for (i, comp) in state.asset.components.iter().enumerate() {
         let is_selected = state.selected_component == Some(i);
-        let is_hidden = state.hidden_components.contains(&i);
+        let is_hidden = state.is_component_hidden(i);
         let item_rect = Rect::new(x, *y, width, line_height);
         let is_hovered = ctx.mouse.inside(&item_rect);
 
@@ -837,11 +840,9 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
 
     // Apply actions
     if let Some(idx) = toggle_vis_idx {
-        if state.hidden_components.contains(&idx) {
-            state.hidden_components.remove(&idx);
-        } else {
-            state.hidden_components.insert(idx);
-        }
+        // Toggle between visible (0) and hidden (7)
+        let current = state.get_component_opacity(idx);
+        state.set_component_opacity(idx, if current >= 7 { 0 } else { 7 });
     } else if let Some(idx) = delete_idx {
         // Open delete confirmation dialog
         state.delete_component_dialog = Some(idx);
@@ -5465,7 +5466,7 @@ fn apply_ortho_box_selection(
     let mesh_hidden = state.asset.components.iter()
         .enumerate()
         .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
-        .map(|(idx, _)| state.hidden_components.contains(&idx))
+        .map(|(idx, _)| state.is_component_hidden(idx))
         .unwrap_or(false);
     if mesh_hidden {
         return;
@@ -7941,14 +7942,10 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
                     }
                 }
 
-                // Update hidden_components indices (remove deleted, shift higher indices)
-                state.hidden_components.remove(&idx);
-                let new_hidden: std::collections::HashSet<usize> = state.hidden_components.iter()
-                    .filter_map(|&i| {
-                        if i > idx { Some(i - 1) } else { Some(i) }
-                    })
-                    .collect();
-                state.hidden_components = new_hidden;
+                // Update component_opacity (remove deleted entry)
+                if idx < state.component_opacity.len() {
+                    state.component_opacity.remove(idx);
+                }
 
                 state.dirty = true;
                 state.set_status(&format!("Deleted '{}' component", comp_name), 1.0);

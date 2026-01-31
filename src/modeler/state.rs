@@ -983,7 +983,9 @@ pub struct ModelerState {
     pub lights_section_expanded: bool,          // Whether Lights section is expanded
     /// Unified dropdown menu state (replaces individual menu_open/btn_rect fields)
     pub dropdown: DropdownState,
-    pub hidden_components: std::collections::HashSet<usize>, // Hidden component indices
+    /// Component opacity levels (0 = fully visible, 7 = hidden)
+    /// Auto-grows as components are added
+    pub component_opacity: Vec<u8>,
     pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
 
     // Component gizmo dragging (for Light offset, etc.)
@@ -1339,7 +1341,7 @@ impl ModelerState {
             properties_section_expanded: true,
             lights_section_expanded: true,
             dropdown: DropdownState::new(),
-            hidden_components: std::collections::HashSet::new(),
+            component_opacity: Vec::new(),
             delete_component_dialog: None,
 
             // Component gizmo dragging
@@ -1530,6 +1532,50 @@ impl ModelerState {
             }
         }
         None
+    }
+
+    // ========================================================================
+    // Component Opacity (0 = fully visible, 7 = hidden)
+    // ========================================================================
+
+    /// Ensure opacity vec is large enough for all components
+    pub fn ensure_opacity_vec(&mut self) {
+        let needed = self.asset.components.len();
+        if self.component_opacity.len() < needed {
+            self.component_opacity.resize(needed, 0); // Default to fully visible
+        }
+    }
+
+    /// Get opacity for a component (0 = visible, 7 = hidden)
+    pub fn get_component_opacity(&self, idx: usize) -> u8 {
+        self.component_opacity.get(idx).copied().unwrap_or(0)
+    }
+
+    /// Set opacity for a component (0 = visible, 7 = hidden)
+    pub fn set_component_opacity(&mut self, idx: usize, opacity: u8) {
+        self.ensure_opacity_vec();
+        if let Some(val) = self.component_opacity.get_mut(idx) {
+            *val = opacity.min(7);
+        }
+    }
+
+    /// Check if component is fully hidden (opacity >= 7)
+    pub fn is_component_hidden(&self, idx: usize) -> bool {
+        self.get_component_opacity(idx) >= 7
+    }
+
+    /// Convert opacity level (0-7) to alpha value (255-0)
+    pub fn opacity_to_alpha(opacity: u8) -> u8 {
+        match opacity {
+            0 => 255,      // Fully visible
+            1 => 220,
+            2 => 180,
+            3 => 140,
+            4 => 100,
+            5 => 60,
+            6 => 30,
+            _ => 0,        // Hidden (7+)
+        }
     }
 
     // ========================================================================
