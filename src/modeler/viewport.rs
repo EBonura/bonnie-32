@@ -1292,6 +1292,7 @@ pub fn draw_modeler_viewport_ext(
                     texture_id: Some(texture_idx),
                     black_transparent: edit_face.black_transparent,
                     blend_mode: edit_face.blend_mode,
+                    editor_alpha: opacity_alpha,
                 });
                 all_blend_modes.push(edit_face.blend_mode);
 
@@ -1304,6 +1305,7 @@ pub fn draw_modeler_viewport_ext(
                         texture_id: Some(texture_idx),
                         black_transparent: edit_face.black_transparent,
                         blend_mode: edit_face.blend_mode,
+                        editor_alpha: opacity_alpha,
                     });
                     all_blend_modes.push(edit_face.blend_mode);
                 }

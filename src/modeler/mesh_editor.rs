@@ -1608,6 +1608,7 @@ impl EditableMesh {
                     texture_id: None,
                     black_transparent: edit_face.black_transparent,
                     blend_mode: edit_face.blend_mode,
+                    editor_alpha: 255,
                 });
             }
         }
@@ -1643,6 +1644,7 @@ impl EditableMesh {
                     texture_id: edit_face.texture_id.or(Some(0)), // Use face texture or atlas
                     black_transparent: edit_face.black_transparent,
                     blend_mode: edit_face.blend_mode,
+                    editor_alpha: 255,
                 });
             }
         }

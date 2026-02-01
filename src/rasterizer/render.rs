@@ -332,6 +332,93 @@ impl Framebuffer {
         }
     }
 
+    /// Set pixel with PS1-style blending + editor alpha multiplier
+    /// Final = lerp(back, ps1_blend_result, editor_alpha/255)
+    /// editor_alpha=255: game-accurate, editor_alpha<255: fade for editor visualization
+    pub fn set_pixel_with_editor_alpha(
+        &mut self, x: usize, y: usize,
+        color: Color, mode: BlendMode, editor_alpha: u8
+    ) {
+        if editor_alpha == 0 { return; } // Fully invisible
+        if x >= self.width || y >= self.height { return; }
+
+        let idx = (y * self.width + x) * 4;
+
+        // Read existing pixel (back)
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+        let back = Color::with_blend(back_r, back_g, back_b, BlendMode::Opaque);
+
+        // Step 1: PS1 blend
+        let ps1_result = color.blend(back, mode);
+
+        // Step 2: Editor alpha (skip lerp if fully opaque)
+        let final_color = if editor_alpha < 255 {
+            let a = editor_alpha as f32 / 255.0;
+            let inv_a = 1.0 - a;
+            Color::new(
+                (ps1_result.r as f32 * a + back_r as f32 * inv_a) as u8,
+                (ps1_result.g as f32 * a + back_g as f32 * inv_a) as u8,
+                (ps1_result.b as f32 * a + back_b as f32 * inv_a) as u8,
+            )
+        } else {
+            ps1_result
+        };
+
+        let bytes = final_color.to_bytes();
+        self.pixels[idx] = bytes[0];
+        self.pixels[idx + 1] = bytes[1];
+        self.pixels[idx + 2] = bytes[2];
+        self.pixels[idx + 3] = bytes[3];
+    }
+
+    /// Set pixel with depth test + PS1 blend + editor alpha
+    pub fn set_pixel_with_depth_and_editor_alpha(
+        &mut self, x: usize, y: usize, z: f32,
+        color: Color, mode: BlendMode, editor_alpha: u8
+    ) -> bool {
+        if editor_alpha == 0 { return false; }
+        if x >= self.width || y >= self.height { return false; }
+
+        let depth_idx = y * self.width + x;
+        if z >= self.zbuffer[depth_idx] { return false; }
+
+        // Depth test passed - update zbuffer
+        self.zbuffer[depth_idx] = z;
+
+        let idx = depth_idx * 4;
+
+        // Read existing pixel (back)
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+        let back = Color::with_blend(back_r, back_g, back_b, BlendMode::Opaque);
+
+        // Step 1: PS1 blend
+        let ps1_result = color.blend(back, mode);
+
+        // Step 2: Editor alpha
+        let final_color = if editor_alpha < 255 {
+            let a = editor_alpha as f32 / 255.0;
+            let inv_a = 1.0 - a;
+            Color::new(
+                (ps1_result.r as f32 * a + back_r as f32 * inv_a) as u8,
+                (ps1_result.g as f32 * a + back_g as f32 * inv_a) as u8,
+                (ps1_result.b as f32 * a + back_b as f32 * inv_a) as u8,
+            )
+        } else {
+            ps1_result
+        };
+
+        let bytes = final_color.to_bytes();
+        self.pixels[idx] = bytes[0];
+        self.pixels[idx + 1] = bytes[1];
+        self.pixels[idx + 2] = bytes[2];
+        self.pixels[idx + 3] = bytes[3];
+        true
+    }
+
     pub fn set_pixel_with_depth(&mut self, x: usize, y: usize, z: f32, color: Color) -> bool {
         if x < self.width && y < self.height {
             let idx = y * self.width + x;
@@ -842,6 +929,7 @@ struct Surface {
     pub face_idx: usize,
     pub black_transparent: bool, // If true, black pixels are transparent (PS1 CLUT-style)
     pub has_transparency: bool,  // True if this face uses semi-transparency (for two-pass rendering)
+    pub editor_alpha: u8, // Editor-only alpha (255=opaque, 0=invisible)
 }
 
 /// Calculate shading intensity from a single directional light
@@ -1221,10 +1309,21 @@ fn rasterize_triangle(
                     color = apply_dither(color, x, y);
                 }
 
-                // Write pixel
+                // Write pixel (with editor alpha support)
+                let editor_alpha = surface.editor_alpha;
+                if editor_alpha == 0 {
+                    // Fully invisible - skip
+                    w0 += a0_step;
+                    w1 += a1_step;
+                    continue;
+                }
+
                 if settings.use_zbuffer {
                     // Z-buffer mode: test depth before writing
-                    if color.blend == BlendMode::Opaque {
+                    if editor_alpha < 255 {
+                        // Use editor alpha blending
+                        fb.set_pixel_with_depth_and_editor_alpha(x, y, z, color, color.blend, editor_alpha);
+                    } else if color.blend == BlendMode::Opaque {
                         fb.set_pixel_with_depth(x, y, z, color);
                     } else {
                         let idx = y * fb.width + x;
@@ -1235,7 +1334,9 @@ fn rasterize_triangle(
                     }
                 } else {
                     // Painter's algorithm: just write (surfaces are pre-sorted)
-                    if color.blend == BlendMode::Opaque {
+                    if editor_alpha < 255 {
+                        fb.set_pixel_with_editor_alpha(x, y, color, color.blend, editor_alpha);
+                    } else if color.blend == BlendMode::Opaque {
                         fb.set_pixel(x, y, color);
                     } else {
                         fb.set_pixel_blended(x, y, color, color.blend);
@@ -1893,6 +1994,7 @@ pub fn render_mesh(
                     face_idx,
                     black_transparent: face.black_transparent,
                     has_transparency,
+                    editor_alpha: face.editor_alpha,
                 });
             }
         } else {
@@ -1920,6 +2022,7 @@ pub fn render_mesh(
                 face_idx,
                 black_transparent: face.black_transparent,
                 has_transparency,
+                editor_alpha: face.editor_alpha,
             });
 
             // Collect for wireframe overlay
@@ -2260,6 +2363,7 @@ pub fn render_mesh_15(
                     face_idx,
                     black_transparent: face.black_transparent,
                     has_transparency,
+                    editor_alpha: face.editor_alpha,
                 });
             }
         } else {
@@ -2286,6 +2390,7 @@ pub fn render_mesh_15(
                 face_idx,
                 black_transparent: face.black_transparent,
                 has_transparency,
+                editor_alpha: face.editor_alpha,
             });
 
             if settings.wireframe_overlay {

@@ -988,10 +988,19 @@ pub struct Face {
     /// Controls how semi-transparent pixels are blended with the background
     #[serde(default)]
     pub blend_mode: BlendMode,
+    /// Editor-only alpha (255 = fully visible, 0 = invisible)
+    /// Applied as post-blend multiplier: lerp(back, ps1_result, editor_alpha/255)
+    /// Not exported to game - purely for editor visualization (component opacity)
+    #[serde(skip, default = "default_editor_alpha")]
+    pub editor_alpha: u8,
 }
 
 fn default_black_transparent() -> bool {
     true
+}
+
+fn default_editor_alpha() -> u8 {
+    255 // Fully visible by default
 }
 
 impl Face {
@@ -1003,6 +1012,7 @@ impl Face {
             texture_id: None,
             black_transparent: true, // Default: black is transparent (PS1 style)
             blend_mode: BlendMode::Opaque,
+            editor_alpha: 255,
         }
     }
 
@@ -1014,7 +1024,14 @@ impl Face {
             texture_id: Some(texture_id),
             black_transparent: true, // Default: black is transparent (PS1 style)
             blend_mode: BlendMode::Opaque,
+            editor_alpha: 255,
         }
+    }
+
+    /// Set the editor alpha (builder pattern)
+    pub fn with_editor_alpha(mut self, alpha: u8) -> Self {
+        self.editor_alpha = alpha;
+        self
     }
 
     /// Set the black_transparent flag (builder pattern)

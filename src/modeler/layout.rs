@@ -4930,6 +4930,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         texture_id: Some(0),
                         black_transparent: edit_face.black_transparent,
                         blend_mode: edit_face.blend_mode,
+                        editor_alpha: 255,
                     });
                 }
             }
