@@ -1438,6 +1438,12 @@ pub fn draw_modeler_viewport_ext(
     if non_mesh_component_selected {
         // Component editing mode: only component gizmo, no mesh interaction
         handle_component_move_gizmo(ctx, state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+
+        // Still update hover state for click-through to mesh/skeleton
+        let is_active_viewport = state.active_viewport == viewport_id;
+        if is_active_viewport && !state.drag_manager.is_dragging() {
+            update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+        }
     } else {
         // Mesh editing mode: normal mesh tools and interaction
         handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
@@ -2679,6 +2685,42 @@ fn update_hover_state(
         state.hovered_edge = edge;
         state.hovered_face = face;
     }
+
+    // Click-through: if nothing hovered in the current component, test other visible components
+    let nothing_hovered = state.hovered_bone.is_none()
+        && state.hovered_bone_tip.is_none()
+        && state.hovered_vertex.is_none()
+        && state.hovered_edge.is_none()
+        && state.hovered_face.is_none();
+
+    if nothing_hovered {
+        // Test bones if we haven't already (skeleton not currently selected)
+        if !skeleton_component_selected && state.show_bones && !state.skeleton().is_empty() {
+            let skeleton_visible = state.asset.components.iter()
+                .position(|c| c.is_skeleton())
+                .map(|idx| !state.is_component_hidden(idx))
+                .unwrap_or(false);
+            if skeleton_visible {
+                let (base, tip) = find_hovered_bone_part(state, (fb_x, fb_y), fb_width, fb_height, viewport_id);
+                state.hovered_bone = base;
+                state.hovered_bone_tip = tip;
+            }
+        }
+
+        // Test mesh if we haven't already (mesh not currently selected, and no bone found)
+        if !mesh_component_selected && state.hovered_bone.is_none() && state.hovered_bone_tip.is_none() {
+            let mesh_visible = state.asset.components.iter()
+                .position(|c| c.is_mesh())
+                .map(|idx| !state.is_component_hidden(idx))
+                .unwrap_or(false);
+            if mesh_visible {
+                let (vert, edge, face) = find_hovered_element(state, (fb_x, fb_y), fb_width, fb_height);
+                state.hovered_vertex = vert;
+                state.hovered_edge = edge;
+                state.hovered_face = face;
+            }
+        }
+    }
 }
 
 /// Find the bone part under the cursor: (base_hover, tip_hover)
@@ -3088,6 +3130,12 @@ fn handle_hover_click(state: &mut ModelerState) {
             state.set_selection(ModelerSelection::Vertices(vec![vert_idx]));
         }
         state.select_mode = SelectMode::Vertex;
+        // Auto-select mesh component (click-through from skeleton/other)
+        let mesh_comp_idx = state.asset.components.iter().position(|c| c.is_mesh());
+        if mesh_comp_idx.is_some() && state.selected_component != mesh_comp_idx {
+            state.selected_component = mesh_comp_idx;
+            state.selected_bone = None;
+        }
         return;
     }
 
@@ -3111,6 +3159,12 @@ fn handle_hover_click(state: &mut ModelerState) {
             state.set_selection(ModelerSelection::Edges(vec![(v0, v1)]));
         }
         state.select_mode = SelectMode::Edge;
+        // Auto-select mesh component (click-through from skeleton/other)
+        let mesh_comp_idx = state.asset.components.iter().position(|c| c.is_mesh());
+        if mesh_comp_idx.is_some() && state.selected_component != mesh_comp_idx {
+            state.selected_component = mesh_comp_idx;
+            state.selected_bone = None;
+        }
         return;
     }
 
@@ -3134,6 +3188,12 @@ fn handle_hover_click(state: &mut ModelerState) {
             state.set_selection(ModelerSelection::Faces(vec![face_idx]));
         }
         state.select_mode = SelectMode::Face;
+        // Auto-select mesh component (click-through from skeleton/other)
+        let mesh_comp_idx = state.asset.components.iter().position(|c| c.is_mesh());
+        if mesh_comp_idx.is_some() && state.selected_component != mesh_comp_idx {
+            state.selected_component = mesh_comp_idx;
+            state.selected_bone = None;
+        }
         return;
     }
 
