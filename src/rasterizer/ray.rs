@@ -5,6 +5,7 @@
 
 use super::camera::Camera;
 use super::math::Vec3;
+use super::OrthoProjection;
 
 /// A 3D ray with origin and direction
 #[derive(Debug, Clone, Copy)]
@@ -92,6 +93,53 @@ pub fn screen_to_ray(
     );
 
     Ray::new(camera.position, world_dir)
+}
+
+/// Generate a parallel ray from screen coordinates for orthographic projection.
+///
+/// Inverts the ortho projection formula:
+/// ```
+/// sx = (cam_x - center_x) * zoom + half_w
+/// sy = -(cam_y - center_y) * zoom + half_h
+/// ```
+///
+/// All ortho rays are parallel (pointing in the camera's forward direction).
+/// Only their origins differ, spread across the view plane.
+pub fn screen_to_ray_ortho(
+    screen_x: f32,
+    screen_y: f32,
+    screen_width: usize,
+    screen_height: usize,
+    camera: &Camera,
+    ortho: &OrthoProjection,
+) -> Ray {
+    // Invert the ortho projection to get camera-space coordinates
+    let cam_x = (screen_x - screen_width as f32 / 2.0) / ortho.zoom + ortho.center_x;
+    let cam_y = -(screen_y - screen_height as f32 / 2.0) / ortho.zoom + ortho.center_y;
+
+    // Origin is the world-space point on the view plane
+    let origin = camera.position
+        + camera.basis_x * cam_x
+        + camera.basis_y * cam_y;
+
+    // All ortho rays are parallel, pointing in the view direction
+    Ray::new(origin, camera.basis_z)
+}
+
+/// Generate a ray from screen coordinates, automatically choosing
+/// perspective or orthographic based on whether an OrthoProjection is provided.
+pub fn screen_to_ray_auto(
+    screen_x: f32,
+    screen_y: f32,
+    screen_width: usize,
+    screen_height: usize,
+    camera: &Camera,
+    ortho: Option<&OrthoProjection>,
+) -> Ray {
+    match ortho {
+        Some(o) => screen_to_ray_ortho(screen_x, screen_y, screen_width, screen_height, camera, o),
+        None => screen_to_ray(screen_x, screen_y, screen_width, screen_height, camera),
+    }
 }
 
 /// Find the closest point on an infinite line to a ray.

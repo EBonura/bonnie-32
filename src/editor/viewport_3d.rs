@@ -630,6 +630,7 @@ pub fn draw_viewport_3d(
                 (mouse_fb_x, mouse_fb_y),
                 &state.camera_3d,
                 fb_width, fb_height,
+                None,
             ) {
                 let snapped_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
                 let snapped_z = (world_pos.z / SECTOR_SIZE).floor() * SECTOR_SIZE;
@@ -670,6 +671,7 @@ pub fn draw_viewport_3d(
                 (mouse_fb_x, mouse_fb_y),
                 &state.camera_3d,
                 fb_width, fb_height,
+                None,
             ) {
                 // Snap to sector center (objects are placed at sector center)
                 let sector_x = (world_pos.x / SECTOR_SIZE).floor();
@@ -725,6 +727,7 @@ pub fn draw_viewport_3d(
                     (mouse_fb_x, mouse_fb_y),
                     &state.camera_3d,
                     fb.width, fb.height,
+                    None,
                 ) {
                     // Snap to grid
                     let grid_x = (world_pos.x / SECTOR_SIZE).floor() * SECTOR_SIZE;
@@ -822,6 +825,7 @@ pub fn draw_viewport_3d(
                 (mouse_fb_x, mouse_fb_y),
                 &state.camera_3d,
                 fb.width, fb.height,
+                None,
             );
 
             if let Some(world_pos) = sector_pos {
@@ -956,6 +960,7 @@ pub fn draw_viewport_3d(
                 (mouse_fb_x, mouse_fb_y),
                 &state.camera_3d,
                 fb.width, fb.height,
+                None,
             );
 
             if let Some(world_pos) = sector_pos {
@@ -1588,6 +1593,7 @@ pub fn draw_viewport_3d(
                                             (fb_x, fb_y),
                                             &state.camera_3d,
                                             fb.width, fb.height,
+                                            None,
                                         ) {
                                             click_offset = (click_pos.x - world_pos.x, click_pos.z - world_pos.z);
                                         }
@@ -1975,6 +1981,7 @@ pub fn draw_viewport_3d(
                                 (fb_x, fb_y),
                                 &state.camera_3d,
                                 fb.width, fb.height,
+                                None,
                             ) {
                                 state.xz_drag_start_world = (world_pos.x, world_pos.z);
                             }
@@ -2093,6 +2100,7 @@ pub fn draw_viewport_3d(
                                         (fb_x, fb_y),
                                         &state.camera_3d,
                                         fb.width, fb.height,
+                                        None,
                                     ) {
                                         click_offset = (click_pos.x - world_pos.x, click_pos.z - world_pos.z);
                                     }
@@ -2163,6 +2171,7 @@ pub fn draw_viewport_3d(
                     (fb_x, fb_y),
                     &state.camera_3d,
                     fb.width, fb.height,
+                    None,
                 ) {
                     let world_dx = world_pos.x - state.xz_drag_start_world.0;
                     let world_dz = world_pos.z - state.xz_drag_start_world.1;
@@ -2290,6 +2299,7 @@ pub fn draw_viewport_3d(
                                     (fb_x, fb_y),
                                     &state.camera_3d,
                                     fb.width, fb.height,
+                                    None,
                                 ) {
                                     state.object_xz_drag_click_offset = Some((
                                         click_pos.x - world_pos.x,
@@ -2329,6 +2339,7 @@ pub fn draw_viewport_3d(
                             (fb_x, fb_y),
                             &state.camera_3d,
                             fb.width, fb.height,
+                            None,
                         ) {
                             // Save undo on first movement
                             if !state.viewport_drag_started {

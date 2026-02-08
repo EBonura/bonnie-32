@@ -18,7 +18,7 @@ pub use rotate_tracker::RotateTracker;
 pub use scale_tracker::ScaleTracker;
 pub use box_select::BoxSelectTracker;
 
-use crate::rasterizer::{Vec3, Camera, screen_to_ray, ray_line_closest_point, ray_circle_angle};
+use crate::rasterizer::{Vec3, Camera, OrthoProjection, screen_to_ray_auto, ray_line_closest_point, ray_circle_angle};
 use crate::ui::{DragState, DragStatus, DragConfig, SnapMode, Axis, apply_drag_update};
 
 /// The type of active drag operation
@@ -143,7 +143,7 @@ impl DragManager {
         viewport_width: usize,
         viewport_height: usize,
     ) {
-        self.start_move_3d_with_bone(initial_position, initial_mouse, axis, None, vertex_indices, initial_positions, snap_enabled, grid_size, camera, viewport_width, viewport_height, None);
+        self.start_move_3d_with_bone(initial_position, initial_mouse, axis, None, vertex_indices, initial_positions, snap_enabled, grid_size, camera, viewport_width, viewport_height, None, None);
     }
 
     /// Start a move drag operation with camera info, bone rotation, and optional axis direction
@@ -161,6 +161,7 @@ impl DragManager {
         viewport_width: usize,
         viewport_height: usize,
         bone_rotation: Option<Vec3>,
+        ortho: Option<&OrthoProjection>,
     ) {
         let tracker = MoveTracker::new(axis, vertex_indices, initial_positions)
             .with_bone_rotation(bone_rotation)
@@ -173,7 +174,7 @@ impl DragManager {
         let handle_offset = if let Some(axis) = axis {
             let dir = axis_direction.unwrap_or_else(|| axis.unit_vector());
             // Cast ray from mouse click and find where it intersects the axis line
-            let ray = screen_to_ray(initial_mouse.0, initial_mouse.1, viewport_width, viewport_height, camera);
+            let ray = screen_to_ray_auto(initial_mouse.0, initial_mouse.1, viewport_width, viewport_height, camera, ortho);
             if let Some((closest, _dist)) = ray_line_closest_point(&ray, initial_position, dir) {
                 // offset = initial_position - closest, so closest + offset = initial_position
                 initial_position - closest
@@ -259,6 +260,7 @@ impl DragManager {
         camera: &Camera,
         viewport_width: usize,
         viewport_height: usize,
+        ortho: Option<&OrthoProjection>,
     ) -> DragUpdateResult {
         let state = match &mut self.state {
             Some(s) => s,
@@ -279,6 +281,7 @@ impl DragManager {
                         camera,
                         viewport_width,
                         viewport_height,
+                        ortho,
                     );
 
                     if let Some(new_pos) = update.new_position {
@@ -319,7 +322,7 @@ impl DragManager {
                     let axis_vec = tracker.axis.unit_vector();
 
                     // Cast ray from current mouse position using stored camera
-                    let ray = screen_to_ray(fb_mouse.0, fb_mouse.1, vp_w, vp_h, start_camera);
+                    let ray = screen_to_ray_auto(fb_mouse.0, fb_mouse.1, vp_w, vp_h, start_camera, ortho);
                     if let Some(current_angle) = ray_circle_angle(&ray, tracker.center, axis_vec, ref_vector) {
                         let angle_delta = current_angle - state.initial_angle;
                         state.current_angle = current_angle;
