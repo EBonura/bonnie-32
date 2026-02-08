@@ -9,7 +9,7 @@
 
 use macroquad::prelude::*;
 use crate::storage::{PendingLoad, PendingList};
-use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
+use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR, TextInputState, draw_text_input};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
 use crate::world::SECTOR_SIZE;
 use crate::asset::{Asset, SAMPLES_ASSETS_DIR, USER_ASSETS_DIR};
@@ -218,6 +218,8 @@ pub struct AssetBrowser {
     pub pending_user_list: Option<PendingList>,
     /// Flag to trigger user assets refresh from main loop (native only, needs storage access)
     pub pending_refresh: bool,
+    /// Active rename dialog (TextInputState for the new name)
+    pub rename_dialog: Option<TextInputState>,
     /// Local framebuffer for preview rendering
     preview_fb: Framebuffer,
 }
@@ -246,6 +248,7 @@ impl Default for AssetBrowser {
             pending_preview_load: None,
             pending_user_list: None,
             pending_refresh: false,
+            rename_dialog: None,
             preview_fb: Framebuffer::new(320, 240), // Initial size, will resize as needed
         }
     }
@@ -368,6 +371,8 @@ pub enum AssetBrowserAction {
     OpenCopy,
     /// User wants to delete the selected user asset
     DeleteAsset,
+    /// User wants to rename the selected user asset
+    RenameAsset,
     /// User wants to start with a new empty asset
     NewAsset,
     /// User wants to refresh the asset list
@@ -506,8 +511,17 @@ pub fn draw_asset_browser(
         action = AssetBrowserAction::DeleteAsset;
     }
 
+    // Rename button (only for user assets)
+    let rename_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    let rename_enabled = browser.is_user_selected() && browser.preview_asset.is_some();
+    if draw_text_button_enabled(ctx, rename_rect, "Rename", Color::from_rgba(60, 80, 100, 255), rename_enabled) {
+        if let Some(info) = browser.selected_asset() {
+            browser.rename_dialog = Some(TextInputState::new(&info.name));
+        }
+    }
+
     // Refresh button - reload asset lists from storage
-    let refresh_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    let refresh_rect = Rect::new(dialog_x + 250.0, footer_y + 8.0, 70.0, 28.0);
     if draw_text_button(ctx, refresh_rect, "Refresh", Color::from_rgba(60, 60, 70, 255)) {
         action = AssetBrowserAction::Refresh;
     }
@@ -532,9 +546,48 @@ pub fn draw_asset_browser(
         action = AssetBrowserAction::OpenAsset;
     }
 
-    // Handle Escape to close
-    if is_key_pressed(KeyCode::Escape) {
-        action = AssetBrowserAction::Cancel;
+    // Rename dialog overlay
+    if browser.rename_dialog.is_some() {
+        let rdw = 280.0;
+        let rdh = 120.0;
+        let rdx = (screen_width() - rdw) / 2.0;
+        let rdy = (screen_height() - rdh) / 2.0;
+
+        draw_rectangle(rdx, rdy, rdw, rdh, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(rdx, rdy, rdw, rdh, 2.0, Color::from_rgba(80, 80, 90, 255));
+        draw_text("Rename Asset", rdx + 12.0, rdy + 22.0, 16.0, WHITE);
+
+        let input_rect = Rect::new(rdx + 12.0, rdy + 40.0, rdw - 24.0, 28.0);
+        if let Some(ref mut input_state) = browser.rename_dialog {
+            draw_text_input(input_rect, input_state, 14.0);
+        }
+
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = rdy + rdh - btn_h - 12.0;
+
+        let cancel_rect = Rect::new(rdx + rdw - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, Color::from_rgba(200, 200, 200, 255));
+
+        let confirm_rect = Rect::new(rdx + rdw - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let confirm_hover = ctx.mouse.inside(&confirm_rect);
+        draw_rectangle(confirm_rect.x, confirm_rect.y, confirm_rect.w, confirm_rect.h,
+            if confirm_hover { Color::from_rgba(60, 100, 140, 255) } else { ACCENT_COLOR });
+        draw_text("Rename", confirm_rect.x + 14.0, confirm_rect.y + 18.0, 14.0, WHITE);
+
+        if ctx.mouse.clicked(&cancel_rect) || is_key_pressed(KeyCode::Escape) {
+            browser.rename_dialog = None;
+        } else if ctx.mouse.clicked(&confirm_rect) || is_key_pressed(KeyCode::Enter) {
+            action = AssetBrowserAction::RenameAsset;
+        }
+    } else {
+        // Handle Escape to close (only when rename dialog is not open)
+        if is_key_pressed(KeyCode::Escape) {
+            action = AssetBrowserAction::Cancel;
+        }
     }
 
     action

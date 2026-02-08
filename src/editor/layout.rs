@@ -533,8 +533,8 @@ pub fn draw_editor(
             state.asset_browser.close();
             action = EditorAction::SwitchToModeler;
         }
-        AssetBrowserAction::DeleteAsset | AssetBrowserAction::Cancel => {
-            // Close browser (DeleteAsset doesn't apply to World Editor)
+        AssetBrowserAction::DeleteAsset | AssetBrowserAction::RenameAsset | AssetBrowserAction::Cancel => {
+            // Close browser (DeleteAsset/RenameAsset don't apply to World Editor)
             state.asset_browser.close();
         }
         AssetBrowserAction::None => {}
