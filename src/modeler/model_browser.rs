@@ -849,7 +849,7 @@ fn draw_orbit_preview_internal(
         if use_rgb555 {
             let tex15 = obj.atlas.to_texture15(clut, &format!("atlas_{}", obj_idx));
             let textures_15 = [tex15];
-            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
+            render_mesh_15(fb, &vertices, &faces, &textures_15, &camera, &settings, None);
         } else {
             let tex = obj.atlas.to_raster_texture(clut, &format!("atlas_{}", obj_idx));
             let textures = [tex];

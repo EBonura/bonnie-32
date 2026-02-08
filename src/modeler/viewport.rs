@@ -1116,9 +1116,8 @@ pub fn draw_modeler_viewport_ext(
     let mesh_component_opacity = mesh_component_info
         .map(|(idx, _)| state.get_component_opacity(idx))
         .unwrap_or(0);
-    // Scale base color by opacity (0=full brightness, 6=dim, 7=hidden)
+    // Convert opacity to alpha for editor transparency (handled by rasterizer, not vertex dimming)
     let opacity_alpha = ModelerState::opacity_to_alpha(mesh_component_opacity);
-    let mesh_brightness_scale = opacity_alpha as f32 / 255.0;
 
     // Fallback CLUT for objects with no assigned CLUT
     let fallback_clut = state.clut_pool.first_id()
@@ -1129,7 +1128,6 @@ pub fn draw_modeler_viewport_ext(
     let mut all_faces: Vec<RasterFace> = Vec::new();
     let mut all_textures: Vec<crate::rasterizer::Texture> = Vec::new();
     let mut all_textures_15: Vec<crate::rasterizer::Texture15> = Vec::new();
-    let mut all_blend_modes: Vec<crate::rasterizer::BlendMode> = Vec::new();
 
     // Cache transformed vertex positions for the selected object (for selection overlays)
     // This avoids redundant bone transforms - compute once, use everywhere
@@ -1171,8 +1169,8 @@ pub fn draw_modeler_viewport_ext(
         let mesh = &obj.mesh;
 
         // All objects use same brightness (selection shown via corner brackets)
-        // Scale by component opacity (0=full, 6=dim, 7=hidden)
-        let base_color = (180.0 * mesh_brightness_scale) as u8;
+        // Opacity is handled by editor_alpha on faces, not by vertex color dimming
+        let base_color = 180u8;
 
         // Track vertex offset for this object
         let vertex_offset = all_vertices.len();
@@ -1220,12 +1218,8 @@ pub fn draw_modeler_viewport_ext(
                 .map(|c| c.is_skeleton())
                 .unwrap_or(false);
             let color = if is_selected && skeleton_component_selected && state.selected_bone.is_some() && bone_idx == state.selected_bone {
-                // Bright green for vertices on selected bone (also scaled by mesh opacity)
-                RasterColor::new(
-                    (100.0 * mesh_brightness_scale) as u8,
-                    (220.0 * mesh_brightness_scale) as u8,
-                    (120.0 * mesh_brightness_scale) as u8,
-                )
+                // Bright green for vertices on selected bone
+                RasterColor::new(100, 220, 120)
             } else {
                 RasterColor::new(base_color, base_color, base_color)
             };
@@ -1294,7 +1288,6 @@ pub fn draw_modeler_viewport_ext(
                     blend_mode: edit_face.blend_mode,
                     editor_alpha: opacity_alpha,
                 });
-                all_blend_modes.push(edit_face.blend_mode);
 
                 // Add mirrored face if mirror mode enabled
                 if let Some(mirror_offset) = mirror_vertex_offset {
@@ -1307,7 +1300,6 @@ pub fn draw_modeler_viewport_ext(
                         blend_mode: edit_face.blend_mode,
                         editor_alpha: opacity_alpha,
                     });
-                    all_blend_modes.push(edit_face.blend_mode);
                 }
             }
         }
@@ -1337,7 +1329,6 @@ pub fn draw_modeler_viewport_ext(
                 face.v1 += vertex_offset;
                 face.v2 += vertex_offset;
                 all_faces.push(face);
-                all_blend_modes.push(crate::rasterizer::BlendMode::Opaque);
             }
         }
     }
@@ -1381,7 +1372,6 @@ pub fn draw_modeler_viewport_ext(
                 &all_vertices,
                 &all_faces,
                 &all_textures_15,
-                Some(&all_blend_modes),
                 &state.camera,
                 &combined_settings,
                 None,

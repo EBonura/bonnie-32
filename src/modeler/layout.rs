@@ -4936,11 +4936,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             }
 
             if !vertices.is_empty() && !faces.is_empty() {
-                // Collect per-face blend modes
-                let blend_modes: Vec<crate::rasterizer::BlendMode> = faces.iter()
-                    .map(|f| f.blend_mode)
-                    .collect();
-
                 if use_rgb555 {
                     // RGB555 rendering path
                     if let Some(ref tex15) = atlas_texture_15 {
@@ -4950,7 +4945,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                             &vertices,
                             &faces,
                             &textures_15,
-                            Some(&blend_modes),
                             &ortho_camera,
                             &ortho_settings,
                             None,

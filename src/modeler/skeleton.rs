@@ -368,9 +368,6 @@ pub fn skeleton_to_triangles(
         return (vertices, faces);
     }
 
-    // Get opacity scale for colors
-    let brightness_scale = editor_alpha as f32 / 255.0;
-
     // Check if skeleton component is selected (for bone coloring)
     let skeleton_component_selected = state.selected_component
         .and_then(|idx| state.asset.components.get(idx))
@@ -379,7 +376,8 @@ pub fn skeleton_to_triangles(
 
     for (idx, bone) in skeleton.iter().enumerate() {
         // Determine bone color based on state
-        let base_color = if state.selected_bone == Some(idx) {
+        // Opacity is handled by editor_alpha on faces, not by vertex color dimming
+        let color = if state.selected_bone == Some(idx) {
             bone_color_selected()
         } else if state.hovered_bone == Some(idx) {
             bone_color_hovered()
@@ -388,13 +386,6 @@ pub fn skeleton_to_triangles(
         } else {
             bone_color_default()
         };
-
-        // Apply brightness scale
-        let color = RasterColor::new(
-            (base_color.r as f32 * brightness_scale) as u8,
-            (base_color.g as f32 * brightness_scale) as u8,
-            (base_color.b as f32 * brightness_scale) as u8,
-        );
 
         let (base_pos, _rotation) = state.get_bone_world_transform(idx);
         let tip_pos = state.get_bone_tip_position(idx);

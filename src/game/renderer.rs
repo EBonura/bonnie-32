@@ -179,7 +179,7 @@ pub fn draw_test_viewport(
         };
 
         let room_timings = if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &game.textures_15_cache, None, &game.camera, &render_settings, fog)
+            render_mesh_15(fb, &vertices, &faces, &game.textures_15_cache, &game.camera, &render_settings, fog)
         } else {
             render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings)
         };

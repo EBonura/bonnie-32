@@ -561,6 +561,72 @@ impl Framebuffer {
         false
     }
 
+    /// RGB555 pixel write with editor alpha blending (no depth test)
+    /// Step 1: Apply PS1 blend if semi-transparent, Step 2: Lerp with background by editor_alpha
+    #[inline]
+    pub fn set_pixel_with_editor_alpha_15(
+        &mut self, x: usize, y: usize,
+        color: Color15, blend_mode: BlendMode, editor_alpha: u8,
+    ) {
+        if editor_alpha == 0 || x >= self.width || y >= self.height { return; }
+        let idx = (y * self.width + x) * 4;
+
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+
+        // Step 1: PS1 blend if semi-transparent
+        let (ps1_r, ps1_g, ps1_b) = if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+            blend_rgb555(color.r8(), color.g8(), color.b8(), back_r, back_g, back_b, blend_mode)
+        } else {
+            (color.r8(), color.g8(), color.b8())
+        };
+
+        // Step 2: editor alpha lerp
+        let a = editor_alpha as u16;
+        let inv_a = 255 - a;
+        self.pixels[idx]     = ((ps1_r as u16 * a + back_r as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 1] = ((ps1_g as u16 * a + back_g as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 2] = ((ps1_b as u16 * a + back_b as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 3] = 255;
+    }
+
+    /// RGB555 pixel write with depth test + editor alpha blending
+    #[inline]
+    pub fn set_pixel_with_depth_and_editor_alpha_15(
+        &mut self, x: usize, y: usize, z: f32,
+        color: Color15, blend_mode: BlendMode, editor_alpha: u8,
+        skip_z_write: bool,
+    ) -> bool {
+        if editor_alpha == 0 || x >= self.width || y >= self.height { return false; }
+        let depth_idx = y * self.width + x;
+        if z >= self.zbuffer[depth_idx] { return false; }
+        if !skip_z_write {
+            self.zbuffer[depth_idx] = z;
+        }
+
+        let idx = depth_idx * 4;
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+
+        // Step 1: PS1 blend if semi-transparent
+        let (ps1_r, ps1_g, ps1_b) = if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+            blend_rgb555(color.r8(), color.g8(), color.b8(), back_r, back_g, back_b, blend_mode)
+        } else {
+            (color.r8(), color.g8(), color.b8())
+        };
+
+        // Step 2: editor alpha lerp
+        let a = editor_alpha as u16;
+        let inv_a = 255 - a;
+        self.pixels[idx]     = ((ps1_r as u16 * a + back_r as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 1] = ((ps1_g as u16 * a + back_g as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 2] = ((ps1_b as u16 * a + back_b as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 3] = 255;
+        true
+    }
+
     /// Draw a filled circle at (cx, cy) with given radius and color
     pub fn draw_circle(&mut self, cx: i32, cy: i32, radius: i32, color: Color) {
         let r_sq = radius * radius;
@@ -929,6 +995,7 @@ struct Surface {
     pub face_idx: usize,
     pub black_transparent: bool, // If true, black pixels are transparent (PS1 CLUT-style)
     pub has_transparency: bool,  // True if this face uses semi-transparency (for two-pass rendering)
+    pub blend_mode: BlendMode, // PS1 blend mode for this face
     pub editor_alpha: u8, // Editor-only alpha (255=opaque, 0=invisible)
 }
 
@@ -1573,10 +1640,24 @@ fn rasterize_triangle_15(
                 let semi = color.is_semi_transparent() || is_all_black;
                 let color = Color15::new_semi(r5, g5, b5, semi);
 
-                // Write pixel
+                // Write pixel (with editor alpha support)
+                let editor_alpha = surface.editor_alpha;
+                if editor_alpha == 0 {
+                    w0 += a0_step;
+                    w1 += a1_step;
+                    continue;
+                }
+
                 if settings.xray_mode {
                     // X-ray mode: always blend at 50% alpha, no z-buffer update
                     fb.set_pixel_xray_15(x, y, color);
+                } else if editor_alpha < 255 {
+                    // Editor alpha: blend with background for transparency visualization
+                    if settings.use_zbuffer {
+                        fb.set_pixel_with_depth_and_editor_alpha_15(x, y, z, color, blend_mode, editor_alpha, skip_z_write);
+                    } else {
+                        fb.set_pixel_with_editor_alpha_15(x, y, color, blend_mode, editor_alpha);
+                    }
                 } else if settings.use_zbuffer {
                     // Z-buffer mode: test depth before writing
                     let idx = y * fb.width + x;
@@ -1994,6 +2075,7 @@ pub fn render_mesh(
                     face_idx,
                     black_transparent: face.black_transparent,
                     has_transparency,
+                    blend_mode: face.blend_mode,
                     editor_alpha: face.editor_alpha,
                 });
             }
@@ -2022,6 +2104,7 @@ pub fn render_mesh(
                 face_idx,
                 black_transparent: face.black_transparent,
                 has_transparency,
+                blend_mode: face.blend_mode,
                 editor_alpha: face.editor_alpha,
             });
 
@@ -2190,7 +2273,6 @@ pub fn render_mesh_15(
     vertices: &[Vertex],
     faces: &[Face],
     textures: &[Texture15],
-    face_blend_modes: Option<&[BlendMode]>,
     camera: &Camera,
     settings: &RasterSettings,
     fog: Option<(f32, f32, f32, Color)>,
@@ -2286,19 +2368,16 @@ pub fn render_mesh_15(
         let normal = edge1.cross(edge2).normalize();
 
         // Determine if this face uses semi-transparency (for two-pass rendering)
-        // Check texture's blend_mode first, then face blend mode
+        // Check texture's blend_mode and face's blend_mode directly
         let has_transparency = {
             let tex_blend = face.texture_id
                 .and_then(|id| textures.get(id))
                 .map(|t| t.blend_mode);
-            let face_blend = face_blend_modes
-                .and_then(|modes| modes.get(face_idx))
-                .copied();
 
             // Face is transparent if texture or face has non-Opaque blend mode
-            match (tex_blend, face_blend) {
+            match (tex_blend, face.blend_mode) {
                 (Some(b), _) if b != BlendMode::Opaque => true,
-                (None, Some(b)) if b != BlendMode::Opaque => true,
+                (_, b) if b != BlendMode::Opaque => true,
                 _ => false,
             }
         };
@@ -2363,6 +2442,7 @@ pub fn render_mesh_15(
                     face_idx,
                     black_transparent: face.black_transparent,
                     has_transparency,
+                    blend_mode: face.blend_mode,
                     editor_alpha: face.editor_alpha,
                 });
             }
@@ -2390,6 +2470,7 @@ pub fn render_mesh_15(
                 face_idx,
                 black_transparent: face.black_transparent,
                 has_transparency,
+                blend_mode: face.blend_mode,
                 editor_alpha: face.editor_alpha,
             });
 
@@ -2442,12 +2523,7 @@ pub fn render_mesh_15(
                 .texture_id
                 .and_then(|id| textures.get(id));
 
-            let blend_mode = face_blend_modes
-                .and_then(|modes| modes.get(surface.face_idx))
-                .copied()
-                .unwrap_or(BlendMode::Opaque);
-
-            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, false);
+            rasterize_triangle_15(fb, surface, texture, surface.blend_mode, surface.black_transparent, settings, false);
         }
 
         // PASS 2: Render semi-transparent surfaces (z-buffer writes DISABLED)
@@ -2457,12 +2533,7 @@ pub fn render_mesh_15(
                 .texture_id
                 .and_then(|id| textures.get(id));
 
-            let blend_mode = face_blend_modes
-                .and_then(|modes| modes.get(surface.face_idx))
-                .copied()
-                .unwrap_or(BlendMode::Opaque);
-
-            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, true);
+            rasterize_triangle_15(fb, surface, texture, surface.blend_mode, surface.black_transparent, settings, true);
         }
     }
 

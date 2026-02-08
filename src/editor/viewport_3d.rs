@@ -3526,7 +3526,7 @@ pub fn draw_viewport_3d(
         // Time rasterization
         let raster_start = EditorFrameTimings::start();
         if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, None, &state.camera_3d, &render_settings, fog);
+            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, &state.camera_3d, &render_settings, fog);
         } else {
             render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
         }
@@ -7614,7 +7614,7 @@ fn render_asset_meshes(
                 if use_rgb555 {
                     let tex15 = atlas.to_texture15(&clut, "asset_part");
                     let part_textures = [tex15];
-                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &state.camera_3d, &render_settings, fog);
+                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, &state.camera_3d, &render_settings, fog);
                 } else {
                     let tex = atlas.to_raster_texture(&clut, "asset_part");
                     let part_textures = [tex];

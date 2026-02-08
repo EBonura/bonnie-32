@@ -757,7 +757,7 @@ fn draw_orbit_preview(
         let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
         if !vertices.is_empty() {
             if use_rgb555 {
-                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
+                render_mesh_15(fb, &vertices, &faces, &textures_15, &camera, &settings, None);
             } else {
                 render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
             }
@@ -847,7 +847,7 @@ fn draw_orbit_preview(
                 if use_rgb555 {
                     let tex15 = atlas.to_texture15(&clut, "preview_asset");
                     let part_textures = [tex15];
-                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &camera, &asset_settings, None);
+                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, &camera, &asset_settings, None);
                 } else {
                     let tex = atlas.to_raster_texture(&clut, "preview_asset");
                     let part_textures = [tex];
