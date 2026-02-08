@@ -998,7 +998,11 @@ pub struct ModelerState {
     pub dropdown: DropdownState,
     /// Component opacity levels (0 = fully visible, 7 = hidden)
     /// Auto-grows as components are added
+    /// This is the *displayed* opacity — may include auto-dimming for non-selected components
     pub component_opacity: Vec<u8>,
+    /// User-intended opacity for each component (before auto-focus dimming)
+    /// When auto-focus is active, non-selected components are dimmed beyond their base opacity
+    pub base_component_opacity: Vec<u8>,
     /// Active opacity drag (vertical slider interaction)
     pub opacity_drag: Option<OpacityDrag>,
     pub delete_component_dialog: Option<usize>, // Component index pending deletion confirmation
@@ -1357,6 +1361,7 @@ impl ModelerState {
             lights_section_expanded: true,
             dropdown: DropdownState::new(),
             component_opacity: Vec::new(),
+            base_component_opacity: Vec::new(),
             opacity_drag: None,
             delete_component_dialog: None,
 
@@ -1554,11 +1559,14 @@ impl ModelerState {
     // Component Opacity (0 = fully visible, 7 = hidden)
     // ========================================================================
 
-    /// Ensure opacity vec is large enough for all components
+    /// Ensure opacity vecs are large enough for all components
     pub fn ensure_opacity_vec(&mut self) {
         let needed = self.asset.components.len();
         if self.component_opacity.len() < needed {
             self.component_opacity.resize(needed, 0); // Default to fully visible
+        }
+        if self.base_component_opacity.len() < needed {
+            self.base_component_opacity.resize(needed, 0);
         }
     }
 
@@ -1567,11 +1575,35 @@ impl ModelerState {
         self.component_opacity.get(idx).copied().unwrap_or(0)
     }
 
-    /// Set opacity for a component (0 = visible, 7 = hidden)
+    /// Set the user-intended (base) opacity for a component, then reapply focus dimming
     pub fn set_component_opacity(&mut self, idx: usize, opacity: u8) {
         self.ensure_opacity_vec();
+        let clamped = opacity.min(7);
+        if let Some(val) = self.base_component_opacity.get_mut(idx) {
+            *val = clamped;
+        }
         if let Some(val) = self.component_opacity.get_mut(idx) {
-            *val = opacity.min(7);
+            *val = clamped;
+        }
+    }
+
+    /// Auto-dim non-selected components for visual focus.
+    /// Selected component shows at its base opacity; others are dimmed to at least FOCUS_DIM_LEVEL.
+    const FOCUS_DIM_LEVEL: u8 = 3;
+
+    pub fn apply_focus_opacity(&mut self) {
+        self.ensure_opacity_vec();
+        let selected = self.selected_component;
+        let count = self.asset.components.len();
+        for i in 0..count {
+            let base = self.base_component_opacity.get(i).copied().unwrap_or(0);
+            if Some(i) == selected {
+                // Selected component: show at user's intended opacity
+                self.component_opacity[i] = base;
+            } else {
+                // Non-selected: dim to at least FOCUS_DIM_LEVEL (but respect if user set it higher)
+                self.component_opacity[i] = base.max(Self::FOCUS_DIM_LEVEL);
+            }
         }
     }
 

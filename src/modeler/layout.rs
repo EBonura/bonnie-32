@@ -103,6 +103,9 @@ pub fn draw_modeler(
     icon_font: Option<&Font>,
     storage: &Storage,
 ) -> ModelerAction {
+    // Apply auto-focus transparency: dim non-selected components
+    state.apply_focus_opacity();
+
     // Save original click state for menus (restored before processing dropdowns)
     let original_left_pressed = ctx.mouse.left_pressed;
 
@@ -775,7 +778,9 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
         }
 
         // Opacity indicator (click to drag vertical slider)
+        // Show the displayed opacity (includes auto-dim), but drag from base
         let opacity = state.get_component_opacity(i);
+        let base_opacity = state.base_component_opacity.get(i).copied().unwrap_or(0);
         let indicator_size = 14.0;
         let indicator_x = x + 2.0;
         let indicator_y = *y + (line_height - indicator_size) / 2.0;
@@ -805,7 +810,7 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             state.opacity_drag = Some(OpacityDrag {
                 component_idx: i,
                 start_y: ctx.mouse.y,
-                start_opacity: opacity,
+                start_opacity: base_opacity,
                 popup_x: x + width + 8.0, // Position popup to the right of the panel
             });
         }
