@@ -14,7 +14,7 @@ use crate::rasterizer::{
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId, rotate_by_euler};
 use super::drag::{DragUpdateResult, ActiveDrag};
 use super::tools::ModelerToolId;
-use super::skeleton::{draw_skeleton, ray_bone_intersect};
+use super::skeleton::{draw_skeleton, ray_bone_intersect, skeleton_to_triangles};
 
 /// Convert state::Axis to ui::Axis
 fn to_ui_axis(axis: Axis) -> UiAxis {
@@ -1313,6 +1313,35 @@ pub fn draw_modeler_viewport_ext(
         }
     }
 
+    // Add skeleton bone triangles to unified pipeline (if visible)
+    if state.show_bones {
+        let skeleton_info = state.asset.components.iter()
+            .enumerate()
+            .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Skeleton { .. }));
+        let skeleton_hidden = skeleton_info
+            .map(|(idx, _)| state.is_component_hidden(idx))
+            .unwrap_or(false);
+
+        if !skeleton_hidden {
+            let skeleton_opacity = skeleton_info
+                .map(|(idx, _)| state.get_component_opacity(idx))
+                .unwrap_or(0);
+            let skeleton_alpha = ModelerState::opacity_to_alpha(skeleton_opacity);
+
+            let vertex_offset = all_vertices.len();
+            let (skeleton_verts, skeleton_faces) = skeleton_to_triangles(state, skeleton_alpha);
+
+            all_vertices.extend(skeleton_verts);
+            for mut face in skeleton_faces {
+                face.v0 += vertex_offset;
+                face.v1 += vertex_offset;
+                face.v2 += vertex_offset;
+                all_faces.push(face);
+                all_blend_modes.push(crate::rasterizer::BlendMode::Opaque);
+            }
+        }
+    }
+
     // Render all combined geometry in one pass
     if !all_vertices.is_empty() && !all_faces.is_empty() {
         // Use combined raster settings
@@ -1378,7 +1407,8 @@ pub fn draw_modeler_viewport_ext(
     // Draw component gizmos (lights, etc.)
     draw_component_gizmos(state, fb);
 
-    // Draw skeleton bones (if visible or in skeleton mode)
+    // Draw skeleton hierarchy lines (bones rendered in unified pipeline above)
+    // TODO: Extract hierarchy line drawing from draw_skeleton for proper layering
     let ortho_proj = state.raster_settings.ortho_projection.as_ref();
     draw_skeleton(fb, state, ortho_proj);
 

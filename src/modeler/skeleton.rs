@@ -78,7 +78,7 @@ pub fn draw_skeleton(
 
     let camera = &state.camera;
 
-    // Draw hierarchy lines first (behind bones)
+    // Draw hierarchy lines (bone octahedrons are now rendered in unified pipeline)
     for (idx, bone) in skeleton.iter().enumerate() {
         if let Some(parent_idx) = bone.parent {
             let (child_pos, _) = state.get_bone_world_transform(idx);
@@ -86,34 +86,6 @@ pub fn draw_skeleton(
 
             draw_3d_line_clipped(fb, camera, parent_pos, child_pos, scale_color(bone_color_hierarchy_line()));
         }
-    }
-
-    // Draw each bone as an octahedron
-    for (idx, bone) in skeleton.iter().enumerate() {
-        let color = if state.selected_bone == Some(idx) {
-            scale_color(bone_color_selected())
-        } else if state.hovered_bone == Some(idx) {
-            scale_color(bone_color_hovered())
-        } else if bone.parent.is_none() {
-            scale_color(bone_color_root())
-        } else {
-            scale_color(bone_color_default())
-        };
-
-        let (base_pos, _rotation) = state.get_bone_world_transform(idx);
-        let tip_pos = state.get_bone_tip_position(idx);
-
-        draw_bone_octahedron(fb, camera, ortho, base_pos, tip_pos, color);
-    }
-
-    // Draw bone creation preview (full brightness - active action)
-    if let Some(ref creation) = state.bone_creation {
-        draw_bone_octahedron(
-            fb, camera, ortho,
-            creation.start_pos,
-            creation.end_pos,
-            bone_color_creating(),
-        );
     }
 }
 
@@ -373,5 +345,172 @@ pub fn ray_bone_intersect(
         Some(t_ray)
     } else {
         None
+    }
+}
+
+// ============================================================================
+// Triangle-based bone rendering for unified pipeline
+// ============================================================================
+
+use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, BlendMode, Vec2};
+
+/// Generate vertices and faces for all skeleton bones
+/// Returns (vertices, faces) ready for unified rendering
+pub fn skeleton_to_triangles(
+    state: &ModelerState,
+    editor_alpha: u8,
+) -> (Vec<RasterVertex>, Vec<RasterFace>) {
+    let skeleton = state.skeleton();
+    let mut vertices: Vec<RasterVertex> = Vec::new();
+    let mut faces: Vec<RasterFace> = Vec::new();
+
+    if skeleton.is_empty() {
+        return (vertices, faces);
+    }
+
+    // Get opacity scale for colors
+    let brightness_scale = editor_alpha as f32 / 255.0;
+
+    // Check if skeleton component is selected (for bone coloring)
+    let skeleton_component_selected = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx))
+        .map(|c| c.is_skeleton())
+        .unwrap_or(false);
+
+    for (idx, bone) in skeleton.iter().enumerate() {
+        // Determine bone color based on state
+        let base_color = if state.selected_bone == Some(idx) {
+            bone_color_selected()
+        } else if state.hovered_bone == Some(idx) {
+            bone_color_hovered()
+        } else if bone.parent.is_none() {
+            bone_color_root()
+        } else {
+            bone_color_default()
+        };
+
+        // Apply brightness scale
+        let color = RasterColor::new(
+            (base_color.r as f32 * brightness_scale) as u8,
+            (base_color.g as f32 * brightness_scale) as u8,
+            (base_color.b as f32 * brightness_scale) as u8,
+        );
+
+        let (base_pos, _rotation) = state.get_bone_world_transform(idx);
+        let tip_pos = state.get_bone_tip_position(idx);
+
+        // Generate octahedron triangles for this bone
+        generate_bone_octahedron(
+            base_pos, tip_pos, color, editor_alpha,
+            &mut vertices, &mut faces,
+        );
+    }
+
+    // Add bone creation preview if active
+    if let Some(ref creation) = state.bone_creation {
+        let color = bone_color_creating();
+        generate_bone_octahedron(
+            creation.start_pos, creation.end_pos, color, 255, // Full alpha for preview
+            &mut vertices, &mut faces,
+        );
+    }
+
+    (vertices, faces)
+}
+
+/// Generate octahedron vertices and faces for a single bone
+fn generate_bone_octahedron(
+    base: Vec3,
+    tip: Vec3,
+    color: RasterColor,
+    editor_alpha: u8,
+    vertices: &mut Vec<RasterVertex>,
+    faces: &mut Vec<RasterFace>,
+) {
+    // Calculate bone direction and length
+    let direction = tip - base;
+    let length = direction.len();
+    if length < 0.001 {
+        return; // Degenerate bone
+    }
+
+    let dir_norm = direction * (1.0 / length);
+
+    // Find perpendicular axes
+    let (perp1, perp2) = compute_perpendicular_axes(dir_norm);
+
+    // Width of the bone (at the widest point)
+    let width = (length * 0.15).clamp(20.0, 200.0);
+
+    // Position of the ring (20% along the bone from base)
+    let ring_center = base + dir_norm * (length * 0.2);
+
+    // 4 ring vertices
+    let ring = [
+        ring_center + perp1 * width,
+        ring_center + perp2 * width,
+        ring_center - perp1 * width,
+        ring_center - perp2 * width,
+    ];
+
+    // Track starting vertex index
+    let v_start = vertices.len();
+
+    // Add 6 vertices: base, tip, and 4 ring vertices
+    // Vertex 0: base
+    vertices.push(RasterVertex {
+        pos: base,
+        uv: Vec2::new(0.0, 0.0),
+        normal: dir_norm * -1.0, // Point away from tip
+        color,
+        bone_index: None,
+    });
+    // Vertex 1: tip
+    vertices.push(RasterVertex {
+        pos: tip,
+        uv: Vec2::new(0.0, 0.0),
+        normal: dir_norm,
+        color,
+        bone_index: None,
+    });
+    // Vertices 2-5: ring
+    for i in 0..4 {
+        let ring_normal = (ring[i] - ring_center).normalize();
+        vertices.push(RasterVertex {
+            pos: ring[i],
+            uv: Vec2::new(0.0, 0.0),
+            normal: ring_normal,
+            color,
+            bone_index: None,
+        });
+    }
+
+    // Add 8 faces (triangles)
+    // Base pyramid: 4 triangles from base to ring
+    for i in 0..4 {
+        let next = (i + 1) % 4;
+        faces.push(RasterFace {
+            v0: v_start + 0,           // base
+            v1: v_start + 2 + i,       // ring[i]
+            v2: v_start + 2 + next,    // ring[next]
+            texture_id: None,
+            black_transparent: false,
+            blend_mode: BlendMode::Opaque,
+            editor_alpha,
+        });
+    }
+
+    // Tip pyramid: 4 triangles from ring to tip
+    for i in 0..4 {
+        let next = (i + 1) % 4;
+        faces.push(RasterFace {
+            v0: v_start + 1,           // tip
+            v1: v_start + 2 + next,    // ring[next] (reversed winding)
+            v2: v_start + 2 + i,       // ring[i]
+            texture_id: None,
+            black_transparent: false,
+            blend_mode: BlendMode::Opaque,
+            editor_alpha,
+        });
     }
 }
