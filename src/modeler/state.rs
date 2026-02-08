@@ -333,9 +333,15 @@ pub struct RigBone {
     pub local_rotation: Vec3,
     /// Length of bone for visualization
     pub length: f32,
+    /// Visual width of bone at its widest point (0 = auto from length)
+    #[serde(default)]
+    pub width: f32,
 }
 
 impl RigBone {
+    /// Default visual width for a bone
+    pub const DEFAULT_WIDTH: f32 = 40.0;
+
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -343,6 +349,7 @@ impl RigBone {
             local_position: Vec3::ZERO,
             local_rotation: Vec3::ZERO,
             length: 20.0,
+            width: Self::DEFAULT_WIDTH,
         }
     }
 
@@ -353,6 +360,17 @@ impl RigBone {
             local_position: Vec3::ZERO,
             local_rotation: Vec3::ZERO,
             length: 20.0,
+            width: Self::DEFAULT_WIDTH,
+        }
+    }
+
+    /// Get the display width for this bone.
+    /// If width is 0 (legacy/auto), falls back to length-proportional calculation.
+    pub fn display_width(&self) -> f32 {
+        if self.width > 0.0 {
+            self.width
+        } else {
+            (self.length * 0.15).clamp(20.0, 200.0)
         }
     }
 }

@@ -7,7 +7,7 @@ use crate::rasterizer::{
     Framebuffer, Vec3, Color as RasterColor, Camera, OrthoProjection,
     world_to_screen_with_ortho_depth, draw_3d_line_clipped,
 };
-use super::state::ModelerState;
+use super::state::{ModelerState, RigBone};
 
 /// Get bone color based on state
 fn bone_color_default() -> RasterColor {
@@ -61,30 +61,16 @@ pub fn draw_skeleton(
     if skeleton_hidden {
         return;
     }
-    let skeleton_opacity = skeleton_info
-        .map(|(idx, _)| state.get_component_opacity(idx))
-        .unwrap_or(0);
-    let opacity_alpha = ModelerState::opacity_to_alpha(skeleton_opacity);
-    let brightness_scale = opacity_alpha as f32 / 255.0;
-
-    // Helper to scale color by opacity
-    let scale_color = |c: RasterColor| -> RasterColor {
-        RasterColor::new(
-            (c.r as f32 * brightness_scale) as u8,
-            (c.g as f32 * brightness_scale) as u8,
-            (c.b as f32 * brightness_scale) as u8,
-        )
-    };
-
     let camera = &state.camera;
 
-    // Draw hierarchy lines (bone octahedrons are now rendered in unified pipeline)
+    // Draw hierarchy lines at full color (bone octahedrons handle transparency via editor_alpha)
+    let line_color = bone_color_hierarchy_line();
     for (idx, bone) in skeleton.iter().enumerate() {
         if let Some(parent_idx) = bone.parent {
             let (child_pos, _) = state.get_bone_world_transform(idx);
             let (parent_pos, _) = state.get_bone_world_transform(parent_idx);
 
-            draw_3d_line_clipped(fb, camera, parent_pos, child_pos, scale_color(bone_color_hierarchy_line()));
+            draw_3d_line_clipped(fb, camera, parent_pos, child_pos, line_color);
         }
     }
 }
@@ -116,8 +102,7 @@ fn draw_bone_octahedron(
     let (perp1, perp2) = compute_perpendicular_axes(dir_norm);
 
     // Width of the bone (at the widest point)
-    // Use 15% of length for a slim bone look, clamped for very short/long bones
-    let width = (length * 0.15).clamp(20.0, 200.0);
+    let width = RigBone::DEFAULT_WIDTH;
 
     // Position of the ring (20% along the bone from base)
     let ring_center = base + dir_norm * (length * 0.2);
@@ -392,7 +377,7 @@ pub fn skeleton_to_triangles(
 
         // Generate octahedron triangles for this bone
         generate_bone_octahedron(
-            base_pos, tip_pos, color, editor_alpha,
+            base_pos, tip_pos, bone.display_width(), color, editor_alpha,
             &mut vertices, &mut faces,
         );
     }
@@ -400,8 +385,9 @@ pub fn skeleton_to_triangles(
     // Add bone creation preview if active
     if let Some(ref creation) = state.bone_creation {
         let color = bone_color_creating();
+        let preview_width = RigBone::DEFAULT_WIDTH;
         generate_bone_octahedron(
-            creation.start_pos, creation.end_pos, color, 255, // Full alpha for preview
+            creation.start_pos, creation.end_pos, preview_width, color, 255,
             &mut vertices, &mut faces,
         );
     }
@@ -413,6 +399,7 @@ pub fn skeleton_to_triangles(
 fn generate_bone_octahedron(
     base: Vec3,
     tip: Vec3,
+    bone_width: f32,
     color: RasterColor,
     editor_alpha: u8,
     vertices: &mut Vec<RasterVertex>,
@@ -431,7 +418,7 @@ fn generate_bone_octahedron(
     let (perp1, perp2) = compute_perpendicular_axes(dir_norm);
 
     // Width of the bone (at the widest point)
-    let width = (length * 0.15).clamp(20.0, 200.0);
+    let width = bone_width;
 
     // Position of the ring (20% along the bone from base)
     let ring_center = base + dir_norm * (length * 0.2);

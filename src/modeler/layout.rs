@@ -1027,6 +1027,7 @@ fn create_default_component(type_name: &str) -> AssetComponent {
                     local_position: Vec3::ZERO,
                     local_rotation: Vec3::ZERO,
                     length: 200.0,
+                    width: RigBone::DEFAULT_WIDTH,
                 }],
             }
         },
@@ -1516,7 +1517,7 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
         y += 4.0;
 
         // Get bone data
-        let (bone_name, parent_name, length) = {
+        let (bone_name, parent_name, length, bone_width) = {
             let skeleton = state.skeleton();
             let bone = match skeleton.get(selected_idx) {
                 Some(b) => b,
@@ -1526,7 +1527,7 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
                 .and_then(|p| skeleton.get(p))
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| "(root)".to_string());
-            (bone.name.clone(), parent_name, bone.length)
+            (bone.name.clone(), parent_name, bone.length, bone.width)
         };
 
         // Bone name (editable if rename mode active)
@@ -1577,6 +1578,40 @@ fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Mod
 
         // Length info
         draw_text(&format!("Length: {:.0}", length), x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        y += line_height;
+
+        // Width slider (drag left/right to adjust)
+        {
+            let label = format!("Width: {:.0}", bone_width);
+            let label_w = 55.0;
+            draw_text(&label, x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+            // Slider bar
+            let slider_x = x + label_w + 4.0;
+            let slider_w = width - label_w - 12.0;
+            let slider_rect = Rect::new(slider_x, y + 2.0, slider_w, line_height - 4.0);
+            let slider_hover = ctx.mouse.inside(&slider_rect);
+
+            // Draw slider background
+            let bg_color = if slider_hover { Color::from_rgba(50, 55, 65, 255) } else { Color::from_rgba(40, 42, 50, 255) };
+            draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, bg_color);
+
+            // Draw filled portion (5..200 range)
+            let fill_ratio = ((bone_width - 5.0) / 195.0).clamp(0.0, 1.0);
+            let fill_w = slider_rect.w * fill_ratio;
+            draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, Color::from_rgba(70, 90, 110, 255));
+
+            // Click to set width directly
+            if slider_hover && ctx.mouse.left_down {
+                let ratio = ((ctx.mouse.x - slider_rect.x) / slider_rect.w).clamp(0.0, 1.0);
+                let new_width = (5.0 + ratio * 195.0).round();
+                if let Some(bones) = state.asset.skeleton_mut() {
+                    if let Some(bone) = bones.get_mut(selected_idx) {
+                        bone.width = new_width;
+                    }
+                }
+            }
+        }
         y += line_height;
 
         // Hint
@@ -1645,6 +1680,7 @@ fn create_child_bone(state: &mut ModelerState, parent_idx: usize) {
         local_position: Vec3::new(0.0, parent_length, 0.0),
         local_rotation: parent_rotation, // Inherit parent's rotation
         length: DEFAULT_LENGTH,
+        width: RigBone::DEFAULT_WIDTH,
     };
 
     let bone_name = new_bone.name.clone();
@@ -1672,7 +1708,8 @@ fn ensure_skeleton_component(state: &mut ModelerState) {
         parent: None,
         local_position: Vec3::new(0.0, 0.0, 0.0),
         local_rotation: Vec3::ZERO,
-        length: 200.0, // Match create_bone_at_default_position
+        length: 200.0,
+        width: RigBone::DEFAULT_WIDTH,
     };
 
     // Create and add skeleton component with default root bone
@@ -1721,6 +1758,7 @@ fn create_bone_at_default_position(state: &mut ModelerState) {
         local_position,
         local_rotation,
         length: DEFAULT_LENGTH,
+        width: RigBone::DEFAULT_WIDTH,
     };
 
     let bone_name = new_bone.name.clone();

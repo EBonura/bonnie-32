@@ -2831,7 +2831,7 @@ fn find_hovered_bone_part(
     for (idx, bone) in skeleton.iter().enumerate() {
         let (base_pos, _) = state.get_bone_world_transform(idx);
         let tip_pos = state.get_bone_tip_position(idx);
-        let pick_radius = (bone.length * 0.15).clamp(20.0, 200.0);
+        let pick_radius = bone.display_width();
 
         if let Some(dist) = ray_bone_intersect(ray.origin, ray.direction, base_pos, tip_pos, pick_radius) {
             if dist < closest_dist {
