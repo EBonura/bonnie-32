@@ -4196,16 +4196,60 @@ pub fn draw_viewport_3d(
                     let head_pos = Vec3::new(world_pos.x, world_pos.y + settings.height, world_pos.z);
                     draw_wireframe_line(fb, &state.camera_3d, head_pos, cam_pos, cam_color);
                 } else {
-                    // Other non-light objects: use 2D circles
-                    let base_radius = if is_selected { 8 } else { 5 };
-
-                    // Selection highlight (white circle behind)
-                    if is_selected {
-                        fb.draw_circle(fb_x as i32, fb_y as i32, base_radius + 3, RasterColor::new(255, 255, 255));
+                    // Check for collision wireframe
+                    let mut drew_collision = false;
+                    if let Some(asset) = asset {
+                        for comp in &asset.components {
+                            if let crate::asset::AssetComponent::Collision { shape, is_trigger } = comp {
+                                let wire_color = if is_selected {
+                                    RasterColor::new(255, 255, 255)
+                                } else if *is_trigger {
+                                    RasterColor::new(100, 255, 150)
+                                } else {
+                                    RasterColor::new(100, 150, 255)
+                                };
+                                match shape {
+                                    crate::asset::CollisionShapeDef::Sphere { radius } => {
+                                        draw_wireframe_sphere(fb, &state.camera_3d, world_pos, *radius, 16, wire_color);
+                                    }
+                                    crate::asset::CollisionShapeDef::Box { half_extents } => {
+                                        let cos_f = obj.facing.cos();
+                                        let sin_f = obj.facing.sin();
+                                        let hx = half_extents[0];
+                                        let hy = half_extents[1];
+                                        let hz = half_extents[2];
+                                        let min = Vec3::new(-hx, -hy, -hz);
+                                        let max = Vec3::new(hx, hy, hz);
+                                        draw_rotated_bounding_box(fb, &state.camera_3d, min, max, world_pos, cos_f, sin_f, wire_color);
+                                    }
+                                    crate::asset::CollisionShapeDef::Cylinder { radius, height } => {
+                                        draw_wireframe_cylinder(fb, &state.camera_3d, world_pos, *radius, *height, 12, wire_color);
+                                    }
+                                    crate::asset::CollisionShapeDef::Capsule { radius, height } => {
+                                        draw_wireframe_capsule(fb, &state.camera_3d, world_pos, *radius, *height, 12, wire_color);
+                                    }
+                                    crate::asset::CollisionShapeDef::FromMesh => {
+                                        if let Some((min, max)) = asset.bounds() {
+                                            let cos_f = obj.facing.cos();
+                                            let sin_f = obj.facing.sin();
+                                            draw_rotated_bounding_box(fb, &state.camera_3d, min, max, world_pos, cos_f, sin_f, wire_color);
+                                        }
+                                    }
+                                }
+                                drew_collision = true;
+                                break;
+                            }
+                        }
                     }
 
-                    // Main circle
-                    fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
+                    if !drew_collision {
+                        // Fallback: 2D circles for objects without collision
+                        let base_radius = if is_selected { 8 } else { 5 };
+                        if is_selected {
+                            fb.draw_circle(fb_x as i32, fb_y as i32, base_radius + 3, RasterColor::new(255, 255, 255));
+                        }
+                        fb.draw_circle(fb_x as i32, fb_y as i32, base_radius, color);
+                    }
                 }
 
                 // Draw bounding box for selected mesh objects
@@ -6012,6 +6056,155 @@ fn draw_wireframe_sphere(
         let curr = Vec3::new(center.x, center.y + radius * angle.cos(), center.z + radius * angle.sin());
         draw_3d_line(fb, prev_yz, curr, camera, color);
         prev_yz = curr;
+    }
+}
+
+/// Draw a wireframe box in 3D from center + half-extents
+fn draw_wireframe_box(
+    fb: &mut Framebuffer,
+    camera: &crate::rasterizer::Camera,
+    center: Vec3,
+    half_extents: [f32; 3],
+    color: RasterColor,
+) {
+    let hx = half_extents[0];
+    let hy = half_extents[1];
+    let hz = half_extents[2];
+
+    let corners = [
+        Vec3::new(center.x - hx, center.y - hy, center.z - hz),
+        Vec3::new(center.x + hx, center.y - hy, center.z - hz),
+        Vec3::new(center.x + hx, center.y - hy, center.z + hz),
+        Vec3::new(center.x - hx, center.y - hy, center.z + hz),
+        Vec3::new(center.x - hx, center.y + hy, center.z - hz),
+        Vec3::new(center.x + hx, center.y + hy, center.z - hz),
+        Vec3::new(center.x + hx, center.y + hy, center.z + hz),
+        Vec3::new(center.x - hx, center.y + hy, center.z + hz),
+    ];
+
+    let edges: [(usize, usize); 12] = [
+        (0,1),(1,2),(2,3),(3,0), // bottom
+        (4,5),(5,6),(6,7),(7,4), // top
+        (0,4),(1,5),(2,6),(3,7), // verticals
+    ];
+
+    for (a, b) in edges {
+        draw_3d_line(fb, corners[a], corners[b], camera, color);
+    }
+}
+
+/// Draw a wireframe capsule in 3D (cylinder + hemisphere caps)
+fn draw_wireframe_capsule(
+    fb: &mut Framebuffer,
+    camera: &crate::rasterizer::Camera,
+    center: Vec3,
+    radius: f32,
+    height: f32,
+    segments: usize,
+    color: RasterColor,
+) {
+    use std::f32::consts::PI;
+
+    // Cylinder body: bottom circle, top circle, vertical lines
+    let mut bottom_points: Vec<Vec3> = Vec::with_capacity(segments);
+    let mut top_points: Vec<Vec3> = Vec::with_capacity(segments);
+
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let x = center.x + radius * angle.cos();
+        let z = center.z + radius * angle.sin();
+        bottom_points.push(Vec3::new(x, center.y, z));
+        top_points.push(Vec3::new(x, center.y + height, z));
+    }
+
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        draw_3d_line(fb, bottom_points[i], bottom_points[next], camera, color);
+        draw_3d_line(fb, top_points[i], top_points[next], camera, color);
+    }
+
+    let skip = if segments > 8 { 2 } else { 1 };
+    for i in (0..segments).step_by(skip) {
+        draw_3d_line(fb, bottom_points[i], top_points[i], camera, color);
+    }
+
+    // Hemisphere caps (arcs in XY and ZY planes)
+    let arc_segments = 8;
+    // Top cap: arcs curving upward from top circle
+    for arc in 0..2 {
+        let mut prev = if arc == 0 {
+            Vec3::new(center.x + radius, center.y + height, center.z)
+        } else {
+            Vec3::new(center.x, center.y + height, center.z + radius)
+        };
+        for i in 1..=arc_segments {
+            let angle = (i as f32 / arc_segments as f32) * PI * 0.5;
+            let r = radius * angle.cos();
+            let h = radius * angle.sin();
+            let curr = if arc == 0 {
+                Vec3::new(center.x + r, center.y + height + h, center.z)
+            } else {
+                Vec3::new(center.x, center.y + height + h, center.z + r)
+            };
+            draw_3d_line(fb, prev, curr, camera, color);
+            prev = curr;
+        }
+        // Mirror side
+        let mut prev = if arc == 0 {
+            Vec3::new(center.x - radius, center.y + height, center.z)
+        } else {
+            Vec3::new(center.x, center.y + height, center.z - radius)
+        };
+        for i in 1..=arc_segments {
+            let angle = (i as f32 / arc_segments as f32) * PI * 0.5;
+            let r = radius * angle.cos();
+            let h = radius * angle.sin();
+            let curr = if arc == 0 {
+                Vec3::new(center.x - r, center.y + height + h, center.z)
+            } else {
+                Vec3::new(center.x, center.y + height + h, center.z - r)
+            };
+            draw_3d_line(fb, prev, curr, camera, color);
+            prev = curr;
+        }
+    }
+
+    // Bottom cap: arcs curving downward from bottom circle
+    for arc in 0..2 {
+        let mut prev = if arc == 0 {
+            Vec3::new(center.x + radius, center.y, center.z)
+        } else {
+            Vec3::new(center.x, center.y, center.z + radius)
+        };
+        for i in 1..=arc_segments {
+            let angle = (i as f32 / arc_segments as f32) * PI * 0.5;
+            let r = radius * angle.cos();
+            let h = radius * angle.sin();
+            let curr = if arc == 0 {
+                Vec3::new(center.x + r, center.y - h, center.z)
+            } else {
+                Vec3::new(center.x, center.y - h, center.z + r)
+            };
+            draw_3d_line(fb, prev, curr, camera, color);
+            prev = curr;
+        }
+        let mut prev = if arc == 0 {
+            Vec3::new(center.x - radius, center.y, center.z)
+        } else {
+            Vec3::new(center.x, center.y, center.z - radius)
+        };
+        for i in 1..=arc_segments {
+            let angle = (i as f32 / arc_segments as f32) * PI * 0.5;
+            let r = radius * angle.cos();
+            let h = radius * angle.sin();
+            let curr = if arc == 0 {
+                Vec3::new(center.x - r, center.y - h, center.z)
+            } else {
+                Vec3::new(center.x, center.y - h, center.z - r)
+            };
+            draw_3d_line(fb, prev, curr, camera, color);
+            prev = curr;
+        }
     }
 }
 

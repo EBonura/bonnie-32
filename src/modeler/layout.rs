@@ -1843,6 +1843,84 @@ fn draw_collision_editor(
     }
     *y += line_height;
 
+    // Dimension sliders per shape type
+    let slider_x = x + 70.0;
+    let slider_w = width - 110.0;
+    let slider_h = 10.0;
+    let track_bg = Color::from_rgba(40, 40, 45, 255);
+    let max_dim = 2048.0;
+
+    match shape {
+        CollisionShapeDef::Sphere { radius } => {
+            // Radius slider
+            draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+            let fill = (radius.clamp(0.0, max_dim) / max_dim) * slider_w;
+            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+            draw_text(&format!("{:.0}", *radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                *radius = t * max_dim;
+                modified = true;
+            }
+            *y += line_height;
+        }
+        CollisionShapeDef::Box { half_extents } => {
+            let labels = ["Width:", "Height:", "Depth:"];
+            for (i, label) in labels.iter().enumerate() {
+                draw_text(label, x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+                let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+                draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+                let val = half_extents[i];
+                let fill = (val.clamp(0.0, max_dim) / max_dim) * slider_w;
+                draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+                // Display as full extent (double the half)
+                draw_text(&format!("{:.0}", val * 2.0), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+                if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                    let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                    half_extents[i] = t * max_dim;
+                    modified = true;
+                }
+                *y += line_height;
+            }
+        }
+        CollisionShapeDef::Capsule { radius, height } | CollisionShapeDef::Cylinder { radius, height } => {
+            // Radius slider
+            draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+            let fill = (radius.clamp(0.0, max_dim) / max_dim) * slider_w;
+            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+            draw_text(&format!("{:.0}", *radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                *radius = t * max_dim;
+                modified = true;
+            }
+            *y += line_height;
+
+            // Height slider
+            draw_text("Height:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+            let max_h = 4096.0;
+            let fill = (height.clamp(0.0, max_h) / max_h) * slider_w;
+            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+            draw_text(&format!("{:.0}", *height), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                *height = t * max_h;
+                modified = true;
+            }
+            *y += line_height;
+        }
+        CollisionShapeDef::FromMesh => {
+            draw_text("Auto-fit to mesh bounds", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            *y += line_height;
+        }
+    }
+
     modified
 }
 

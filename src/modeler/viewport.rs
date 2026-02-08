@@ -4147,7 +4147,158 @@ fn draw_component_gizmos(
 
                 draw_filled_octahedron(fb, camera, ortho, light_pos, size, gizmo_color);
             }
+            crate::asset::AssetComponent::Collision { shape, is_trigger } => {
+                let is_selected = state.selected_component == Some(comp_idx);
+                let wire_color = if is_selected {
+                    RasterColor::new(255, 255, 255)
+                } else if *is_trigger {
+                    RasterColor::new(100, 255, 150)
+                } else {
+                    RasterColor::new(100, 150, 255)
+                };
+
+                draw_collision_wireframe(fb, camera, ortho, shape, wire_color, state.asset.bounds());
+            }
             _ => {}
+        }
+    }
+}
+
+/// Draw a collision shape wireframe in the modeler viewport.
+/// Works across all 4 panels (perspective + ortho) by projecting 3D points.
+fn draw_collision_wireframe(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    ortho: Option<&OrthoProjection>,
+    shape: &crate::asset::CollisionShapeDef,
+    color: RasterColor,
+    mesh_bounds: Option<(Vec3, Vec3)>,
+) {
+    use crate::asset::CollisionShapeDef;
+
+    let fb_w = fb.width;
+    let fb_h = fb.height;
+
+    let project = |p: Vec3| -> Option<(i32, i32, f32)> {
+        world_to_screen_with_ortho_depth(
+            p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb_w, fb_h, ortho,
+        ).map(|(x, y, z)| (x as i32, y as i32, z))
+    };
+
+    // Collect edges as pairs of 3D points, then draw after projection
+    let mut edges: Vec<(Vec3, Vec3)> = Vec::new();
+
+    match shape {
+        CollisionShapeDef::Sphere { radius } => {
+            let r = *radius;
+            let segments = 24;
+            for ring in 0..3 {
+                for i in 0..segments {
+                    let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                    let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                    let (p0, p1) = match ring {
+                        0 => (Vec3::new(r * a0.cos(), 0.0, r * a0.sin()),
+                              Vec3::new(r * a1.cos(), 0.0, r * a1.sin())),
+                        1 => (Vec3::new(r * a0.cos(), r * a0.sin(), 0.0),
+                              Vec3::new(r * a1.cos(), r * a1.sin(), 0.0)),
+                        _ => (Vec3::new(0.0, r * a0.cos(), r * a0.sin()),
+                              Vec3::new(0.0, r * a1.cos(), r * a1.sin())),
+                    };
+                    edges.push((p0, p1));
+                }
+            }
+        }
+        CollisionShapeDef::Box { half_extents } => {
+            let hx = half_extents[0];
+            let hy = half_extents[1];
+            let hz = half_extents[2];
+            let corners = [
+                Vec3::new(-hx, -hy, -hz), Vec3::new( hx, -hy, -hz),
+                Vec3::new( hx, -hy,  hz), Vec3::new(-hx, -hy,  hz),
+                Vec3::new(-hx,  hy, -hz), Vec3::new( hx,  hy, -hz),
+                Vec3::new( hx,  hy,  hz), Vec3::new(-hx,  hy,  hz),
+            ];
+            let box_edges: [(usize, usize); 12] = [
+                (0,1),(1,2),(2,3),(3,0),
+                (4,5),(5,6),(6,7),(7,4),
+                (0,4),(1,5),(2,6),(3,7),
+            ];
+            for (a, b) in box_edges {
+                edges.push((corners[a], corners[b]));
+            }
+        }
+        CollisionShapeDef::Cylinder { radius, height } => {
+            let r = *radius;
+            let h = *height;
+            let segments = 24;
+            for i in 0..segments {
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                let bx0 = r * a0.cos(); let bz0 = r * a0.sin();
+                let bx1 = r * a1.cos(); let bz1 = r * a1.sin();
+                edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx1, 0.0, bz1)));
+                edges.push((Vec3::new(bx0, h, bz0), Vec3::new(bx1, h, bz1)));
+                if i % 6 == 0 {
+                    edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx0, h, bz0)));
+                }
+            }
+        }
+        CollisionShapeDef::Capsule { radius, height } => {
+            let r = *radius;
+            let h = *height;
+            let segments = 24;
+            for i in 0..segments {
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                let bx0 = r * a0.cos(); let bz0 = r * a0.sin();
+                let bx1 = r * a1.cos(); let bz1 = r * a1.sin();
+                edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx1, 0.0, bz1)));
+                edges.push((Vec3::new(bx0, h, bz0), Vec3::new(bx1, h, bz1)));
+                if i % 6 == 0 {
+                    edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx0, h, bz0)));
+                }
+            }
+            let half_segs = segments / 2;
+            for i in 0..half_segs {
+                let a0 = (i as f32 / half_segs as f32) * std::f32::consts::PI;
+                let a1 = ((i + 1) as f32 / half_segs as f32) * std::f32::consts::PI;
+                // Bottom hemisphere arcs (XY and ZY planes)
+                edges.push((Vec3::new(r * a0.cos(), -r * a0.sin(), 0.0),
+                            Vec3::new(r * a1.cos(), -r * a1.sin(), 0.0)));
+                edges.push((Vec3::new(0.0, -r * a0.sin(), r * a0.cos()),
+                            Vec3::new(0.0, -r * a1.sin(), r * a1.cos())));
+                // Top hemisphere arcs
+                edges.push((Vec3::new(r * a0.cos(), h + r * a0.sin(), 0.0),
+                            Vec3::new(r * a1.cos(), h + r * a1.sin(), 0.0)));
+                edges.push((Vec3::new(0.0, h + r * a0.sin(), r * a0.cos()),
+                            Vec3::new(0.0, h + r * a1.sin(), r * a1.cos())));
+            }
+        }
+        CollisionShapeDef::FromMesh => {
+            if let Some((min, max)) = mesh_bounds {
+                let corners = [
+                    Vec3::new(min.x, min.y, min.z), Vec3::new(max.x, min.y, min.z),
+                    Vec3::new(max.x, min.y, max.z), Vec3::new(min.x, min.y, max.z),
+                    Vec3::new(min.x, max.y, min.z), Vec3::new(max.x, max.y, min.z),
+                    Vec3::new(max.x, max.y, max.z), Vec3::new(min.x, max.y, max.z),
+                ];
+                let box_edges: [(usize, usize); 12] = [
+                    (0,1),(1,2),(2,3),(3,0),
+                    (4,5),(5,6),(6,7),(7,4),
+                    (0,4),(1,5),(2,6),(3,7),
+                ];
+                for (a, b) in box_edges {
+                    edges.push((corners[a], corners[b]));
+                }
+            }
+        }
+    }
+
+    // Project and draw all edges
+    for (a, b) in &edges {
+        if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (project(*a), project(*b)) {
+            fb.draw_line_3d(x0, y0, z0, x1, y1, z1, color);
         }
     }
 }
