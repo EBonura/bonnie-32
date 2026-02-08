@@ -18,8 +18,8 @@ static ASSET_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Generate a stable unique ID for an asset
 ///
-/// Uses a combination of atomic counter and random value to ensure uniqueness.
-/// This ID survives edits and renames - only changes if explicitly regenerated.
+/// Uses a combination of atomic counter, random value, and timestamp to ensure
+/// uniqueness both within a session and across separate launches.
 pub fn generate_asset_id() -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -32,6 +32,15 @@ pub fn generate_asset_id() -> u64 {
     let mut hasher = DefaultHasher::new();
     counter.hash(&mut hasher);
     random_bits.hash(&mut hasher);
+
+    // Include timestamp for cross-session uniqueness (counter and rand may
+    // repeat across launches since the counter resets and rand seed may match)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(time) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            time.as_nanos().hash(&mut hasher);
+        }
+    }
 
     hasher.finish()
 }
@@ -259,13 +268,6 @@ impl Asset {
             .any(|c| matches!(c, AssetComponent::Pickup { .. }))
     }
 
-    /// Check if this asset has a Checkpoint component
-    pub fn has_checkpoint(&self) -> bool {
-        self.components
-            .iter()
-            .any(|c| matches!(c, AssetComponent::Checkpoint { .. }))
-    }
-
     /// Check if this asset has a Door component
     pub fn has_door(&self) -> bool {
         self.components
@@ -273,13 +275,10 @@ impl Asset {
             .any(|c| matches!(c, AssetComponent::Door { .. }))
     }
 
-    /// Check if this asset has a SpawnPoint component
-    ///
-    /// - `is_player_start: true` - checks for player start spawn point
-    /// - `is_player_start: false` - checks for NPC/enemy spawn point
-    pub fn has_spawn_point(&self, is_player_start: bool) -> bool {
+    /// Check if this asset has a SpawnPoint component with the given player flag
+    pub fn has_spawn_point(&self, is_player: bool) -> bool {
         self.components.iter().any(|c| {
-            matches!(c, AssetComponent::SpawnPoint { is_player_start: p } if *p == is_player_start)
+            matches!(c, AssetComponent::SpawnPoint { is_player: p, .. } if *p == is_player)
         })
     }
 

@@ -4117,8 +4117,6 @@ pub fn draw_viewport_3d(
                         } else {
                             RasterColor::new(80, 80, 80)
                         }
-                    } else if asset.has_checkpoint() {
-                        RasterColor::new(100, 200, 255)
                     } else if asset.has_enemy() {
                         RasterColor::new(255, 100, 100)
                     } else if asset.has_mesh() {

@@ -629,8 +629,6 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                 (Color::from_rgba(50, 200, 50, 200), Color::from_rgba(100, 255, 100, 255), 'P')
             } else if asset.has_light() {
                 (Color::from_rgba(255, 200, 50, 200), Color::from_rgba(255, 255, 150, 255), 'L')
-            } else if asset.has_checkpoint() {
-                (Color::from_rgba(50, 50, 200, 200), Color::from_rgba(100, 100, 255, 255), 'C')
             } else if asset.has_enemy() {
                 (Color::from_rgba(200, 50, 50, 200), Color::from_rgba(255, 100, 100, 255), 'E')
             } else if asset.has_mesh() {
@@ -832,8 +830,6 @@ pub fn draw_grid_view(ctx: &mut UiContext, rect: Rect, state: &mut EditorState) 
                             (Color::from_rgba(100, 255, 100, 150), 'P')
                         } else if asset.has_light() {
                             (Color::from_rgba(255, 255, 100, 150), 'L')
-                        } else if asset.has_checkpoint() {
-                            (Color::from_rgba(100, 200, 255, 150), 'C')
                         } else if asset.has_enemy() {
                             (Color::from_rgba(255, 100, 100, 150), 'E')
                         } else if asset.has_mesh() {

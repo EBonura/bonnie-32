@@ -710,7 +710,6 @@ fn component_icon(comp: &AssetComponent) -> char {
         AssetComponent::Trigger { .. } => icon::MAP_PIN,
         AssetComponent::Pickup { .. } => icon::PLUS,
         AssetComponent::Enemy { .. } => icon::PERSON_STANDING,
-        AssetComponent::Checkpoint { .. } => icon::SKIP_BACK,
         AssetComponent::Door { .. } => icon::DOOR_CLOSED,
         AssetComponent::Audio { .. } => icon::MUSIC,
         AssetComponent::Particle { .. } => icon::BLEND,
@@ -998,9 +997,6 @@ fn create_default_component(type_name: &str) -> AssetComponent {
             damage: 10,
             patrol_radius: 512.0,
         },
-        "Checkpoint" => AssetComponent::Checkpoint {
-            respawn_offset: [0.0, 0.0, 0.0],
-        },
         "Door" => AssetComponent::Door {
             required_key: None,
             start_open: false,
@@ -1021,7 +1017,8 @@ fn create_default_component(type_name: &str) -> AssetComponent {
             step_height: 384.0,
         },
         "SpawnPoint" => AssetComponent::SpawnPoint {
-            is_player_start: false,
+            is_player: false,
+            respawns: false,
         },
         "Skeleton" => {
             use super::state::RigBone;
@@ -1084,9 +1081,6 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
         AssetComponent::Enemy { enemy_type, health, damage, patrol_radius } => {
             draw_enemy_editor(ctx, x, y, width, enemy_type, health, damage, patrol_radius, icon_font)
         }
-        AssetComponent::Checkpoint { respawn_offset } => {
-            draw_checkpoint_editor(ctx, x, y, width, respawn_offset, icon_font)
-        }
         AssetComponent::Door { required_key, start_open } => {
             draw_door_editor(ctx, x, y, width, required_key, start_open, icon_font)
         }
@@ -1099,8 +1093,8 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
         AssetComponent::CharacterController { height, radius, step_height } => {
             draw_character_controller_editor(ctx, x, y, width, height, radius, step_height, icon_font)
         }
-        AssetComponent::SpawnPoint { is_player_start } => {
-            draw_spawn_point_editor(ctx, x, y, width, is_player_start, icon_font)
+        AssetComponent::SpawnPoint { is_player, respawns } => {
+            draw_spawn_point_editor(ctx, x, y, width, is_player, respawns, icon_font)
         }
         AssetComponent::Skeleton { bones: _ } => {
             // Skeleton editing handled separately via bone tree in left panel
@@ -2186,28 +2180,6 @@ fn draw_enemy_editor(
     modified
 }
 
-/// Draw checkpoint component editor
-fn draw_checkpoint_editor(
-    _ctx: &mut UiContext,
-    x: f32,
-    y: &mut f32,
-    _width: f32,
-    respawn_offset: &mut [f32; 3],
-    _icon_font: Option<&Font>,
-) -> bool {
-    let line_height = 20.0;
-
-    draw_text("Respawn Offset:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-    *y += line_height;
-
-    draw_text(&format!("X: {:.0}  Y: {:.0}  Z: {:.0}",
-        respawn_offset[0], respawn_offset[1], respawn_offset[2]),
-        x + 8.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-    *y += line_height;
-
-    false
-}
-
 /// Draw door component editor
 fn draw_door_editor(
     ctx: &mut UiContext,
@@ -2422,23 +2394,34 @@ fn draw_spawn_point_editor(
     x: f32,
     y: &mut f32,
     width: f32,
-    is_player_start: &mut bool,
+    is_player: &mut bool,
+    respawns: &mut bool,
     _icon_font: Option<&Font>,
 ) -> bool {
     let mut modified = false;
     let line_height = 20.0;
-
-    // Is player start toggle
-    draw_text("Player Start:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-
     let toggle_x = x + width - 40.0;
-    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
-    let toggle_color = if *is_player_start { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
-    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
-    draw_text(if *is_player_start { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
 
+    // Is player toggle
+    draw_text("Player Start:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let toggle_color = if *is_player { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+    draw_text(if *is_player { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
     if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
-        *is_player_start = !*is_player_start;
+        *is_player = !*is_player;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Respawns toggle
+    draw_text("Respawns:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let respawn_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let respawn_color = if *respawns { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(respawn_rect.x, respawn_rect.y, respawn_rect.w, respawn_rect.h, respawn_color);
+    draw_text(if *respawns { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
+    if ctx.mouse.inside(&respawn_rect) && ctx.mouse.left_pressed {
+        *respawns = !*respawns;
         modified = true;
     }
     *y += line_height;
@@ -7449,7 +7432,6 @@ fn draw_add_component_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut M
         ("Trigger", icon::MAP_PIN),
         ("Pickup", icon::PLUS),
         ("Enemy", icon::PERSON_STANDING),
-        ("Checkpoint", icon::SKIP_BACK),
         ("Door", icon::DOOR_CLOSED),
         ("Audio", icon::MUSIC),
         ("Particle", icon::BLEND),
