@@ -5,7 +5,7 @@
 
 use crate::rasterizer::{
     Framebuffer, Vec3, Color as RasterColor, Camera, OrthoProjection,
-    world_to_screen_with_ortho_depth, draw_3d_line_clipped,
+    world_to_screen_with_ortho, world_to_screen_with_ortho_depth, draw_3d_line_clipped,
 };
 use super::state::{ModelerState, RigBone};
 
@@ -20,6 +20,10 @@ fn bone_color_selected() -> RasterColor {
 
 fn bone_color_hovered() -> RasterColor {
     RasterColor::new(100, 180, 255) // Light blue
+}
+
+fn bone_color_tip_hovered() -> RasterColor {
+    RasterColor::new(255, 180, 80) // Orange for tip hover
 }
 
 fn bone_color_root() -> RasterColor {
@@ -71,6 +75,70 @@ pub fn draw_skeleton(
             let (parent_pos, _) = state.get_bone_world_transform(parent_idx);
 
             draw_3d_line_clipped(fb, camera, parent_pos, child_pos, line_color);
+        }
+    }
+}
+
+/// Draw bone tip and base dots as overlays on all bones
+/// Tips get a small dot, hovered tips get a larger highlighted dot
+pub fn draw_bone_dots(
+    fb: &mut Framebuffer,
+    state: &ModelerState,
+    ortho: Option<&OrthoProjection>,
+) {
+    let skeleton = state.skeleton();
+    if skeleton.is_empty() || !state.show_bones {
+        return;
+    }
+
+    // Check if skeleton component is hidden
+    let skeleton_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Skeleton { .. }))
+        .map(|(idx, _)| state.is_component_hidden(idx))
+        .unwrap_or(false);
+    if skeleton_hidden {
+        return;
+    }
+
+    let camera = &state.camera;
+    let tip_color = RasterColor::new(220, 220, 230); // Subtle light dot
+    let tip_selected_color = RasterColor::new(80, 255, 80); // Green (matches selected bone)
+    let tip_hovered_color = RasterColor::new(255, 180, 80); // Orange (matches tip hover)
+    let base_color = RasterColor::new(150, 150, 160); // Dimmer dot for base
+
+    for (idx, _bone) in skeleton.iter().enumerate() {
+        let (base_pos, _) = state.get_bone_world_transform(idx);
+        let tip_pos = state.get_bone_tip_position(idx);
+
+        // Draw tip dot
+        if let Some((tx, ty)) = world_to_screen_with_ortho(
+            tip_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb.width, fb.height, ortho,
+        ) {
+            let (radius, color) = if state.hovered_bone_tip == Some(idx) {
+                (11, tip_hovered_color) // Large orange dot when hovered
+            } else if state.selected_bone == Some(idx) {
+                (8, tip_selected_color) // Green dot on selected bone's tip
+            } else {
+                (5, tip_color) // Visible dot
+            };
+            fb.draw_circle(tx as i32, ty as i32, radius, color);
+        }
+
+        // Draw base dot (smaller, subtler)
+        if let Some((bx, by)) = world_to_screen_with_ortho(
+            base_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb.width, fb.height, ortho,
+        ) {
+            let (radius, color) = if state.hovered_bone == Some(idx) {
+                (11, bone_color_hovered()) // Large blue dot when body/base hovered
+            } else if state.selected_bone == Some(idx) {
+                (8, tip_selected_color) // Green dot on selected bone's base
+            } else {
+                (5, base_color) // Visible dot
+            };
+            fb.draw_circle(bx as i32, by as i32, radius, color);
         }
     }
 }
@@ -359,11 +427,17 @@ pub fn skeleton_to_triangles(
         .map(|c| c.is_skeleton())
         .unwrap_or(false);
 
+    // When a bone is selected, dim non-selected bones to near-minimum alpha
+    let has_selection = state.selected_bone.is_some();
+    let dim_alpha: u8 = 30; // opacity level 6 — one step above hidden
+
     for (idx, bone) in skeleton.iter().enumerate() {
         // Determine bone color based on state
         // Opacity is handled by editor_alpha on faces, not by vertex color dimming
         let color = if state.selected_bone == Some(idx) {
             bone_color_selected()
+        } else if state.hovered_bone_tip == Some(idx) {
+            bone_color_tip_hovered()
         } else if state.hovered_bone == Some(idx) {
             bone_color_hovered()
         } else if bone.parent.is_none() {
@@ -372,12 +446,19 @@ pub fn skeleton_to_triangles(
             bone_color_default()
         };
 
+        // Selected bone gets full alpha; others get dimmed when there's a selection
+        let bone_alpha = if has_selection && state.selected_bone != Some(idx) {
+            editor_alpha.min(dim_alpha)
+        } else {
+            editor_alpha
+        };
+
         let (base_pos, _rotation) = state.get_bone_world_transform(idx);
         let tip_pos = state.get_bone_tip_position(idx);
 
         // Generate octahedron triangles for this bone
         generate_bone_octahedron(
-            base_pos, tip_pos, bone.display_width(), color, editor_alpha,
+            base_pos, tip_pos, bone.display_width(), color, bone_alpha,
             &mut vertices, &mut faces,
         );
     }

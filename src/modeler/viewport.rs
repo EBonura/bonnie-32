@@ -14,7 +14,7 @@ use crate::rasterizer::{
 use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId, rotate_by_euler};
 use super::drag::{DragUpdateResult, ActiveDrag};
 use super::tools::ModelerToolId;
-use super::skeleton::{draw_skeleton, ray_bone_intersect, skeleton_to_triangles};
+use super::skeleton::{draw_skeleton, draw_bone_dots, ray_bone_intersect, skeleton_to_triangles};
 
 /// Convert state::Axis to ui::Axis
 fn to_ui_axis(axis: Axis) -> UiAxis {
@@ -1385,6 +1385,9 @@ pub fn draw_modeler_viewport_ext(
     let ortho_proj = state.raster_settings.ortho_projection.as_ref();
     draw_skeleton(fb, state, ortho_proj);
 
+    // Draw bone tip/base dots as overlays (on top of octahedrons)
+    draw_bone_dots(fb, state, ortho_proj);
+
     // Draw box selection preview (highlight elements that would be selected)
     if state.box_select_viewport == Some(viewport_id) {
         if let ActiveDrag::BoxSelect(tracker) = &state.drag_manager.active {
@@ -2710,6 +2713,23 @@ fn update_hover_state(
             }
         }
     }
+
+    // Set hover status messages
+    if let Some(tip_idx) = state.hovered_bone_tip {
+        let name = state.skeleton().get(tip_idx)
+            .map(|b| b.name.as_str()).unwrap_or("?");
+        state.set_status(&format!("Tip: {} (click to select tip)", name), 0.0);
+    } else if let Some(bone_idx) = state.hovered_bone {
+        let name = state.skeleton().get(bone_idx)
+            .map(|b| b.name.as_str()).unwrap_or("?");
+        state.set_status(&format!("Bone: {} (click to select)", name), 0.0);
+    } else if let Some(v_idx) = state.hovered_vertex {
+        state.set_status(&format!("Vertex {}", v_idx), 0.0);
+    } else if let Some((e0, e1)) = state.hovered_edge {
+        state.set_status(&format!("Edge {}-{}", e0, e1), 0.0);
+    } else if let Some(f_idx) = state.hovered_face {
+        state.set_status(&format!("Face {}", f_idx), 0.0);
+    }
 }
 
 /// Find the bone part under the cursor: (base_hover, tip_hover)
@@ -3063,26 +3083,26 @@ fn handle_hover_click(state: &mut ModelerState) {
         return;
     }
 
-    // Handle bone BASE/BODY selection - defaults to tip selection for easier editing
+    // Handle bone BASE/BODY selection (click on body = select base for moving)
     if let Some(bone_idx) = state.hovered_bone {
         if multi_select {
             match &mut state.selection {
-                ModelerSelection::BoneTips(tips) => {
-                    if let Some(pos) = tips.iter().position(|&b| b == bone_idx) {
-                        tips.remove(pos);
-                        state.selected_bone = tips.first().copied();
+                ModelerSelection::Bones(bones) => {
+                    if let Some(pos) = bones.iter().position(|&b| b == bone_idx) {
+                        bones.remove(pos);
+                        state.selected_bone = bones.first().copied();
                     } else {
-                        tips.push(bone_idx);
+                        bones.push(bone_idx);
                         state.selected_bone = Some(bone_idx);
                     }
                 }
                 _ => {
-                    state.selection = ModelerSelection::BoneTips(vec![bone_idx]);
+                    state.selection = ModelerSelection::Bones(vec![bone_idx]);
                     state.selected_bone = Some(bone_idx);
                 }
             }
         } else {
-            state.selection = ModelerSelection::BoneTips(vec![bone_idx]);
+            state.selection = ModelerSelection::Bones(vec![bone_idx]);
             state.selected_bone = Some(bone_idx);
         }
 
@@ -3094,7 +3114,7 @@ fn handle_hover_click(state: &mut ModelerState) {
         let bone_name = state.skeleton().get(bone_idx)
             .map(|b| b.name.clone())
             .unwrap_or_default();
-        state.set_status(&format!("Selected tip: {} (G to rotate/resize)", bone_name), 1.0);
+        state.set_status(&format!("Selected bone: {} (G to move)", bone_name), 1.0);
         return;
     }
 

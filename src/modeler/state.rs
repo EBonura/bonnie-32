@@ -1607,7 +1607,8 @@ impl ModelerState {
 
     /// Auto-dim non-selected components for visual focus.
     /// Selected component shows at its base opacity; others are dimmed to at least FOCUS_DIM_LEVEL.
-    const FOCUS_DIM_LEVEL: u8 = 3;
+    /// Level 6 = alpha 30, one step above hidden — makes non-selected components nearly invisible.
+    const FOCUS_DIM_LEVEL: u8 = 6;
 
     pub fn apply_focus_opacity(&mut self) {
         self.ensure_opacity_vec();
