@@ -136,21 +136,27 @@ impl Color15 {
     }
 
     /// Get red channel as 8-bit value (0-255, expanded from 5-bit)
+    /// Uses proper expansion: (v5 << 3) | (v5 >> 2) so 0→0, 31→255
     #[inline]
     pub fn r8(self) -> u8 {
-        self.r5() << 3
+        let v = self.r5();
+        (v << 3) | (v >> 2)
     }
 
     /// Get green channel as 8-bit value (0-255, expanded from 5-bit)
+    /// Uses proper expansion: (v5 << 3) | (v5 >> 2) so 0→0, 31→255
     #[inline]
     pub fn g8(self) -> u8 {
-        self.g5() << 3
+        let v = self.g5();
+        (v << 3) | (v >> 2)
     }
 
     /// Get blue channel as 8-bit value (0-255, expanded from 5-bit)
+    /// Uses proper expansion: (v5 << 3) | (v5 >> 2) so 0→0, 31→255
     #[inline]
     pub fn b8(self) -> u8 {
-        self.b5() << 3
+        let v = self.b5();
+        (v << 3) | (v >> 2)
     }
 
     /// PS1-style texture modulation: (self * vertex_color) / 128

@@ -1236,6 +1236,15 @@ fn rasterize_triangle(
         None
     };
 
+    // PS1 dithering rule: only dither Gouraud-shaded or texture-modulated polygons.
+    // Flat-shaded untextured uniform-color triangles are NOT dithered on real hardware.
+    let needs_dither = settings.dithering && (
+        settings.shading == ShadingMode::Gouraud
+        || texture.is_some()
+        || surface.vc1 != surface.vc2
+        || surface.vc2 != surface.vc3
+    );
+
     // === EDGE FUNCTION SETUP ===
     // Edge function: E(x,y) = (y1-y2)*x + (x2-x1)*y + (x1*y2 - x2*y1)
     // For barycentric: bc.x = E23/area, bc.y = E31/area, bc.z = E12/area
@@ -1372,7 +1381,8 @@ fn rasterize_triangle(
                 color = shade_color_rgb(color, shade_r, shade_g, shade_b);
 
                 // Apply PS1-style ordered dithering
-                if settings.dithering {
+                // PS1 rule: only dither Gouraud-shaded or texture-modulated polygons
+                if needs_dither {
                     color = apply_dither(color, x, y);
                 }
 
@@ -1471,6 +1481,15 @@ fn rasterize_triangle_15(
     } else {
         None
     };
+
+    // PS1 dithering rule: only dither Gouraud-shaded or texture-modulated polygons.
+    // Flat-shaded untextured uniform-color triangles are NOT dithered on real hardware.
+    let needs_dither = settings.dithering && (
+        settings.shading == ShadingMode::Gouraud
+        || texture.is_some()
+        || surface.vc1 != surface.vc2
+        || surface.vc2 != surface.vc3
+    );
 
     // === EDGE FUNCTION SETUP ===
     let v1 = surface.v1;
@@ -1626,7 +1645,8 @@ fn rasterize_triangle_15(
                 let shaded_b8 = (mod_b8 as f32 * shade_b.clamp(0.0, 2.0)).min(255.0) as u8;
 
                 // Final quantization: dither (if enabled) and convert 8-bit to 5-bit
-                let (r5, g5, b5) = if settings.dithering {
+                // PS1 rule: only dither Gouraud-shaded or texture-modulated polygons
+                let (r5, g5, b5) = if needs_dither {
                     dither_and_quantize(shaded_r8, shaded_g8, shaded_b8, x, y)
                 } else {
                     // Simple truncation without dithering
@@ -1738,6 +1758,15 @@ fn rasterize_triangle_indexed(
     } else {
         None
     };
+
+    // PS1 dithering rule: only dither Gouraud-shaded or texture-modulated polygons.
+    // Flat-shaded untextured uniform-color triangles are NOT dithered on real hardware.
+    let needs_dither = settings.dithering && (
+        settings.shading == ShadingMode::Gouraud
+        || indexed_texture.is_some()
+        || surface.vc1 != surface.vc2
+        || surface.vc2 != surface.vc3
+    );
 
     // === EDGE FUNCTION SETUP ===
     let v1 = surface.v1;
@@ -1891,7 +1920,8 @@ fn rasterize_triangle_indexed(
                 let shaded_b8 = (mod_b8 as f32 * shade_b.clamp(0.0, 2.0)).min(255.0) as u8;
 
                 // Final quantization with dithering
-                let (r5, g5, b5) = if settings.dithering {
+                // PS1 rule: only dither Gouraud-shaded or texture-modulated polygons
+                let (r5, g5, b5) = if needs_dither {
                     dither_and_quantize(shaded_r8, shaded_g8, shaded_b8, x, y)
                 } else {
                     (shaded_r8 >> 3, shaded_g8 >> 3, shaded_b8 >> 3)
