@@ -39,8 +39,9 @@ use std::path::PathBuf;
 fn window_conf() -> Conf {
     Conf {
         window_title: format!("BONNIE-32 v{}", VERSION),
-        window_width: WIDTH as i32 * 3,
-        window_height: HEIGHT as i32 * 3,
+        // Request oversized dimensions so macOS clamps to screen bounds (pseudo-maximize)
+        window_width: 3840,
+        window_height: 2160,
         window_resizable: true,
         high_dpi: true,
         // Start windowed on all platforms (WASM: browser handles sizing)
