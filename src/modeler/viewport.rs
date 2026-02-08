@@ -1205,18 +1205,7 @@ pub fn draw_modeler_viewport_ext(
                 world_positions.push(pos);
             }
 
-            // Highlight vertices assigned to selected bone (green tint)
-            // Only show when skeleton component is selected AND a specific bone is selected
-            let skeleton_component_selected = state.selected_component
-                .and_then(|idx| state.asset.components.get(idx))
-                .map(|c| c.is_skeleton())
-                .unwrap_or(false);
-            let color = if is_selected && skeleton_component_selected && state.selected_bone.is_some() && bone_idx == state.selected_bone {
-                // Bright green for vertices on selected bone
-                RasterColor::new(100, 220, 120)
-            } else {
-                RasterColor::new(base_color, base_color, base_color)
-            };
+            let color = RasterColor::new(base_color, base_color, base_color);
 
             all_vertices.push(RasterVertex {
                 pos,
@@ -3074,26 +3063,26 @@ fn handle_hover_click(state: &mut ModelerState) {
         return;
     }
 
-    // Handle bone BASE selection (click on base/body = move whole bone)
+    // Handle bone BASE/BODY selection - defaults to tip selection for easier editing
     if let Some(bone_idx) = state.hovered_bone {
         if multi_select {
             match &mut state.selection {
-                ModelerSelection::Bones(bones) => {
-                    if let Some(pos) = bones.iter().position(|&b| b == bone_idx) {
-                        bones.remove(pos);
-                        state.selected_bone = bones.first().copied();
+                ModelerSelection::BoneTips(tips) => {
+                    if let Some(pos) = tips.iter().position(|&b| b == bone_idx) {
+                        tips.remove(pos);
+                        state.selected_bone = tips.first().copied();
                     } else {
-                        bones.push(bone_idx);
+                        tips.push(bone_idx);
                         state.selected_bone = Some(bone_idx);
                     }
                 }
                 _ => {
-                    state.selection = ModelerSelection::Bones(vec![bone_idx]);
+                    state.selection = ModelerSelection::BoneTips(vec![bone_idx]);
                     state.selected_bone = Some(bone_idx);
                 }
             }
         } else {
-            state.selection = ModelerSelection::Bones(vec![bone_idx]);
+            state.selection = ModelerSelection::BoneTips(vec![bone_idx]);
             state.selected_bone = Some(bone_idx);
         }
 
@@ -3105,7 +3094,7 @@ fn handle_hover_click(state: &mut ModelerState) {
         let bone_name = state.skeleton().get(bone_idx)
             .map(|b| b.name.clone())
             .unwrap_or_default();
-        state.set_status(&format!("Selected bone: {} (G to move)", bone_name), 1.0);
+        state.set_status(&format!("Selected tip: {} (G to rotate/resize)", bone_name), 1.0);
         return;
     }
 

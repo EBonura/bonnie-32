@@ -788,7 +788,7 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
 
         // Draw opacity indicator: vertical bar showing current level
         let bar_height = indicator_size - 2.0;
-        let bar_width = 4.0;
+        let bar_width = 8.0;
         let bar_x = indicator_x + (indicator_size - bar_width) / 2.0;
         let bar_y = indicator_y + 1.0;
 
@@ -818,10 +818,14 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
         // Component icon
         let icon_rect = Rect::new(x + 20.0, *y + 1.0, 16.0, 16.0);
         let icon_char = component_icon(comp);
+        let is_dimmed = opacity > 0 && !is_hidden;
+        let dimmed_color = Color::new(0.55, 0.55, 0.6, 1.0);
         let icon_color = if is_hidden {
             TEXT_DIM
         } else if is_selected {
             ACCENT_COLOR
+        } else if is_dimmed {
+            dimmed_color
         } else {
             TEXT_COLOR
         };
@@ -833,6 +837,8 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             TEXT_DIM
         } else if is_selected {
             ACCENT_COLOR
+        } else if is_dimmed {
+            dimmed_color
         } else {
             TEXT_COLOR
         };
@@ -1668,8 +1674,8 @@ fn create_child_bone(state: &mut ModelerState, parent_idx: usize) {
     state.save_undo_skeleton("Create Bone");
 
     // Get parent bone info
-    let (parent_length, parent_rotation) = match state.skeleton().get(parent_idx) {
-        Some(b) => (b.length, b.local_rotation),
+    let (parent_length, parent_rotation, parent_width) = match state.skeleton().get(parent_idx) {
+        Some(b) => (b.length, b.local_rotation, b.display_width()),
         None => return,
     };
 
@@ -1680,7 +1686,7 @@ fn create_child_bone(state: &mut ModelerState, parent_idx: usize) {
         local_position: Vec3::new(0.0, parent_length, 0.0),
         local_rotation: parent_rotation, // Inherit parent's rotation
         length: DEFAULT_LENGTH,
-        width: RigBone::DEFAULT_WIDTH,
+        width: parent_width,
     };
 
     let bone_name = new_bone.name.clone();
