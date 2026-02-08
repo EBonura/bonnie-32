@@ -43,9 +43,9 @@ fn window_conf() -> Conf {
         window_height: HEIGHT as i32 * 3,
         window_resizable: true,
         high_dpi: true,
-        // Start fullscreen on native, windowed on WASM (browser handles sizing)
+        // Start windowed on all platforms (WASM: browser handles sizing)
         #[cfg(not(target_arch = "wasm32"))]
-        fullscreen: true,
+        fullscreen: false,
         icon: Some(miniquad::conf::Icon {
             small: *include_bytes!("../assets/runtime/icons/icon16.rgba"),
             medium: *include_bytes!("../assets/runtime/icons/icon32.rgba"),
@@ -71,8 +71,7 @@ async fn main() {
     let level = create_empty_level();
 
     // Mouse state tracking
-    let mut last_left_down = false;
-    let mut last_right_down = false;
+    // (mouse edge-detection now uses macroquad's event-based is_mouse_button_pressed/released)
     let mut last_click_time = 0.0f64;
     let mut last_click_pos = (0.0f32, 0.0f32);
 
@@ -290,10 +289,11 @@ async fn main() {
         poll_pending_ops(&mut app);
 
         // Update UI context with mouse state
+        // Use macroquad's event-based press/release detection (won't miss fast clicks)
         let mouse_pos = mouse_position();
         let left_down = is_mouse_button_down(MouseButton::Left);
+        let left_pressed = is_mouse_button_pressed(MouseButton::Left);
         // Detect double-click (300ms window, 10px radius)
-        let left_pressed = left_down && !last_left_down;
         let current_time = get_time();
         let double_click_threshold = 0.3; // 300ms
         let double_click_radius = 10.0;
@@ -311,20 +311,17 @@ async fn main() {
         };
 
         let right_down = is_mouse_button_down(MouseButton::Right);
-        let right_pressed = right_down && !last_right_down;
         let mouse_state = MouseState {
             x: mouse_pos.0,
             y: mouse_pos.1,
             left_down,
             right_down,
             left_pressed,
-            left_released: !left_down && last_left_down,
-            right_pressed,
+            left_released: is_mouse_button_released(MouseButton::Left),
+            right_pressed: is_mouse_button_pressed(MouseButton::Right),
             scroll: mouse_wheel().1,
             double_clicked,
         };
-        last_left_down = left_down;
-        last_right_down = right_down;
         ui_ctx.begin_frame(mouse_state);
 
         // Poll gamepad input
