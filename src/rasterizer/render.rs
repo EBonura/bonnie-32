@@ -2037,11 +2037,12 @@ pub fn render_mesh(
         let edge2 = cv3 - cv1;
         let normal = edge1.cross(edge2).normalize();
 
-        // Determine if this face uses semi-transparency (8-bit path: check texture's blend_mode)
+        // Determine if this face uses semi-transparency (8-bit path: check texture's blend_mode or editor_alpha)
         let has_transparency = face.texture_id
             .and_then(|id| textures.get(id))
             .map(|t| t.blend_mode != BlendMode::Opaque)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || face.editor_alpha < 255;
 
         if is_backface {
             // Back-face: collect for wireframe rendering (skip in xray mode)
@@ -2368,17 +2369,18 @@ pub fn render_mesh_15(
         let normal = edge1.cross(edge2).normalize();
 
         // Determine if this face uses semi-transparency (for two-pass rendering)
-        // Check texture's blend_mode and face's blend_mode directly
+        // Check texture's blend_mode, face's blend_mode, and editor_alpha
         let has_transparency = {
             let tex_blend = face.texture_id
                 .and_then(|id| textures.get(id))
                 .map(|t| t.blend_mode);
 
-            // Face is transparent if texture or face has non-Opaque blend mode
+            // Face is transparent if texture or face has non-Opaque blend mode,
+            // or if editor_alpha is less than fully opaque
             match (tex_blend, face.blend_mode) {
                 (Some(b), _) if b != BlendMode::Opaque => true,
                 (_, b) if b != BlendMode::Opaque => true,
-                _ => false,
+                _ => face.editor_alpha < 255,
             }
         };
 
