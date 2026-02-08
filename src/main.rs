@@ -25,6 +25,7 @@ mod texture;
 mod asset;
 mod storage;
 mod auth;
+mod scene;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -762,6 +763,7 @@ async fn main() {
                     &app.input,
                     &ui_ctx,
                     &app.world_editor.editor_state.asset_library,
+                    &app.world_editor.editor_state.user_textures,
                 );
             }
 
@@ -823,6 +825,7 @@ async fn main() {
                         &mut ms.model_browser,
                         &app.storage,
                         app.icon_font.as_ref(),
+                        &ms.modeler_state.user_textures,
                     );
 
                     match browser_action {

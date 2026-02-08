@@ -7,7 +7,7 @@ use crate::rasterizer::{
     Framebuffer, Vec3, Color as RasterColor, Camera, OrthoProjection,
     world_to_screen_with_ortho, world_to_screen_with_ortho_depth, draw_3d_line_clipped,
 };
-use super::state::{ModelerState, RigBone};
+use super::state::{ModelerState, RigBone, rotate_by_euler};
 
 /// Get bone color based on state
 fn bone_color_default() -> RasterColor {
@@ -469,6 +469,91 @@ pub fn skeleton_to_triangles(
         let preview_width = RigBone::DEFAULT_WIDTH;
         generate_bone_octahedron(
             creation.start_pos, creation.end_pos, preview_width, color, 255,
+            &mut vertices, &mut faces,
+        );
+    }
+
+    (vertices, faces)
+}
+
+/// Compute world transform for a bone by walking up the hierarchy.
+/// Standalone version of `ModelerState::get_bone_world_transform` that takes raw bone data.
+/// Returns (position, rotation) in world space.
+pub fn bone_world_transform(bones: &[RigBone], bone_idx: usize) -> (Vec3, Vec3) {
+    if bone_idx >= bones.len() {
+        return (Vec3::ZERO, Vec3::ZERO);
+    }
+
+    let mut position = Vec3::ZERO;
+    let mut rotation = Vec3::ZERO;
+
+    // Build chain from root to this bone
+    let mut current = Some(bone_idx);
+    let mut chain = Vec::new();
+    while let Some(idx) = current {
+        chain.push(idx);
+        current = bones[idx].parent;
+    }
+
+    // Apply transforms from root to leaf
+    for idx in chain.into_iter().rev() {
+        let bone = &bones[idx];
+        let rotated_pos = rotate_by_euler(bone.local_position, rotation);
+        position = position + rotated_pos;
+        rotation = rotation + bone.local_rotation;
+    }
+
+    (position, rotation)
+}
+
+/// Compute world position of a bone's tip.
+/// Standalone version of `ModelerState::get_bone_tip_position`.
+pub fn bone_tip_position(bones: &[RigBone], bone_idx: usize) -> Vec3 {
+    if bone_idx >= bones.len() {
+        return Vec3::ZERO;
+    }
+
+    let (base_pos, rotation) = bone_world_transform(bones, bone_idx);
+    let bone = &bones[bone_idx];
+
+    let rad_x = rotation.x.to_radians();
+    let rad_z = rotation.z.to_radians();
+    let cos_x = rad_x.cos();
+    let direction = Vec3::new(
+        rad_z.sin() * cos_x,
+        rad_z.cos() * cos_x,
+        -rad_x.sin(),
+    ).normalize();
+
+    base_pos + direction * bone.length
+}
+
+/// Generate bone octahedron triangles from raw skeleton data.
+/// Simplified version for read-only rendering (asset browser, previews).
+/// Uses default/root coloring only — no selection, hover, or creation preview.
+pub fn skeleton_to_triangles_from_bones(
+    bones: &[RigBone],
+    alpha: u8,
+) -> (Vec<RasterVertex>, Vec<RasterFace>) {
+    let mut vertices: Vec<RasterVertex> = Vec::new();
+    let mut faces: Vec<RasterFace> = Vec::new();
+
+    if bones.is_empty() {
+        return (vertices, faces);
+    }
+
+    for (idx, bone) in bones.iter().enumerate() {
+        let color = if bone.parent.is_none() {
+            bone_color_root()
+        } else {
+            bone_color_default()
+        };
+
+        let (base_pos, _) = bone_world_transform(bones, idx);
+        let tip_pos = bone_tip_position(bones, idx);
+
+        generate_bone_octahedron(
+            base_pos, tip_pos, bone.display_width(), color, alpha,
             &mut vertices, &mut faces,
         );
     }

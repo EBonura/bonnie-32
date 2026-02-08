@@ -7,9 +7,7 @@ use macroquad::prelude::*;
 use crate::storage::{Storage, PendingLoad, PendingList};
 use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
 use crate::world::Level;
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex, Clut, ClutId};
-use crate::modeler::{checkerboard_clut, IndexedAtlas, TextureRef};
-use crate::asset::AssetComponent;
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, Color as RasterColor, Vec3, RasterSettings, ShadingMode};
 use super::sample_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
 
@@ -656,52 +654,17 @@ fn draw_orbit_preview(
     fb.clear(RasterColor::new(15, 15, 20));
 
     // Build lighting from level
-    let mut lights = Vec::new();
-    let mut total_ambient = 0.0;
-    let mut room_count = 0;
-    for room in &level.rooms {
-        total_ambient += room.ambient;
-        room_count += 1;
-    }
-    // Collect lights from room objects (any asset with Light component)
-    for room in &level.rooms {
-        for obj in room.objects.iter().filter(|o| o.enabled) {
-            let asset = match asset_library.get_by_id(obj.asset_id) {
-                Some(a) => a,
-                None => continue,
-            };
-            // Find Light component and extract its properties
-            for comp in &asset.components {
-                if let AssetComponent::Light { color, intensity, radius, offset } = comp {
-                    // Apply per-instance overrides if present
-                    let overrides = &obj.overrides.light;
-                    let final_color = overrides.as_ref().and_then(|o| o.color).unwrap_or(*color);
-                    let final_intensity = overrides.as_ref().and_then(|o| o.intensity).unwrap_or(*intensity);
-                    let final_radius = overrides.as_ref().and_then(|o| o.radius).unwrap_or(*radius);
-                    let final_offset = overrides.as_ref().and_then(|o| o.offset).unwrap_or(*offset);
-
-                    let base_pos = obj.world_position(room);
-                    // Apply light offset to get actual light position
-                    let light_pos = Vec3::new(
-                        base_pos.x + final_offset[0],
-                        base_pos.y + final_offset[1],
-                        base_pos.z + final_offset[2],
-                    );
-                    // Convert color from [u8; 3] to normalized RGB
-                    let r = final_color[0] as f32 / 255.0;
-                    let g = final_color[1] as f32 / 255.0;
-                    let b = final_color[2] as f32 / 255.0;
-                    lights.push(Light::point_colored(light_pos, final_radius, final_intensity, r, g, b));
-                }
-            }
-        }
-    }
-    let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
+    let lights = crate::scene::collect_scene_lights(&level.rooms, asset_library);
+    let ambient = if !level.rooms.is_empty() {
+        level.rooms.iter().map(|r| r.ambient).sum::<f32>() / level.rooms.len() as f32
+    } else {
+        0.5
+    };
 
     // Render settings with Gouraud shading and room lights
     let settings = RasterSettings {
         shading: ShadingMode::Gouraud,
-        lights,
+        lights: lights.clone(),
         ambient,
         ..RasterSettings::default()
     };
@@ -725,21 +688,19 @@ fn draw_orbit_preview(
     let mut texture_idx = 0;
     for pack in texture_packs {
         for tex in &pack.textures {
-            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64)); // Pack textures are 64x64
+            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64));
             texture_idx += 1;
         }
     }
-    // Add user textures (using _USER pack name convention)
     for name in user_textures.names() {
         let width = user_textures.get(name).map(|t| t.width as u32).unwrap_or(64);
         texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), (texture_idx, width));
         texture_idx += 1;
     }
 
-    // Texture resolver - returns (texture_id, texture_width)
     let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<(usize, u32)> {
         if !tex_ref.is_valid() {
-            return Some((0, 64)); // Fallback to first texture with default 64x64 size
+            return Some((0, 64));
         }
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
@@ -752,110 +713,24 @@ fn draw_orbit_preview(
         Vec::new()
     };
 
-    // Render each room using the same method as the main viewport
-    for room in &level.rooms {
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        if !vertices.is_empty() {
-            if use_rgb555 {
-                render_mesh_15(fb, &vertices, &faces, &textures_15, &camera, &settings, None);
-            } else {
-                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
-            }
-        }
-    }
-
-    // Render asset meshes placed in each room
-    let fallback_clut = checkerboard_clut();
-    for room in &level.rooms {
-        for obj in &room.objects {
-            if !obj.enabled {
-                continue;
-            }
-
-            // Get asset from library
-            let asset = match asset_library.get_by_id(obj.asset_id) {
-                Some(a) => a,
-                None => continue,
-            };
-
-            // Get mesh parts from asset
-            let mesh_parts = match asset.mesh() {
-                Some(parts) => parts,
-                None => continue,
-            };
-
-            // Calculate world transform
-            let world_pos = obj.world_position(room);
-            let facing = obj.facing;
-            let cos_f = facing.cos();
-            let sin_f = facing.sin();
-
-            // Per-room render settings
-            let asset_settings = RasterSettings {
-                lights: settings.lights.clone(),
-                ambient,
-                ..settings.clone()
-            };
-
-            // Render each visible mesh part
-            for part in mesh_parts.iter().filter(|p| p.visible) {
-                let (local_vertices, faces) = part.mesh.to_render_data_textured();
-                if local_vertices.is_empty() {
-                    continue;
-                }
-
-                // Transform vertices: rotate around Y by facing, then translate
-                let transformed_vertices: Vec<Vertex> = local_vertices.iter().map(|v| {
-                    let rx = v.pos.x * cos_f - v.pos.z * sin_f;
-                    let rz = v.pos.x * sin_f + v.pos.z * cos_f;
-                    Vertex {
-                        pos: Vec3::new(rx + world_pos.x, v.pos.y + world_pos.y, rz + world_pos.z),
-                        uv: v.uv,
-                        normal: Vec3::new(
-                            v.normal.x * cos_f - v.normal.z * sin_f,
-                            v.normal.y,
-                            v.normal.x * sin_f + v.normal.z * cos_f,
-                        ),
-                        color: v.color,
-                        bone_index: v.bone_index,
-                    }
-                }).collect();
-
-                // Resolve texture: use UserTexture data for Id refs, otherwise use atlas with fallback
-                let (atlas, clut) = match &part.texture_ref {
-                    TextureRef::Id(id) => {
-                        // Find user texture by ID and create atlas + CLUT from it
-                        if let Some(tex) = user_textures.get_by_id(*id) {
-                            let atlas = IndexedAtlas {
-                                width: tex.width,
-                                height: tex.height,
-                                depth: tex.depth,
-                                indices: tex.indices.clone(),
-                                default_clut: ClutId::NONE,
-                            };
-                            let mut clut = Clut::new_4bit("preview_texture");
-                            clut.colors = tex.palette.clone();
-                            clut.depth = tex.depth;
-                            (atlas, clut)
-                        } else {
-                            (part.atlas.clone(), fallback_clut.clone())
-                        }
-                    }
-                    _ => (part.atlas.clone(), fallback_clut.clone()),
-                };
-
-                if use_rgb555 {
-                    let tex15 = atlas.to_texture15(&clut, "preview_asset");
-                    let part_textures = [tex15];
-                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, &camera, &asset_settings, None);
-                } else {
-                    let tex = atlas.to_raster_texture(&clut, "preview_asset");
-                    let part_textures = [tex];
-                    render_mesh(fb, &transformed_vertices, &faces, &part_textures, &camera, &asset_settings);
-                }
-            }
-        }
-    }
+    // Render rooms + asset meshes in one pass
+    crate::scene::render_scene(
+        fb,
+        &level.rooms,
+        asset_library,
+        user_textures,
+        &camera,
+        &settings,
+        &lights,
+        &textures,
+        &textures_15,
+        &resolve_texture,
+        &crate::scene::SceneRenderOptions {
+            use_fog: false,
+            render_assets: true,
+            skip_rooms: &[],
+        },
+    );
 
     // Draw framebuffer to screen
     let fb_texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);

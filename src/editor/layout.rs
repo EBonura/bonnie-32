@@ -3,7 +3,7 @@
 use macroquad::prelude::*;
 use crate::storage::Storage;
 use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, COLLAPSED_PANEL_HEIGHT, Toolbar, icon, draw_ps1_color_picker, ps1_color_picker_height, ActionRegistry};
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode};
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, Color as RasterColor, Vec3, RasterSettings, ShadingMode};
 use crate::input::InputState;
 use super::{EditorState, EditorTool, Selection, SectorFace, GridViewMode, SECTOR_SIZE, FaceClipboard, GeometryClipboard, CopiedFace, CopiedFaceData};
 use crate::world::{UV_SCALE, Sector};
@@ -467,7 +467,7 @@ pub fn draw_editor(
     }
 
     // Draw Asset Browser modal (if open)
-    let browser_action = draw_asset_browser(ctx, &mut state.asset_browser, storage, icon_font);
+    let browser_action = draw_asset_browser(ctx, &mut state.asset_browser, storage, icon_font, &state.user_textures);
     match browser_action {
         AssetBrowserAction::SelectPreview(category, idx) => {
             use crate::modeler::AssetCategory;
@@ -6352,31 +6352,17 @@ fn draw_player_camera_preview(
     }
     camera.update_basis();
 
-    // Build lighting from level - collect lights from any asset with Light component
-    let mut lights = Vec::new();
-    let mut total_ambient = 0.0;
-    let mut room_count = 0;
-    for room in &level.rooms {
-        total_ambient += room.ambient;
-        room_count += 1;
-        // Collect lights from room objects (any asset with Light component)
-        for obj in room.objects.iter().filter(|o| {
-            o.enabled && asset_library.get_by_id(o.asset_id)
-                .map(|a| a.has_light())
-                .unwrap_or(false)
-        }) {
-            // Use default light settings for preview
-            let world_pos = obj.world_position(room);
-            let light = Light::point(world_pos, 5000.0, 1.0);
-            lights.push(light);
-        }
-    }
-    let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
+    // Build lighting and settings
+    let lights = crate::scene::collect_scene_lights(&level.rooms, asset_library);
+    let ambient = if !level.rooms.is_empty() {
+        level.rooms.iter().map(|r| r.ambient).sum::<f32>() / level.rooms.len() as f32
+    } else {
+        0.5
+    };
 
-    // Render settings
     let settings = RasterSettings {
         shading: ShadingMode::Gouraud,
-        lights,
+        lights: lights.clone(),
         ambient,
         ..RasterSettings::default()
     };
@@ -6388,16 +6374,14 @@ fn draw_player_camera_preview(
         .cloned()
         .collect();
 
-    // Maps (pack, name) -> (texture_idx, texture_width)
     let mut texture_map: std::collections::HashMap<(String, String), (usize, u32)> = std::collections::HashMap::new();
     let mut texture_idx = 0;
     for pack in texture_packs {
         for tex in &pack.textures {
-            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64)); // Pack textures are 64x64
+            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64));
             texture_idx += 1;
         }
     }
-    // Add user textures
     for name in user_textures.names() {
         if let Some(user_tex) = user_textures.get(name) {
             let width = user_tex.width as u32;
@@ -6407,7 +6391,6 @@ fn draw_player_camera_preview(
         }
     }
 
-    // Texture resolver - returns (texture_id, texture_width)
     let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<(usize, u32)> {
         if !tex_ref.is_valid() {
             return Some((0, 64));
@@ -6415,13 +6398,24 @@ fn draw_player_camera_preview(
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
 
-    // Render each room
-    for room in &level.rooms {
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        if !vertices.is_empty() {
-            render_mesh(&mut fb, &vertices, &faces, &textures, &camera, &settings);
-        }
-    }
+    // Render rooms + asset meshes
+    crate::scene::render_scene(
+        &mut fb,
+        &level.rooms,
+        asset_library,
+        user_textures,
+        &camera,
+        &settings,
+        &lights,
+        &textures,
+        &[],  // No RGB555 cache for preview
+        &resolve_texture,
+        &crate::scene::SceneRenderOptions {
+            use_fog: false,
+            render_assets: true,
+            skip_rooms: &[],
+        },
+    );
 
     // Draw player cylinder wireframe
     let cylinder_color = RasterColor::new(100, 255, 100); // Green

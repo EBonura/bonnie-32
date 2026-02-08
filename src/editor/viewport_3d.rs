@@ -13,11 +13,11 @@
 use macroquad::prelude::*;
 use crate::ui::{Rect, UiContext, drag_tracker::pick_plane};
 use crate::rasterizer::{
-    Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15, Color as RasterColor, Vec3,
+    Framebuffer, Texture as RasterTexture, Color as RasterColor, Vec3,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
     world_to_screen, world_to_screen_with_depth,
     point_to_segment_distance, point_in_triangle_2d,
-    Light, RasterSettings, Camera, draw_3d_line_clipped,
+    Light, Camera, draw_3d_line_clipped,
 };
 use crate::world::{SECTOR_SIZE, SplitDirection};
 use crate::input::{InputState, Action};
@@ -3444,42 +3444,7 @@ pub fn draw_viewport_3d(
 
     // Collect all lights from room objects (any asset with a Light component)
     let lights: Vec<Light> = if state.raster_settings.shading != crate::rasterizer::ShadingMode::None {
-        state.level.rooms.iter()
-            .flat_map(|room| {
-                room.objects.iter()
-                    .filter_map(|obj| {
-                        if !obj.enabled {
-                            return None;
-                        }
-                        let asset = state.asset_library.get_by_id(obj.asset_id)?;
-                        // Find Light component and extract its properties
-                        for comp in &asset.components {
-                            if let crate::asset::AssetComponent::Light { color, intensity, radius, offset } = comp {
-                                // Apply per-instance overrides if present
-                                let overrides = &obj.overrides.light;
-                                let final_color = overrides.as_ref().and_then(|o| o.color).unwrap_or(*color);
-                                let final_intensity = overrides.as_ref().and_then(|o| o.intensity).unwrap_or(*intensity);
-                                let final_radius = overrides.as_ref().and_then(|o| o.radius).unwrap_or(*radius);
-                                let final_offset = overrides.as_ref().and_then(|o| o.offset).unwrap_or(*offset);
-
-                                let base_pos = obj.world_position(room);
-                                // Apply light offset to get actual light position
-                                let light_pos = Vec3::new(
-                                    base_pos.x + final_offset[0],
-                                    base_pos.y + final_offset[1],
-                                    base_pos.z + final_offset[2],
-                                );
-                                // Convert color from [u8; 3] to normalized RGB
-                                let r = final_color[0] as f32 / 255.0;
-                                let g = final_color[1] as f32 / 255.0;
-                                let b = final_color[2] as f32 / 255.0;
-                                return Some(Light::point_colored(light_pos, final_radius, final_intensity, r, g, b));
-                            }
-                        }
-                        None
-                    })
-            })
-            .collect()
+        crate::scene::collect_scene_lights(&state.level.rooms, &state.asset_library)
     } else {
         Vec::new()
     };
@@ -3498,55 +3463,29 @@ pub fn draw_viewport_3d(
 
     let vp_texconv_ms = EditorFrameTimings::elapsed_ms(texconv_start);
 
-    // === RENDER PHASE (meshgen + raster) ===
+    // === RENDER PHASE (rooms + asset meshes) ===
     let render_start = EditorFrameTimings::start();
-    let mut vp_meshgen_ms = 0.0f32;
-    let mut vp_raster_ms = 0.0f32;
+    let vp_meshgen_ms = 0.0f32;
+    let vp_raster_ms = 0.0f32;
 
-    // Render each room with its own ambient setting (skip hidden ones)
-    for (room_idx, room) in state.level.rooms.iter().enumerate() {
-        // Skip hidden rooms
-        if state.hidden_rooms.contains(&room_idx) {
-            continue;
-        }
-        let render_settings = RasterSettings {
-            lights: lights.clone(),
-            ambient: room.ambient,
-            ..state.raster_settings.clone()
-        };
-
-        // Time mesh generation
-        let meshgen_start = EditorFrameTimings::start();
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        vp_meshgen_ms += EditorFrameTimings::elapsed_ms(meshgen_start);
-
-        // Build fog parameter from room settings
-        let fog = if room.fog.enabled {
-            let (r, g, b) = room.fog.color;
-            let fog_color = RasterColor::new(
-                (r * 255.0) as u8,
-                (g * 255.0) as u8,
-                (b * 255.0) as u8,
-            );
-            let cull_distance = room.fog.start + room.fog.falloff + room.fog.cull_offset;
-            Some((room.fog.start, room.fog.falloff, cull_distance, fog_color))
-        } else {
-            None
-        };
-
-        // Time rasterization
-        let raster_start = EditorFrameTimings::start();
-        if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &state.textures_15_cache, &state.camera_3d, &render_settings, fog);
-        } else {
-            render_mesh(fb, &vertices, &faces, textures, &state.camera_3d, &render_settings);
-        }
-        vp_raster_ms += EditorFrameTimings::elapsed_ms(raster_start);
-    }
-
-    // === ASSET MESH RENDERING PHASE ===
-    // Render 3D meshes from placed asset instances (after room geometry, shares z-buffer)
-    render_asset_meshes(fb, state, &lights, use_rgb555);
+    let skip_rooms: Vec<usize> = state.hidden_rooms.iter().copied().collect();
+    crate::scene::render_scene(
+        fb,
+        &state.level.rooms,
+        &state.asset_library,
+        &state.user_textures,
+        &state.camera_3d,
+        &state.raster_settings,
+        &lights,
+        textures,
+        &state.textures_15_cache,
+        &resolve_texture,
+        &crate::scene::SceneRenderOptions {
+            use_fog: true,
+            render_assets: true,
+            skip_rooms: &skip_rooms,
+        },
+    );
 
     let _render_total_ms = EditorFrameTimings::elapsed_ms(render_start);
 
@@ -7521,156 +7460,6 @@ fn wall_center_in_rect(
         sx >= rect_min_x && sx <= rect_max_x && sy >= rect_min_y && sy <= rect_max_y
     } else {
         false
-    }
-}
-
-// =============================================================================
-// Asset Mesh Rendering
-// =============================================================================
-
-use crate::modeler::{IndexedAtlas, MeshPart, TextureRef, checkerboard_clut};
-use crate::rasterizer::ClutId;
-
-/// Render 3D meshes for all placed assets that have Mesh components
-fn render_asset_meshes(
-    fb: &mut Framebuffer,
-    state: &EditorState,
-    lights: &[Light],
-    use_rgb555: bool,
-) {
-    use crate::rasterizer::Vertex;
-
-    for (room_idx, room) in state.level.rooms.iter().enumerate() {
-        // Skip hidden rooms
-        if state.hidden_rooms.contains(&room_idx) {
-            continue;
-        }
-
-        for obj in &room.objects {
-            // Skip disabled objects
-            if !obj.enabled {
-                continue;
-            }
-
-            // Get asset from library
-            let asset = match state.asset_library.get_by_id(obj.asset_id) {
-                Some(a) => a,
-                None => continue,
-            };
-
-            // Get mesh component
-            let mesh_parts = match asset.mesh() {
-                Some(parts) => parts,
-                None => continue, // No mesh component - will use gizmo rendering
-            };
-
-            // Calculate world transform
-            let world_pos = obj.world_position(room);
-            let facing = obj.facing;
-            let cos_f = facing.cos();
-            let sin_f = facing.sin();
-
-            // Build fog parameter from room settings (same as room geometry)
-            let fog = if room.fog.enabled {
-                let (r, g, b) = room.fog.color;
-                let fog_color = RasterColor::new(
-                    (r * 255.0) as u8,
-                    (g * 255.0) as u8,
-                    (b * 255.0) as u8,
-                );
-                let cull_distance = room.fog.start + room.fog.falloff + room.fog.cull_offset;
-                Some((room.fog.start, room.fog.falloff, cull_distance, fog_color))
-            } else {
-                None
-            };
-
-            // Render each visible mesh part
-            for part in mesh_parts.iter().filter(|p| p.visible) {
-                let (local_vertices, faces) = part.mesh.to_render_data_textured();
-                if local_vertices.is_empty() {
-                    continue;
-                }
-
-                // Per-room render settings with lights
-                // Disable backface culling for double-sided parts (same as modeler)
-                let render_settings = RasterSettings {
-                    lights: lights.to_vec(),
-                    ambient: room.ambient,
-                    backface_cull: !part.double_sided && state.raster_settings.backface_cull,
-                    backface_wireframe: !part.double_sided && state.raster_settings.backface_wireframe,
-                    ..state.raster_settings.clone()
-                };
-
-                // Transform vertices: rotate around Y by facing, then translate
-                let transformed_vertices: Vec<Vertex> = local_vertices.iter().map(|v| {
-                    let rx = v.pos.x * cos_f - v.pos.z * sin_f;
-                    let rz = v.pos.x * sin_f + v.pos.z * cos_f;
-                    Vertex {
-                        pos: Vec3::new(rx + world_pos.x, v.pos.y + world_pos.y, rz + world_pos.z),
-                        uv: v.uv,
-                        normal: Vec3::new(
-                            v.normal.x * cos_f - v.normal.z * sin_f,
-                            v.normal.y,
-                            v.normal.x * sin_f + v.normal.z * cos_f,
-                        ),
-                        color: v.color,
-                        bone_index: v.bone_index,
-                    }
-                }).collect();
-
-                // Resolve texture: use UserTexture data for Id refs, otherwise use atlas
-                let (atlas, clut) = resolve_part_texture(part, state);
-
-                // Render the mesh with fog and distance culling
-                if use_rgb555 {
-                    let tex15 = atlas.to_texture15(&clut, "asset_part");
-                    let part_textures = [tex15];
-                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, &state.camera_3d, &render_settings, fog);
-                } else {
-                    let tex = atlas.to_raster_texture(&clut, "asset_part");
-                    let part_textures = [tex];
-                    render_mesh(fb, &transformed_vertices, &faces, &part_textures, &state.camera_3d, &render_settings);
-                }
-            }
-        }
-    }
-}
-
-/// Resolve atlas and CLUT for a mesh part based on its TextureRef
-///
-/// For TextureRef::Id, returns the actual texture data from the UserTexture,
-/// not the potentially stale atlas stored in the MeshPart.
-fn resolve_part_texture(part: &MeshPart, state: &EditorState) -> (IndexedAtlas, crate::rasterizer::Clut) {
-    use crate::rasterizer::Clut;
-
-    match &part.texture_ref {
-        TextureRef::Id(id) => {
-            // Find user texture by ID and create atlas + CLUT from it
-            if let Some(tex) = state.user_textures.get_by_id(*id) {
-                // Create atlas from UserTexture's indices
-                let atlas = IndexedAtlas {
-                    width: tex.width,
-                    height: tex.height,
-                    depth: tex.depth,
-                    indices: tex.indices.clone(),
-                    default_clut: ClutId::NONE,
-                };
-                // Create CLUT from UserTexture's palette
-                let mut clut = Clut::new_4bit("asset_texture");
-                clut.colors = tex.palette.clone();
-                clut.depth = tex.depth;
-                (atlas, clut)
-            } else {
-                (part.atlas.clone(), checkerboard_clut().clone())
-            }
-        }
-        TextureRef::Embedded(_embedded) => {
-            // For embedded textures, we'd need a CLUT pool - use checkerboard for now
-            (part.atlas.clone(), checkerboard_clut().clone())
-        }
-        TextureRef::Checkerboard | TextureRef::None => {
-            (part.atlas.clone(), checkerboard_clut().clone())
-        }
     }
 }
 
