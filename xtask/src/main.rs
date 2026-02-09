@@ -149,8 +149,11 @@ fn build_web(dev: bool) -> Result<()> {
     // Copy assets (excluding large/unused directories to stay under itch.io file limit)
     copy_dir_recursive_filtered(&root.join("assets"), &dist.join("assets"), EXCLUDED_ASSET_DIRS)?;
 
-    // Regenerate texture manifest without excluded packs
-    regenerate_texture_manifest(&dist.join("assets/samples/textures"))?;
+    // Regenerate texture-pack manifest without excluded packs
+    regenerate_texture_manifest(&dist.join("assets/samples/texture-packs"))?;
+
+    // Generate manifest for sample CLUT textures (RON files)
+    regenerate_user_texture_manifest(&dist.join("assets/samples/textures"))?;
 
     // Generate manifest for user textures (for WASM loading)
     regenerate_user_texture_manifest(&dist.join("assets/userdata/textures"))?;

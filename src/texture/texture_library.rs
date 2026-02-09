@@ -173,12 +173,7 @@ impl TextureLibrary {
         let mut count = 0;
 
         // Load sample textures (RON UserTexture definitions)
-        // Skip on WASM: the manifest lists PNGs (for TexturePack), not RON files.
-        // Sample RON textures aren't needed on web - only user textures matter.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            count += self.load_manifest_from_dir(SAMPLES_TEXTURES_DIR, TextureSource::Sample).await?;
-        }
+        count += self.load_manifest_from_dir(SAMPLES_TEXTURES_DIR, TextureSource::Sample).await?;
 
         // Load user textures
         count += self.load_manifest_from_dir(USER_TEXTURES_DIR, TextureSource::User).await?;
