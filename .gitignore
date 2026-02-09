@@ -13,6 +13,7 @@ docs/mq_js_bundle.js
 assets/userdata/**/*
 !assets/userdata/**/
 !assets/userdata/**/.gitkeep
+!assets/userdata/textures/*.ron
 
 # Copyrighted PS1 model references (not for distribution)
 assets/samples/meshes/ps1-reference/
