@@ -489,7 +489,7 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .status_tip("Assign selected vertices to selected bone (Ctrl+B)")
             .category("Skeleton")
             .enabled_when(|ctx| {
-                ctx.has_flag(flags::VERTEX_MODE) &&
+                (ctx.has_flag(flags::VERTEX_MODE) || ctx.has_flag(flags::FACE_MODE) || ctx.has_flag(flags::EDGE_MODE)) &&
                 ctx.has_flag(flags::HAS_BONE_SELECTED) &&
                 ctx.has_selection
             }),
@@ -502,7 +502,8 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .status_tip("Remove bone assignment from selected vertices (Ctrl+Shift+B)")
             .category("Skeleton")
             .enabled_when(|ctx| {
-                ctx.has_flag(flags::VERTEX_MODE) && ctx.has_selection
+                (ctx.has_flag(flags::VERTEX_MODE) || ctx.has_flag(flags::FACE_MODE) || ctx.has_flag(flags::EDGE_MODE)) &&
+                ctx.has_selection
             }),
     );
 

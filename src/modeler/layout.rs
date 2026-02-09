@@ -6769,18 +6769,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     // Context Menu Actions
     // ========================================================================
     if actions.triggered("context.open_menu", &ctx) {
-        // Check if we're in bone mode (skeleton selected OR bone selection active)
-        let skeleton_selected = state.selected_component
-            .and_then(|idx| state.asset.components.get(idx))
-            .map(|c| c.is_skeleton())
-            .unwrap_or(false);
-        let bone_selection_active = state.selection.is_bone_selection();
-
-        if skeleton_selected || bone_selection_active {
-            // Create a new bone - auto-create Skeleton component if needed
-            ensure_skeleton_component(state);
-            create_bone_at_default_position(state);
-        } else if !state.radial_menu.is_open {
+        if !state.radial_menu.is_open {
             // Tab key opens radial menu at mouse position (hold behavior)
             let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
             open_radial_menu(state, mx, my);
@@ -7678,9 +7667,8 @@ fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
         ContextMenuType::Primitives => draw_primitives_context_menu(ctx, state, &menu),
         ContextMenuType::VertexOps => draw_vertex_ops_context_menu(ctx, state, &menu),
         ContextMenuType::FaceOps | ContextMenuType::EdgeOps => {
-            // TODO: Implement face/edge context menus
-            // For now, fall back to primitives menu
-            draw_primitives_context_menu(ctx, state, &menu)
+            // Face/edge modes share the vertex ops menu for bone assignment
+            draw_vertex_ops_context_menu(ctx, state, &menu)
         }
     }
 }
@@ -7713,9 +7701,27 @@ fn draw_vertex_ops_context_menu(ctx: &mut UiContext, state: &mut ModelerState, m
 
     let mut y = menu_rect.y + 4.0;
 
-    // Header showing vertex count
+    // Header showing vertex count (derived from faces/edges if needed)
     let vert_count = match &state.selection {
         super::state::ModelerSelection::Vertices(v) => v.len(),
+        super::state::ModelerSelection::Faces(faces) => {
+            let mesh = state.mesh();
+            let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for &face_idx in faces {
+                if let Some(face) = mesh.faces.get(face_idx) {
+                    verts.extend(face.vertices.iter().copied());
+                }
+            }
+            verts.len()
+        }
+        super::state::ModelerSelection::Edges(edges) => {
+            let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for &(a, b) in edges {
+                verts.insert(a);
+                verts.insert(b);
+            }
+            verts.len()
+        }
         _ => 0,
     };
     draw_text(&format!("{} vertices selected", vert_count), menu_rect.x + 8.0, y + 14.0, 12.0, TEXT_DIM);

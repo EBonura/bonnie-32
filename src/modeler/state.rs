@@ -554,6 +554,19 @@ impl ModelerSelection {
         }
     }
 
+    /// Debug summary string for logging
+    pub fn summary(&self) -> String {
+        match self {
+            ModelerSelection::None => "None".to_string(),
+            ModelerSelection::Mesh => "Mesh".to_string(),
+            ModelerSelection::Vertices(v) => format!("Vertices({:?})", v),
+            ModelerSelection::Edges(e) => format!("Edges({})", e.len()),
+            ModelerSelection::Faces(f) => format!("Faces({:?})", f),
+            ModelerSelection::Bones(b) => format!("Bones({:?})", b),
+            ModelerSelection::BoneTips(t) => format!("BoneTips({:?})", t),
+        }
+    }
+
     /// Compute the center point of the selection (average of all affected vertex positions)
     pub fn compute_center(&self, mesh: &EditableMesh) -> Option<Vec3> {
         let indices = self.get_affected_vertex_indices(mesh);
@@ -2713,17 +2726,42 @@ impl ModelerState {
         let bone_name = self.skeleton().get(bone_idx).map(|b| b.name.clone()).unwrap_or_else(|| "bone".to_string());
         let obj_idx = self.selected_object.unwrap_or(0);
 
+        // Pre-compute bone transforms for space conversion
+        let new_bone_transform = self.get_bone_world_transform(bone_idx);
+        let bone_transforms: Vec<(Vec3, Vec3)> = (0..self.skeleton().len())
+            .map(|i| self.get_bone_world_transform(i))
+            .collect();
+        let default_bone_idx = self.selected_object().and_then(|obj| obj.default_bone_index);
+
         // Save undo state
         self.save_undo("Assign Vertices to Bone");
 
-        // Assign vertices to bone
+        // Assign vertices to bone, converting positions to keep them visually in place.
+        // The rendering code transforms bone-assigned vertices by the bone's world transform,
+        // so we must convert from current space → world → new bone-local space.
         if let Some(objects) = self.objects_mut() {
             if let Some(obj) = objects.get_mut(obj_idx) {
-                obj.mesh.assign_vertices_to_bone(&vertex_indices, Some(bone_idx));
+                for &idx in &vertex_indices {
+                    if let Some(v) = obj.mesh.vertices.get_mut(idx) {
+                        // Determine current effective bone (explicit or fallback)
+                        let old_effective_bone = v.bone_index.or(default_bone_idx);
+
+                        // Convert current position to world space
+                        let world_pos = match old_effective_bone.and_then(|bi| bone_transforms.get(bi)) {
+                            Some(&(bone_pos, bone_rot)) => rotate_by_euler(v.pos, bone_rot) + bone_pos,
+                            None => v.pos,
+                        };
+
+                        // Convert from world space to new bone-local space
+                        let (new_pos, new_rot) = new_bone_transform;
+                        v.pos = inverse_rotate_by_euler(world_pos - new_pos, new_rot);
+                        v.bone_index = Some(bone_idx);
+                    }
+                }
             }
         }
 
-        // Set status message
+        self.dirty = true;
         self.set_status(&format!("Assigned {} vertices to '{}'", vertex_indices.len(), bone_name), 2.0);
     }
 
@@ -2765,16 +2803,42 @@ impl ModelerState {
 
         let obj_idx = self.selected_object.unwrap_or(0);
 
+        // Pre-compute bone transforms for space conversion
+        let bone_transforms: Vec<(Vec3, Vec3)> = (0..self.skeleton().len())
+            .map(|i| self.get_bone_world_transform(i))
+            .collect();
+        let default_bone_idx = self.selected_object().and_then(|obj| obj.default_bone_index);
+        let default_bone_transform = default_bone_idx.and_then(|bi| bone_transforms.get(bi)).copied();
+
         // Save undo state
         self.save_undo("Unassign Vertices from Bone");
 
-        // Unassign vertices
+        // Unassign vertices, converting positions to keep them visually in place.
+        // The rendering code transforms bone-assigned vertices by the bone's world transform,
+        // so we must convert from current bone-local → world → default bone-local (or world if no default).
         if let Some(objects) = self.objects_mut() {
             if let Some(obj) = objects.get_mut(obj_idx) {
-                obj.mesh.assign_vertices_to_bone(&vertex_indices, None);
+                for &idx in &vertex_indices {
+                    if let Some(v) = obj.mesh.vertices.get_mut(idx) {
+                        // Convert current position to world space using the vertex's current bone
+                        let old_bone = v.bone_index;
+                        let world_pos = match old_bone.and_then(|bi| bone_transforms.get(bi)) {
+                            Some(&(bone_pos, bone_rot)) => rotate_by_euler(v.pos, bone_rot) + bone_pos,
+                            None => v.pos,
+                        };
+
+                        // Convert from world space to default bone-local (or keep as world if no default)
+                        v.pos = match default_bone_transform {
+                            Some((def_pos, def_rot)) => inverse_rotate_by_euler(world_pos - def_pos, def_rot),
+                            None => world_pos,
+                        };
+                        v.bone_index = None;
+                    }
+                }
             }
         }
 
+        self.dirty = true;
         self.set_status(&format!("Unassigned {} vertices from bone", vertex_indices.len()), 2.0);
     }
 

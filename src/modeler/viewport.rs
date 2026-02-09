@@ -341,6 +341,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
         }
         state.drag_manager.end();
         state.modal_transform = ModalTransform::None;
+        state.free_drag_pending_start = None;
         state.dirty = true;
         state.set_status("Transform applied", 1.0);
     }
@@ -450,6 +451,20 @@ fn handle_drag_move(
                     None,
                 );
 
+                if let DragUpdateResult::Move { ref positions, .. } = result {
+                    // DEBUG: Log large movements
+                    if let Some((idx, pos)) = positions.first() {
+                        let mesh = state.mesh();
+                        if let Some(vert) = mesh.vertices.get(*idx) {
+                            let delta = *pos - vert.pos;
+                            let dist = delta.len();
+                            if dist > 0.5 {
+                                eprintln!("[DRAG_UPDATE] Large move detected! vert[{}]: ({:.3},{:.3},{:.3}) -> ({:.3},{:.3},{:.3}), delta={:.3}",
+                                    idx, vert.pos.x, vert.pos.y, vert.pos.z, pos.x, pos.y, pos.z, dist);
+                            }
+                        }
+                    }
+                }
                 if let DragUpdateResult::Move { positions, .. } = result {
                     let snap_disabled = is_key_down(KeyCode::Z);
                     // Capture snap settings before borrowing mesh
@@ -498,6 +513,8 @@ fn handle_drag_move(
         // Not in any drag - check for free move start
         // Store potential start position (similar to box select)
         if ctx.mouse.left_pressed && inside_viewport {
+            eprintln!("[FREE_DRAG] Pending start set at mouse ({:.1}, {:.1}), selection: {:?}",
+                mouse_pos.0, mouse_pos.1, state.selection.summary());
             state.free_drag_pending_start = Some(mouse_pos);
         }
 
@@ -523,6 +540,12 @@ fn handle_drag_move(
                         // Calculate center
                         let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
                         let center = sum * (1.0 / initial_positions.len() as f32);
+
+                        eprintln!("[FREE_DRAG] Starting free drag: {} verts, center ({:.3}, {:.3}, {:.3}), mouse ({:.1}, {:.1})",
+                            initial_positions.len(), center.x, center.y, center.z, mouse_pos.0, mouse_pos.1);
+                        for (idx, pos) in &initial_positions {
+                            eprintln!("[FREE_DRAG]   initial vert[{}] = ({:.3}, {:.3}, {:.3})", idx, pos.x, pos.y, pos.z);
+                        }
 
                         // Save undo state before starting
                         state.push_undo("Drag move");
@@ -1491,6 +1514,12 @@ pub fn draw_modeler_viewport_ext(
         && !state.radial_menu.is_open
     {
         handle_hover_click(state);
+        // Reset pending start to THIS click's position. handle_drag_move runs before
+        // handle_hover_click, so it may have been unable to set the pending start
+        // (e.g., a gizmo drag was active at that point but ended in handle_transform_gizmo).
+        // Without this, a stale pending start from a previous interaction could trigger
+        // an unintended free drag on the next frame with a huge position delta.
+        state.free_drag_pending_start = Some(mouse_pos);
     }
 
     // Restore original camera and ortho settings after ortho rendering
@@ -1551,6 +1580,7 @@ fn handle_box_selection(
             // End the drag and clear viewport ownership
             state.drag_manager.end();
             state.box_select_viewport = None;
+            state.free_drag_pending_start = None;
         }
     } else if !state.drag_manager.is_dragging() {
         // Not in any drag - check for box select start
@@ -3178,6 +3208,25 @@ fn handle_hover_click(state: &mut ModelerState) {
     }
 
     if let Some(face_idx) = state.hovered_face {
+        // DEBUG: Log face selection change
+        {
+            let mesh = state.mesh();
+            if let Some(face) = mesh.faces.get(face_idx) {
+                let verts: Vec<Vec3> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| v.pos))
+                    .collect();
+                let center = if !verts.is_empty() {
+                    verts.iter().fold(Vec3::ZERO, |acc, p| acc + *p) * (1.0 / verts.len() as f32)
+                } else { Vec3::ZERO };
+                eprintln!("[FACE_SELECT] Selecting face {} (verts: {:?}, center: ({:.3}, {:.3}, {:.3}))",
+                    face_idx, face.vertices, center.x, center.y, center.z);
+                for &vi in &face.vertices {
+                    if let Some(v) = mesh.vertices.get(vi) {
+                        eprintln!("[FACE_SELECT]   vert[{}] = ({:.3}, {:.3}, {:.3})", vi, v.pos.x, v.pos.y, v.pos.z);
+                    }
+                }
+            }
+        }
         if multi_select {
             // Toggle face in selection - save undo first
             state.save_selection_undo();
@@ -3566,6 +3615,9 @@ fn handle_move_gizmo(
             state.ortho_drag_viewport = None;
             state.gizmo_bone_drag = false;
             state.gizmo_bone_tip_drag = false;
+            // Clear stale free-drag pending start (set during the click that initiated
+            // this gizmo drag, before handle_drag_move knew a gizmo drag would start)
+            state.free_drag_pending_start = None;
         }
     }
 
@@ -3590,6 +3642,7 @@ fn handle_move_gizmo(
     // Start drag on click
     if ctx.mouse.left_pressed && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
         let axis = state.gizmo_hovered_axis.unwrap();
+        eprintln!("[GIZMO_DRAG] Starting gizmo drag on axis {:?}, selection: {:?}", axis, state.selection.summary());
 
         // Check if we're moving bones, bone tips, or vertices
         let (indices, initial_positions, is_bone_drag, is_bone_tip_drag) = if let Some(bone_indices) = state.selection.bones() {
@@ -3782,6 +3835,7 @@ fn handle_scale_gizmo(
             // End drag - sync tool state
             state.tool_box.tools.scale.end_drag();
             state.drag_manager.end();
+            state.free_drag_pending_start = None;
         }
     }
 
@@ -3949,6 +4003,7 @@ fn handle_rotate_gizmo(
             // End drag - sync tool state
             state.tool_box.tools.rotate.end_drag();
             state.drag_manager.end();
+            state.free_drag_pending_start = None;
         }
     }
 
