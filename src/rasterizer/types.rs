@@ -136,21 +136,27 @@ impl Color15 {
     }
 
     /// Get red channel as 8-bit value (0-255, expanded from 5-bit)
+    /// Uses proper expansion: (v5 << 3) | (v5 >> 2) so 0→0, 31→255
     #[inline]
     pub fn r8(self) -> u8 {
-        self.r5() << 3
+        let v = self.r5();
+        (v << 3) | (v >> 2)
     }
 
     /// Get green channel as 8-bit value (0-255, expanded from 5-bit)
+    /// Uses proper expansion: (v5 << 3) | (v5 >> 2) so 0→0, 31→255
     #[inline]
     pub fn g8(self) -> u8 {
-        self.g5() << 3
+        let v = self.g5();
+        (v << 3) | (v >> 2)
     }
 
     /// Get blue channel as 8-bit value (0-255, expanded from 5-bit)
+    /// Uses proper expansion: (v5 << 3) | (v5 >> 2) so 0→0, 31→255
     #[inline]
     pub fn b8(self) -> u8 {
-        self.b5() << 3
+        let v = self.b5();
+        (v << 3) | (v >> 2)
     }
 
     /// PS1-style texture modulation: (self * vertex_color) / 128
@@ -988,10 +994,19 @@ pub struct Face {
     /// Controls how semi-transparent pixels are blended with the background
     #[serde(default)]
     pub blend_mode: BlendMode,
+    /// Editor-only alpha (255 = fully visible, 0 = invisible)
+    /// Applied as post-blend multiplier: lerp(back, ps1_result, editor_alpha/255)
+    /// Not exported to game - purely for editor visualization (component opacity)
+    #[serde(skip, default = "default_editor_alpha")]
+    pub editor_alpha: u8,
 }
 
 fn default_black_transparent() -> bool {
     true
+}
+
+fn default_editor_alpha() -> u8 {
+    255 // Fully visible by default
 }
 
 impl Face {
@@ -1003,6 +1018,7 @@ impl Face {
             texture_id: None,
             black_transparent: true, // Default: black is transparent (PS1 style)
             blend_mode: BlendMode::Opaque,
+            editor_alpha: 255,
         }
     }
 
@@ -1014,7 +1030,14 @@ impl Face {
             texture_id: Some(texture_id),
             black_transparent: true, // Default: black is transparent (PS1 style)
             blend_mode: BlendMode::Opaque,
+            editor_alpha: 255,
         }
+    }
+
+    /// Set the editor alpha (builder pattern)
+    pub fn with_editor_alpha(mut self, alpha: u8) -> Self {
+        self.editor_alpha = alpha;
+        self
     }
 
     /// Set the black_transparent flag (builder pattern)

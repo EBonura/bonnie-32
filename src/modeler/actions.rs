@@ -24,6 +24,8 @@ pub mod flags {
     pub const UV_EDITOR_FOCUSED: u32 = 1 << 8;
     /// Clipboard has content for paste
     pub const HAS_CLIPBOARD: u32 = 1 << 9;
+    /// A skeleton bone is selected (for vertex-to-bone binding)
+    pub const HAS_BONE_SELECTED: u32 = 1 << 10;
 }
 
 /// Create the complete action registry for the modeler
@@ -226,6 +228,15 @@ pub fn create_modeler_actions() -> ActionRegistry {
             .status_tip("Extrude selected faces (E)")
             .category("Transform")
             .enabled_when(|ctx| ctx.has_face_selection),
+    );
+
+    registry.register(
+        Action::new("transform.toggle_orientation")
+            .label("Toggle Orientation")
+            .shortcut(Shortcut::key(KeyCode::Comma))
+            .icon(icon::GLOBE)
+            .status_tip("Toggle between Global and Local orientation (,)")
+            .category("Transform"),
     );
 
     // ========================================================================
@@ -469,6 +480,34 @@ pub fn create_modeler_actions() -> ActionRegistry {
     );
 
     // ========================================================================
+    // Skeleton / Bone Binding
+    // ========================================================================
+    registry.register(
+        Action::new("skeleton.bind_vertices_to_bone")
+            .label("Bind to Bone")
+            .shortcut(Shortcut::ctrl(KeyCode::B))
+            .status_tip("Assign selected vertices to selected bone (Ctrl+B)")
+            .category("Skeleton")
+            .enabled_when(|ctx| {
+                (ctx.has_flag(flags::VERTEX_MODE) || ctx.has_flag(flags::FACE_MODE) || ctx.has_flag(flags::EDGE_MODE)) &&
+                ctx.has_flag(flags::HAS_BONE_SELECTED) &&
+                ctx.has_selection
+            }),
+    );
+
+    registry.register(
+        Action::new("skeleton.unbind_vertices")
+            .label("Unbind from Bone")
+            .shortcut(Shortcut::ctrl_shift(KeyCode::B))
+            .status_tip("Remove bone assignment from selected vertices (Ctrl+Shift+B)")
+            .category("Skeleton")
+            .enabled_when(|ctx| {
+                (ctx.has_flag(flags::VERTEX_MODE) || ctx.has_flag(flags::FACE_MODE) || ctx.has_flag(flags::EDGE_MODE)) &&
+                ctx.has_selection
+            }),
+    );
+
+    // ========================================================================
     // Arrow Key Movement (PicoCAD-style)
     // ========================================================================
     registry.register(
@@ -562,6 +601,7 @@ pub fn build_context(
     is_paint_mode: bool,
     uv_editor_focused: bool,
     has_clipboard: bool,
+    has_bone_selected: bool,
 ) -> ActionContext {
     let mut ctx = ActionContext {
         can_undo,
@@ -597,6 +637,10 @@ pub fn build_context(
 
     if has_clipboard {
         ctx.flags |= flags::HAS_CLIPBOARD;
+    }
+
+    if has_bone_selected {
+        ctx.flags |= flags::HAS_BONE_SELECTED;
     }
 
     ctx
@@ -657,14 +701,14 @@ mod tests {
 
         // Face mode should show as checked when in face mode
         let ctx = build_context(
-            false, false, false, false, false, "face", false, false, false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false, false
         );
         assert!(registry.is_checked("select.face_mode", &ctx));
         assert!(!registry.is_checked("select.vertex_mode", &ctx));
 
         // Texture mode toggle - use text_editing=true since that's what toggles the mode
         let ctx2 = build_context(
-            false, false, false, false, false, "face", true, false, false, false, false, false
+            false, false, false, false, false, "face", true, false, false, false, false, false, false
         );
         assert!(registry.is_checked("view.toggle_mode", &ctx2));
     }
@@ -675,12 +719,12 @@ mod tests {
 
         // Axis constraints should only be enabled when dragging
         let ctx_not_dragging = build_context(
-            false, false, true, false, false, "vertex", false, false, false, false, false, false
+            false, false, true, false, false, "vertex", false, false, false, false, false, false, false
         );
         assert!(!registry.is_enabled("axis.constrain_x", &ctx_not_dragging));
 
         let ctx_dragging = build_context(
-            false, false, true, false, false, "vertex", false, false, true, false, false, false
+            false, false, true, false, false, "vertex", false, false, true, false, false, false, false
         );
         assert!(registry.is_enabled("axis.constrain_x", &ctx_dragging));
         assert!(registry.is_enabled("axis.constrain_y", &ctx_dragging));
@@ -693,12 +737,12 @@ mod tests {
 
         // Brush actions should only be enabled in paint mode
         let ctx_not_paint = build_context(
-            false, false, false, false, false, "face", false, false, false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false, false
         );
         assert!(!registry.is_enabled("brush.square", &ctx_not_paint));
 
         let ctx_paint = build_context(
-            false, false, false, false, false, "face", false, false, false, true, false, false
+            false, false, false, false, false, "face", false, false, false, true, false, false, false
         );
         assert!(registry.is_enabled("brush.square", &ctx_paint));
         assert!(registry.is_enabled("brush.fill", &ctx_paint));
@@ -710,12 +754,12 @@ mod tests {
 
         // Select all should be disabled when UV editor is focused
         let ctx_no_uv = build_context(
-            false, false, false, false, false, "face", false, false, false, false, false, false
+            false, false, false, false, false, "face", false, false, false, false, false, false, false
         );
         assert!(registry.is_enabled("select.all", &ctx_no_uv));
 
         let ctx_uv_focused = build_context(
-            false, false, false, false, false, "face", false, false, false, false, true, false
+            false, false, false, false, false, "face", false, false, false, false, true, false, false
         );
         assert!(!registry.is_enabled("select.all", &ctx_uv_focused));
     }

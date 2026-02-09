@@ -825,7 +825,7 @@ fn draw_orbit_preview(
             if settings.use_rgb555 {
                 let atlas_texture_15 = tex_result.indexed.to_texture15(&tex_result.clut, "preview");
                 let textures_15 = [atlas_texture_15];
-                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
+                render_mesh_15(fb, &vertices, &faces, &textures_15, &camera, &settings, None);
             } else {
                 let atlas_texture = tex_result.indexed.to_raster_texture(&tex_result.clut, "preview");
                 let textures = [atlas_texture];
@@ -835,7 +835,7 @@ fn draw_orbit_preview(
             // Render without texture (triangulate n-gon faces)
             let (vertices, faces) = mesh.to_render_data();
             if settings.use_rgb555 {
-                render_mesh_15(fb, &vertices, &faces, &[], None, &camera, &settings, None);
+                render_mesh_15(fb, &vertices, &faces, &[], &camera, &settings, None);
             } else {
                 render_mesh(fb, &vertices, &faces, &[], &camera, &settings);
             }

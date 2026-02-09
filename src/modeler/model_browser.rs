@@ -9,7 +9,7 @@
 
 use macroquad::prelude::*;
 use crate::storage::{PendingLoad, PendingList};
-use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
+use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR, TextInputState, draw_text_input};
 use crate::rasterizer::{Framebuffer, Camera, Color as RasterColor, Vec3, RasterSettings, render_mesh, render_mesh_15, draw_floor_grid};
 use crate::world::SECTOR_SIZE;
 use crate::asset::{Asset, SAMPLES_ASSETS_DIR, USER_ASSETS_DIR};
@@ -198,8 +198,6 @@ pub struct AssetBrowser {
     pub selected_index: Option<usize>,
     /// Currently loaded preview asset
     pub preview_asset: Option<Asset>,
-    /// CLUTs for preview rendering (one per object, indexed by object index)
-    pub preview_cluts: Vec<crate::rasterizer::Clut>,
     /// Orbit camera state for preview
     pub orbit_yaw: f32,
     pub orbit_pitch: f32,
@@ -220,6 +218,8 @@ pub struct AssetBrowser {
     pub pending_user_list: Option<PendingList>,
     /// Flag to trigger user assets refresh from main loop (native only, needs storage access)
     pub pending_refresh: bool,
+    /// Active rename dialog (TextInputState for the new name)
+    pub rename_dialog: Option<TextInputState>,
     /// Local framebuffer for preview rendering
     preview_fb: Framebuffer,
 }
@@ -235,7 +235,6 @@ impl Default for AssetBrowser {
             selected_category: None,
             selected_index: None,
             preview_asset: None,
-            preview_cluts: Vec::new(),
             orbit_yaw: 0.5,
             orbit_pitch: 0.3,
             // Scale: 1024 units = 1 meter
@@ -249,6 +248,7 @@ impl Default for AssetBrowser {
             pending_preview_load: None,
             pending_user_list: None,
             pending_refresh: false,
+            rename_dialog: None,
             preview_fb: Framebuffer::new(320, 240), // Initial size, will resize as needed
         }
     }
@@ -263,7 +263,6 @@ impl AssetBrowser {
         self.selected_category = None;
         self.selected_index = None;
         self.preview_asset = None;
-        self.preview_cluts.clear();
         self.scroll_offset = 0.0;
     }
 
@@ -276,7 +275,6 @@ impl AssetBrowser {
     pub fn close(&mut self) {
         self.open = false;
         self.preview_asset = None;
-        self.preview_cluts.clear();
         self.pending_preview_load = None;
     }
 
@@ -304,46 +302,7 @@ impl AssetBrowser {
     ///
     /// The texture library is used to resolve TextureRef::Id references
     /// so that preview rendering shows the correct textures.
-    pub fn set_preview(&mut self, mut asset: Asset, texture_library: &crate::texture::TextureLibrary) {
-        use crate::rasterizer::Clut;
-        use super::mesh_editor::{TextureRef, checkerboard_clut};
-
-        // Clear old CLUTs and prepare for new ones
-        self.preview_cluts.clear();
-
-        // Resolve texture references using the library and build CLUTs
-        if let Some(objects) = asset.mesh_mut() {
-            for obj in objects.iter_mut() {
-                match &obj.texture_ref {
-                    TextureRef::Id(id) => {
-                        if let Some(tex) = texture_library.get_by_id(*id) {
-                            // Copy texture data to atlas
-                            obj.atlas.width = tex.width;
-                            obj.atlas.height = tex.height;
-                            obj.atlas.depth = tex.depth;
-                            obj.atlas.indices = tex.indices.clone();
-                            // Create CLUT with the texture's palette
-                            let mut clut = Clut::new_4bit("preview");
-                            clut.colors = tex.palette.clone();
-                            clut.depth = tex.depth;
-                            self.preview_cluts.push(clut);
-                        } else {
-                            // Texture not found, use checkerboard
-                            self.preview_cluts.push(checkerboard_clut().clone());
-                        }
-                    }
-                    TextureRef::Checkerboard | TextureRef::None => {
-                        self.preview_cluts.push(checkerboard_clut().clone());
-                    }
-                    TextureRef::Embedded(_embedded) => {
-                        // For embedded, we'd need a CLUT pool - use checkerboard for now
-                        self.preview_cluts.push(checkerboard_clut().clone());
-                    }
-                }
-            }
-        }
-
-        let asset = asset; // Make immutable again
+    pub fn set_preview(&mut self, asset: Asset, _texture_library: &crate::texture::TextureLibrary) {
         // Calculate bounding box to center camera (across all mesh objects)
         let mut min_y = f32::MAX;
         let mut max_y = f32::MIN;
@@ -412,6 +371,8 @@ pub enum AssetBrowserAction {
     OpenCopy,
     /// User wants to delete the selected user asset
     DeleteAsset,
+    /// User wants to rename the selected user asset
+    RenameAsset,
     /// User wants to start with a new empty asset
     NewAsset,
     /// User wants to refresh the asset list
@@ -426,6 +387,7 @@ pub fn draw_asset_browser(
     browser: &mut AssetBrowser,
     storage: &crate::storage::Storage,
     icon_font: Option<&Font>,
+    user_textures: &crate::texture::TextureLibrary,
 ) -> AssetBrowserAction {
     if !browser.open {
         return AssetBrowserAction::None;
@@ -502,7 +464,7 @@ pub fn draw_asset_browser(
 
     if has_preview {
         // Render 3D preview with orbit camera (uses browser's local framebuffer)
-        draw_orbit_preview_internal(ctx, browser, preview_rect);
+        draw_orbit_preview_internal(ctx, browser, preview_rect, user_textures);
 
         // Draw stats at bottom of preview
         if let Some(asset) = &browser.preview_asset {
@@ -549,8 +511,17 @@ pub fn draw_asset_browser(
         action = AssetBrowserAction::DeleteAsset;
     }
 
+    // Rename button (only for user assets)
+    let rename_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    let rename_enabled = browser.is_user_selected() && browser.preview_asset.is_some();
+    if draw_text_button_enabled(ctx, rename_rect, "Rename", Color::from_rgba(60, 80, 100, 255), rename_enabled) {
+        if let Some(info) = browser.selected_asset() {
+            browser.rename_dialog = Some(TextInputState::new(&info.name));
+        }
+    }
+
     // Refresh button - reload asset lists from storage
-    let refresh_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    let refresh_rect = Rect::new(dialog_x + 250.0, footer_y + 8.0, 70.0, 28.0);
     if draw_text_button(ctx, refresh_rect, "Refresh", Color::from_rgba(60, 60, 70, 255)) {
         action = AssetBrowserAction::Refresh;
     }
@@ -575,9 +546,48 @@ pub fn draw_asset_browser(
         action = AssetBrowserAction::OpenAsset;
     }
 
-    // Handle Escape to close
-    if is_key_pressed(KeyCode::Escape) {
-        action = AssetBrowserAction::Cancel;
+    // Rename dialog overlay
+    if browser.rename_dialog.is_some() {
+        let rdw = 280.0;
+        let rdh = 120.0;
+        let rdx = (screen_width() - rdw) / 2.0;
+        let rdy = (screen_height() - rdh) / 2.0;
+
+        draw_rectangle(rdx, rdy, rdw, rdh, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(rdx, rdy, rdw, rdh, 2.0, Color::from_rgba(80, 80, 90, 255));
+        draw_text("Rename Asset", rdx + 12.0, rdy + 22.0, 16.0, WHITE);
+
+        let input_rect = Rect::new(rdx + 12.0, rdy + 40.0, rdw - 24.0, 28.0);
+        if let Some(ref mut input_state) = browser.rename_dialog {
+            draw_text_input(input_rect, input_state, 14.0);
+        }
+
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = rdy + rdh - btn_h - 12.0;
+
+        let cancel_rect = Rect::new(rdx + rdw - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, Color::from_rgba(200, 200, 200, 255));
+
+        let confirm_rect = Rect::new(rdx + rdw - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let confirm_hover = ctx.mouse.inside(&confirm_rect);
+        draw_rectangle(confirm_rect.x, confirm_rect.y, confirm_rect.w, confirm_rect.h,
+            if confirm_hover { Color::from_rgba(60, 100, 140, 255) } else { ACCENT_COLOR });
+        draw_text("Rename", confirm_rect.x + 14.0, confirm_rect.y + 18.0, 14.0, WHITE);
+
+        if ctx.mouse.clicked(&cancel_rect) || is_key_pressed(KeyCode::Escape) {
+            browser.rename_dialog = None;
+        } else if ctx.mouse.clicked(&confirm_rect) || is_key_pressed(KeyCode::Enter) {
+            action = AssetBrowserAction::RenameAsset;
+        }
+    } else {
+        // Handle Escape to close (only when rename dialog is not open)
+        if is_key_pressed(KeyCode::Escape) {
+            action = AssetBrowserAction::Cancel;
+        }
     }
 
     action
@@ -746,6 +756,7 @@ fn draw_orbit_preview_internal(
     ctx: &mut UiContext,
     browser: &mut AssetBrowser,
     rect: Rect,
+    user_textures: &crate::texture::TextureLibrary,
 ) {
     let asset = match &browser.preview_asset {
         Some(a) => a,
@@ -818,42 +829,40 @@ fn draw_orbit_preview_internal(
     fb.resize(target_w, target_h);
     fb.clear(RasterColor::new(25, 25, 35));
 
-    // Check if any object needs backface culling disabled
-    let any_double_sided = objects.iter().any(|obj| obj.visible && obj.double_sided);
-
-    // Render settings - disable backface culling if any object is double-sided
-    let mut settings = RasterSettings::default();
-    if any_double_sided {
-        settings.backface_cull = false;
-    }
+    let settings = RasterSettings::default();
     let use_rgb555 = settings.use_rgb555;
 
-    // Use preview_cluts which were populated during set_preview with actual palettes
-    use crate::modeler::mesh_editor::checkerboard_clut;
-    let fallback_clut = checkerboard_clut();
+    // Render mesh parts with per-part double_sided handling
+    crate::scene::render_asset_parts(
+        fb, objects, &camera, &settings,
+        0.0, Vec3::ZERO, None, user_textures,
+    );
 
-    // Render each visible object with its atlas texture and corresponding CLUT
-    for (obj_idx, obj) in objects.iter().enumerate() {
-        if !obj.visible {
-            continue;
-        }
+    // Render skeleton bones (if present)
+    if let Some(bones) = asset.skeleton() {
+        if !bones.is_empty() {
+            use super::skeleton::{skeleton_to_triangles_from_bones, bone_world_transform};
+            use crate::rasterizer::draw_3d_line_clipped;
 
-        let (vertices, faces) = obj.mesh.to_render_data_textured();
-        if vertices.is_empty() {
-            continue;
-        }
+            let (bone_verts, bone_faces) = skeleton_to_triangles_from_bones(bones, 255);
+            if !bone_verts.is_empty() {
+                let bone_settings = RasterSettings { backface_cull: false, ..settings.clone() };
+                if use_rgb555 {
+                    render_mesh_15(fb, &bone_verts, &bone_faces, &[], &camera, &bone_settings, None);
+                } else {
+                    render_mesh(fb, &bone_verts, &bone_faces, &[], &camera, &bone_settings);
+                }
+            }
 
-        // Use the object's CLUT from preview_cluts, or fallback to checkerboard
-        let clut = browser.preview_cluts.get(obj_idx).unwrap_or(fallback_clut);
-
-        if use_rgb555 {
-            let tex15 = obj.atlas.to_texture15(clut, &format!("atlas_{}", obj_idx));
-            let textures_15 = [tex15];
-            render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
-        } else {
-            let tex = obj.atlas.to_raster_texture(clut, &format!("atlas_{}", obj_idx));
-            let textures = [tex];
-            render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
+            // Hierarchy connection lines
+            let line_color = RasterColor::new(100, 100, 100);
+            for (idx, bone) in bones.iter().enumerate() {
+                if let Some(parent_idx) = bone.parent {
+                    let (child_pos, _) = bone_world_transform(bones, idx);
+                    let (parent_pos, _) = bone_world_transform(bones, parent_idx);
+                    draw_3d_line_clipped(fb, &camera, parent_pos, child_pos, line_color);
+                }
+            }
         }
     }
 
@@ -965,6 +974,7 @@ pub fn draw_model_browser(
     browser: &mut AssetBrowser,
     storage: &crate::storage::Storage,
     icon_font: Option<&Font>,
+    user_textures: &crate::texture::TextureLibrary,
 ) -> AssetBrowserAction {
-    draw_asset_browser(ctx, browser, storage, icon_font)
+    draw_asset_browser(ctx, browser, storage, icon_font, user_textures)
 }

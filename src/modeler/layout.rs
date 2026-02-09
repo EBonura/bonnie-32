@@ -2,11 +2,11 @@
 
 use macroquad::prelude::*;
 use crate::storage::Storage;
-use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered, TextInputState, draw_text_input};
+use crate::ui::{Rect, UiContext, SplitPanel, draw_panel, panel_content_rect, draw_collapsible_panel, Toolbar, icon, icon_button, ActionRegistry, draw_icon_centered, TextInputState, draw_text_input, dropdown_block_clicks, draw_dropdown_trigger, begin_dropdown, dropdown_item, dropdown_menu_rect};
 use crate::rasterizer::{Framebuffer, render_mesh, render_mesh_15, Camera, OrthoProjection, point_in_triangle_2d};
 use crate::rasterizer::{Vertex as RasterVertex, Face as RasterFace, Color as RasterColor};
 use crate::rasterizer::{ClutDepth, Clut, Color15};
-use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode, Axis, MirrorSettings};
+use super::state::{ModelerState, SelectMode, ViewportId, ContextMenu, ModalTransform, CameraMode, Axis, MirrorSettings, rotate_by_euler, inverse_rotate_by_euler};
 use crate::asset::AssetComponent;
 use crate::texture::{
     UserTexture, TextureSize, generate_texture_id,
@@ -103,19 +103,14 @@ pub fn draw_modeler(
     icon_font: Option<&Font>,
     storage: &Storage,
 ) -> ModelerAction {
-    // Save original mouse state for menus that need it after we block viewport clicks
+    // Apply auto-focus transparency: dim non-selected components
+    state.apply_focus_opacity();
+
+    // Save original click state for menus (restored before processing dropdowns)
     let original_left_pressed = ctx.mouse.left_pressed;
 
-    // Block clicks if snap menu is open and mouse is in menu area
-    // (must happen before viewport processes clicks)
-    if state.snap_menu_open {
-        if let Some(btn_rect) = state.snap_btn_rect {
-            let menu_rect = Rect::new(btn_rect.x, btn_rect.bottom() + 2.0, 80.0, 7.0 * 22.0 + 8.0);
-            if ctx.mouse.inside(&menu_rect) {
-                ctx.mouse.left_pressed = false;
-            }
-        }
-    }
+    // Block clicks when any dropdown is open (unified dropdown system)
+    dropdown_block_clicks(ctx, &state.dropdown);
 
     let screen = bounds;
 
@@ -173,11 +168,16 @@ pub fn draw_modeler(
     let action = if keyboard_action != ModelerAction::None { keyboard_action } else { action };
 
     // Draw popups and menus (on top of everything)
-    draw_add_component_popup(ctx, left_rect, state, icon_font);
-    // Restore original click state for snap menu (we blocked it earlier to protect viewport)
+    // Restore click state so menus can process their clicks
     ctx.mouse.left_pressed = original_left_pressed;
+    draw_add_component_popup(ctx, left_rect, state, icon_font);
+    draw_bone_picker_popup(ctx, left_rect, state, icon_font);
+    draw_opacity_slider_popup(ctx, state);
     draw_snap_menu(ctx, state);
     draw_context_menu(ctx, state);
+
+    // Draw radial menu (new hold-to-show menu)
+    draw_and_handle_radial_menu(ctx, state);
 
     // Draw rename/delete dialogs (modal, on top of everything)
     draw_object_dialogs(ctx, state, icon_font);
@@ -254,6 +254,43 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let is_active = state.tool_box.is_active(tool_id);
         if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_active) {
             state.tool_box.toggle(tool_id);
+        }
+    }
+
+    // Transform orientation toggle (Global/Local)
+    {
+        use super::state::TransformOrientation;
+        let is_local = state.transform_orientation == TransformOrientation::Local;
+        let icon_char = if is_local { icon::FOCUS } else { icon::GLOBE };
+        let tooltip = if is_local { "Orientation: Local (click for Global)" } else { "Orientation: Global (click for Local)" };
+        if toolbar.icon_button_active(ctx, icon_char, icon_font, tooltip, is_local) {
+            state.transform_orientation = state.transform_orientation.toggle();
+            state.set_status(&format!("Transform orientation: {}", state.transform_orientation.label()), 1.5);
+        }
+    }
+
+    toolbar.separator();
+
+    // Selection mode buttons (Vertex/Edge/Face)
+    {
+        let is_vertex = state.select_mode == SelectMode::Vertex;
+        let is_edge = state.select_mode == SelectMode::Edge;
+        let is_face = state.select_mode == SelectMode::Face;
+
+        if toolbar.icon_button_active(ctx, icon::CIRCLE, icon_font, "Vertex Mode (1)", is_vertex) {
+            state.select_mode = SelectMode::Vertex;
+            state.selection.clear();
+            state.set_status("Vertex selection mode", 1.0);
+        }
+        if toolbar.icon_button_active(ctx, icon::MINUS, icon_font, "Edge Mode (2)", is_edge) {
+            state.select_mode = SelectMode::Edge;
+            state.selection.clear();
+            state.set_status("Edge selection mode", 1.0);
+        }
+        if toolbar.icon_button_active(ctx, icon::SQUARE, icon_font, "Face Mode (3)", is_face) {
+            state.select_mode = SelectMode::Face;
+            state.selection.clear();
+            state.set_status("Face selection mode", 1.0);
         }
     }
 
@@ -355,12 +392,11 @@ fn draw_toolbar(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_
         let mode = if state.snap_settings.enabled { "ON" } else { "OFF" };
         state.set_status(&format!("Grid Snap: {}", mode), 1.5);
     }
-    // Clickable grid size label
+    // Clickable grid size label (opens snap menu dropdown)
     let size_label = format!("{}", state.snap_settings.grid_size as i32);
     let (size_clicked, size_rect) = toolbar.clickable_label(ctx, &size_label, "Click to change snap grid size");
-    state.snap_btn_rect = Some(size_rect);
     if size_clicked {
-        state.snap_menu_open = !state.snap_menu_open;
+        state.dropdown.toggle("snap_menu", size_rect);
     }
     // Vertex linking toggle (move coincident vertices together)
     let link_icon = if state.vertex_linking { icon::LINK } else { icon::LINK_OFF };
@@ -632,16 +668,18 @@ fn draw_left_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, ic
     }
     if let Some(content) = props_content {
         if let Some(comp_idx) = state.selected_component {
-            // For Mesh, show embedded object list; for others, show property editor
-            let is_mesh = state.asset.components.get(comp_idx)
-                .map(|c| c.is_mesh())
-                .unwrap_or(false);
+            // For Mesh/Skeleton, show embedded content; for others, show property editor
+            let component_type = state.asset.components.get(comp_idx)
+                .map(|c| (c.is_mesh(), c.is_skeleton()))
+                .unwrap_or((false, false));
 
-            if is_mesh {
-                draw_mesh_editor_content(ctx, content, state, icon_font);
-            } else {
-                let mut cy = content.y;
-                draw_component_editor(ctx, content.x, &mut cy, content.w, state, icon_font);
+            match component_type {
+                (true, _) => draw_mesh_editor_content(ctx, content, state, icon_font),
+                (_, true) => draw_skeleton_editor_content(ctx, content, state, icon_font),
+                _ => {
+                    let mut cy = content.y;
+                    draw_component_editor(ctx, content.x, &mut cy, content.w, state, icon_font);
+                }
             }
         } else {
             draw_text("Select a component", content.x + 4.0, content.y + 12.0, FONT_SIZE_HEADER, TEXT_DIM);
@@ -672,12 +710,12 @@ fn component_icon(comp: &AssetComponent) -> char {
         AssetComponent::Trigger { .. } => icon::MAP_PIN,
         AssetComponent::Pickup { .. } => icon::PLUS,
         AssetComponent::Enemy { .. } => icon::PERSON_STANDING,
-        AssetComponent::Checkpoint { .. } => icon::SKIP_BACK,
         AssetComponent::Door { .. } => icon::DOOR_CLOSED,
         AssetComponent::Audio { .. } => icon::MUSIC,
         AssetComponent::Particle { .. } => icon::BLEND,
         AssetComponent::CharacterController { .. } => icon::GAMEPAD_2,
         AssetComponent::SpawnPoint { .. } => icon::FOOTPRINTS,
+        AssetComponent::Skeleton { .. } => icon::BONE,
     }
 }
 
@@ -690,13 +728,10 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
     let comp_count = state.asset.components.len();
     draw_text(&format!("{} component(s)", comp_count), x + 4.0, *y + 13.0, FONT_SIZE_HEADER, TEXT_COLOR);
 
-    // Add button
+    // Add button (opens add component dropdown)
     let add_rect = Rect::new(x + width - btn_size * 2.0 - 8.0, *y, btn_size, btn_size);
     if icon_button(ctx, add_rect, icon::PLUS, icon_font, "Add component") {
-        state.add_component_menu_open = !state.add_component_menu_open;
-        if state.add_component_menu_open {
-            state.add_component_btn_rect = Some(add_rect);
-        }
+        state.dropdown.toggle("add_component", add_rect);
     }
 
     // Remove button (disabled for Mesh, requires selection)
@@ -723,12 +758,14 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
 
     // List components
     let mut select_idx: Option<usize> = None;
-    let mut toggle_vis_idx: Option<usize> = None;
     let mut delete_idx: Option<usize> = None;
+
+    // Ensure opacity vec is sized correctly
+    state.ensure_opacity_vec();
 
     for (i, comp) in state.asset.components.iter().enumerate() {
         let is_selected = state.selected_component == Some(i);
-        let is_hidden = state.hidden_components.contains(&i);
+        let is_hidden = state.is_component_hidden(i);
         let item_rect = Rect::new(x, *y, width, line_height);
         let is_hovered = ctx.mouse.inside(&item_rect);
 
@@ -739,23 +776,55 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
         }
 
-        // Visibility toggle (eye icon)
-        let vis_rect = Rect::new(x + 2.0, *y + 1.0, 16.0, 16.0);
-        let vis_icon = if is_hidden { icon::EYE_OFF } else { icon::EYE };
-        let vis_color = if is_hidden { TEXT_DIM } else { TEXT_COLOR };
-        draw_icon_centered(icon_font, vis_icon, &vis_rect, 11.0, vis_color);
+        // Opacity indicator (click to drag vertical slider)
+        // Show the displayed opacity (includes auto-dim), but drag from base
+        let opacity = state.get_component_opacity(i);
+        let base_opacity = state.base_component_opacity.get(i).copied().unwrap_or(0);
+        let indicator_size = 14.0;
+        let indicator_x = x + 2.0;
+        let indicator_y = *y + (line_height - indicator_size) / 2.0;
+        let indicator_rect = Rect::new(indicator_x, *y, indicator_size + 2.0, line_height);
 
-        if ctx.mouse.inside(&vis_rect) && ctx.mouse.left_pressed {
-            toggle_vis_idx = Some(i);
+        // Draw opacity indicator: vertical bar showing current level
+        let bar_height = indicator_size - 2.0;
+        let bar_width = 8.0;
+        let bar_x = indicator_x + (indicator_size - bar_width) / 2.0;
+        let bar_y = indicator_y + 1.0;
+
+        // Background bar
+        draw_rectangle(bar_x, bar_y, bar_width, bar_height, Color::from_rgba(40, 40, 45, 255));
+
+        // Filled portion (inverted: 0=full, 7=empty)
+        let fill_ratio = 1.0 - (opacity as f32 / 7.0);
+        let fill_height = bar_height * fill_ratio;
+        let fill_y = bar_y + (bar_height - fill_height);
+        if fill_height > 0.0 {
+            let brightness = (200.0 * fill_ratio) as u8 + 55;
+            draw_rectangle(bar_x, fill_y, bar_width, fill_height, Color::from_rgba(brightness, brightness, brightness, 255));
+        }
+
+        // Click to start opacity drag
+        if ctx.mouse.inside(&indicator_rect) && ctx.mouse.left_pressed && state.opacity_drag.is_none() {
+            use super::state::OpacityDrag;
+            state.opacity_drag = Some(OpacityDrag {
+                component_idx: i,
+                start_y: ctx.mouse.y,
+                start_opacity: base_opacity,
+                popup_x: x + width + 8.0, // Position popup to the right of the panel
+            });
         }
 
         // Component icon
         let icon_rect = Rect::new(x + 20.0, *y + 1.0, 16.0, 16.0);
         let icon_char = component_icon(comp);
+        let is_dimmed = opacity > 0 && !is_hidden;
+        let dimmed_color = Color::new(0.55, 0.55, 0.6, 1.0);
         let icon_color = if is_hidden {
             TEXT_DIM
         } else if is_selected {
             ACCENT_COLOR
+        } else if is_dimmed {
+            dimmed_color
         } else {
             TEXT_COLOR
         };
@@ -767,6 +836,8 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             TEXT_DIM
         } else if is_selected {
             ACCENT_COLOR
+        } else if is_dimmed {
+            dimmed_color
         } else {
             TEXT_COLOR
         };
@@ -793,10 +864,10 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
             }
         }
 
-        // Click to select (not on visibility or delete)
-        let name_rect = Rect::new(x + 20.0, *y, width - 40.0, line_height);
+        // Click to select (not on opacity drag or delete)
+        let name_rect = Rect::new(x + 56.0, *y, width - 76.0, line_height);
         if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed
-            && toggle_vis_idx.is_none() && delete_idx.is_none() {
+            && state.opacity_drag.is_none() && delete_idx.is_none() {
             select_idx = Some(i);
         }
 
@@ -804,13 +875,7 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
     }
 
     // Apply actions
-    if let Some(idx) = toggle_vis_idx {
-        if state.hidden_components.contains(&idx) {
-            state.hidden_components.remove(&idx);
-        } else {
-            state.hidden_components.insert(idx);
-        }
-    } else if let Some(idx) = delete_idx {
+    if let Some(idx) = delete_idx {
         // Open delete confirmation dialog
         state.delete_component_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
@@ -825,64 +890,76 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
 
 }
 
-/// Draw the "Add Component" popup menu
-fn draw_add_component_menu(ctx: &mut UiContext, x: f32, y: f32, state: &mut ModelerState, icon_font: Option<&Font>, add_btn_rect: Rect) {
-    // All component types that can be added
-    let component_types = [
-        ("Mesh", icon::BOX),
-        ("Collision", icon::SCAN),
-        ("Light", icon::SUN),
-        ("Trigger", icon::MAP_PIN),
-        ("Pickup", icon::PLUS),
-        ("Enemy", icon::PERSON_STANDING),
-        ("Checkpoint", icon::SKIP_BACK),
-        ("Door", icon::DOOR_CLOSED),
-        ("Audio", icon::MUSIC),
-        ("Particle", icon::BLEND),
-        ("CharacterController", icon::GAMEPAD_2),
-        ("SpawnPoint", icon::FOOTPRINTS),
-    ];
+/// Draw and handle the vertical opacity slider popup
+fn draw_opacity_slider_popup(ctx: &mut UiContext, state: &mut ModelerState) {
+    let drag = match state.opacity_drag {
+        Some(d) => d,
+        None => return,
+    };
 
-    let item_height = 20.0;
-    let menu_width = 140.0;
-    let menu_height = component_types.len() as f32 * item_height + 4.0;
+    // Slider dimensions
+    let slider_height = 120.0;
+    let slider_width = 24.0;
+    let padding = 8.0;
+    let popup_width = slider_width + padding * 2.0;
+    let popup_height = slider_height + padding * 2.0 + 20.0; // Extra space for label
 
-    // Menu background
-    let menu_rect = Rect::new(x, y, menu_width, menu_height);
-    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
-    draw_rectangle_lines(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, 1.0, Color::from_rgba(80, 80, 80, 255));
+    // Position popup near the component (centered vertically on start position)
+    let popup_x = drag.popup_x;
+    let popup_y = (drag.start_y - popup_height / 2.0).max(10.0);
 
-    // Close menu if clicking outside (but not on the add button that opened it)
-    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) && !ctx.mouse.inside(&add_btn_rect) {
-        state.add_component_menu_open = false;
-        return;
+    // Draw popup background
+    draw_rectangle(popup_x, popup_y, popup_width, popup_height, Color::from_rgba(35, 38, 45, 250));
+    draw_rectangle_lines(popup_x, popup_y, popup_width, popup_height, 1.0, Color::from_rgba(80, 80, 90, 255));
+
+    // Calculate current opacity from mouse Y delta
+    // Moving UP = more visible (lower opacity), moving DOWN = more hidden (higher opacity)
+    let delta_y = ctx.mouse.y - drag.start_y;
+    let sensitivity = 15.0; // pixels per opacity level
+    let opacity_delta = (delta_y / sensitivity).round() as i32;
+    let new_opacity = (drag.start_opacity as i32 + opacity_delta).clamp(0, 7) as u8;
+
+    // Apply the new opacity
+    state.set_component_opacity(drag.component_idx, new_opacity);
+
+    // Draw slider track
+    let track_x = popup_x + padding;
+    let track_y = popup_y + padding + 16.0; // Leave room for label
+    draw_rectangle(track_x, track_y, slider_width, slider_height, Color::from_rgba(25, 28, 35, 255));
+
+    // Draw 8 segments (0 at top = visible, 7 at bottom = hidden)
+    let segment_height = slider_height / 8.0;
+    for i in 0..8u8 {
+        let seg_y = track_y + i as f32 * segment_height;
+        let is_active = i <= new_opacity;
+        let brightness = if is_active {
+            255 - (i * 28) // Darker as we go down
+        } else {
+            50
+        };
+        let color = Color::from_rgba(brightness, brightness, brightness, 255);
+        draw_rectangle(track_x + 2.0, seg_y + 1.0, slider_width - 4.0, segment_height - 2.0, color);
     }
 
-    let mut item_y = y + 2.0;
-    for (type_name, icon_char) in component_types {
-        let item_rect = Rect::new(x + 2.0, item_y, menu_width - 4.0, item_height);
-        let hovered = ctx.mouse.inside(&item_rect);
+    // Draw current position indicator (horizontal line)
+    let indicator_y = track_y + (new_opacity as f32 + 0.5) * segment_height;
+    draw_rectangle(track_x - 2.0, indicator_y - 1.0, slider_width + 4.0, 3.0, ACCENT_COLOR);
 
-        if hovered {
-            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
-        }
+    // Draw label at top
+    let label = match new_opacity {
+        0 => "Visible",
+        7 => "Hidden",
+        _ => "",
+    };
+    if !label.is_empty() {
+        draw_text(label, popup_x + padding, popup_y + padding + 10.0, 12.0, TEXT_COLOR);
+    } else {
+        draw_text(&format!("{}%", ((7 - new_opacity) as f32 / 7.0 * 100.0) as u8), popup_x + padding, popup_y + padding + 10.0, 12.0, TEXT_COLOR);
+    }
 
-        // Icon
-        let icon_rect = Rect::new(item_rect.x + 2.0, item_y + 2.0, 16.0, 16.0);
-        draw_icon_centered(icon_font, icon_char, &icon_rect, 11.0, TEXT_COLOR);
-
-        // Label
-        draw_text(type_name, item_rect.x + 22.0, item_y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-
-        // Click to add component
-        if hovered && ctx.mouse.left_pressed {
-            let new_component = create_default_component(type_name);
-            state.asset.components.push(new_component);
-            state.selected_component = Some(state.asset.components.len() - 1);
-            state.add_component_menu_open = false;
-        }
-
-        item_y += item_height;
+    // End drag on mouse release
+    if !ctx.mouse.left_down {
+        state.opacity_drag = None;
     }
 }
 
@@ -920,9 +997,6 @@ fn create_default_component(type_name: &str) -> AssetComponent {
             damage: 10,
             patrol_radius: 512.0,
         },
-        "Checkpoint" => AssetComponent::Checkpoint {
-            respawn_offset: [0.0, 0.0, 0.0],
-        },
         "Door" => AssetComponent::Door {
             required_key: None,
             start_open: false,
@@ -943,7 +1017,22 @@ fn create_default_component(type_name: &str) -> AssetComponent {
             step_height: 384.0,
         },
         "SpawnPoint" => AssetComponent::SpawnPoint {
-            is_player_start: false,
+            is_player: false,
+            respawns: false,
+        },
+        "Skeleton" => {
+            use super::state::RigBone;
+            use crate::rasterizer::Vec3;
+            AssetComponent::Skeleton {
+                bones: vec![RigBone {
+                    name: "Root".to_string(),
+                    parent: None,
+                    local_position: Vec3::ZERO,
+                    local_rotation: Vec3::ZERO,
+                    length: 200.0,
+                    width: RigBone::DEFAULT_WIDTH,
+                }],
+            }
         },
         _ => AssetComponent::Collision {
             shape: CollisionShapeDef::FromMesh,
@@ -992,9 +1081,6 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
         AssetComponent::Enemy { enemy_type, health, damage, patrol_radius } => {
             draw_enemy_editor(ctx, x, y, width, enemy_type, health, damage, patrol_radius, icon_font)
         }
-        AssetComponent::Checkpoint { respawn_offset } => {
-            draw_checkpoint_editor(ctx, x, y, width, respawn_offset, icon_font)
-        }
         AssetComponent::Door { required_key, start_open } => {
             draw_door_editor(ctx, x, y, width, required_key, start_open, icon_font)
         }
@@ -1007,8 +1093,13 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
         AssetComponent::CharacterController { height, radius, step_height } => {
             draw_character_controller_editor(ctx, x, y, width, height, radius, step_height, icon_font)
         }
-        AssetComponent::SpawnPoint { is_player_start } => {
-            draw_spawn_point_editor(ctx, x, y, width, is_player_start, icon_font)
+        AssetComponent::SpawnPoint { is_player, respawns } => {
+            draw_spawn_point_editor(ctx, x, y, width, is_player, respawns, icon_font)
+        }
+        AssetComponent::Skeleton { bones: _ } => {
+            // Skeleton editing handled separately via bone tree in left panel
+            // TODO: Implement skeleton editor
+            false
         }
     };
 
@@ -1133,8 +1224,8 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
         y += 4.0;
 
         // Get object data (capture values to avoid borrow issues)
-        let (obj_name, double_sided, mirror) = match state.objects().get(selected_idx) {
-            Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror),
+        let (obj_name, double_sided, mirror, bone_index) = match state.objects().get(selected_idx) {
+            Some(obj) => (obj.name.clone(), obj.double_sided, obj.mirror, obj.default_bone_index),
             None => return,
         };
 
@@ -1214,6 +1305,470 @@ fn draw_mesh_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut Modeler
                 btn_x += btn_w + 2.0;
             }
         }
+
+        y += line_height;
+
+        // Bone Assignment (only if skeleton exists)
+        let skeleton = state.skeleton();
+        if !skeleton.is_empty() {
+            draw_text("Bone", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+            // Get current bone name
+            let bone_name = bone_index
+                .and_then(|idx| skeleton.get(idx))
+                .map(|b| b.name.as_str())
+                .unwrap_or("(None)");
+
+            // Draw dropdown trigger for bone selection
+            let selector_rect = Rect::new(x + 50.0, y, width - 54.0, line_height);
+            if draw_dropdown_trigger(ctx, selector_rect, bone_name, icon_font) {
+                state.bone_picker_target_mesh = Some(selected_idx);
+                state.dropdown.toggle("bone_picker", selector_rect);
+            }
+
+            y += line_height;
+        }
+    }
+}
+
+/// Draw skeleton component content (bone tree + per-bone properties)
+fn draw_skeleton_editor_content(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let line_height = 18.0;
+    let mut y = rect.y;
+    let x = rect.x;
+    let width = rect.w;
+
+    // --- BONE TREE ---
+    let skeleton = state.skeleton();
+    if skeleton.is_empty() {
+        draw_text("No bones", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        draw_text("Add Skeleton component", x + 4.0, y + 26.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        draw_text("to create root bone", x + 4.0, y + 40.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        return;
+    }
+
+    // Calculate how much space for bone list (leave room for properties if bone selected)
+    let has_selection = state.selected_bone.is_some();
+    let props_height = if has_selection { 80.0 } else { 0.0 };
+    let list_height = (rect.h - props_height - 4.0).max(60.0);
+
+    // Collect click actions
+    let mut select_idx: Option<usize> = None;
+    let mut delete_idx: Option<usize> = None;
+    let mut add_idx: Option<usize> = None;
+    let mut rename_idx: Option<usize> = None;
+
+    // Draw root bones and their children recursively
+    fn draw_bone_recursive(
+        ctx: &mut UiContext,
+        state: &ModelerState,
+        bone_idx: usize,
+        depth: usize,
+        x: f32,
+        y: &mut f32,
+        width: f32,
+        line_height: f32,
+        list_height: f32,
+        rect_y: f32,
+        icon_font: Option<&Font>,
+        select_idx: &mut Option<usize>,
+        delete_idx: &mut Option<usize>,
+        add_idx: &mut Option<usize>,
+        rename_idx: &mut Option<usize>,
+    ) {
+        if *y + line_height > rect_y + list_height {
+            return;
+        }
+
+        let skeleton = state.skeleton();
+        let bone = match skeleton.get(bone_idx) {
+            Some(b) => b,
+            None => return,
+        };
+
+        let is_selected = state.selected_bone == Some(bone_idx);
+        let is_hovered_bone = state.hovered_bone == Some(bone_idx);
+        let indent = depth as f32 * 12.0;
+        let item_rect = Rect::new(x, *y, width, line_height);
+        let is_hovered = ctx.mouse.inside(&item_rect);
+
+        // Selection/hover highlight
+        if is_selected {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+        } else if is_hovered || is_hovered_bone {
+            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(50, 50, 55, 255));
+        }
+
+        // Bone icon
+        let icon_rect = Rect::new(x + 2.0 + indent, *y + 1.0, 16.0, 16.0);
+        let icon_color = if bone.parent.is_none() {
+            Color::from_rgba(255, 220, 100, 255) // Yellow for root
+        } else if is_selected {
+            Color::from_rgba(80, 255, 80, 255) // Green when selected
+        } else {
+            TEXT_COLOR
+        };
+        draw_icon_centered(icon_font, icon::BONE, &icon_rect, 11.0, icon_color);
+
+        // Action icons (show when selected or hovered): Delete, Rename, Add Child
+        let show_icons = is_selected || is_hovered;
+        let icon_size = 14.0;
+        let icon_spacing = 2.0;
+        let mut icon_x = x + width - icon_size - 4.0;
+
+        if show_icons {
+            // Delete icon (rightmost)
+            let delete_rect = Rect::new(icon_x, *y + 2.0, icon_size, icon_size);
+            let delete_hover = ctx.mouse.inside(&delete_rect);
+            let delete_color = if delete_hover { Color::from_rgba(255, 100, 100, 255) } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::TRASH, &delete_rect, 11.0, delete_color);
+            if delete_hover && ctx.mouse.left_pressed {
+                *delete_idx = Some(bone_idx);
+            }
+            icon_x -= icon_size + icon_spacing;
+
+            // Rename icon
+            let rename_rect = Rect::new(icon_x, *y + 2.0, icon_size, icon_size);
+            let rename_hover = ctx.mouse.inside(&rename_rect);
+            let rename_color = if rename_hover { ACCENT_COLOR } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::PENCIL, &rename_rect, 11.0, rename_color);
+            if rename_hover && ctx.mouse.left_pressed {
+                *rename_idx = Some(bone_idx);
+            }
+            icon_x -= icon_size + icon_spacing;
+
+            // Add child icon
+            let add_rect = Rect::new(icon_x, *y + 2.0, icon_size, icon_size);
+            let add_hover = ctx.mouse.inside(&add_rect);
+            let add_color = if add_hover { Color::from_rgba(100, 255, 100, 255) } else { TEXT_DIM };
+            draw_icon_centered(icon_font, icon::PLUS, &add_rect, 11.0, add_color);
+            if add_hover && ctx.mouse.left_pressed {
+                *add_idx = Some(bone_idx);
+            }
+        }
+
+        // Bone name
+        let name_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+        draw_text(&bone.name, x + 20.0 + indent, *y + 13.0, FONT_SIZE_HEADER, name_color);
+
+        // Handle selection click (not on action icons)
+        let icons_width = if show_icons { (icon_size + icon_spacing) * 3.0 + 4.0 } else { 0.0 };
+        let name_rect = Rect::new(x + 20.0 + indent, *y, width - 24.0 - indent - icons_width, line_height);
+        if ctx.mouse.inside(&name_rect) && ctx.mouse.left_pressed {
+            *select_idx = Some(bone_idx);
+        }
+
+        *y += line_height;
+
+        // Draw children
+        let children = state.bone_children(bone_idx);
+        for child_idx in children {
+            draw_bone_recursive(
+                ctx, state, child_idx, depth + 1, x, y, width, line_height,
+                list_height, rect_y, icon_font, select_idx, delete_idx, add_idx, rename_idx
+            );
+        }
+    }
+
+    // Draw root bones (no parent)
+    let root_bones = state.root_bones();
+    for root_idx in root_bones {
+        draw_bone_recursive(
+            ctx, state, root_idx, 0, x, &mut y, width, line_height,
+            list_height, rect.y, icon_font, &mut select_idx, &mut delete_idx, &mut add_idx, &mut rename_idx
+        );
+    }
+
+    // Apply actions after the loop
+    if let Some(idx) = delete_idx {
+        state.save_undo_skeleton("Delete Bone");
+        state.remove_bone(idx);
+        // Cancel rename mode if deleting
+        state.bone_rename_active = false;
+        state.bone_rename_buffer.clear();
+    } else if let Some(idx) = add_idx {
+        // Add child bone to this bone
+        create_child_bone(state, idx);
+    } else if let Some(idx) = rename_idx {
+        // Start rename mode for this bone
+        state.selected_bone = Some(idx); // Select the bone being renamed
+        if let Some(bone) = state.skeleton().get(idx) {
+            state.bone_rename_buffer = bone.name.clone();
+            state.bone_rename_active = true;
+        }
+    } else if let Some(idx) = select_idx {
+        // Cancel rename mode when selecting different bone
+        if state.selected_bone != Some(idx) {
+            state.bone_rename_active = false;
+            state.bone_rename_buffer.clear();
+        }
+        state.selected_bone = Some(idx);
+        if let Some(bone) = state.skeleton().get(idx) {
+            state.set_status(&format!("Selected bone: {}", bone.name), 1.0);
+        }
+    }
+
+    // --- PER-BONE PROPERTIES ---
+    if let Some(selected_idx) = state.selected_bone {
+        y += 4.0;
+
+        // Separator line
+        draw_rectangle(x + 4.0, y, width - 8.0, 1.0, Color::from_rgba(60, 60, 70, 255));
+        y += 4.0;
+
+        // Get bone data
+        let (bone_name, parent_name, length, bone_width) = {
+            let skeleton = state.skeleton();
+            let bone = match skeleton.get(selected_idx) {
+                Some(b) => b,
+                None => return,
+            };
+            let parent_name = bone.parent
+                .and_then(|p| skeleton.get(p))
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "(root)".to_string());
+            (bone.name.clone(), parent_name, bone.length, bone.width)
+        };
+
+        // Bone name (editable if rename mode active)
+        if state.bone_rename_active {
+            // Draw text input for rename
+            let input_rect = Rect::new(x + 4.0, y, width - 8.0, line_height);
+            draw_rectangle(input_rect.x, input_rect.y, input_rect.w, input_rect.h, Color::from_rgba(40, 45, 55, 255));
+            draw_rectangle_lines(input_rect.x, input_rect.y, input_rect.w, input_rect.h, 1.0, ACCENT_COLOR);
+
+            // Handle text input
+            while let Some(ch) = get_char_pressed() {
+                if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == ' ' {
+                    state.bone_rename_buffer.push(ch);
+                }
+            }
+            if is_key_pressed(KeyCode::Backspace) && !state.bone_rename_buffer.is_empty() {
+                state.bone_rename_buffer.pop();
+            }
+
+            // Draw the text with cursor
+            let display_text = format!("{}|", state.bone_rename_buffer);
+            draw_text(&display_text, x + 6.0, y + 13.0, FONT_SIZE_HEADER, ACCENT_COLOR);
+
+            // Handle Enter to confirm or Escape to cancel
+            if is_key_pressed(KeyCode::Enter) {
+                if !state.bone_rename_buffer.is_empty() {
+                    state.save_undo_skeleton("Rename Bone");
+                    if let Some(bones) = state.asset.skeleton_mut() {
+                        if let Some(bone) = bones.get_mut(selected_idx) {
+                            bone.name = state.bone_rename_buffer.clone();
+                        }
+                    }
+                }
+                state.bone_rename_active = false;
+                state.bone_rename_buffer.clear();
+            } else if is_key_pressed(KeyCode::Escape) {
+                state.bone_rename_active = false;
+                state.bone_rename_buffer.clear();
+            }
+        } else {
+            draw_text(&bone_name, x + 4.0, y + 12.0, FONT_SIZE_HEADER, ACCENT_COLOR);
+        }
+        y += line_height;
+
+        // Parent info
+        draw_text(&format!("Parent: {}", parent_name), x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        y += line_height;
+
+        // Length info
+        draw_text(&format!("Length: {:.0}", length), x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        y += line_height;
+
+        // Width slider (drag left/right to adjust)
+        {
+            let label = format!("Width: {:.0}", bone_width);
+            let label_w = 55.0;
+            draw_text(&label, x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+            // Slider bar
+            let slider_x = x + label_w + 4.0;
+            let slider_w = width - label_w - 12.0;
+            let slider_rect = Rect::new(slider_x, y + 2.0, slider_w, line_height - 4.0);
+            let slider_hover = ctx.mouse.inside(&slider_rect);
+
+            // Draw slider background
+            let bg_color = if slider_hover { Color::from_rgba(50, 55, 65, 255) } else { Color::from_rgba(40, 42, 50, 255) };
+            draw_rectangle(slider_rect.x, slider_rect.y, slider_rect.w, slider_rect.h, bg_color);
+
+            // Draw filled portion (5..200 range)
+            let fill_ratio = ((bone_width - 5.0) / 195.0).clamp(0.0, 1.0);
+            let fill_w = slider_rect.w * fill_ratio;
+            draw_rectangle(slider_rect.x, slider_rect.y, fill_w, slider_rect.h, Color::from_rgba(70, 90, 110, 255));
+
+            // Click to set width directly
+            if slider_hover && ctx.mouse.left_down {
+                let ratio = ((ctx.mouse.x - slider_rect.x) / slider_rect.w).clamp(0.0, 1.0);
+                let new_width = (5.0 + ratio * 195.0).round();
+                if let Some(bones) = state.asset.skeleton_mut() {
+                    if let Some(bone) = bones.get_mut(selected_idx) {
+                        bone.width = new_width;
+                    }
+                }
+            }
+        }
+        y += line_height;
+
+        // Hint
+        draw_text("Drag tip to rotate", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, Color::from_rgba(100, 150, 200, 255));
+        y += line_height;
+
+        // Show meshes attached to this bone
+        let attached_meshes: Vec<String> = state.objects()
+            .iter()
+            .filter(|obj| obj.default_bone_index == Some(selected_idx))
+            .map(|obj| obj.name.clone())
+            .collect();
+
+        if !attached_meshes.is_empty() {
+            y += 4.0;
+            draw_text("Attached:", x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            y += line_height;
+
+            for name in attached_meshes {
+                draw_text(&format!("• {}", name), x + 8.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+                y += line_height;
+            }
+        }
+
+        // Per-vertex bone assignment info
+        let vertex_count = state.count_vertices_for_bone(selected_idx);
+        if vertex_count > 0 {
+            y += 4.0;
+            draw_text(&format!("Vertices: {}", vertex_count), x + 4.0, y + 12.0, FONT_SIZE_CONTENT, TEXT_DIM);
+
+            // "Select" button to select all vertices for this bone
+            let btn_rect = Rect::new(x + 70.0, y, 50.0, line_height - 2.0);
+            let btn_hover = ctx.mouse.inside(&btn_rect);
+            let btn_color = if btn_hover { Color::from_rgba(80, 100, 120, 255) } else { Color::from_rgba(50, 60, 70, 255) };
+            draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, btn_color);
+            draw_text("Select", btn_rect.x + 6.0, btn_rect.y + 12.0, FONT_SIZE_CONTENT, if btn_hover { ACCENT_COLOR } else { TEXT_COLOR });
+
+            if btn_hover && ctx.mouse.left_pressed {
+                state.select_vertices_for_bone(selected_idx);
+            }
+            y += line_height;
+        }
+    }
+}
+
+/// Create a child bone attached to the given parent bone
+fn create_child_bone(state: &mut ModelerState, parent_idx: usize) {
+    use super::state::RigBone;
+    use crate::rasterizer::Vec3;
+
+    const DEFAULT_LENGTH: f32 = 200.0;
+
+    // Save undo before creating bone
+    state.save_undo_skeleton("Create Bone");
+
+    // Get parent bone info
+    let (parent_length, parent_rotation, parent_width) = match state.skeleton().get(parent_idx) {
+        Some(b) => (b.length, b.local_rotation, b.display_width()),
+        None => return,
+    };
+
+    // Child is positioned at parent's tip in parent's local space
+    let new_bone = RigBone {
+        name: state.generate_bone_name(),
+        parent: Some(parent_idx),
+        local_position: Vec3::new(0.0, parent_length, 0.0),
+        local_rotation: parent_rotation, // Inherit parent's rotation
+        length: DEFAULT_LENGTH,
+        width: parent_width,
+    };
+
+    let bone_name = new_bone.name.clone();
+    if let Some(new_idx) = state.add_bone(new_bone) {
+        state.selected_bone = Some(new_idx);
+        state.selection = super::state::ModelerSelection::Bones(vec![new_idx]);
+        state.set_status(&format!("Created child bone: {}", bone_name), 1.0);
+    }
+}
+
+/// Ensure a Skeleton component exists, creating one if needed
+fn ensure_skeleton_component(state: &mut ModelerState) {
+    use super::state::RigBone;
+    use crate::rasterizer::Vec3;
+
+    // Check if skeleton component already exists
+    let has_skeleton = state.asset.components.iter().any(|c| c.is_skeleton());
+    if has_skeleton {
+        return;
+    }
+
+    // Create default root bone at origin, pointing up (Y+)
+    let root_bone = RigBone {
+        name: "Root".to_string(),
+        parent: None,
+        local_position: Vec3::new(0.0, 0.0, 0.0),
+        local_rotation: Vec3::ZERO,
+        length: 200.0,
+        width: RigBone::DEFAULT_WIDTH,
+    };
+
+    // Create and add skeleton component with default root bone
+    let skeleton = crate::asset::AssetComponent::Skeleton {
+        bones: vec![root_bone],
+    };
+    state.asset.components.push(skeleton);
+
+    // Select the new skeleton component and root bone
+    state.selected_component = Some(state.asset.components.len() - 1);
+    state.selected_bone = Some(0);
+    state.selection = super::state::ModelerSelection::Bones(vec![0]);
+    state.dirty = true;
+    state.set_status("Created skeleton with Root bone", 1.0);
+}
+
+/// Create a bone at a sensible default position (Tab key handler for skeleton)
+fn create_bone_at_default_position(state: &mut ModelerState) {
+    use super::state::RigBone;
+    use crate::rasterizer::Vec3;
+
+    // Default bone properties
+    const DEFAULT_LENGTH: f32 = 200.0;
+
+    // Determine position and parent based on current selection
+    // Check bone selection first, then fall back to selected_bone
+    let parent_from_selection = state.selection.bones()
+        .and_then(|bones| bones.first().copied());
+    let parent_idx = parent_from_selection.or(state.selected_bone);
+
+    let (local_position, parent, local_rotation) = if let Some(selected_idx) = parent_idx {
+        // Create child bone at selected bone's tip, pointing same direction
+        // local_position is in parent's local space, so Y = parent.length puts us at the tip
+        let (parent_length, parent_rotation) = state.skeleton().get(selected_idx)
+            .map(|b| (b.length, b.local_rotation))
+            .unwrap_or((DEFAULT_LENGTH, Vec3::ZERO));
+        (Vec3::new(0.0, parent_length, 0.0), Some(selected_idx), parent_rotation)
+    } else {
+        // Create root bone at origin, pointing up (Y+)
+        (Vec3::new(0.0, 0.0, 0.0), None, Vec3::ZERO)
+    };
+
+    let new_bone = RigBone {
+        name: state.generate_bone_name(),
+        parent,
+        local_position,
+        local_rotation,
+        length: DEFAULT_LENGTH,
+        width: RigBone::DEFAULT_WIDTH,
+    };
+
+    let bone_name = new_bone.name.clone();
+    if let Some(new_idx) = state.add_bone(new_bone) {
+        // Update both selection systems
+        state.selected_bone = Some(new_idx);
+        state.selection = super::state::ModelerSelection::Bones(vec![new_idx]);
+        state.set_status(&format!("Created bone: {} (G to move, drag tip to rotate)", bone_name), 2.0);
+    } else {
+        state.set_status("Failed to create bone", 1.5);
     }
 }
 
@@ -1287,6 +1842,84 @@ fn draw_collision_editor(
         modified = true;
     }
     *y += line_height;
+
+    // Dimension sliders per shape type
+    let slider_x = x + 70.0;
+    let slider_w = width - 110.0;
+    let slider_h = 10.0;
+    let track_bg = Color::from_rgba(40, 40, 45, 255);
+    let max_dim = 2048.0;
+
+    match shape {
+        CollisionShapeDef::Sphere { radius } => {
+            // Radius slider
+            draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+            let fill = (radius.clamp(0.0, max_dim) / max_dim) * slider_w;
+            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+            draw_text(&format!("{:.0}", *radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                *radius = t * max_dim;
+                modified = true;
+            }
+            *y += line_height;
+        }
+        CollisionShapeDef::Box { half_extents } => {
+            let labels = ["Width:", "Height:", "Depth:"];
+            for (i, label) in labels.iter().enumerate() {
+                draw_text(label, x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+                let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+                draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+                let val = half_extents[i];
+                let fill = (val.clamp(0.0, max_dim) / max_dim) * slider_w;
+                draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+                // Display as full extent (double the half)
+                draw_text(&format!("{:.0}", val * 2.0), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+                if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                    let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                    half_extents[i] = t * max_dim;
+                    modified = true;
+                }
+                *y += line_height;
+            }
+        }
+        CollisionShapeDef::Capsule { radius, height } | CollisionShapeDef::Cylinder { radius, height } => {
+            // Radius slider
+            draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+            let fill = (radius.clamp(0.0, max_dim) / max_dim) * slider_w;
+            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+            draw_text(&format!("{:.0}", *radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                *radius = t * max_dim;
+                modified = true;
+            }
+            *y += line_height;
+
+            // Height slider
+            draw_text("Height:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+            let max_h = 4096.0;
+            let fill = (height.clamp(0.0, max_h) / max_h) * slider_w;
+            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+            draw_text(&format!("{:.0}", *height), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+                *height = t * max_h;
+                modified = true;
+            }
+            *y += line_height;
+        }
+        CollisionShapeDef::FromMesh => {
+            draw_text("Auto-fit to mesh bounds", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+            *y += line_height;
+        }
+    }
 
     modified
 }
@@ -1625,28 +2258,6 @@ fn draw_enemy_editor(
     modified
 }
 
-/// Draw checkpoint component editor
-fn draw_checkpoint_editor(
-    _ctx: &mut UiContext,
-    x: f32,
-    y: &mut f32,
-    _width: f32,
-    respawn_offset: &mut [f32; 3],
-    _icon_font: Option<&Font>,
-) -> bool {
-    let line_height = 20.0;
-
-    draw_text("Respawn Offset:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-    *y += line_height;
-
-    draw_text(&format!("X: {:.0}  Y: {:.0}  Z: {:.0}",
-        respawn_offset[0], respawn_offset[1], respawn_offset[2]),
-        x + 8.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-    *y += line_height;
-
-    false
-}
-
 /// Draw door component editor
 fn draw_door_editor(
     ctx: &mut UiContext,
@@ -1861,23 +2472,34 @@ fn draw_spawn_point_editor(
     x: f32,
     y: &mut f32,
     width: f32,
-    is_player_start: &mut bool,
+    is_player: &mut bool,
+    respawns: &mut bool,
     _icon_font: Option<&Font>,
 ) -> bool {
     let mut modified = false;
     let line_height = 20.0;
-
-    // Is player start toggle
-    draw_text("Player Start:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-
     let toggle_x = x + width - 40.0;
-    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
-    let toggle_color = if *is_player_start { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
-    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
-    draw_text(if *is_player_start { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
 
+    // Is player toggle
+    draw_text("Player Start:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let toggle_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let toggle_color = if *is_player { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(toggle_rect.x, toggle_rect.y, toggle_rect.w, toggle_rect.h, toggle_color);
+    draw_text(if *is_player { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
     if ctx.mouse.inside(&toggle_rect) && ctx.mouse.left_pressed {
-        *is_player_start = !*is_player_start;
+        *is_player = !*is_player;
+        modified = true;
+    }
+    *y += line_height;
+
+    // Respawns toggle
+    draw_text("Respawns:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    let respawn_rect = Rect::new(toggle_x, *y + 2.0, 32.0, 14.0);
+    let respawn_color = if *respawns { ACCENT_COLOR } else { Color::from_rgba(60, 60, 65, 255) };
+    draw_rectangle(respawn_rect.x, respawn_rect.y, respawn_rect.w, respawn_rect.h, respawn_color);
+    draw_text(if *respawns { "ON" } else { "OFF" }, toggle_x + 6.0, *y + 13.0, 11.0, TEXT_COLOR);
+    if ctx.mouse.inside(&respawn_rect) && ctx.mouse.left_pressed {
+        *respawns = !*respawns;
         modified = true;
     }
     *y += line_height;
@@ -4418,16 +5040,12 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         texture_id: Some(0),
                         black_transparent: edit_face.black_transparent,
                         blend_mode: edit_face.blend_mode,
+                        editor_alpha: 255,
                     });
                 }
             }
 
             if !vertices.is_empty() && !faces.is_empty() {
-                // Collect per-face blend modes
-                let blend_modes: Vec<crate::rasterizer::BlendMode> = faces.iter()
-                    .map(|f| f.blend_mode)
-                    .collect();
-
                 if use_rgb555 {
                     // RGB555 rendering path
                     if let Some(ref tex15) = atlas_texture_15 {
@@ -4437,7 +5055,6 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                             &vertices,
                             &faces,
                             &textures_15,
-                            Some(&blend_modes),
                             &ortho_camera,
                             &ortho_settings,
                             None,
@@ -4563,7 +5180,7 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // Draw transform gizmo in ortho views (2-axis version)
     // =========================================================================
     if !state.selection.is_empty() && state.tool_box.active_transform_tool().is_some() {
-        if let Some(center) = state.selection.compute_center(state.mesh()) {
+        if let Some(center) = state.compute_selection_center() {
             // Project center to screen using world_to_ortho directly
             let (cx, cy) = match viewport_id {
                 ViewportId::Top => world_to_ortho(center.x, center.z),
@@ -4576,17 +5193,54 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
             if cx >= rect.x && cx <= rect.right() && cy >= rect.y && cy <= rect.bottom() {
                 let gizmo_length = 40.0; // Fixed screen-space length
 
-                // Determine which world axes map to screen X and Y for this ortho view
-                let (x_color, y_color) = match viewport_id {
-                    ViewportId::Top => (RED, BLUE),    // X right, Z up
-                    ViewportId::Front => (RED, GREEN), // X right, Y up
-                    ViewportId::Side => (BLUE, GREEN), // Z right, Y up
-                    ViewportId::Perspective => (WHITE, WHITE),
+                // Get orientation basis (local or global axes)
+                let (local_x, local_y, local_z) = state.compute_orientation_basis();
+
+                // Project local axes to screen coordinates for this ortho view
+                // Returns (screen_dx, screen_dy) for each axis - how much the axis moves on screen
+                let (axis1_screen, axis2_screen, axis1_world, axis2_world) = match viewport_id {
+                    ViewportId::Top => {
+                        // Top view: X-Z plane, screen X = world X, screen Y = -world Z
+                        ((local_x.x, -local_x.z), (local_z.x, -local_z.z), super::state::Axis::X, super::state::Axis::Z)
+                    }
+                    ViewportId::Front => {
+                        // Front view: X-Y plane, screen X = world X, screen Y = -world Y
+                        ((local_x.x, -local_x.y), (local_y.x, -local_y.y), super::state::Axis::X, super::state::Axis::Y)
+                    }
+                    ViewportId::Side => {
+                        // Side view: Z-Y plane, screen X = world Z, screen Y = -world Y
+                        ((local_z.z, -local_z.y), (local_y.z, -local_y.y), super::state::Axis::Z, super::state::Axis::Y)
+                    }
+                    ViewportId::Perspective => ((1.0, 0.0), (0.0, -1.0), super::state::Axis::X, super::state::Axis::Y),
                 };
 
-                // Screen directions: right is +X, up is -Y (screen coords)
-                let x_end = (cx + gizmo_length, cy);
-                let y_end = (cx, cy - gizmo_length);
+                // Normalize and scale to gizmo length
+                let normalize_and_scale = |dx: f32, dy: f32| -> (f32, f32) {
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len > 0.001 {
+                        (dx / len * gizmo_length, dy / len * gizmo_length)
+                    } else {
+                        (gizmo_length, 0.0) // Fallback
+                    }
+                };
+
+                let (dx1, dy1) = normalize_and_scale(axis1_screen.0, axis1_screen.1);
+                let (dx2, dy2) = normalize_and_scale(axis2_screen.0, axis2_screen.1);
+
+                let x_end = (cx + dx1, cy + dy1);
+                let y_end = (cx + dx2, cy + dy2);
+
+                // Axis colors based on which world axis they represent
+                let axis1_color = match axis1_world {
+                    super::state::Axis::X => RED,
+                    super::state::Axis::Y => GREEN,
+                    super::state::Axis::Z => BLUE,
+                };
+                let axis2_color = match axis2_world {
+                    super::state::Axis::X => RED,
+                    super::state::Axis::Y => GREEN,
+                    super::state::Axis::Z => BLUE,
+                };
 
                 // Check which axis is hovered
                 let dist_to_x = point_to_line_dist(ctx.mouse.x, ctx.mouse.y, cx, cy, x_end.0, x_end.1);
@@ -4598,26 +5252,16 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
 
                 // Update gizmo hover state for ortho views
                 if x_hovered {
-                    state.ortho_gizmo_hovered_axis = Some(match viewport_id {
-                        ViewportId::Top => super::state::Axis::X,
-                        ViewportId::Front => super::state::Axis::X,
-                        ViewportId::Side => super::state::Axis::Z,
-                        _ => super::state::Axis::X,
-                    });
+                    state.ortho_gizmo_hovered_axis = Some(axis1_world);
                 } else if y_hovered {
-                    state.ortho_gizmo_hovered_axis = Some(match viewport_id {
-                        ViewportId::Top => super::state::Axis::Z,
-                        ViewportId::Front => super::state::Axis::Y,
-                        ViewportId::Side => super::state::Axis::Y,
-                        _ => super::state::Axis::Y,
-                    });
+                    state.ortho_gizmo_hovered_axis = Some(axis2_world);
                 } else if inside_viewport {
                     state.ortho_gizmo_hovered_axis = None;
                 }
 
                 // Draw colors (brighten on hover)
-                let x_draw_color = if x_hovered { YELLOW } else { Color::new(x_color.r * 0.8, x_color.g * 0.8, x_color.b * 0.8, 1.0) };
-                let y_draw_color = if y_hovered { YELLOW } else { Color::new(y_color.r * 0.8, y_color.g * 0.8, y_color.b * 0.8, 1.0) };
+                let x_draw_color = if x_hovered { YELLOW } else { Color::new(axis1_color.r * 0.8, axis1_color.g * 0.8, axis1_color.b * 0.8, 1.0) };
+                let y_draw_color = if y_hovered { YELLOW } else { Color::new(axis2_color.r * 0.8, axis2_color.g * 0.8, axis2_color.b * 0.8, 1.0) };
 
                 // Draw gizmo lines
                 let line_thickness = 2.0;
@@ -4627,20 +5271,25 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                 // Draw arrowheads for move gizmo
                 if matches!(state.tool_box.active_transform_tool(), Some(ModelerToolId::Move)) {
                     let arrow_size = 8.0;
-                    // X arrow (pointing right)
-                    draw_triangle(
-                        Vec2::new(x_end.0, x_end.1),
-                        Vec2::new(x_end.0 - arrow_size, x_end.1 - arrow_size * 0.5),
-                        Vec2::new(x_end.0 - arrow_size, x_end.1 + arrow_size * 0.5),
-                        x_draw_color,
-                    );
-                    // Y arrow (pointing up)
-                    draw_triangle(
-                        Vec2::new(y_end.0, y_end.1),
-                        Vec2::new(y_end.0 - arrow_size * 0.5, y_end.1 + arrow_size),
-                        Vec2::new(y_end.0 + arrow_size * 0.5, y_end.1 + arrow_size),
-                        y_draw_color,
-                    );
+                    // Calculate arrow direction based on line direction
+                    let draw_arrow = |end: (f32, f32), dx: f32, dy: f32, color: Color| {
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len > 0.001 {
+                            let nx = dx / len;
+                            let ny = dy / len;
+                            // Perpendicular
+                            let px = -ny;
+                            let py = nx;
+                            draw_triangle(
+                                Vec2::new(end.0, end.1),
+                                Vec2::new(end.0 - nx * arrow_size + px * arrow_size * 0.5, end.1 - ny * arrow_size + py * arrow_size * 0.5),
+                                Vec2::new(end.0 - nx * arrow_size - px * arrow_size * 0.5, end.1 - ny * arrow_size - py * arrow_size * 0.5),
+                                color,
+                            );
+                        }
+                    };
+                    draw_arrow(x_end, dx1, dy1, x_draw_color);
+                    draw_arrow(y_end, dx2, dy2, y_draw_color);
                 }
 
                 // Draw small squares for scale gizmo
@@ -4672,7 +5321,8 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
     // Handle click to select in ortho views
     // =========================================================================
     // Skip selection if gizmo is hovered - gizmo takes precedence
-    if inside_viewport && state.active_viewport == viewport_id && ctx.mouse.left_pressed && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() && state.ortho_gizmo_hovered_axis.is_none() {
+    // Skip if radial menu is open - menu consumes clicks
+    if inside_viewport && state.active_viewport == viewport_id && ctx.mouse.left_pressed && state.modal_transform == ModalTransform::None && !state.drag_manager.is_dragging() && state.ortho_gizmo_hovered_axis.is_none() && !state.radial_menu.is_open {
         let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_key_down(KeyCode::X);
 
         if let Some(vert_idx) = state.hovered_vertex {
@@ -4851,15 +5501,32 @@ fn draw_ortho_viewport(ctx: &mut UiContext, rect: Rect, state: &mut ModelerState
                         // This prevents snapping - delta starts at 0 and accumulates from here.
                         let drag_start_mouse = (ctx.mouse.x, ctx.mouse.y);
 
+                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes)
+                        let bone_rotation = state.selected_object()
+                            .and_then(|obj| obj.default_bone_index)
+                            .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
+
+                        // Get axis direction from orientation basis if axis is constrained
+                        let axis_direction = state.ortho_drag_axis.map(|axis| {
+                            let (basis_x, basis_y, basis_z) = state.compute_orientation_basis();
+                            match axis {
+                                crate::ui::drag_tracker::Axis::X => basis_x,
+                                crate::ui::drag_tracker::Axis::Y => basis_y,
+                                crate::ui::drag_tracker::Axis::Z => basis_z,
+                            }
+                        });
+
                         // Start move drag (constrained if gizmo axis was clicked)
-                        state.drag_manager.start_move(
+                        state.drag_manager.start_move_with_bone(
                             center,
                             drag_start_mouse,
                             state.ortho_drag_axis, // Use captured axis constraint
+                            axis_direction,
                             indices,
                             initial_positions,
                             state.snap_settings.enabled,
                             state.snap_settings.grid_size,
+                            bone_rotation,
                         );
                     }
 
@@ -4995,6 +5662,16 @@ fn apply_ortho_box_selection(
     ortho_zoom: f32,
     ortho_center: crate::rasterizer::Vec2,
 ) {
+    // Skip if Mesh component is hidden - nothing to select
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.is_component_hidden(idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return;
+    }
+
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
         || is_key_down(KeyCode::X);
@@ -5027,7 +5704,27 @@ fn apply_ortho_box_selection(
         sx >= min_sx && sx <= max_sx && sy >= min_sy && sy <= max_sy
     };
 
+    // Pre-compute all bone transforms for per-vertex skinning
+    let bone_transforms: Vec<(crate::rasterizer::Vec3, crate::rasterizer::Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
+
+    // Get mesh's default bone index
+    let default_bone_idx = state.selected_object().and_then(|obj| obj.default_bone_index);
+
     let mesh = state.mesh();
+
+    // Helper to transform vertex position to world space (per-vertex bone)
+    let get_world_pos = |v: &crate::rasterizer::Vertex| -> crate::rasterizer::Vec3 {
+        let bone_idx = v.bone_index.or(default_bone_idx);
+        let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+        if let Some((bone_pos, bone_rot)) = bone_transform {
+            rotate_by_euler(v.pos, bone_rot) + bone_pos
+        } else {
+            v.pos
+        }
+    };
 
     match state.select_mode {
         SelectMode::Vertex => {
@@ -5038,9 +5735,8 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
-                let (_sx, _sy) = world_to_screen(vert.pos);
-                let in_box = is_in_box(vert.pos);
-                if in_box && !selected.contains(&idx) {
+                let world_pos = get_world_pos(vert);
+                if is_in_box(world_pos) && !selected.contains(&idx) {
                     selected.push(idx);
                 }
             }
@@ -5068,9 +5764,9 @@ fn apply_ortho_box_selection(
                     let v1 = face.vertices[(i + 1) % face.vertices.len()];
                     let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
                     if edges_checked.insert(edge) {
-                        // Check if edge center is in box
+                        // Check if edge center is in box (using transformed positions)
                         if let (Some(p0), Some(p1)) = (mesh.vertices.get(v0), mesh.vertices.get(v1)) {
-                            let center = (p0.pos + p1.pos) * 0.5;
+                            let center = (get_world_pos(p0) + get_world_pos(p1)) * 0.5;
                             if is_in_box(center) {
                                 let e = (v0, v1);
                                 if !selected.iter().any(|&(a, b)| (a, b) == e || (b, a) == e) {
@@ -5098,13 +5794,13 @@ fn apply_ortho_box_selection(
             };
 
             for (idx, face) in mesh.faces.iter().enumerate() {
-                // Calculate face center
-                let verts: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi))
+                // Calculate face center using transformed positions
+                let world_positions: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| get_world_pos(v)))
                     .collect();
-                if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(crate::rasterizer::Vec3::ZERO, |acc, p| acc + p)
-                        * (1.0 / verts.len() as f32);
+                if !world_positions.is_empty() {
+                    let center = world_positions.iter().fold(crate::rasterizer::Vec3::ZERO, |acc, &p| acc + p)
+                        * (1.0 / world_positions.len() as f32);
                     if is_in_box(center) && !selected.contains(&idx) {
                         selected.push(idx);
                     }
@@ -5314,6 +6010,12 @@ fn draw_properties_panel(ctx: &mut UiContext, rect: Rect, state: &mut ModelerSta
         super::state::ModelerSelection::Faces(faces) => {
             draw_text(&format!("{} face(s)", faces.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
         }
+        super::state::ModelerSelection::Bones(bones) => {
+            draw_text(&format!("{} bone(s)", bones.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
+        super::state::ModelerSelection::BoneTips(tips) => {
+            draw_text(&format!("{} bone tip(s)", tips.len()), rect.x, y + 14.0, 12.0, TEXT_COLOR);
+        }
     }
 
     y += line_height * 2.0;
@@ -5455,6 +6157,7 @@ fn draw_status_bar(rect: Rect, state: &ModelerState) {
         shortcuts.push("[R] Rotate");
         shortcuts.push("[T] Scale");
         shortcuts.push("[Del] Delete");
+        shortcuts.push("[Tab] Menu");
     }
 
     // View shortcuts (always available)
@@ -5751,6 +6454,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         is_paint_mode,
         uv_editor_focused,
         state.clipboard.has_content(),
+        state.selected_bone.is_some(),
     );
 
     let mut action = ModelerAction::None;
@@ -5813,6 +6517,7 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         state.set_selection(super::state::ModelerSelection::None);
         state.set_status("Face mode", 1.0);
     }
+
     if actions.triggered("select.all", &ctx) {
         select_all(state);
     }
@@ -5901,6 +6606,10 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             state.set_status("Switch to Face mode (3) to extrude", 1.0);
         }
     }
+    if actions.triggered("transform.toggle_orientation", &ctx) {
+        state.transform_orientation = state.transform_orientation.toggle();
+        state.set_status(&format!("Transform orientation: {}", state.transform_orientation.label()), 1.5);
+    }
 
     // ========================================================================
     // Mesh Cleanup Actions
@@ -5947,6 +6656,18 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
         } else {
             state.set_status("Switch to Vertex mode (1) to merge", 1.0);
         }
+    }
+
+    // ========================================================================
+    // Skeleton / Bone Binding Actions
+    // ========================================================================
+    if actions.triggered("skeleton.bind_vertices_to_bone", &ctx) {
+        if let Some(bone_idx) = state.selected_bone {
+            state.assign_selected_vertices_to_bone(bone_idx);
+        }
+    }
+    if actions.triggered("skeleton.unbind_vertices", &ctx) {
+        state.unassign_selected_vertices();
     }
 
     // ========================================================================
@@ -6048,11 +6769,46 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
     // Context Menu Actions
     // ========================================================================
     if actions.triggered("context.open_menu", &ctx) {
-        // Tab key opens context menu at mouse position
-        let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
-        let world_pos = screen_to_world_position(state, mx, my);
-        let snapped = state.snap_settings.snap_vec3(world_pos);
-        state.context_menu = Some(ContextMenu::new(mx, my, snapped, state.active_viewport));
+        if !state.radial_menu.is_open {
+            // Tab key opens radial menu at mouse position (hold behavior)
+            let (mx, my) = (ui_ctx.mouse.x, ui_ctx.mouse.y);
+            open_radial_menu(state, mx, my);
+        }
+    }
+
+    // Tab release: enter submenu if has children, otherwise close and select
+    // Use is_key_released so this only fires once, not every frame
+    if state.radial_menu.is_open && is_key_released(KeyCode::Tab) {
+        // Check if highlighted item has children (submenu)
+        let has_children = state.radial_menu.highlighted
+            .and_then(|idx| state.radial_menu.items.get(idx))
+            .map(|item| !item.children.is_empty())
+            .unwrap_or(false);
+
+        if has_children {
+            // Enter submenu, keep menu open
+            if let Some(idx) = state.radial_menu.highlighted {
+                state.radial_menu.enter_submenu(idx);
+            }
+        } else if state.radial_menu.highlighted.is_none() {
+            // In center zone - check for back vs exit in submenu
+            let in_submenu = !state.radial_menu.menu_stack.is_empty();
+            let (cx, cy) = state.radial_menu.center;
+            let mouse_on_left = ui_ctx.mouse.x < cx;
+
+            if in_submenu && mouse_on_left {
+                // Back to parent menu
+                state.radial_menu.back();
+            } else {
+                // Exit/cancel
+                state.radial_menu.close(false);
+            }
+        } else {
+            // Close and select
+            if let Some(selected_id) = state.radial_menu.close(true) {
+                handle_radial_menu_action(state, &selected_id);
+            }
+        }
     }
     if actions.triggered("context.close", &ctx) {
         // Escape closes menus or cancels operations (priority order)
@@ -6103,6 +6859,9 @@ fn handle_actions(actions: &ActionRegistry, state: &mut ModelerState, ui_ctx: &c
             // Cancel box selection via DragManager
             state.drag_manager.cancel();
             state.box_select_pending_start = None;
+        } else if !state.selection.is_empty() {
+            // Clear selection if nothing else to cancel
+            state.set_selection(super::state::ModelerSelection::None);
         }
     }
 
@@ -6344,7 +7103,7 @@ fn select_loop(state: &mut ModelerState) {
             }
         }
 
-        super::state::ModelerSelection::None | super::state::ModelerSelection::Mesh => {
+        super::state::ModelerSelection::None | super::state::ModelerSelection::Mesh | super::state::ModelerSelection::Bones(_) | super::state::ModelerSelection::BoneTips(_) => {
             state.set_status("No selection for loop select", 1.0);
         }
     }
@@ -6726,30 +7485,334 @@ impl PrimitiveType {
 
 /// Draw the "Add Component" popup at the top level (above all panels)
 fn draw_add_component_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
-    if !state.add_component_menu_open {
+    let trigger_rect = match state.dropdown.trigger_rect {
+        Some(r) if state.dropdown.is_open("add_component") => r,
+        _ => return,
+    };
+
+    // All component types that can be added
+    let component_types = [
+        ("Mesh", icon::BOX),
+        ("Skeleton", icon::BONE),
+        ("Collision", icon::SCAN),
+        ("Light", icon::SUN),
+        ("Trigger", icon::MAP_PIN),
+        ("Pickup", icon::PLUS),
+        ("Enemy", icon::PERSON_STANDING),
+        ("Door", icon::DOOR_CLOSED),
+        ("Audio", icon::MUSIC),
+        ("Particle", icon::BLEND),
+        ("CharacterController", icon::GAMEPAD_2),
+        ("SpawnPoint", icon::FOOTPRINTS),
+    ];
+
+    let item_height = 20.0;
+    let menu_rect = dropdown_menu_rect(trigger_rect, component_types.len(), item_height, Some(140.0));
+
+    if !begin_dropdown(ctx, &mut state.dropdown, "add_component", menu_rect) {
         return;
     }
 
-    let add_btn_rect = match state.add_component_btn_rect {
-        Some(r) => r,
-        None => return,
+    let mut item_y = menu_rect.y + 2.0;
+    for (type_name, icon_char) in component_types {
+        let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
+
+        if dropdown_item(ctx, item_rect, type_name, Some((icon_char, icon_font)), false) {
+            let new_component = create_default_component(type_name);
+            let is_skeleton = new_component.is_skeleton();
+            state.asset.components.push(new_component);
+            state.selected_component = Some(state.asset.components.len() - 1);
+            state.dropdown.close();
+
+            // For Skeleton, also select the default Root bone
+            if is_skeleton {
+                state.selected_bone = Some(0);
+                state.selection = super::state::ModelerSelection::Bones(vec![0]);
+                state.set_status("Created skeleton with Root bone", 1.0);
+            }
+        }
+
+        item_y += item_height;
+    }
+}
+
+/// Draw the bone picker popup for mesh-to-bone assignment
+fn draw_bone_picker_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut ModelerState, icon_font: Option<&Font>) {
+    let trigger_rect = match state.dropdown.trigger_rect {
+        Some(r) if state.dropdown.is_open("bone_picker") => r,
+        _ => return,
     };
 
-    // Position menu below the add button
-    let menu_x = add_btn_rect.x;
-    let menu_y = add_btn_rect.bottom() + 2.0;
+    let target_mesh = match state.bone_picker_target_mesh {
+        Some(idx) => idx,
+        None => {
+            state.dropdown.close();
+            return;
+        }
+    };
 
-    draw_add_component_menu(ctx, menu_x, menu_y, state, icon_font, add_btn_rect);
+    // Collect bone names first to avoid borrow issues
+    let bone_names: Vec<String> = state.skeleton().iter().map(|b| b.name.clone()).collect();
+    if bone_names.is_empty() {
+        state.dropdown.close();
+        return;
+    }
+
+    // Get current bone index for highlighting
+    let current_bone_index = state.objects()
+        .get(target_mesh)
+        .and_then(|obj| obj.default_bone_index);
+
+    // +1 for "(None)" option
+    let item_height = 20.0;
+    let menu_rect = dropdown_menu_rect(trigger_rect, bone_names.len() + 1, item_height, Some(140.0));
+
+    if !begin_dropdown(ctx, &mut state.dropdown, "bone_picker", menu_rect) {
+        return;
+    }
+
+    let mut item_y = menu_rect.y + 2.0;
+
+    // "(None)" option first - unbind from bone
+    {
+        let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
+        let is_selected = current_bone_index.is_none();
+
+        if dropdown_item(ctx, item_rect, "(None)", None, is_selected) {
+            // Get current bone transform BEFORE mutating, so we can convert vertices back to world space
+            let old_bone_transform = current_bone_index.map(|idx| state.get_bone_world_transform(idx));
+
+            state.push_undo("Unbind bone");
+            if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
+                // Convert vertices from bone-local space back to world space
+                if let Some((bone_pos, bone_rot)) = old_bone_transform {
+                    for v in &mut obj.mesh.vertices {
+                        // Rotate by bone rotation, then translate by bone position
+                        let rotated = rotate_by_euler(v.pos, bone_rot);
+                        v.pos = rotated + bone_pos;
+                        // Rotate normal too (no translation for normals)
+                        v.normal = rotate_by_euler(v.normal, bone_rot);
+                    }
+                }
+                obj.default_bone_index = None;
+            }
+            state.dirty = true;
+            state.dropdown.close();
+            state.set_status("Unbound mesh from bone", 1.0);
+        }
+
+        item_y += item_height;
+    }
+
+    // List all bones
+    for (bone_idx, bone_name) in bone_names.iter().enumerate() {
+        let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
+        let is_selected = current_bone_index == Some(bone_idx);
+
+        if dropdown_item(ctx, item_rect, bone_name, Some((icon::BONE, icon_font)), is_selected) {
+            // Get transforms BEFORE mutating state
+            // Old bone transform (if previously bound to a different bone)
+            let old_bone_transform = current_bone_index
+                .filter(|&old_idx| old_idx != bone_idx)
+                .map(|idx| state.get_bone_world_transform(idx));
+            // New bone transform
+            let (new_bone_pos, new_bone_rot) = state.get_bone_world_transform(bone_idx);
+
+            state.push_undo("Assign bone");
+            if let Some(obj) = state.objects_mut().and_then(|v| v.get_mut(target_mesh)) {
+                // If already bound to a different bone, first convert to world space
+                if let Some((old_pos, old_rot)) = old_bone_transform {
+                    for v in &mut obj.mesh.vertices {
+                        let rotated = rotate_by_euler(v.pos, old_rot);
+                        v.pos = rotated + old_pos;
+                        v.normal = rotate_by_euler(v.normal, old_rot);
+                    }
+                }
+
+                // Now convert from world space to new bone-local space
+                // Only if not already bound (or was bound to different bone, which we just converted above)
+                if current_bone_index != Some(bone_idx) {
+                    for v in &mut obj.mesh.vertices {
+                        // Translate to bone origin, then inverse-rotate
+                        let relative = v.pos - new_bone_pos;
+                        v.pos = inverse_rotate_by_euler(relative, new_bone_rot);
+                        // Inverse-rotate normal (no translation for normals)
+                        v.normal = inverse_rotate_by_euler(v.normal, new_bone_rot);
+                    }
+                }
+
+                obj.default_bone_index = Some(bone_idx);
+            }
+            state.dirty = true;
+            state.dropdown.close();
+            state.set_status(&format!("Bound mesh to '{}'", bone_name), 1.0);
+        }
+
+        item_y += item_height;
+    }
 }
 
 /// Draw and handle context menu
 fn draw_context_menu(ctx: &mut UiContext, state: &mut ModelerState) {
+    use super::state::ContextMenuType;
     // Note: Tab/Escape shortcuts are now handled through ActionRegistry in handle_actions()
 
     let menu = match &state.context_menu {
         Some(m) => m.clone(),
         None => return,
     };
+
+    // Dispatch based on menu type
+    match menu.menu_type {
+        ContextMenuType::Primitives => draw_primitives_context_menu(ctx, state, &menu),
+        ContextMenuType::VertexOps => draw_vertex_ops_context_menu(ctx, state, &menu),
+        ContextMenuType::FaceOps | ContextMenuType::EdgeOps => {
+            // Face/edge modes share the vertex ops menu for bone assignment
+            draw_vertex_ops_context_menu(ctx, state, &menu)
+        }
+    }
+}
+
+/// Draw vertex operations context menu (bone assignment, etc.)
+fn draw_vertex_ops_context_menu(ctx: &mut UiContext, state: &mut ModelerState, menu: &super::state::ContextMenu) {
+    let item_height = 24.0;
+    let menu_width = 160.0;
+
+    // Get skeleton bones for the submenu
+    let skeleton = state.skeleton();
+    let bone_count = skeleton.len();
+    let has_bones = bone_count > 0;
+
+    // Calculate menu height
+    let header_height = item_height;
+    let assign_item_height = if has_bones { item_height + (bone_count as f32 * item_height) } else { item_height };
+    let unbind_height = item_height;
+    let menu_height = header_height + assign_item_height + unbind_height + 16.0;
+
+    // Keep menu on screen
+    let menu_x = menu.x.min(screen_width() - menu_width - 5.0);
+    let menu_y = menu.y.min(screen_height() - menu_height - 5.0);
+
+    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
+
+    // Draw menu background
+    draw_rectangle(menu_rect.x - 1.0, menu_rect.y - 1.0, menu_rect.w + 2.0, menu_rect.h + 2.0, Color::from_rgba(80, 80, 85, 255));
+    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
+
+    let mut y = menu_rect.y + 4.0;
+
+    // Header showing vertex count (derived from faces/edges if needed)
+    let vert_count = match &state.selection {
+        super::state::ModelerSelection::Vertices(v) => v.len(),
+        super::state::ModelerSelection::Faces(faces) => {
+            let mesh = state.mesh();
+            let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for &face_idx in faces {
+                if let Some(face) = mesh.faces.get(face_idx) {
+                    verts.extend(face.vertices.iter().copied());
+                }
+            }
+            verts.len()
+        }
+        super::state::ModelerSelection::Edges(edges) => {
+            let mut verts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for &(a, b) in edges {
+                verts.insert(a);
+                verts.insert(b);
+            }
+            verts.len()
+        }
+        _ => 0,
+    };
+    draw_text(&format!("{} vertices selected", vert_count), menu_rect.x + 8.0, y + 14.0, 12.0, TEXT_DIM);
+    y += item_height;
+
+    // Track actions
+    let mut assign_to_bone: Option<usize> = None;
+    let mut unbind_clicked = false;
+    let mut new_hovered_bone: Option<usize> = None;
+
+    if has_bones {
+        // "Assign to Bone" section header
+        draw_text("Assign to Bone:", menu_rect.x + 8.0, y + 14.0, 12.0, ACCENT_COLOR);
+        y += item_height;
+
+        // List all bones
+        let skeleton = state.skeleton();
+        for (idx, bone) in skeleton.iter().enumerate() {
+            let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+
+            // Hover highlight
+            let is_hovered = ctx.mouse.inside(&item_rect);
+            if is_hovered {
+                draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 80, 100, 255));
+                new_hovered_bone = Some(idx);
+
+                if ctx.mouse.left_pressed {
+                    assign_to_bone = Some(idx);
+                }
+            }
+
+            // Bone icon and name
+            let icon_color = if bone.parent.is_none() {
+                Color::from_rgba(255, 220, 100, 255) // Yellow for root
+            } else {
+                TEXT_COLOR
+            };
+            draw_text("◆", item_rect.x + 8.0, item_rect.y + 15.0, 10.0, icon_color);
+            draw_text(&bone.name, item_rect.x + 22.0, item_rect.y + 16.0, 14.0, TEXT_COLOR);
+
+            y += item_height;
+        }
+    } else {
+        // No bones available
+        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+        draw_text("No bones (add skeleton)", item_rect.x + 8.0, item_rect.y + 16.0, 12.0, TEXT_DIM);
+        y += item_height;
+    }
+
+    // Separator
+    y += 4.0;
+    draw_line(menu_rect.x + 8.0, y, menu_rect.right() - 8.0, y, 1.0, Color::from_rgba(70, 70, 75, 255));
+    y += 8.0;
+
+    // "Unbind from Bone" option
+    let unbind_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+    if ctx.mouse.inside(&unbind_rect) {
+        draw_rectangle(unbind_rect.x, unbind_rect.y, unbind_rect.w, unbind_rect.h, Color::from_rgba(60, 60, 70, 255));
+        if ctx.mouse.left_pressed {
+            unbind_clicked = true;
+        }
+    }
+    draw_text("Unbind from Bone", unbind_rect.x + 8.0, unbind_rect.y + 16.0, 14.0, TEXT_COLOR);
+
+    // Update hovered bone for viewport highlighting
+    if let Some(cm) = &mut state.context_menu {
+        cm.hovered_bone = new_hovered_bone;
+    }
+    // Also set hovered_bone on state for 3D highlighting
+    state.hovered_bone = new_hovered_bone;
+
+    // Handle actions
+    if let Some(bone_idx) = assign_to_bone {
+        state.assign_selected_vertices_to_bone(bone_idx);
+        state.context_menu = None;
+    }
+
+    if unbind_clicked {
+        state.unassign_selected_vertices();
+        state.context_menu = None;
+    }
+
+    // Close if clicked outside menu
+    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
+        state.context_menu = None;
+        state.hovered_bone = None;
+    }
+}
+
+/// Draw primitives context menu (original functionality)
+fn draw_primitives_context_menu(ctx: &mut UiContext, state: &mut ModelerState, menu: &super::state::ContextMenu) {
 
     // Menu dimensions
     let item_height = 24.0;
@@ -7084,14 +8147,10 @@ fn draw_object_dialogs(ctx: &mut UiContext, state: &mut ModelerState, icon_font:
                     }
                 }
 
-                // Update hidden_components indices (remove deleted, shift higher indices)
-                state.hidden_components.remove(&idx);
-                let new_hidden: std::collections::HashSet<usize> = state.hidden_components.iter()
-                    .filter_map(|&i| {
-                        if i > idx { Some(i - 1) } else { Some(i) }
-                    })
-                    .collect();
-                state.hidden_components = new_hidden;
+                // Update component_opacity (remove deleted entry)
+                if idx < state.component_opacity.len() {
+                    state.component_opacity.remove(idx);
+                }
 
                 state.dirty = true;
                 state.set_status(&format!("Deleted '{}' component", comp_name), 1.0);
@@ -7135,87 +8194,147 @@ fn screen_to_world_position(state: &ModelerState, _screen_x: f32, _screen_y: f32
 
 /// Draw the snap grid size dropdown menu
 fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
-    if !state.snap_menu_open {
-        return;
-    }
-
-    let snap_btn_rect = match state.snap_btn_rect {
-        Some(r) => r,
-        None => return,
+    let trigger_rect = match state.dropdown.trigger_rect {
+        Some(r) if state.dropdown.is_open("snap_menu") => r,
+        _ => return,
     };
 
     // Preset snap sizes (in world units)
     const SNAP_SIZES: &[f32] = &[8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
 
-    // Menu dimensions
     let item_height = 22.0;
-    let menu_width = 80.0;
-    let menu_height = SNAP_SIZES.len() as f32 * item_height + 8.0;
-
-    // Position menu below the snap button
-    let menu_x = snap_btn_rect.x;
-    let menu_y = snap_btn_rect.bottom() + 2.0;
+    let menu_rect = dropdown_menu_rect(trigger_rect, SNAP_SIZES.len(), item_height, Some(80.0));
 
     // Keep menu on screen
-    let menu_x = menu_x.min(screen_width() - menu_width - 5.0);
-    let menu_y = menu_y.min(screen_height() - menu_height - 5.0);
+    let menu_x = menu_rect.x.min(screen_width() - menu_rect.w - 5.0);
+    let menu_y = menu_rect.y.min(screen_height() - menu_rect.h - 5.0);
+    let menu_rect = Rect::new(menu_x, menu_y, menu_rect.w, menu_rect.h);
 
-    let menu_rect = Rect::new(menu_x, menu_y, menu_width, menu_height);
+    if !begin_dropdown(ctx, &mut state.dropdown, "snap_menu", menu_rect) {
+        return;
+    }
 
-    // Draw menu background with border
-    draw_rectangle(menu_rect.x - 1.0, menu_rect.y - 1.0, menu_rect.w + 2.0, menu_rect.h + 2.0, Color::from_rgba(80, 80, 85, 255));
-    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, Color::from_rgba(45, 45, 50, 255));
-
-    let mut y = menu_rect.y + 4.0;
-    let mut clicked_size: Option<f32> = None;
+    let mut y = menu_rect.y + 2.0;
 
     for &size in SNAP_SIZES {
-        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_width - 4.0, item_height);
+        let item_rect = Rect::new(menu_rect.x + 2.0, y, menu_rect.w - 4.0, item_height);
         let is_current = (state.snap_settings.grid_size - size).abs() < 0.1;
-
-        // Hover highlight
-        if ctx.mouse.inside(&item_rect) {
-            draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, Color::from_rgba(60, 60, 70, 255));
-            if ctx.mouse.left_pressed {
-                clicked_size = Some(size);
-            }
-        }
-
-        // Current selection indicator
-        let text_color = if is_current { ACCENT_COLOR } else { TEXT_COLOR };
         let label = format!("{}", size as i32);
-        draw_text(&label, item_rect.x + 8.0, item_rect.y + 15.0, 13.0, text_color);
 
-        // Checkmark for current size
-        if is_current {
-            draw_text("✓", item_rect.right() - 18.0, item_rect.y + 15.0, 13.0, ACCENT_COLOR);
+        if dropdown_item(ctx, item_rect, &label, None, is_current) {
+            state.snap_settings.grid_size = size;
+            state.dropdown.close();
+            state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
         }
 
         y += item_height;
     }
+}
 
-    // Handle click on menu item
-    if let Some(size) = clicked_size {
-        state.snap_settings.grid_size = size;
-        state.snap_menu_open = false;
-        state.set_status(&format!("Snap Grid: {} units", size as i32), 1.5);
-        // Consume the click so it doesn't propagate to viewport
-        ctx.mouse.left_pressed = false;
+// ============================================================================
+// Radial Menu (Hold-Tab Context Menu)
+// ============================================================================
+
+/// Open the radial menu at the given position with context-appropriate items
+fn open_radial_menu(state: &mut ModelerState, x: f32, y: f32) {
+    use super::radial_menu::{RadialMenuItem, build_context_items};
+
+    // Determine what's selected
+    let has_vertex_selection = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if !v.is_empty());
+    let has_face_selection = matches!(&state.selection, super::state::ModelerSelection::Faces(f) if !f.is_empty());
+    let has_edge_selection = matches!(&state.selection, super::state::ModelerSelection::Edges(e) if !e.is_empty());
+
+    // Get bone names if skeleton exists
+    let bone_names: Vec<String> = state.skeleton().iter().map(|b| b.name.clone()).collect();
+
+    // Build context-sensitive items
+    let items = build_context_items(has_vertex_selection, has_face_selection, has_edge_selection, &bone_names);
+
+    state.radial_menu.open(x, y, items);
+}
+
+/// Draw and handle the radial menu
+fn draw_and_handle_radial_menu(ctx: &mut UiContext, state: &mut ModelerState) {
+    use super::radial_menu::{draw_radial_menu, RadialMenuConfig};
+
+    if !state.radial_menu.is_open {
+        return;
     }
 
-    // Consume clicks inside menu area (don't propagate to viewport)
-    if ctx.mouse.left_pressed && ctx.mouse.inside(&menu_rect) {
-        ctx.mouse.left_pressed = false;
+    // Close on Escape
+    if is_key_pressed(KeyCode::Escape) {
+        state.radial_menu.close(false);
+        return;
     }
 
-    // Close menu on click outside (but not on the button that opened it)
-    if ctx.mouse.left_pressed && !ctx.mouse.inside(&menu_rect) {
-        // Don't close if clicking the snap button (it handles its own toggle)
-        let clicking_button = state.snap_btn_rect.map_or(false, |r| ctx.mouse.inside(&r));
-        if !clicking_button {
-            state.snap_menu_open = false;
-            // Consume the click so it doesn't propagate to viewport
-            ctx.mouse.left_pressed = false;
+    // Draw and handle the menu
+    let config = RadialMenuConfig::default();
+    if let Some(selected_id) = draw_radial_menu(&mut state.radial_menu, &config, ctx.mouse.x, ctx.mouse.y) {
+        handle_radial_menu_action(state, &selected_id);
+    }
+
+    // Close if clicked outside (check after drawing so we know the menu bounds)
+    // The draw function handles click-to-select internally
+}
+
+/// Handle a radial menu action by ID
+fn handle_radial_menu_action(state: &mut ModelerState, action_id: &str) {
+    // Handle bone assignment (bone_0, bone_1, etc.)
+    if let Some(idx_str) = action_id.strip_prefix("bone_") {
+        if let Ok(bone_idx) = idx_str.parse::<usize>() {
+            state.assign_selected_vertices_to_bone(bone_idx);
+            return;
         }
     }
+
+    match action_id {
+        "unbind" => {
+            state.unassign_selected_vertices();
+        }
+        "merge" => {
+            // TODO: Implement merge vertices
+            state.set_status("Merge vertices (not yet implemented)", 1.5);
+        }
+        "split" => {
+            // TODO: Implement split
+            state.set_status("Split (not yet implemented)", 1.5);
+        }
+        "extrude" => {
+            // TODO: Trigger extrude
+            state.set_status("Extrude (not yet implemented)", 1.5);
+        }
+        "inset" => {
+            state.set_status("Inset (not yet implemented)", 1.5);
+        }
+        "flip" => {
+            state.set_status("Flip normal (not yet implemented)", 1.5);
+        }
+        "prim_cube" => {
+            add_primitive_at_origin(state, PrimitiveType::Cube);
+        }
+        "prim_plane" => {
+            add_primitive_at_origin(state, PrimitiveType::Plane);
+        }
+        "prim_cylinder" => {
+            add_primitive_at_origin(state, PrimitiveType::Cylinder);
+        }
+        "prim_prism" => {
+            add_primitive_at_origin(state, PrimitiveType::Prism);
+        }
+        _ => {
+            // Unknown action
+        }
+    }
+}
+
+/// Add a primitive at origin as a new object
+fn add_primitive_at_origin(state: &mut ModelerState, prim: PrimitiveType) {
+    state.push_undo(&format!("Add {}", prim.label()));
+    let size = 512.0;
+    let new_mesh = prim.create(size);
+    let base_name = prim.label().split_whitespace().next().unwrap_or("Object");
+    let name = state.generate_unique_object_name(base_name);
+    let obj = MeshPart::with_mesh(&name, new_mesh);
+    state.add_object(obj);
+    state.set_status(&format!("Added {}", prim.label()), 1.0);
 }

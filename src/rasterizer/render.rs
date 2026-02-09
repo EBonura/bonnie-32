@@ -332,6 +332,93 @@ impl Framebuffer {
         }
     }
 
+    /// Set pixel with PS1-style blending + editor alpha multiplier
+    /// Final = lerp(back, ps1_blend_result, editor_alpha/255)
+    /// editor_alpha=255: game-accurate, editor_alpha<255: fade for editor visualization
+    pub fn set_pixel_with_editor_alpha(
+        &mut self, x: usize, y: usize,
+        color: Color, mode: BlendMode, editor_alpha: u8
+    ) {
+        if editor_alpha == 0 { return; } // Fully invisible
+        if x >= self.width || y >= self.height { return; }
+
+        let idx = (y * self.width + x) * 4;
+
+        // Read existing pixel (back)
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+        let back = Color::with_blend(back_r, back_g, back_b, BlendMode::Opaque);
+
+        // Step 1: PS1 blend
+        let ps1_result = color.blend(back, mode);
+
+        // Step 2: Editor alpha (skip lerp if fully opaque)
+        let final_color = if editor_alpha < 255 {
+            let a = editor_alpha as f32 / 255.0;
+            let inv_a = 1.0 - a;
+            Color::new(
+                (ps1_result.r as f32 * a + back_r as f32 * inv_a) as u8,
+                (ps1_result.g as f32 * a + back_g as f32 * inv_a) as u8,
+                (ps1_result.b as f32 * a + back_b as f32 * inv_a) as u8,
+            )
+        } else {
+            ps1_result
+        };
+
+        let bytes = final_color.to_bytes();
+        self.pixels[idx] = bytes[0];
+        self.pixels[idx + 1] = bytes[1];
+        self.pixels[idx + 2] = bytes[2];
+        self.pixels[idx + 3] = bytes[3];
+    }
+
+    /// Set pixel with depth test + PS1 blend + editor alpha
+    pub fn set_pixel_with_depth_and_editor_alpha(
+        &mut self, x: usize, y: usize, z: f32,
+        color: Color, mode: BlendMode, editor_alpha: u8
+    ) -> bool {
+        if editor_alpha == 0 { return false; }
+        if x >= self.width || y >= self.height { return false; }
+
+        let depth_idx = y * self.width + x;
+        if z >= self.zbuffer[depth_idx] { return false; }
+
+        // Depth test passed - update zbuffer
+        self.zbuffer[depth_idx] = z;
+
+        let idx = depth_idx * 4;
+
+        // Read existing pixel (back)
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+        let back = Color::with_blend(back_r, back_g, back_b, BlendMode::Opaque);
+
+        // Step 1: PS1 blend
+        let ps1_result = color.blend(back, mode);
+
+        // Step 2: Editor alpha
+        let final_color = if editor_alpha < 255 {
+            let a = editor_alpha as f32 / 255.0;
+            let inv_a = 1.0 - a;
+            Color::new(
+                (ps1_result.r as f32 * a + back_r as f32 * inv_a) as u8,
+                (ps1_result.g as f32 * a + back_g as f32 * inv_a) as u8,
+                (ps1_result.b as f32 * a + back_b as f32 * inv_a) as u8,
+            )
+        } else {
+            ps1_result
+        };
+
+        let bytes = final_color.to_bytes();
+        self.pixels[idx] = bytes[0];
+        self.pixels[idx + 1] = bytes[1];
+        self.pixels[idx + 2] = bytes[2];
+        self.pixels[idx + 3] = bytes[3];
+        true
+    }
+
     pub fn set_pixel_with_depth(&mut self, x: usize, y: usize, z: f32, color: Color) -> bool {
         if x < self.width && y < self.height {
             let idx = y * self.width + x;
@@ -472,6 +559,72 @@ impl Framebuffer {
             }
         }
         false
+    }
+
+    /// RGB555 pixel write with editor alpha blending (no depth test)
+    /// Step 1: Apply PS1 blend if semi-transparent, Step 2: Lerp with background by editor_alpha
+    #[inline]
+    pub fn set_pixel_with_editor_alpha_15(
+        &mut self, x: usize, y: usize,
+        color: Color15, blend_mode: BlendMode, editor_alpha: u8,
+    ) {
+        if editor_alpha == 0 || x >= self.width || y >= self.height { return; }
+        let idx = (y * self.width + x) * 4;
+
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+
+        // Step 1: PS1 blend if semi-transparent
+        let (ps1_r, ps1_g, ps1_b) = if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+            blend_rgb555(color.r8(), color.g8(), color.b8(), back_r, back_g, back_b, blend_mode)
+        } else {
+            (color.r8(), color.g8(), color.b8())
+        };
+
+        // Step 2: editor alpha lerp
+        let a = editor_alpha as u16;
+        let inv_a = 255 - a;
+        self.pixels[idx]     = ((ps1_r as u16 * a + back_r as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 1] = ((ps1_g as u16 * a + back_g as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 2] = ((ps1_b as u16 * a + back_b as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 3] = 255;
+    }
+
+    /// RGB555 pixel write with depth test + editor alpha blending
+    #[inline]
+    pub fn set_pixel_with_depth_and_editor_alpha_15(
+        &mut self, x: usize, y: usize, z: f32,
+        color: Color15, blend_mode: BlendMode, editor_alpha: u8,
+        skip_z_write: bool,
+    ) -> bool {
+        if editor_alpha == 0 || x >= self.width || y >= self.height { return false; }
+        let depth_idx = y * self.width + x;
+        if z >= self.zbuffer[depth_idx] { return false; }
+        if !skip_z_write {
+            self.zbuffer[depth_idx] = z;
+        }
+
+        let idx = depth_idx * 4;
+        let back_r = self.pixels[idx];
+        let back_g = self.pixels[idx + 1];
+        let back_b = self.pixels[idx + 2];
+
+        // Step 1: PS1 blend if semi-transparent
+        let (ps1_r, ps1_g, ps1_b) = if color.is_semi_transparent() && blend_mode != BlendMode::Opaque {
+            blend_rgb555(color.r8(), color.g8(), color.b8(), back_r, back_g, back_b, blend_mode)
+        } else {
+            (color.r8(), color.g8(), color.b8())
+        };
+
+        // Step 2: editor alpha lerp
+        let a = editor_alpha as u16;
+        let inv_a = 255 - a;
+        self.pixels[idx]     = ((ps1_r as u16 * a + back_r as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 1] = ((ps1_g as u16 * a + back_g as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 2] = ((ps1_b as u16 * a + back_b as u16 * inv_a) / 255) as u8;
+        self.pixels[idx + 3] = 255;
+        true
     }
 
     /// Draw a filled circle at (cx, cy) with given radius and color
@@ -842,6 +995,8 @@ struct Surface {
     pub face_idx: usize,
     pub black_transparent: bool, // If true, black pixels are transparent (PS1 CLUT-style)
     pub has_transparency: bool,  // True if this face uses semi-transparency (for two-pass rendering)
+    pub blend_mode: BlendMode, // PS1 blend mode for this face
+    pub editor_alpha: u8, // Editor-only alpha (255=opaque, 0=invisible)
 }
 
 /// Calculate shading intensity from a single directional light
@@ -1081,6 +1236,15 @@ fn rasterize_triangle(
         None
     };
 
+    // PS1 dithering rule: only dither Gouraud-shaded or texture-modulated polygons.
+    // Flat-shaded untextured uniform-color triangles are NOT dithered on real hardware.
+    let needs_dither = settings.dithering && (
+        settings.shading == ShadingMode::Gouraud
+        || texture.is_some()
+        || surface.vc1 != surface.vc2
+        || surface.vc2 != surface.vc3
+    );
+
     // === EDGE FUNCTION SETUP ===
     // Edge function: E(x,y) = (y1-y2)*x + (x2-x1)*y + (x1*y2 - x2*y1)
     // For barycentric: bc.x = E23/area, bc.y = E31/area, bc.z = E12/area
@@ -1217,14 +1381,26 @@ fn rasterize_triangle(
                 color = shade_color_rgb(color, shade_r, shade_g, shade_b);
 
                 // Apply PS1-style ordered dithering
-                if settings.dithering {
+                // PS1 rule: only dither Gouraud-shaded or texture-modulated polygons
+                if needs_dither {
                     color = apply_dither(color, x, y);
                 }
 
-                // Write pixel
+                // Write pixel (with editor alpha support)
+                let editor_alpha = surface.editor_alpha;
+                if editor_alpha == 0 {
+                    // Fully invisible - skip
+                    w0 += a0_step;
+                    w1 += a1_step;
+                    continue;
+                }
+
                 if settings.use_zbuffer {
                     // Z-buffer mode: test depth before writing
-                    if color.blend == BlendMode::Opaque {
+                    if editor_alpha < 255 {
+                        // Use editor alpha blending
+                        fb.set_pixel_with_depth_and_editor_alpha(x, y, z, color, color.blend, editor_alpha);
+                    } else if color.blend == BlendMode::Opaque {
                         fb.set_pixel_with_depth(x, y, z, color);
                     } else {
                         let idx = y * fb.width + x;
@@ -1235,7 +1411,9 @@ fn rasterize_triangle(
                     }
                 } else {
                     // Painter's algorithm: just write (surfaces are pre-sorted)
-                    if color.blend == BlendMode::Opaque {
+                    if editor_alpha < 255 {
+                        fb.set_pixel_with_editor_alpha(x, y, color, color.blend, editor_alpha);
+                    } else if color.blend == BlendMode::Opaque {
                         fb.set_pixel(x, y, color);
                     } else {
                         fb.set_pixel_blended(x, y, color, color.blend);
@@ -1303,6 +1481,15 @@ fn rasterize_triangle_15(
     } else {
         None
     };
+
+    // PS1 dithering rule: only dither Gouraud-shaded or texture-modulated polygons.
+    // Flat-shaded untextured uniform-color triangles are NOT dithered on real hardware.
+    let needs_dither = settings.dithering && (
+        settings.shading == ShadingMode::Gouraud
+        || texture.is_some()
+        || surface.vc1 != surface.vc2
+        || surface.vc2 != surface.vc3
+    );
 
     // === EDGE FUNCTION SETUP ===
     let v1 = surface.v1;
@@ -1458,7 +1645,8 @@ fn rasterize_triangle_15(
                 let shaded_b8 = (mod_b8 as f32 * shade_b.clamp(0.0, 2.0)).min(255.0) as u8;
 
                 // Final quantization: dither (if enabled) and convert 8-bit to 5-bit
-                let (r5, g5, b5) = if settings.dithering {
+                // PS1 rule: only dither Gouraud-shaded or texture-modulated polygons
+                let (r5, g5, b5) = if needs_dither {
                     dither_and_quantize(shaded_r8, shaded_g8, shaded_b8, x, y)
                 } else {
                     // Simple truncation without dithering
@@ -1472,10 +1660,24 @@ fn rasterize_triangle_15(
                 let semi = color.is_semi_transparent() || is_all_black;
                 let color = Color15::new_semi(r5, g5, b5, semi);
 
-                // Write pixel
+                // Write pixel (with editor alpha support)
+                let editor_alpha = surface.editor_alpha;
+                if editor_alpha == 0 {
+                    w0 += a0_step;
+                    w1 += a1_step;
+                    continue;
+                }
+
                 if settings.xray_mode {
                     // X-ray mode: always blend at 50% alpha, no z-buffer update
                     fb.set_pixel_xray_15(x, y, color);
+                } else if editor_alpha < 255 {
+                    // Editor alpha: blend with background for transparency visualization
+                    if settings.use_zbuffer {
+                        fb.set_pixel_with_depth_and_editor_alpha_15(x, y, z, color, blend_mode, editor_alpha, skip_z_write);
+                    } else {
+                        fb.set_pixel_with_editor_alpha_15(x, y, color, blend_mode, editor_alpha);
+                    }
                 } else if settings.use_zbuffer {
                     // Z-buffer mode: test depth before writing
                     let idx = y * fb.width + x;
@@ -1556,6 +1758,15 @@ fn rasterize_triangle_indexed(
     } else {
         None
     };
+
+    // PS1 dithering rule: only dither Gouraud-shaded or texture-modulated polygons.
+    // Flat-shaded untextured uniform-color triangles are NOT dithered on real hardware.
+    let needs_dither = settings.dithering && (
+        settings.shading == ShadingMode::Gouraud
+        || indexed_texture.is_some()
+        || surface.vc1 != surface.vc2
+        || surface.vc2 != surface.vc3
+    );
 
     // === EDGE FUNCTION SETUP ===
     let v1 = surface.v1;
@@ -1709,7 +1920,8 @@ fn rasterize_triangle_indexed(
                 let shaded_b8 = (mod_b8 as f32 * shade_b.clamp(0.0, 2.0)).min(255.0) as u8;
 
                 // Final quantization with dithering
-                let (r5, g5, b5) = if settings.dithering {
+                // PS1 rule: only dither Gouraud-shaded or texture-modulated polygons
+                let (r5, g5, b5) = if needs_dither {
                     dither_and_quantize(shaded_r8, shaded_g8, shaded_b8, x, y)
                 } else {
                     (shaded_r8 >> 3, shaded_g8 >> 3, shaded_b8 >> 3)
@@ -1855,11 +2067,12 @@ pub fn render_mesh(
         let edge2 = cv3 - cv1;
         let normal = edge1.cross(edge2).normalize();
 
-        // Determine if this face uses semi-transparency (8-bit path: check texture's blend_mode)
+        // Determine if this face uses semi-transparency (8-bit path: check texture's blend_mode or editor_alpha)
         let has_transparency = face.texture_id
             .and_then(|id| textures.get(id))
             .map(|t| t.blend_mode != BlendMode::Opaque)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || face.editor_alpha < 255;
 
         if is_backface {
             // Back-face: collect for wireframe rendering (skip in xray mode)
@@ -1893,6 +2106,8 @@ pub fn render_mesh(
                     face_idx,
                     black_transparent: face.black_transparent,
                     has_transparency,
+                    blend_mode: face.blend_mode,
+                    editor_alpha: face.editor_alpha,
                 });
             }
         } else {
@@ -1920,6 +2135,8 @@ pub fn render_mesh(
                 face_idx,
                 black_transparent: face.black_transparent,
                 has_transparency,
+                blend_mode: face.blend_mode,
+                editor_alpha: face.editor_alpha,
             });
 
             // Collect for wireframe overlay
@@ -2087,7 +2304,6 @@ pub fn render_mesh_15(
     vertices: &[Vertex],
     faces: &[Face],
     textures: &[Texture15],
-    face_blend_modes: Option<&[BlendMode]>,
     camera: &Camera,
     settings: &RasterSettings,
     fog: Option<(f32, f32, f32, Color)>,
@@ -2183,20 +2399,18 @@ pub fn render_mesh_15(
         let normal = edge1.cross(edge2).normalize();
 
         // Determine if this face uses semi-transparency (for two-pass rendering)
-        // Check texture's blend_mode first, then face blend mode
+        // Check texture's blend_mode, face's blend_mode, and editor_alpha
         let has_transparency = {
             let tex_blend = face.texture_id
                 .and_then(|id| textures.get(id))
                 .map(|t| t.blend_mode);
-            let face_blend = face_blend_modes
-                .and_then(|modes| modes.get(face_idx))
-                .copied();
 
-            // Face is transparent if texture or face has non-Opaque blend mode
-            match (tex_blend, face_blend) {
+            // Face is transparent if texture or face has non-Opaque blend mode,
+            // or if editor_alpha is less than fully opaque
+            match (tex_blend, face.blend_mode) {
                 (Some(b), _) if b != BlendMode::Opaque => true,
-                (None, Some(b)) if b != BlendMode::Opaque => true,
-                _ => false,
+                (_, b) if b != BlendMode::Opaque => true,
+                _ => face.editor_alpha < 255,
             }
         };
 
@@ -2260,6 +2474,8 @@ pub fn render_mesh_15(
                     face_idx,
                     black_transparent: face.black_transparent,
                     has_transparency,
+                    blend_mode: face.blend_mode,
+                    editor_alpha: face.editor_alpha,
                 });
             }
         } else {
@@ -2286,6 +2502,8 @@ pub fn render_mesh_15(
                 face_idx,
                 black_transparent: face.black_transparent,
                 has_transparency,
+                blend_mode: face.blend_mode,
+                editor_alpha: face.editor_alpha,
             });
 
             if settings.wireframe_overlay {
@@ -2337,12 +2555,7 @@ pub fn render_mesh_15(
                 .texture_id
                 .and_then(|id| textures.get(id));
 
-            let blend_mode = face_blend_modes
-                .and_then(|modes| modes.get(surface.face_idx))
-                .copied()
-                .unwrap_or(BlendMode::Opaque);
-
-            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, false);
+            rasterize_triangle_15(fb, surface, texture, surface.blend_mode, surface.black_transparent, settings, false);
         }
 
         // PASS 2: Render semi-transparent surfaces (z-buffer writes DISABLED)
@@ -2352,12 +2565,7 @@ pub fn render_mesh_15(
                 .texture_id
                 .and_then(|id| textures.get(id));
 
-            let blend_mode = face_blend_modes
-                .and_then(|modes| modes.get(surface.face_idx))
-                .copied()
-                .unwrap_or(BlendMode::Opaque);
-
-            rasterize_triangle_15(fb, surface, texture, blend_mode, surface.black_transparent, settings, true);
+            rasterize_triangle_15(fb, surface, texture, surface.blend_mode, surface.black_transparent, settings, true);
         }
     }
 

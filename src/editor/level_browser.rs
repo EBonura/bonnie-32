@@ -5,11 +5,9 @@
 
 use macroquad::prelude::*;
 use crate::storage::{Storage, PendingLoad, PendingList};
-use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR};
+use crate::ui::{Rect, UiContext, draw_icon_centered, ACCENT_COLOR, TextInputState, draw_text_input};
 use crate::world::Level;
-use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, render_mesh, render_mesh_15, Color as RasterColor, Vec3, RasterSettings, Light, ShadingMode, Vertex, Clut, ClutId};
-use crate::modeler::{checkerboard_clut, IndexedAtlas, TextureRef};
-use crate::asset::AssetComponent;
+use crate::rasterizer::{Framebuffer, Texture as RasterTexture, Camera, Color as RasterColor, Vec3, RasterSettings, ShadingMode};
 use super::sample_levels::{LevelInfo, LevelCategory, LevelStats, get_level_stats};
 use super::TexturePack;
 
@@ -51,6 +49,8 @@ pub struct LevelBrowser {
     pub pending_preview_load: Option<PendingLoad>,
     /// Pending async user level list (native cloud storage)
     pub pending_user_list: Option<PendingList>,
+    /// Active rename dialog (TextInputState for the new name)
+    pub rename_dialog: Option<TextInputState>,
     /// Local framebuffer for preview rendering (avoids resizing main fb)
     preview_fb: Framebuffer,
 }
@@ -78,6 +78,7 @@ impl Default for LevelBrowser {
             pending_load_list: false,
             pending_preview_load: None,
             pending_user_list: None,
+            rename_dialog: None,
             preview_fb: Framebuffer::new(320, 240), // Initial size, will resize as needed
         }
     }
@@ -225,6 +226,8 @@ pub enum BrowserAction {
     OpenCopy,
     /// User wants to delete the selected user level
     DeleteLevel,
+    /// User wants to rename the selected user level
+    RenameLevel,
     /// User wants to start with a new empty level
     NewLevel,
     /// User wants to refresh the level list
@@ -362,8 +365,17 @@ pub fn draw_level_browser(
         action = BrowserAction::DeleteLevel;
     }
 
+    // Rename button (for any selected level with a preview loaded)
+    let rename_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    let rename_enabled = browser.selected_level().is_some() && browser.preview_level.is_some();
+    if draw_text_button_enabled(ctx, rename_rect, "Rename", Color::from_rgba(60, 80, 100, 255), rename_enabled) {
+        if let Some(info) = browser.selected_level() {
+            browser.rename_dialog = Some(TextInputState::new(&info.name));
+        }
+    }
+
     // Refresh button - reload level lists from storage
-    let refresh_rect = Rect::new(dialog_x + 170.0, footer_y + 8.0, 70.0, 28.0);
+    let refresh_rect = Rect::new(dialog_x + 250.0, footer_y + 8.0, 70.0, 28.0);
     if draw_text_button(ctx, refresh_rect, "Refresh", Color::from_rgba(60, 60, 70, 255)) {
         action = BrowserAction::Refresh;
     }
@@ -388,9 +400,48 @@ pub fn draw_level_browser(
         action = BrowserAction::OpenLevel;
     }
 
-    // Handle Escape to close
-    if is_key_pressed(KeyCode::Escape) {
-        action = BrowserAction::Cancel;
+    // Rename dialog overlay
+    if browser.rename_dialog.is_some() {
+        let rdw = 280.0;
+        let rdh = 120.0;
+        let rdx = (screen_width() - rdw) / 2.0;
+        let rdy = (screen_height() - rdh) / 2.0;
+
+        draw_rectangle(rdx, rdy, rdw, rdh, Color::from_rgba(45, 45, 50, 255));
+        draw_rectangle_lines(rdx, rdy, rdw, rdh, 2.0, Color::from_rgba(80, 80, 90, 255));
+        draw_text("Rename Level", rdx + 12.0, rdy + 22.0, 16.0, WHITE);
+
+        let input_rect = Rect::new(rdx + 12.0, rdy + 40.0, rdw - 24.0, 28.0);
+        if let Some(ref mut input_state) = browser.rename_dialog {
+            draw_text_input(input_rect, input_state, 14.0);
+        }
+
+        let btn_w = 80.0;
+        let btn_h = 28.0;
+        let btn_y = rdy + rdh - btn_h - 12.0;
+
+        let cancel_rect = Rect::new(rdx + rdw - btn_w * 2.0 - 20.0, btn_y, btn_w, btn_h);
+        let cancel_hover = ctx.mouse.inside(&cancel_rect);
+        draw_rectangle(cancel_rect.x, cancel_rect.y, cancel_rect.w, cancel_rect.h,
+            if cancel_hover { Color::from_rgba(70, 70, 75, 255) } else { Color::from_rgba(55, 55, 60, 255) });
+        draw_text("Cancel", cancel_rect.x + 18.0, cancel_rect.y + 18.0, 14.0, Color::from_rgba(200, 200, 200, 255));
+
+        let confirm_rect = Rect::new(rdx + rdw - btn_w - 12.0, btn_y, btn_w, btn_h);
+        let confirm_hover = ctx.mouse.inside(&confirm_rect);
+        draw_rectangle(confirm_rect.x, confirm_rect.y, confirm_rect.w, confirm_rect.h,
+            if confirm_hover { Color::from_rgba(60, 100, 140, 255) } else { ACCENT_COLOR });
+        draw_text("Rename", confirm_rect.x + 14.0, confirm_rect.y + 18.0, 14.0, WHITE);
+
+        if ctx.mouse.clicked(&cancel_rect) || is_key_pressed(KeyCode::Escape) {
+            browser.rename_dialog = None;
+        } else if ctx.mouse.clicked(&confirm_rect) || is_key_pressed(KeyCode::Enter) {
+            action = BrowserAction::RenameLevel;
+        }
+    } else {
+        // Handle Escape to close (only when rename dialog is not open)
+        if is_key_pressed(KeyCode::Escape) {
+            action = BrowserAction::Cancel;
+        }
     }
 
     action
@@ -656,52 +707,17 @@ fn draw_orbit_preview(
     fb.clear(RasterColor::new(15, 15, 20));
 
     // Build lighting from level
-    let mut lights = Vec::new();
-    let mut total_ambient = 0.0;
-    let mut room_count = 0;
-    for room in &level.rooms {
-        total_ambient += room.ambient;
-        room_count += 1;
-    }
-    // Collect lights from room objects (any asset with Light component)
-    for room in &level.rooms {
-        for obj in room.objects.iter().filter(|o| o.enabled) {
-            let asset = match asset_library.get_by_id(obj.asset_id) {
-                Some(a) => a,
-                None => continue,
-            };
-            // Find Light component and extract its properties
-            for comp in &asset.components {
-                if let AssetComponent::Light { color, intensity, radius, offset } = comp {
-                    // Apply per-instance overrides if present
-                    let overrides = &obj.overrides.light;
-                    let final_color = overrides.as_ref().and_then(|o| o.color).unwrap_or(*color);
-                    let final_intensity = overrides.as_ref().and_then(|o| o.intensity).unwrap_or(*intensity);
-                    let final_radius = overrides.as_ref().and_then(|o| o.radius).unwrap_or(*radius);
-                    let final_offset = overrides.as_ref().and_then(|o| o.offset).unwrap_or(*offset);
-
-                    let base_pos = obj.world_position(room);
-                    // Apply light offset to get actual light position
-                    let light_pos = Vec3::new(
-                        base_pos.x + final_offset[0],
-                        base_pos.y + final_offset[1],
-                        base_pos.z + final_offset[2],
-                    );
-                    // Convert color from [u8; 3] to normalized RGB
-                    let r = final_color[0] as f32 / 255.0;
-                    let g = final_color[1] as f32 / 255.0;
-                    let b = final_color[2] as f32 / 255.0;
-                    lights.push(Light::point_colored(light_pos, final_radius, final_intensity, r, g, b));
-                }
-            }
-        }
-    }
-    let ambient = if room_count > 0 { total_ambient / room_count as f32 } else { 0.5 };
+    let lights = crate::scene::collect_scene_lights(&level.rooms, asset_library);
+    let ambient = if !level.rooms.is_empty() {
+        level.rooms.iter().map(|r| r.ambient).sum::<f32>() / level.rooms.len() as f32
+    } else {
+        0.5
+    };
 
     // Render settings with Gouraud shading and room lights
     let settings = RasterSettings {
         shading: ShadingMode::Gouraud,
-        lights,
+        lights: lights.clone(),
         ambient,
         ..RasterSettings::default()
     };
@@ -725,21 +741,19 @@ fn draw_orbit_preview(
     let mut texture_idx = 0;
     for pack in texture_packs {
         for tex in &pack.textures {
-            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64)); // Pack textures are 64x64
+            texture_map.insert((pack.name.clone(), tex.name.clone()), (texture_idx, 64));
             texture_idx += 1;
         }
     }
-    // Add user textures (using _USER pack name convention)
     for name in user_textures.names() {
         let width = user_textures.get(name).map(|t| t.width as u32).unwrap_or(64);
         texture_map.insert((crate::world::USER_TEXTURE_PACK.to_string(), name.to_string()), (texture_idx, width));
         texture_idx += 1;
     }
 
-    // Texture resolver - returns (texture_id, texture_width)
     let resolve_texture = |tex_ref: &crate::world::TextureRef| -> Option<(usize, u32)> {
         if !tex_ref.is_valid() {
-            return Some((0, 64)); // Fallback to first texture with default 64x64 size
+            return Some((0, 64));
         }
         texture_map.get(&(tex_ref.pack.clone(), tex_ref.name.clone())).copied()
     };
@@ -752,110 +766,24 @@ fn draw_orbit_preview(
         Vec::new()
     };
 
-    // Render each room using the same method as the main viewport
-    for room in &level.rooms {
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        if !vertices.is_empty() {
-            if use_rgb555 {
-                render_mesh_15(fb, &vertices, &faces, &textures_15, None, &camera, &settings, None);
-            } else {
-                render_mesh(fb, &vertices, &faces, &textures, &camera, &settings);
-            }
-        }
-    }
-
-    // Render asset meshes placed in each room
-    let fallback_clut = checkerboard_clut();
-    for room in &level.rooms {
-        for obj in &room.objects {
-            if !obj.enabled {
-                continue;
-            }
-
-            // Get asset from library
-            let asset = match asset_library.get_by_id(obj.asset_id) {
-                Some(a) => a,
-                None => continue,
-            };
-
-            // Get mesh parts from asset
-            let mesh_parts = match asset.mesh() {
-                Some(parts) => parts,
-                None => continue,
-            };
-
-            // Calculate world transform
-            let world_pos = obj.world_position(room);
-            let facing = obj.facing;
-            let cos_f = facing.cos();
-            let sin_f = facing.sin();
-
-            // Per-room render settings
-            let asset_settings = RasterSettings {
-                lights: settings.lights.clone(),
-                ambient,
-                ..settings.clone()
-            };
-
-            // Render each visible mesh part
-            for part in mesh_parts.iter().filter(|p| p.visible) {
-                let (local_vertices, faces) = part.mesh.to_render_data_textured();
-                if local_vertices.is_empty() {
-                    continue;
-                }
-
-                // Transform vertices: rotate around Y by facing, then translate
-                let transformed_vertices: Vec<Vertex> = local_vertices.iter().map(|v| {
-                    let rx = v.pos.x * cos_f - v.pos.z * sin_f;
-                    let rz = v.pos.x * sin_f + v.pos.z * cos_f;
-                    Vertex {
-                        pos: Vec3::new(rx + world_pos.x, v.pos.y + world_pos.y, rz + world_pos.z),
-                        uv: v.uv,
-                        normal: Vec3::new(
-                            v.normal.x * cos_f - v.normal.z * sin_f,
-                            v.normal.y,
-                            v.normal.x * sin_f + v.normal.z * cos_f,
-                        ),
-                        color: v.color,
-                        bone_index: v.bone_index,
-                    }
-                }).collect();
-
-                // Resolve texture: use UserTexture data for Id refs, otherwise use atlas with fallback
-                let (atlas, clut) = match &part.texture_ref {
-                    TextureRef::Id(id) => {
-                        // Find user texture by ID and create atlas + CLUT from it
-                        if let Some(tex) = user_textures.get_by_id(*id) {
-                            let atlas = IndexedAtlas {
-                                width: tex.width,
-                                height: tex.height,
-                                depth: tex.depth,
-                                indices: tex.indices.clone(),
-                                default_clut: ClutId::NONE,
-                            };
-                            let mut clut = Clut::new_4bit("preview_texture");
-                            clut.colors = tex.palette.clone();
-                            clut.depth = tex.depth;
-                            (atlas, clut)
-                        } else {
-                            (part.atlas.clone(), fallback_clut.clone())
-                        }
-                    }
-                    _ => (part.atlas.clone(), fallback_clut.clone()),
-                };
-
-                if use_rgb555 {
-                    let tex15 = atlas.to_texture15(&clut, "preview_asset");
-                    let part_textures = [tex15];
-                    render_mesh_15(fb, &transformed_vertices, &faces, &part_textures, None, &camera, &asset_settings, None);
-                } else {
-                    let tex = atlas.to_raster_texture(&clut, "preview_asset");
-                    let part_textures = [tex];
-                    render_mesh(fb, &transformed_vertices, &faces, &part_textures, &camera, &asset_settings);
-                }
-            }
-        }
-    }
+    // Render rooms + asset meshes in one pass
+    crate::scene::render_scene(
+        fb,
+        &level.rooms,
+        asset_library,
+        user_textures,
+        &camera,
+        &settings,
+        &lights,
+        &textures,
+        &textures_15,
+        &resolve_texture,
+        &crate::scene::SceneRenderOptions {
+            use_fog: false,
+            render_assets: true,
+            skip_rooms: &[],
+        },
+    );
 
     // Draw framebuffer to screen
     let fb_texture = Texture2D::from_rgba8(fb.width as u16, fb.height as u16, &fb.pixels);

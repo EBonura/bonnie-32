@@ -7,7 +7,7 @@
 //! not a special field. This enables mesh-less assets (pure triggers, lights, etc.)
 
 use serde::{Deserialize, Serialize};
-use crate::modeler::MeshPart;
+use crate::modeler::{MeshPart, RigBone};
 use crate::game::components::{EnemyType, ItemType};
 
 /// Components that can be attached to an asset
@@ -92,15 +92,6 @@ pub enum AssetComponent {
         patrol_radius: f32,
     },
 
-    /// Checkpoint / save point
-    ///
-    /// Where the player respawns after death.
-    Checkpoint {
-        /// Offset from checkpoint position for player respawn
-        #[serde(default)]
-        respawn_offset: [f32; 3],
-    },
-
     /// Interactive door
     ///
     /// Can be locked, requiring a key to open.
@@ -153,13 +144,26 @@ pub enum AssetComponent {
         step_height: f32,
     },
 
-    /// Spawn point for player or NPCs
+    /// Spawn point for entities
     ///
-    /// Defines where entities can spawn in the level.
+    /// Controls spawn lifecycle. The asset's other components (Enemy, Pickup, etc.)
+    /// define what gets spawned. SpawnPoint just says "this spawns" and "does it come back".
     SpawnPoint {
-        /// True for player start position, false for NPC/enemy spawns
+        /// Player start position (special case: position marker, no entity spawned)
         #[serde(default)]
-        is_player_start: bool,
+        is_player: bool,
+        /// Respawns on rest/reload (true = enemies/consumables, false = bosses/key items)
+        #[serde(default)]
+        respawns: bool,
+    },
+
+    /// Skeleton for animation (TR-style: bones define fixed structure)
+    ///
+    /// Bones define hierarchy and offsets. Animation keyframes store rotations.
+    /// Each MeshPart can be bound to a bone via bone_index.
+    Skeleton {
+        /// The bone hierarchy
+        bones: Vec<RigBone>,
     },
 }
 
@@ -181,12 +185,12 @@ impl AssetComponent {
             AssetComponent::Trigger { .. } => "Trigger",
             AssetComponent::Pickup { .. } => "Pickup",
             AssetComponent::Enemy { .. } => "Enemy",
-            AssetComponent::Checkpoint { .. } => "Checkpoint",
             AssetComponent::Door { .. } => "Door",
             AssetComponent::Audio { .. } => "Audio",
             AssetComponent::Particle { .. } => "Particle",
             AssetComponent::CharacterController { .. } => "CharacterController",
             AssetComponent::SpawnPoint { .. } => "SpawnPoint",
+            AssetComponent::Skeleton { .. } => "Skeleton",
         }
     }
 
@@ -199,12 +203,12 @@ impl AssetComponent {
             AssetComponent::Trigger { .. } => '\u{E8B8}', // flag icon
             AssetComponent::Pickup { .. } => '\u{E838}', // star icon
             AssetComponent::Enemy { .. } => '\u{E87C}', // skull icon
-            AssetComponent::Checkpoint { .. } => '\u{E153}', // flag icon
             AssetComponent::Door { .. } => '\u{E88A}', // door icon
             AssetComponent::Audio { .. } => '\u{E050}', // speaker icon
             AssetComponent::Particle { .. } => '\u{E3A5}', // sparkle icon
             AssetComponent::CharacterController { .. } => '\u{E7FD}', // person icon
             AssetComponent::SpawnPoint { .. } => '\u{E566}', // location icon
+            AssetComponent::Skeleton { .. } => '\u{E91B}', // accessibility icon (stick figure)
         }
     }
 
@@ -228,14 +232,14 @@ impl AssetComponent {
         matches!(self, AssetComponent::Enemy { .. })
     }
 
-    /// Check if this is a Checkpoint component
-    pub fn is_checkpoint(&self) -> bool {
-        matches!(self, AssetComponent::Checkpoint { .. })
-    }
-
     /// Check if this is a SpawnPoint component
     pub fn is_spawn_point(&self) -> bool {
         matches!(self, AssetComponent::SpawnPoint { .. })
+    }
+
+    /// Check if this is a Skeleton component
+    pub fn is_skeleton(&self) -> bool {
+        matches!(self, AssetComponent::Skeleton { .. })
     }
 }
 

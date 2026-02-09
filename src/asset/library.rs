@@ -145,10 +145,25 @@ impl AssetLibrary {
                         .and_then(|s| s.to_str())
                         .unwrap_or(&asset.name)
                         .to_string();
-                    let id = asset.id;
-
                     // Create namespaced key to prevent collisions between sources
                     let key = make_asset_key(source, &base_name);
+
+                    // Detect ID collision: if another asset already has this ID,
+                    // regenerate to avoid by_id lookup returning the wrong asset
+                    if let Some(existing_key) = self.by_id.get(&asset.id) {
+                        if *existing_key != key {
+                            let old_id = asset.id;
+                            asset.id = super::asset::generate_asset_id();
+                            eprintln!("Warning: '{}' has duplicate ID {} (conflicts with '{}'), reassigned to {}",
+                                base_name, old_id, existing_key, asset.id);
+                            // Persist the new ID so the collision is permanently resolved
+                            if source == AssetSource::User {
+                                let _ = asset.save(&path);
+                            }
+                        }
+                    }
+
+                    let id = asset.id;
 
                     // Track in the appropriate list (using base name for display)
                     match source {
@@ -299,20 +314,32 @@ impl AssetLibrary {
                     Ok(mut asset) => {
                         asset.source = source;
 
-                        // Use filename (without extension) as the key
-                        let name = filename
+                        // Use filename (without extension) as the base name
+                        let base_name = filename
                             .strip_suffix(".ron")
                             .unwrap_or(filename)
                             .to_string();
+
+                        // Create namespaced key (consistent with discover_from_dir)
+                        let key = make_asset_key(source, &base_name);
+
+                        // Detect ID collision
+                        if let Some(existing_key) = self.by_id.get(&asset.id) {
+                            if *existing_key != key {
+                                asset.id = super::asset::generate_asset_id();
+                                eprintln!("Warning: '{}' has duplicate ID, reassigned", base_name);
+                            }
+                        }
+
                         let id = asset.id;
 
                         match source {
-                            AssetSource::Sample => self.sample_names.push(name.clone()),
-                            AssetSource::User => self.user_names.push(name.clone()),
+                            AssetSource::Sample => self.sample_names.push(base_name.clone()),
+                            AssetSource::User => self.user_names.push(base_name.clone()),
                         }
 
-                        self.by_id.insert(id, name.clone());
-                        self.assets.insert(name, asset);
+                        self.by_id.insert(id, key.clone());
+                        self.assets.insert(key, asset);
                         count += 1;
                     }
                     Err(e) => {
@@ -815,23 +842,43 @@ impl AssetLibrary {
                         Ok(mut asset) => {
                             asset.source = source;
 
-                            // Use filename (without extension) as the key
-                            let name = filename
+                            // Use filename (without extension) as the base name
+                            let base_name = filename
                                 .rsplit('/')
                                 .next()
                                 .unwrap_or(&filename)
                                 .strip_suffix(".ron")
                                 .unwrap_or(&filename)
                                 .to_string();
+
+                            // Create namespaced key (consistent with discover_from_dir)
+                            let key = make_asset_key(source, &base_name);
+
+                            // Detect ID collision
+                            if let Some(existing_key) = self.by_id.get(&asset.id) {
+                                if *existing_key != key {
+                                    let old_id = asset.id;
+                                    asset.id = super::asset::generate_asset_id();
+                                    eprintln!("Warning: '{}' has duplicate ID {} (conflicts with '{}'), reassigned to {}",
+                                        base_name, old_id, existing_key, asset.id);
+                                    // Persist new ID for user assets
+                                    if source == AssetSource::User {
+                                        if let Ok(bytes) = asset.to_bytes() {
+                                            let _ = storage.write_sync(&path, &bytes);
+                                        }
+                                    }
+                                }
+                            }
+
                             let id = asset.id;
 
                             match source {
-                                AssetSource::Sample => self.sample_names.push(name.clone()),
-                                AssetSource::User => self.user_names.push(name.clone()),
+                                AssetSource::Sample => self.sample_names.push(base_name.clone()),
+                                AssetSource::User => self.user_names.push(base_name.clone()),
                             }
 
-                            self.by_id.insert(id, name.clone());
-                            self.assets.insert(name, asset);
+                            self.by_id.insert(id, key.clone());
+                            self.assets.insert(key, asset);
                             count += 1;
                         }
                         Err(e) => {
@@ -911,32 +958,46 @@ impl AssetLibrary {
     /// Reload a single asset using storage backend
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reload_asset_with_storage(&mut self, name: &str, storage: &Storage) -> Result<(), AssetError> {
-        // Determine directory from existing asset source
-        let dir = if let Some(asset) = self.assets.get(name) {
-            match asset.source {
-                AssetSource::Sample => SAMPLES_ASSETS_DIR,
-                AssetSource::User => USER_ASSETS_DIR,
-            }
+        // Resolve namespaced key and source (same logic as reload_asset)
+        let (key, source, base_name) = if let Some(stripped) = name.strip_prefix("sample:") {
+            (name.to_string(), AssetSource::Sample, stripped.to_string())
+        } else if let Some(stripped) = name.strip_prefix("user:") {
+            (name.to_string(), AssetSource::User, stripped.to_string())
         } else {
-            USER_ASSETS_DIR // Default to user directory
+            let user_key = make_asset_key(AssetSource::User, name);
+            if self.assets.contains_key(&user_key) {
+                (user_key, AssetSource::User, name.to_string())
+            } else {
+                let sample_key = make_asset_key(AssetSource::Sample, name);
+                if self.assets.contains_key(&sample_key) {
+                    (sample_key, AssetSource::Sample, name.to_string())
+                } else {
+                    (make_asset_key(AssetSource::User, name), AssetSource::User, name.to_string())
+                }
+            }
         };
 
-        let path = format!("{}/{}.ron", dir, name);
+        let dir = match source {
+            AssetSource::Sample => SAMPLES_ASSETS_DIR,
+            AssetSource::User => USER_ASSETS_DIR,
+        };
+
+        let path = format!("{}/{}.ron", dir, base_name);
 
         let bytes = storage
             .read_sync(&path)
             .map_err(|e| AssetError::Io(e.to_string()))?;
 
         let mut asset = Asset::load_from_bytes(&bytes)?;
+        asset.source = source;
 
-        // Preserve the source
-        if let Some(old_asset) = self.assets.get(name) {
-            asset.source = old_asset.source;
+        // Update ID index
+        if let Some(old_asset) = self.assets.get(&key) {
             self.by_id.remove(&old_asset.id);
         }
-        self.by_id.insert(asset.id, name.to_string());
+        self.by_id.insert(asset.id, key.clone());
 
-        self.assets.insert(name.to_string(), asset);
+        self.assets.insert(key, asset);
         Ok(())
     }
 

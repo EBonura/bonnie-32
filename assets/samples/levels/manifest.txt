@@ -1,6 +1,6 @@
-level_001.ron
-level_002.ron
-level_003.ron
-level_004.ron
-level_006.ron
+Cathedral.ron
+Cave.ron
+Dungeon.ron
+Sewers.ron
+West.ron
 level_008.ron

@@ -25,6 +25,7 @@ mod texture;
 mod asset;
 mod storage;
 mod auth;
+mod scene;
 
 use macroquad::prelude::*;
 use rasterizer::{Framebuffer, Texture, HEIGHT, WIDTH};
@@ -39,13 +40,14 @@ use std::path::PathBuf;
 fn window_conf() -> Conf {
     Conf {
         window_title: format!("BONNIE-32 v{}", VERSION),
-        window_width: WIDTH as i32 * 3,
-        window_height: HEIGHT as i32 * 3,
+        // Request oversized dimensions so macOS clamps to screen bounds (pseudo-maximize)
+        window_width: 3840,
+        window_height: 2160,
         window_resizable: true,
         high_dpi: true,
-        // Start fullscreen on native, windowed on WASM (browser handles sizing)
+        // Start windowed on all platforms (WASM: browser handles sizing)
         #[cfg(not(target_arch = "wasm32"))]
-        fullscreen: true,
+        fullscreen: false,
         icon: Some(miniquad::conf::Icon {
             small: *include_bytes!("../assets/runtime/icons/icon16.rgba"),
             medium: *include_bytes!("../assets/runtime/icons/icon32.rgba"),
@@ -71,8 +73,7 @@ async fn main() {
     let level = create_empty_level();
 
     // Mouse state tracking
-    let mut last_left_down = false;
-    let mut last_right_down = false;
+    // (mouse edge-detection now uses macroquad's event-based is_mouse_button_pressed/released)
     let mut last_click_time = 0.0f64;
     let mut last_click_pos = (0.0f32, 0.0f32);
 
@@ -290,10 +291,11 @@ async fn main() {
         poll_pending_ops(&mut app);
 
         // Update UI context with mouse state
+        // Use macroquad's event-based press/release detection (won't miss fast clicks)
         let mouse_pos = mouse_position();
         let left_down = is_mouse_button_down(MouseButton::Left);
+        let left_pressed = is_mouse_button_pressed(MouseButton::Left);
         // Detect double-click (300ms window, 10px radius)
-        let left_pressed = left_down && !last_left_down;
         let current_time = get_time();
         let double_click_threshold = 0.3; // 300ms
         let double_click_radius = 10.0;
@@ -311,20 +313,17 @@ async fn main() {
         };
 
         let right_down = is_mouse_button_down(MouseButton::Right);
-        let right_pressed = right_down && !last_right_down;
         let mouse_state = MouseState {
             x: mouse_pos.0,
             y: mouse_pos.1,
             left_down,
             right_down,
             left_pressed,
-            left_released: !left_down && last_left_down,
-            right_pressed,
+            left_released: is_mouse_button_released(MouseButton::Left),
+            right_pressed: is_mouse_button_pressed(MouseButton::Right),
             scroll: mouse_wheel().1,
             double_clicked,
         };
-        last_left_down = left_down;
-        last_right_down = right_down;
         ui_ctx.begin_frame(mouse_state);
 
         // Poll gamepad input
@@ -675,6 +674,82 @@ async fn main() {
                                 }
                             }
                         }
+                        BrowserAction::RenameLevel => {
+                            // Rename level file (user or sample)
+                            if let Some(info) = ws.level_browser.selected_level() {
+                                if let Some(ref input_state) = ws.level_browser.rename_dialog {
+                                    let new_name = input_state.text.trim().to_string();
+                                    let old_path = info.path.clone();
+                                    let old_name = info.name.clone();
+                                    let is_sample = info.category == LevelCategory::Sample;
+
+                                    if new_name.is_empty() {
+                                        ws.editor_state.set_status("Name cannot be empty", 3.0);
+                                    } else if new_name.contains('/') || new_name.contains('\\') || new_name.contains(':') {
+                                        ws.editor_state.set_status("Name contains invalid characters", 3.0);
+                                    } else if new_name == old_name {
+                                        // No change
+                                    } else {
+                                        let new_path = old_path.with_file_name(format!("{}.ron", new_name));
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        {
+                                            if new_path.exists() {
+                                                ws.editor_state.set_status(&format!("'{}' already exists", new_name), 3.0);
+                                            } else if !is_sample && app.storage.has_cloud() {
+                                                // Cloud user level: read → write new → delete old
+                                                let old_str = old_path.to_string_lossy().to_string();
+                                                let new_str = new_path.to_string_lossy().to_string();
+                                                match app.storage.read_sync(&old_str) {
+                                                    Ok(bytes) => {
+                                                        if let Err(e) = app.storage.write_sync(&new_str, &bytes) {
+                                                            ws.editor_state.set_status(&format!("Rename failed: {}", e), 3.0);
+                                                        } else {
+                                                            let _ = app.storage.delete_sync(&old_str);
+                                                            if ws.editor_state.current_file.as_ref() == Some(&old_path) {
+                                                                ws.editor_state.current_file = Some(new_path);
+                                                            }
+                                                            ws.editor_state.set_status(&format!("Renamed to '{}'", new_name), 2.0);
+                                                            ws.level_browser.selected_category = None;
+                                                            ws.level_browser.selected_index = None;
+                                                            ws.level_browser.preview_level = None;
+                                                            ws.level_browser.preview_stats = None;
+                                                            ws.level_browser.user_levels.clear();
+                                                            ws.level_browser.pending_user_list = Some(list_async("assets/userdata/levels".to_string()));
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        ws.editor_state.set_status(&format!("Rename failed: {}", e), 3.0);
+                                                    }
+                                                }
+                                            } else {
+                                                // Local rename (user levels without cloud, or sample levels)
+                                                match std::fs::rename(&old_path, &new_path) {
+                                                    Ok(()) => {
+                                                        if ws.editor_state.current_file.as_ref() == Some(&old_path) {
+                                                            ws.editor_state.current_file = Some(new_path);
+                                                        }
+                                                        ws.editor_state.set_status(&format!("Renamed to '{}'", new_name), 2.0);
+                                                        ws.level_browser.selected_category = None;
+                                                        ws.level_browser.selected_index = None;
+                                                        ws.level_browser.preview_level = None;
+                                                        ws.level_browser.preview_stats = None;
+                                                        if is_sample {
+                                                            ws.level_browser.samples = discover_sample_levels();
+                                                        } else {
+                                                            ws.level_browser.user_levels = discover_user_levels(&app.storage);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        ws.editor_state.set_status(&format!("Rename failed: {}", e), 3.0);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ws.level_browser.rename_dialog = None;
+                        }
                         BrowserAction::NewLevel => {
                             // Start with a fresh empty level, preserving texture packs
                             let new_level = create_empty_level();
@@ -764,6 +839,7 @@ async fn main() {
                     &app.input,
                     &ui_ctx,
                     &app.world_editor.editor_state.asset_library,
+                    &app.world_editor.editor_state.user_textures,
                 );
             }
 
@@ -825,6 +901,7 @@ async fn main() {
                         &mut ms.model_browser,
                         &app.storage,
                         app.icon_font.as_ref(),
+                        &ms.modeler_state.user_textures,
                     );
 
                     match browser_action {
@@ -862,6 +939,9 @@ async fn main() {
                                 // Set the asset directly in the modeler
                                 ms.modeler_state.asset = asset;
                                 ms.modeler_state.selected_object = if ms.modeler_state.objects().is_empty() { None } else { Some(0) };
+                                // Auto-select first mesh component so it's visible
+                                ms.modeler_state.selected_component = ms.modeler_state.asset.components.iter()
+                                    .position(|c| c.is_mesh());
                                 // Resolve ID-based texture refs using the texture library
                                 ms.modeler_state.resolve_all_texture_refs();
                                 ms.modeler_state.current_file = Some(path.clone());
@@ -882,6 +962,9 @@ async fn main() {
 
                                 ms.modeler_state.asset = asset;
                                 ms.modeler_state.selected_object = if ms.modeler_state.objects().is_empty() { None } else { Some(0) };
+                                // Auto-select first mesh component so it's visible
+                                ms.modeler_state.selected_component = ms.modeler_state.asset.components.iter()
+                                    .position(|c| c.is_mesh());
                                 ms.modeler_state.resolve_all_texture_refs();
                                 ms.modeler_state.current_file = Some(path.clone());
                                 ms.modeler_state.dirty = true; // Mark as dirty so it gets saved
@@ -909,6 +992,72 @@ async fn main() {
                                     }
                                 }
                             }
+                        }
+                        ModelBrowserAction::RenameAsset => {
+                            // Rename user asset file and update internal name
+                            if let Some(asset_info) = ms.model_browser.selected_asset() {
+                                if let Some(ref input_state) = ms.model_browser.rename_dialog {
+                                    let new_name = input_state.text.trim().to_string();
+                                    let old_path = asset_info.path.clone();
+                                    let old_name = asset_info.name.clone();
+
+                                    if new_name.is_empty() {
+                                        ms.modeler_state.set_status("Name cannot be empty", 3.0);
+                                    } else if new_name.contains('/') || new_name.contains('\\') || new_name.contains(':') {
+                                        ms.modeler_state.set_status("Name contains invalid characters", 3.0);
+                                    } else if new_name == old_name {
+                                        // No change
+                                    } else {
+                                        let new_path = old_path.with_file_name(format!("{}.ron", new_name));
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        {
+                                            if new_path.exists() {
+                                                ms.modeler_state.set_status(&format!("'{}' already exists", new_name), 3.0);
+                                            } else {
+                                                // Read, update name, write new, delete old
+                                                match std::fs::read(&old_path) {
+                                                    Ok(bytes) => {
+                                                        match asset::Asset::load_from_bytes(&bytes) {
+                                                            Ok(mut asset) => {
+                                                                asset.name = new_name.clone();
+                                                                match asset.to_bytes() {
+                                                                    Ok(new_bytes) => {
+                                                                        if let Err(e) = std::fs::write(&new_path, &new_bytes) {
+                                                                            ms.modeler_state.set_status(&format!("Rename failed: {}", e), 3.0);
+                                                                        } else {
+                                                                            let _ = std::fs::remove_file(&old_path);
+                                                                            // Update current_file if this asset is open
+                                                                            if ms.modeler_state.current_file.as_ref() == Some(&old_path) {
+                                                                                ms.modeler_state.current_file = Some(new_path);
+                                                                                ms.modeler_state.asset.name = new_name.clone();
+                                                                            }
+                                                                            ms.modeler_state.set_status(&format!("Renamed to '{}'", new_name), 2.0);
+                                                                            ms.model_browser.user_assets = modeler::discover_user_assets();
+                                                                            ms.model_browser.preview_asset = None;
+                                                                            ms.model_browser.selected_category = None;
+                                                                            ms.model_browser.selected_index = None;
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        ms.modeler_state.set_status(&format!("Rename failed: {}", e), 3.0);
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                ms.modeler_state.set_status(&format!("Rename failed: {}", e), 3.0);
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        ms.modeler_state.set_status(&format!("Rename failed: {}", e), 3.0);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ms.model_browser.rename_dialog = None;
                         }
                         ModelBrowserAction::Refresh => {
                             // Refresh both sample and user asset lists

@@ -5,8 +5,8 @@
 
 use macroquad::prelude::*;
 use crate::rasterizer::{
-    Framebuffer, Texture as RasterTexture, render_mesh, render_mesh_15,
-    Light, RasterSettings, RasterTimings, ShadingMode, Color as RasterColor,
+    Framebuffer, Texture as RasterTexture,
+    Light, RasterTimings, ShadingMode, Color as RasterColor,
     Vec3, project, perspective_transform,
     WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI,
 };
@@ -26,6 +26,7 @@ pub fn draw_test_viewport(
     input: &InputState,
     ctx: &crate::ui::UiContext,
     asset_library: &crate::asset::AssetLibrary,
+    user_textures: &crate::texture::TextureLibrary,
 ) {
     let frame_start = FrameTimings::start();
 
@@ -113,33 +114,18 @@ pub fn draw_test_viewport(
     // --- Sub-timing: Light collection ---
     let lights_start = FrameTimings::start();
     let lights: Vec<Light> = if game.raster_settings.shading != ShadingMode::None {
-        level.rooms.iter()
-            .flat_map(|room| {
-                room.objects.iter()
-                    .filter(|obj| {
-                        obj.enabled && asset_library.get_by_id(obj.asset_id)
-                            .map(|a| a.has_light())
-                            .unwrap_or(false)
-                    })
-                    .map(|obj| {
-                        let world_pos = obj.world_position(room);
-                        // Use default light settings (can be expanded later with asset data)
-                        Light::point(world_pos, 5000.0, 1.0)
-                    })
-            })
-            .collect()
+        crate::scene::collect_scene_lights(&level.rooms, asset_library)
     } else {
         Vec::new()
     };
     let render_lights_ms = FrameTimings::elapsed_ms(lights_start);
 
     // --- Sub-timing: Mesh generation and rasterization ---
-    let mut render_meshgen_ms = 0.0;
+    let render_meshgen_ms = 0.0;
     let mut render_raster_ms = 0.0;
-    let mut raster_timings = RasterTimings::default();
+    let raster_timings = RasterTimings::default();
 
     // --- Sub-timing: Texture conversion (RGB888 to RGB555) ---
-    // Lazy cache: only convert if texture count changed (textures added/removed)
     let texconv_start = FrameTimings::start();
     let use_rgb555 = game.raster_settings.use_rgb555;
     if use_rgb555 && game.textures_15_cache.len() != textures.len() {
@@ -147,45 +133,24 @@ pub fn draw_test_viewport(
     }
     let render_texconv_ms = FrameTimings::elapsed_ms(texconv_start);
 
-    // Render each room with its own ambient setting
-    for room in &level.rooms {
-        let render_settings = RasterSettings {
-            lights: lights.clone(),
-            ambient: room.ambient,
-            ..game.raster_settings.clone()
-        };
-
-        // Time mesh data generation
-        let meshgen_start = FrameTimings::start();
-        let (vertices, faces) = room.to_render_data_with_textures(&resolve_texture);
-        render_meshgen_ms += FrameTimings::elapsed_ms(meshgen_start);
-
-        // Time actual rasterization (returns detailed sub-timings)
-        let raster_start = FrameTimings::start();
-
-        // Convert room fog to render parameter (8-bit Color for vertex color fog)
-        let fog = if room.fog.enabled {
-            let (r, g, b) = room.fog.color;
-            // Convert f32 (0.0-1.0) to u8 (0-255)
-            let fog_color = RasterColor::new(
-                (r * 255.0) as u8,
-                (g * 255.0) as u8,
-                (b * 255.0) as u8,
-            );
-            let cull_distance = room.fog.start + room.fog.falloff + room.fog.cull_offset;
-            Some((room.fog.start, room.fog.falloff, cull_distance, fog_color))
-        } else {
-            None
-        };
-
-        let room_timings = if use_rgb555 {
-            render_mesh_15(fb, &vertices, &faces, &game.textures_15_cache, None, &game.camera, &render_settings, fog)
-        } else {
-            render_mesh(fb, &vertices, &faces, textures, &game.camera, &render_settings)
-        };
-        render_raster_ms += FrameTimings::elapsed_ms(raster_start);
-        raster_timings.accumulate(&room_timings);
-    }
+    // Render rooms + asset meshes
+    crate::scene::render_scene(
+        fb,
+        &level.rooms,
+        asset_library,
+        user_textures,
+        &game.camera,
+        &game.raster_settings,
+        &lights,
+        textures,
+        &game.textures_15_cache,
+        &resolve_texture,
+        &crate::scene::SceneRenderOptions {
+            use_fog: true,
+            render_assets: true,
+            skip_rooms: &[],
+        },
+    );
 
     // Render player wireframe cylinder if playing
     if game.playing {

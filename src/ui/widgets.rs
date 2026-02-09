@@ -2064,3 +2064,219 @@ fn draw_rounded_rect_outline(x: f32, y: f32, w: f32, h: f32, r: f32, thickness: 
         }
     }
 }
+
+// =============================================================================
+// Dropdown Menu Widget
+// =============================================================================
+
+use super::theme::{
+    FONT_SIZE_CONTENT, DROPDOWN_BG, DROPDOWN_BORDER, DROPDOWN_HOVER,
+    DROPDOWN_TRIGGER_BG, DROPDOWN_TRIGGER_HOVER, TEXT_COLOR, TEXT_DIM,
+};
+use super::icons::icon;
+
+/// State for the dropdown menu system.
+///
+/// Tracks which dropdown (if any) is currently open and where its trigger button is.
+/// Use a single DropdownState instance per UI context to ensure only one dropdown
+/// is open at a time.
+#[derive(Clone, Default)]
+pub struct DropdownState {
+    /// ID of the currently active dropdown (None if all closed)
+    pub active: Option<&'static str>,
+    /// Rectangle of the trigger button that opened the dropdown
+    pub trigger_rect: Option<Rect>,
+}
+
+impl DropdownState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if a specific dropdown is open
+    pub fn is_open(&self, id: &'static str) -> bool {
+        self.active == Some(id)
+    }
+
+    /// Check if any dropdown is open
+    pub fn is_any_open(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Open a dropdown
+    pub fn open(&mut self, id: &'static str, trigger_rect: Rect) {
+        self.active = Some(id);
+        self.trigger_rect = Some(trigger_rect);
+    }
+
+    /// Close the active dropdown
+    pub fn close(&mut self) {
+        self.active = None;
+        self.trigger_rect = None;
+    }
+
+    /// Toggle a dropdown open/closed
+    pub fn toggle(&mut self, id: &'static str, trigger_rect: Rect) {
+        if self.active == Some(id) {
+            self.close();
+        } else {
+            self.open(id, trigger_rect);
+        }
+    }
+}
+
+/// Block clicks when a dropdown is open.
+///
+/// Call this at the start of your draw function to prevent clicks from bleeding
+/// through to UI elements underneath the dropdown. Clicks on the trigger button
+/// are NOT blocked, allowing it to toggle the dropdown closed.
+pub fn dropdown_block_clicks(ctx: &mut UiContext, dropdown: &DropdownState) {
+    if dropdown.is_any_open() {
+        let on_trigger = dropdown.trigger_rect
+            .map(|r| ctx.mouse.inside(&r))
+            .unwrap_or(false);
+        if !on_trigger {
+            ctx.mouse.left_pressed = false;
+        }
+    }
+}
+
+/// Draw a dropdown trigger button (shows current value with chevron arrow).
+///
+/// Returns true if clicked. Caller should call `dropdown.toggle(id, rect)` when true.
+///
+/// # Arguments
+/// * `ctx` - UI context
+/// * `rect` - Button rectangle
+/// * `current_value` - Text to display (current selection)
+/// * `icon_font` - Font for the chevron icon
+pub fn draw_dropdown_trigger(
+    ctx: &mut UiContext,
+    rect: Rect,
+    current_value: &str,
+    icon_font: Option<&Font>,
+) -> bool {
+    let hovered = ctx.mouse.inside(&rect);
+    let bg_color = if hovered { DROPDOWN_TRIGGER_HOVER } else { DROPDOWN_TRIGGER_BG };
+
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, bg_color);
+    draw_text(current_value, rect.x + 4.0, rect.y + 13.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+
+    // Chevron arrow
+    let chevron_rect = Rect::new(rect.right() - 16.0, rect.y, 16.0, rect.h);
+    draw_icon_centered(icon_font, icon::CHEVRON_DOWN, &chevron_rect, 10.0, TEXT_DIM);
+
+    hovered && ctx.mouse.left_pressed
+}
+
+/// Begin drawing a dropdown menu.
+///
+/// Returns true if the dropdown should be drawn (is open). Handles:
+/// - Drawing the menu background
+/// - Closing on click outside (excluding trigger button)
+///
+/// # Arguments
+/// * `ctx` - UI context
+/// * `dropdown` - Dropdown state (will be mutated to close on outside click)
+/// * `id` - Unique identifier for this dropdown
+/// * `menu_rect` - Rectangle for the menu
+pub fn begin_dropdown(
+    ctx: &mut UiContext,
+    dropdown: &mut DropdownState,
+    id: &'static str,
+    menu_rect: Rect,
+) -> bool {
+    if !dropdown.is_open(id) {
+        return false;
+    }
+
+    // Draw menu background
+    draw_rectangle(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, DROPDOWN_BG);
+    draw_rectangle_lines(menu_rect.x, menu_rect.y, menu_rect.w, menu_rect.h, 1.0, DROPDOWN_BORDER);
+
+    // Check click outside (but not on trigger button)
+    let click_outside = ctx.mouse.left_pressed
+        && !ctx.mouse.inside(&menu_rect)
+        && dropdown.trigger_rect.map_or(true, |r| !ctx.mouse.inside(&r));
+
+    if click_outside {
+        dropdown.close();
+        return false;
+    }
+
+    true
+}
+
+/// Draw a dropdown menu item.
+///
+/// Returns true if clicked. Caller should handle the selection and call `dropdown.close()`.
+///
+/// # Arguments
+/// * `ctx` - UI context
+/// * `item_rect` - Rectangle for this item
+/// * `label` - Text label
+/// * `icon` - Optional icon (character and font)
+/// * `is_selected` - Whether this item is currently selected (shows checkmark)
+pub fn dropdown_item(
+    ctx: &mut UiContext,
+    item_rect: Rect,
+    label: &str,
+    icon: Option<(char, Option<&Font>)>,
+    is_selected: bool,
+) -> bool {
+    let hovered = ctx.mouse.inside(&item_rect);
+
+    if hovered {
+        draw_rectangle(item_rect.x, item_rect.y, item_rect.w, item_rect.h, DROPDOWN_HOVER);
+    }
+
+    let mut text_x = item_rect.x + 4.0;
+
+    // Draw icon if provided
+    if let Some((icon_char, icon_font)) = icon {
+        let icon_rect = Rect::new(item_rect.x + 2.0, item_rect.y + 2.0, 16.0, 16.0);
+        draw_icon_centered(icon_font, icon_char, &icon_rect, 11.0, TEXT_COLOR);
+        text_x = item_rect.x + 22.0;
+    }
+
+    // Draw label
+    let text_color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+    draw_text(label, text_x, item_rect.y + 14.0, FONT_SIZE_CONTENT, text_color);
+
+    // Draw checkmark for selected item
+    if is_selected {
+        draw_text("\u{2713}", item_rect.right() - 18.0, item_rect.y + 14.0, FONT_SIZE_CONTENT, ACCENT_COLOR);
+    }
+
+    hovered && ctx.mouse.left_pressed
+}
+
+/// Draw a simple dropdown item without icon support.
+///
+/// Convenience wrapper around `dropdown_item` for menus without icons.
+pub fn dropdown_item_simple(
+    ctx: &mut UiContext,
+    item_rect: Rect,
+    label: &str,
+    is_selected: bool,
+) -> bool {
+    dropdown_item(ctx, item_rect, label, None, is_selected)
+}
+
+/// Calculate the menu rect for a dropdown positioned below a trigger button.
+///
+/// # Arguments
+/// * `trigger_rect` - The trigger button rectangle
+/// * `item_count` - Number of items in the menu
+/// * `item_height` - Height of each item (default 20.0)
+/// * `menu_width` - Width of the menu (None = same as trigger width)
+pub fn dropdown_menu_rect(
+    trigger_rect: Rect,
+    item_count: usize,
+    item_height: f32,
+    menu_width: Option<f32>,
+) -> Rect {
+    let width = menu_width.unwrap_or(trigger_rect.w);
+    let height = item_count as f32 * item_height + 4.0; // 4.0 padding
+    Rect::new(trigger_rect.x, trigger_rect.bottom() + 2.0, width, height)
+}

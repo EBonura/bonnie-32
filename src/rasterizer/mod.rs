@@ -69,4 +69,4 @@ pub use draw::{draw_3d_line_clipped, draw_floor_grid, create_test_cube};
 pub use constants::{WIDTH, HEIGHT, WIDTH_HI, HEIGHT_HI};
 
 // Ray utilities (selective re-export)
-pub use ray::{screen_to_ray, ray_line_closest_point, ray_plane_intersection, ray_circle_angle};
+pub use ray::{screen_to_ray, screen_to_ray_ortho, screen_to_ray_auto, ray_line_closest_point, ray_plane_intersection, ray_circle_angle};

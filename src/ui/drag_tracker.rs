@@ -11,7 +11,7 @@
 //! - Pickers: Propose positions along lines, planes, circles
 //! - Snappers: Snap positions to grid (relative or absolute)
 
-use crate::rasterizer::{Vec3, Camera, screen_to_ray, ray_line_closest_point, ray_plane_intersection, ray_circle_angle};
+use crate::rasterizer::{Vec3, Camera, OrthoProjection, screen_to_ray_auto, ray_line_closest_point, ray_plane_intersection, ray_circle_angle};
 
 /// The status of a drag operation after an update
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,8 +272,9 @@ pub fn pick_line(
     camera: &Camera,
     viewport_width: usize,
     viewport_height: usize,
+    ortho: Option<&OrthoProjection>,
 ) -> Option<Vec3> {
-    let ray = screen_to_ray(mouse_pos.0, mouse_pos.1, viewport_width, viewport_height, camera);
+    let ray = screen_to_ray_auto(mouse_pos.0, mouse_pos.1, viewport_width, viewport_height, camera, ortho);
 
     // Offset line by handle_offset for accurate picking
     let (closest, _dist) = ray_line_closest_point(
@@ -294,8 +295,9 @@ pub fn pick_plane(
     camera: &Camera,
     viewport_width: usize,
     viewport_height: usize,
+    ortho: Option<&OrthoProjection>,
 ) -> Option<Vec3> {
-    let ray = screen_to_ray(mouse_pos.0, mouse_pos.1, viewport_width, viewport_height, camera);
+    let ray = screen_to_ray_auto(mouse_pos.0, mouse_pos.1, viewport_width, viewport_height, camera, ortho);
 
     let t = ray_plane_intersection(&ray, plane_origin - handle_offset, plane_normal)?;
     Some(ray.at(t) + handle_offset)
@@ -310,8 +312,9 @@ pub fn pick_circle_angle(
     camera: &Camera,
     viewport_width: usize,
     viewport_height: usize,
+    ortho: Option<&OrthoProjection>,
 ) -> Option<f32> {
-    let ray = screen_to_ray(mouse_pos.0, mouse_pos.1, viewport_width, viewport_height, camera);
+    let ray = screen_to_ray_auto(mouse_pos.0, mouse_pos.1, viewport_width, viewport_height, camera, ortho);
     ray_circle_angle(&ray, center, axis, ref_vector)
 }
 
@@ -323,6 +326,7 @@ pub fn pick_position(
     camera: &Camera,
     viewport_width: usize,
     viewport_height: usize,
+    ortho: Option<&OrthoProjection>,
 ) -> Option<Vec3> {
     match &config.picker {
         PickerType::Line { origin, direction } => {
@@ -334,6 +338,7 @@ pub fn pick_position(
                 camera,
                 viewport_width,
                 viewport_height,
+                ortho,
             )
         }
         PickerType::Plane { origin, normal } => {
@@ -345,6 +350,7 @@ pub fn pick_position(
                 camera,
                 viewport_width,
                 viewport_height,
+                ortho,
             )
         }
         PickerType::Circle { .. } => {
@@ -375,9 +381,10 @@ pub fn pick_angle(
     camera: &Camera,
     viewport_width: usize,
     viewport_height: usize,
+    ortho: Option<&OrthoProjection>,
 ) -> Option<f32> {
     if let PickerType::Circle { center, axis, ref_vector } = &config.picker {
-        pick_circle_angle(*center, *axis, *ref_vector, mouse_pos, camera, viewport_width, viewport_height)
+        pick_circle_angle(*center, *axis, *ref_vector, mouse_pos, camera, viewport_width, viewport_height, ortho)
     } else {
         None
     }
@@ -509,12 +516,14 @@ pub fn apply_drag_update(
     camera: &Camera,
     viewport_width: usize,
     viewport_height: usize,
+    ortho: Option<&OrthoProjection>,
 ) -> DragUpdate {
     // Handle rotation separately
     if let PickerType::Circle { center, axis, ref_vector } = &config.picker {
         if let Some(angle) = pick_circle_angle(
             *center, *axis, *ref_vector,
             mouse_pos, camera, viewport_width, viewport_height,
+            ortho,
         ) {
             let snapped_angle = if config.snap_mode != SnapMode::None {
                 snap_angle(angle, drag_state.initial_angle, config.grid_size, config.snap_mode)
@@ -538,7 +547,7 @@ pub fn apply_drag_update(
 
     // Position-based dragging
     if let Some(proposed) = pick_position(
-        config, drag_state, mouse_pos, camera, viewport_width, viewport_height,
+        config, drag_state, mouse_pos, camera, viewport_width, viewport_height, ortho,
     ) {
         let snapped = snap_position(
             proposed,

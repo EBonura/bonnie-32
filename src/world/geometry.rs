@@ -3009,7 +3009,7 @@ impl Room {
         // Helper to add a single triangle with specific corners
         let add_triangle = |vertices: &mut Vec<Vertex>, faces: &mut Vec<RasterFace>,
                            corners: &[Vec3; 4], c: [usize; 3], uvs: &[Vec2; 4], colors: &[Color; 4],
-                           normal: Vec3, texture_id: usize, flip_winding: bool, black_transparent: bool| {
+                           normal: Vec3, texture_id: usize, flip_winding: bool, black_transparent: bool, blend_mode: BlendMode| {
             let base_idx = vertices.len();
             vertices.push(Vertex::with_color(corners[c[0]], uvs[c[0]], normal, colors[c[0]]));
             vertices.push(Vertex::with_color(corners[c[1]], uvs[c[1]], normal, colors[c[1]]));
@@ -3017,31 +3017,33 @@ impl Room {
 
             if flip_winding {
                 faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id)
-                    .with_black_transparent(black_transparent));
+                    .with_black_transparent(black_transparent)
+                    .with_blend_mode(blend_mode));
             } else {
                 faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id)
-                    .with_black_transparent(black_transparent));
+                    .with_black_transparent(black_transparent)
+                    .with_blend_mode(blend_mode));
             }
         };
 
         // Render triangle 1
         if render_front {
             let flip = !is_floor; // Ceilings need flipped winding
-            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, front_normal_1, texture_id_1, flip, face.black_transparent);
+            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, front_normal_1, texture_id_1, flip, face.black_transparent, face.blend_mode);
         }
         if render_back {
             let flip = is_floor; // Back faces flip the winding
-            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, back_normal_1, texture_id_1, flip, face.black_transparent);
+            add_triangle(vertices, faces, &corners_1, tri1_corners, &uvs_1, colors_1, back_normal_1, texture_id_1, flip, face.black_transparent, face.blend_mode);
         }
 
         // Render triangle 2 (uses corners_2 which may have different heights)
         if render_front {
             let flip = !is_floor;
-            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, front_normal_2, texture_id_2, flip, face.black_transparent);
+            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, front_normal_2, texture_id_2, flip, face.black_transparent, face.blend_mode);
         }
         if render_back {
             let flip = is_floor;
-            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, back_normal_2, texture_id_2, flip, face.black_transparent);
+            add_triangle(vertices, faces, &corners_2, tri2_corners, &uvs_2, colors_2, back_normal_2, texture_id_2, flip, face.black_transparent, face.blend_mode);
         }
     }
 
@@ -3211,8 +3213,8 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
             }
             // Two triangles for the quad (CCW winding when viewed from inside room)
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
         }
 
         // Add back-facing face (flipped normal and winding)
@@ -3223,8 +3225,8 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, wall.colors[i]));
             }
             // Reverse winding order for back face
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
         }
     }
 
@@ -3332,8 +3334,8 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], front_normal, wall.colors[i]));
             }
             // Two triangles for the quad
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 1, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 3, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
         }
 
         // Add back-facing face (flipped normal and winding)
@@ -3344,8 +3346,8 @@ impl Room {
                 vertices.push(Vertex::with_color(corners[i], uvs[i], back_normal, wall.colors[i]));
             }
             // Reverse winding order for back face
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent));
-            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 1, base_idx + 2, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
+            faces.push(RasterFace::with_texture(base_idx, base_idx + 2, base_idx + 3, texture_id).with_black_transparent(wall.black_transparent).with_blend_mode(wall.blend_mode));
         }
     }
 }

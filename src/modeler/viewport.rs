@@ -11,9 +11,10 @@ use crate::rasterizer::{
     OrthoProjection, Camera, draw_3d_line_clipped,
     screen_to_ray, ray_circle_angle,
 };
-use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId};
+use super::state::{ModelerState, ModelerSelection, SelectMode, Axis, ModalTransform, CameraMode, ViewportId, rotate_by_euler};
 use super::drag::{DragUpdateResult, ActiveDrag};
 use super::tools::ModelerToolId;
+use super::skeleton::{draw_skeleton, draw_bone_dots, ray_bone_intersect, skeleton_to_triangles};
 
 /// Convert state::Axis to ui::Axis
 fn to_ui_axis(axis: Axis) -> UiAxis {
@@ -36,10 +37,10 @@ fn from_ui_axis(axis: UiAxis) -> Axis {
 /// Get all selected element positions for modal transforms
 fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
     let mut positions = Vec::new();
-    let mesh = state.mesh();
 
     match &state.selection {
         ModelerSelection::Vertices(verts) => {
+            let mesh = state.mesh();
             for &idx in verts {
                 if let Some(vert) = mesh.vertices.get(idx) {
                     positions.push(vert.pos);
@@ -47,6 +48,7 @@ fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
             }
         }
         ModelerSelection::Edges(edges) => {
+            let mesh = state.mesh();
             for (v0, v1) in edges {
                 if let Some(vert0) = mesh.vertices.get(*v0) {
                     positions.push(vert0.pos);
@@ -57,6 +59,7 @@ fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
             }
         }
         ModelerSelection::Faces(faces) => {
+            let mesh = state.mesh();
             for &face_idx in faces {
                 if let Some(face) = mesh.faces.get(face_idx) {
                     for &vi in &face.vertices {
@@ -65,6 +68,20 @@ fn get_selected_positions(state: &ModelerState) -> Vec<Vec3> {
                         }
                     }
                 }
+            }
+        }
+        ModelerSelection::Bones(bones) => {
+            // For bones, return the world-space base position of each bone
+            for &bone_idx in bones {
+                let (base_pos, _) = state.get_bone_world_transform(bone_idx);
+                positions.push(base_pos);
+            }
+        }
+        ModelerSelection::BoneTips(tips) => {
+            // For bone tips, return the world-space tip position of each bone
+            for &bone_idx in tips {
+                let tip_pos = state.get_bone_tip_position(bone_idx);
+                positions.push(tip_pos);
             }
         }
         _ => {}
@@ -128,15 +145,99 @@ fn apply_selected_positions(state: &mut ModelerState, positions: &[Vec3]) {
                     }
                 }
             }
+            ModelerSelection::Bones(bones) => {
+                // For bones, collect bone movements
+                for &bone_idx in bones {
+                    let (old_pos, _) = state.get_bone_world_transform(bone_idx);
+                    if let Some(&new_pos) = positions.get(pos_idx) {
+                        // Store bone_idx in the movements list (we'll handle it specially)
+                        // Use a sentinel value to indicate this is a bone base, not a vertex
+                        // 0x80000000 = bone base movement
+                        movements.push((bone_idx | 0x80000000, old_pos, new_pos));
+                    }
+                    pos_idx += 1;
+                }
+            }
+            ModelerSelection::BoneTips(tips) => {
+                // For bone tips, collect tip movements
+                for &bone_idx in tips {
+                    let old_tip = state.get_bone_tip_position(bone_idx);
+                    if let Some(&new_tip) = positions.get(pos_idx) {
+                        // Use 0x40000000 to indicate this is a bone TIP, not a base
+                        movements.push((bone_idx | 0x40000000, old_tip, new_tip));
+                    }
+                    pos_idx += 1;
+                }
+            }
             _ => {}
         }
     }
 
     // Second pass: apply movements (mutable)
     let mirror_settings = state.current_mirror_settings();
+
+    // Handle bone movements first (marked with high bit)
+    let bone_movements: Vec<_> = movements.iter()
+        .filter(|(idx, _, _)| *idx & 0x80000000 != 0)
+        .map(|(idx, old, new)| (*idx & 0x7FFFFFFF, *old, *new))
+        .collect();
+
+    for (bone_idx, old_pos, new_pos) in bone_movements {
+        let delta = new_pos - old_pos;
+        // Apply delta to bone's local_position
+        if let Some(bones) = state.asset.skeleton_mut() {
+            if let Some(bone) = bones.get_mut(bone_idx) {
+                bone.local_position = bone.local_position + delta;
+                state.dirty = true;
+            }
+        }
+    }
+
+    // Handle bone TIP movements (marked with 0x40000000)
+    let tip_movements: Vec<_> = movements.iter()
+        .filter(|(idx, _, _)| *idx & 0x40000000 != 0 && *idx & 0x80000000 == 0)
+        .map(|(idx, old, new)| (*idx & 0x3FFFFFFF, *old, *new))
+        .collect();
+
+    for (bone_idx, _old_tip, new_tip) in tip_movements {
+        // Get the bone's base position to calculate new direction
+        let (base_pos, _) = state.get_bone_world_transform(bone_idx);
+        let direction = new_tip - base_pos;
+        let new_length = direction.len();
+
+        if new_length > 0.001 {
+            // Calculate new rotation from direction
+            let new_rotation = direction_to_rotation(direction);
+
+            let old_length = state.skeleton().get(bone_idx).map(|b| b.length).unwrap_or(0.0);
+            if let Some(bones) = state.asset.skeleton_mut() {
+                if let Some(bone) = bones.get_mut(bone_idx) {
+                    bone.local_rotation = new_rotation;
+                    bone.length = new_length;
+                    state.dirty = true;
+                }
+                // Smart mode: only update children that were at the tip
+                for bone in bones.iter_mut() {
+                    if bone.parent == Some(bone_idx) {
+                        let was_at_tip = (bone.local_position.y - old_length).abs() < 1.0;
+                        if was_at_tip {
+                            bone.local_position.y = new_length;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle mesh vertex movements
     if let Some(mesh) = state.mesh_mut() {
         let mut already_moved = std::collections::HashSet::new();
         for (idx, old_pos, new_pos) in &movements {
+            // Skip bone movements (marked with 0x80000000 for base, 0x40000000 for tip)
+            if *idx & 0xC0000000 != 0 {
+                continue;
+            }
+
             let delta = *new_pos - *old_pos;
 
             if linking {
@@ -187,6 +288,7 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
         &state.camera,
         1, // Not used for screen-space transforms
         1,
+        None,
     );
 
     // Apply the updated positions
@@ -239,11 +341,12 @@ fn handle_modal_transform(state: &mut ModelerState, mouse_pos: (f32, f32), ctx: 
         }
         state.drag_manager.end();
         state.modal_transform = ModalTransform::None;
+        state.free_drag_pending_start = None;
         state.dirty = true;
         state.set_status("Transform applied", 1.0);
     }
 
-    // Cancel on right click (Escape is handled through ActionRegistry in handle_actions())
+    // Cancel on right click (context menu handled separately in main viewport function)
     if ctx.mouse.right_pressed {
         // Sync tool state before cancelling
         match state.modal_transform {
@@ -307,17 +410,9 @@ fn handle_drag_move(
                     let dx = mouse_pos.0 - drag_state.initial_mouse.0;
                     let dy = mouse_pos.1 - drag_state.initial_mouse.1;
 
-                    // Convert screen delta to world delta based on viewport
-                    let world_dx = dx / drag_zoom;
-                    let world_dy = -dy / drag_zoom; // Y inverted
-
-                    // Free move: movement on viewport plane (no axis constraint)
-                    let delta = match viewport_id {
-                        ViewportId::Top => Vec3::new(world_dx, 0.0, world_dy),    // XZ plane
-                        ViewportId::Front => Vec3::new(world_dx, world_dy, 0.0),  // XY plane
-                        ViewportId::Side => Vec3::new(0.0, world_dy, world_dx),   // ZY plane
-                        ViewportId::Perspective => Vec3::ZERO,
-                    };
+                    // Convert screen delta to world delta using camera basis vectors
+                    let delta = state.camera.basis_x * (dx / drag_zoom)
+                              + state.camera.basis_y * (-dy / drag_zoom);
 
                     // Apply delta to initial positions
                     if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
@@ -346,13 +441,30 @@ fn handle_drag_move(
                 }
             } else {
                 // Perspective mode: use ray casting via DragManager
+                // DEBUG: Free move uses PickerType::Screen which only uses deltas
+                // Both initial_mouse and mouse_pos are in screen coords, so delta is correct
                 let result = state.drag_manager.update(
                     mouse_pos,
                     &state.camera,
                     fb_width,
                     fb_height,
+                    None,
                 );
 
+                if let DragUpdateResult::Move { ref positions, .. } = result {
+                    // DEBUG: Log large movements
+                    if let Some((idx, pos)) = positions.first() {
+                        let mesh = state.mesh();
+                        if let Some(vert) = mesh.vertices.get(*idx) {
+                            let delta = *pos - vert.pos;
+                            let dist = delta.len();
+                            if dist > 0.5 {
+                                eprintln!("[DRAG_UPDATE] Large move detected! vert[{}]: ({:.3},{:.3},{:.3}) -> ({:.3},{:.3},{:.3}), delta={:.3}",
+                                    idx, vert.pos.x, vert.pos.y, vert.pos.z, pos.x, pos.y, pos.z, dist);
+                            }
+                        }
+                    }
+                }
                 if let DragUpdateResult::Move { positions, .. } = result {
                     let snap_disabled = is_key_down(KeyCode::Z);
                     // Capture snap settings before borrowing mesh
@@ -401,6 +513,8 @@ fn handle_drag_move(
         // Not in any drag - check for free move start
         // Store potential start position (similar to box select)
         if ctx.mouse.left_pressed && inside_viewport {
+            eprintln!("[FREE_DRAG] Pending start set at mouse ({:.1}, {:.1}), selection: {:?}",
+                mouse_pos.0, mouse_pos.1, state.selection.summary());
             state.free_drag_pending_start = Some(mouse_pos);
         }
 
@@ -427,6 +541,12 @@ fn handle_drag_move(
                         let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
                         let center = sum * (1.0 / initial_positions.len() as f32);
 
+                        eprintln!("[FREE_DRAG] Starting free drag: {} verts, center ({:.3}, {:.3}, {:.3}), mouse ({:.1}, {:.1})",
+                            initial_positions.len(), center.x, center.y, center.z, mouse_pos.0, mouse_pos.1);
+                        for (idx, pos) in &initial_positions {
+                            eprintln!("[FREE_DRAG]   initial vert[{}] = ({:.3}, {:.3}, {:.3})", idx, pos.x, pos.y, pos.z);
+                        }
+
                         // Save undo state before starting
                         state.push_undo("Drag move");
 
@@ -441,15 +561,22 @@ fn handle_drag_move(
                             state.ortho_drag_zoom = state.get_ortho_camera(viewport_id).zoom;
                         }
 
+                        // Get bone rotation for world-to-local delta transformation (bone-bound meshes)
+                        let bone_rotation = state.selected_object()
+                            .and_then(|obj| obj.default_bone_index)
+                            .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
+
                         // Start free move drag (axis = None for screen-space movement)
-                        state.drag_manager.start_move(
+                        state.drag_manager.start_move_with_bone(
                             center,
                             drag_start_mouse,
                             None,      // No axis = free movement
+                            None,      // No axis direction for free movement
                             indices,
                             initial_positions,
                             state.snap_settings.enabled,
                             state.snap_settings.grid_size,
+                            bone_rotation,
                         );
 
                         state.set_status("Drag to move (hold Shift for fine)", 3.0);
@@ -869,6 +996,11 @@ pub fn draw_modeler_viewport_ext(
             let sum: Vec3 = initial_positions.iter().map(|(_, p)| *p).fold(Vec3::ZERO, |acc, p| acc + p);
             let center = sum * (1.0 / initial_positions.len() as f32);
 
+            // Get bone rotation for world-to-local delta transformation (for bone-bound meshes)
+            let bone_rotation = state.selected_object()
+                .and_then(|obj| obj.default_bone_index)
+                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1);
+
             // Save undo state before starting transform
             state.push_undo(mode.label());
 
@@ -876,14 +1008,16 @@ pub fn draw_modeler_viewport_ext(
             match mode {
                 ModalTransform::Grab => {
                     state.tool_box.tools.move_tool.start_drag(None);
-                    state.drag_manager.start_move(
+                    state.drag_manager.start_move_with_bone(
                         center,
                         mouse_pos,
                         None, // No axis constraint initially
+                        None, // No axis direction for free movement
                         indices,
                         initial_positions,
                         state.snap_settings.enabled,
                         state.snap_settings.grid_size,
+                        bone_rotation,
                     );
                 }
                 ModalTransform::Scale => {
@@ -989,6 +1123,19 @@ pub fn draw_modeler_viewport_ext(
     // This ensures proper depth sorting across all objects (painter's algorithm and z-buffer)
     let use_rgb555 = state.raster_settings.use_rgb555;
 
+    // Check if the Mesh component itself is hidden and get its opacity
+    let mesh_component_info = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }));
+    let mesh_component_hidden = mesh_component_info
+        .map(|(idx, _)| state.is_component_hidden(idx))
+        .unwrap_or(false);
+    let mesh_component_opacity = mesh_component_info
+        .map(|(idx, _)| state.get_component_opacity(idx))
+        .unwrap_or(0);
+    // Convert opacity to alpha for editor transparency (handled by rasterizer, not vertex dimming)
+    let opacity_alpha = ModelerState::opacity_to_alpha(mesh_component_opacity);
+
     // Fallback CLUT for objects with no assigned CLUT
     let fallback_clut = state.clut_pool.first_id()
         .and_then(|id| state.clut_pool.get(id));
@@ -998,12 +1145,19 @@ pub fn draw_modeler_viewport_ext(
     let mut all_faces: Vec<RasterFace> = Vec::new();
     let mut all_textures: Vec<crate::rasterizer::Texture> = Vec::new();
     let mut all_textures_15: Vec<crate::rasterizer::Texture15> = Vec::new();
-    let mut all_blend_modes: Vec<crate::rasterizer::BlendMode> = Vec::new();
+
+    // Cache transformed vertex positions for the selected object (for selection overlays)
+    // This avoids redundant bone transforms - compute once, use everywhere
+    let mut selected_object_world_vertices: Option<Vec<Vec3>> = None;
 
     // Track if any object needs backface culling disabled
     let mut any_double_sided = false;
 
     for (obj_idx, obj) in state.objects().iter().enumerate() {
+        // Skip all mesh objects if Mesh component is hidden
+        if mesh_component_hidden {
+            continue;
+        }
         // Skip hidden objects
         if !obj.visible {
             continue;
@@ -1032,29 +1186,88 @@ pub fn draw_modeler_viewport_ext(
         let mesh = &obj.mesh;
 
         // All objects use same brightness (selection shown via corner brackets)
+        // Opacity is handled by editor_alpha on faces, not by vertex color dimming
         let base_color = 180u8;
 
         // Track vertex offset for this object
         let vertex_offset = all_vertices.len();
 
-        // Add vertices from this object
+        // Pre-compute all bone transforms for per-vertex skinning
+        // Each vertex can have its own bone_index, with fallback to mesh's default_bone_index
+        let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+            .map(|i| state.get_bone_world_transform(i))
+            .collect();
+
+        // For selected object, we'll cache world positions for selection overlays
+        let is_selected = state.selected_object == Some(obj_idx);
+        let mut world_positions: Vec<Vec3> = if is_selected {
+            Vec::with_capacity(mesh.vertices.len())
+        } else {
+            Vec::new()
+        };
+
+        // Add vertices from this object (with per-vertex bone transforms)
         for v in &mesh.vertices {
+            // Per-vertex bone assignment with fallback to mesh default
+            let bone_idx = v.bone_index.or(obj.default_bone_index);
+            let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+            let (pos, normal) = if let Some((bone_pos, bone_rot)) = bone_transform {
+                // Vertices are in bone-local space, transform to world space
+                let rotated = rotate_by_euler(v.pos, bone_rot);
+                let world_pos = rotated + bone_pos;
+                // Rotate normal (no translation)
+                let world_normal = rotate_by_euler(v.normal, bone_rot);
+                (world_pos, world_normal)
+            } else {
+                (v.pos, v.normal)
+            };
+
+            // Cache world position for selected object
+            if is_selected {
+                world_positions.push(pos);
+            }
+
+            let color = RasterColor::new(base_color, base_color, base_color);
+
             all_vertices.push(RasterVertex {
-                pos: v.pos,
-                normal: v.normal,
+                pos,
+                normal,
                 uv: v.uv,
-                color: RasterColor::new(base_color, base_color, base_color),
+                color,
                 bone_index: None,
             });
+        }
+
+        // Store cached positions for selected object
+        if is_selected {
+            selected_object_world_vertices = Some(world_positions);
         }
 
         // Add mirrored vertices if mirror mode is enabled for selected object
         let mirror_vertex_offset = if state.current_mirror_settings().enabled && state.selected_object == Some(obj_idx) {
             let offset = all_vertices.len();
             for v in &mesh.vertices {
+                // First mirror in local space, then apply per-vertex bone transform
+                let mirrored_pos = state.current_mirror_settings().mirror_position(v.pos);
+                let mirrored_normal = state.current_mirror_settings().mirror_normal(v.normal);
+
+                // Per-vertex bone assignment with fallback to mesh default
+                let bone_idx = v.bone_index.or(obj.default_bone_index);
+                let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+                let (pos, normal) = if let Some((bone_pos, bone_rot)) = bone_transform {
+                    let rotated = rotate_by_euler(mirrored_pos, bone_rot);
+                    let world_pos = rotated + bone_pos;
+                    let world_normal = rotate_by_euler(mirrored_normal, bone_rot);
+                    (world_pos, world_normal)
+                } else {
+                    (mirrored_pos, mirrored_normal)
+                };
+
                 all_vertices.push(RasterVertex {
-                    pos: state.current_mirror_settings().mirror_position(v.pos),
-                    normal: state.current_mirror_settings().mirror_normal(v.normal),
+                    pos,
+                    normal,
                     uv: v.uv,
                     color: RasterColor::new(
                         (base_color as f32 * 0.85) as u8,
@@ -1079,8 +1292,8 @@ pub fn draw_modeler_viewport_ext(
                     texture_id: Some(texture_idx),
                     black_transparent: edit_face.black_transparent,
                     blend_mode: edit_face.blend_mode,
+                    editor_alpha: opacity_alpha,
                 });
-                all_blend_modes.push(edit_face.blend_mode);
 
                 // Add mirrored face if mirror mode enabled
                 if let Some(mirror_offset) = mirror_vertex_offset {
@@ -1091,9 +1304,37 @@ pub fn draw_modeler_viewport_ext(
                         texture_id: Some(texture_idx),
                         black_transparent: edit_face.black_transparent,
                         blend_mode: edit_face.blend_mode,
+                        editor_alpha: opacity_alpha,
                     });
-                    all_blend_modes.push(edit_face.blend_mode);
                 }
+            }
+        }
+    }
+
+    // Add skeleton bone triangles to unified pipeline (if visible)
+    if state.show_bones {
+        let skeleton_info = state.asset.components.iter()
+            .enumerate()
+            .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Skeleton { .. }));
+        let skeleton_hidden = skeleton_info
+            .map(|(idx, _)| state.is_component_hidden(idx))
+            .unwrap_or(false);
+
+        if !skeleton_hidden {
+            let skeleton_opacity = skeleton_info
+                .map(|(idx, _)| state.get_component_opacity(idx))
+                .unwrap_or(0);
+            let skeleton_alpha = ModelerState::opacity_to_alpha(skeleton_opacity);
+
+            let vertex_offset = all_vertices.len();
+            let (skeleton_verts, skeleton_faces) = skeleton_to_triangles(state, skeleton_alpha);
+
+            all_vertices.extend(skeleton_verts);
+            for mut face in skeleton_faces {
+                face.v0 += vertex_offset;
+                face.v1 += vertex_offset;
+                face.v2 += vertex_offset;
+                all_faces.push(face);
             }
         }
     }
@@ -1112,7 +1353,7 @@ pub fn draw_modeler_viewport_ext(
 
         // Add lights from Light components to the render settings
         for (comp_idx, component) in state.asset.components.iter().enumerate() {
-            if state.hidden_components.contains(&comp_idx) {
+            if state.is_component_hidden(comp_idx) {
                 continue;
             }
             if let crate::asset::AssetComponent::Light { color, intensity, radius, offset } = component {
@@ -1137,7 +1378,6 @@ pub fn draw_modeler_viewport_ext(
                 &all_vertices,
                 &all_faces,
                 &all_textures_15,
-                Some(&all_blend_modes),
                 &state.camera,
                 &combined_settings,
                 None,
@@ -1157,11 +1397,19 @@ pub fn draw_modeler_viewport_ext(
     // Draw corner brackets around selected object's bounding box
     draw_selected_object_brackets(state, fb);
 
-    // Draw selection overlays
-    draw_mesh_selection_overlays(state, fb);
+    // Draw selection overlays (using cached world positions to avoid redundant bone transforms)
+    draw_mesh_selection_overlays(state, fb, selected_object_world_vertices.as_deref());
 
     // Draw component gizmos (lights, etc.)
-    draw_component_gizmos(state, fb, &state.hidden_components);
+    draw_component_gizmos(state, fb);
+
+    // Draw skeleton hierarchy lines (bones rendered in unified pipeline above)
+    // TODO: Extract hierarchy line drawing from draw_skeleton for proper layering
+    let ortho_proj = state.raster_settings.ortho_projection.as_ref();
+    draw_skeleton(fb, state, ortho_proj);
+
+    // Draw bone tip/base dots as overlays (on top of octahedrons)
+    draw_bone_dots(fb, state, ortho_proj);
 
     // Draw box selection preview (highlight elements that would be selected)
     if state.box_select_viewport == Some(viewport_id) {
@@ -1172,7 +1420,7 @@ pub fn draw_modeler_viewport_ext(
             let fb_y0 = (min_y - draw_y) / draw_h * fb_height as f32;
             let fb_x1 = (max_x - draw_x) / draw_w * fb_width as f32;
             let fb_y1 = (max_y - draw_y) / draw_h * fb_height as f32;
-            draw_box_selection_preview(state, fb, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id);
+            draw_box_selection_preview(state, fb, fb_x0, fb_y0, fb_x1, fb_y1, viewport_id, selected_object_world_vertices.as_deref());
         }
     }
 
@@ -1194,17 +1442,23 @@ pub fn draw_modeler_viewport_ext(
         },
     );
 
-    // Check if a non-Mesh component is selected (Light, etc.)
+    // Check if a non-Mesh/non-Skeleton component is selected (Light, etc.)
     // When true: disable all mesh interaction, only component gizmo works
-    // When false: normal mesh editing mode
+    // When false: normal mesh editing mode (includes Skeleton for bone selection/gizmo)
     let non_mesh_component_selected = state.selected_component
         .and_then(|idx| state.asset.components.get(idx))
-        .map(|c| !matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|c| !matches!(c, crate::asset::AssetComponent::Mesh { .. } | crate::asset::AssetComponent::Skeleton { .. }))
         .unwrap_or(false);
 
     if non_mesh_component_selected {
         // Component editing mode: only component gizmo, no mesh interaction
         handle_component_move_gizmo(ctx, state, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+
+        // Still update hover state for click-through to mesh/skeleton
+        let is_active_viewport = state.active_viewport == viewport_id;
+        if is_active_viewport && !state.drag_manager.is_dragging() {
+            update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+        }
     } else {
         // Mesh editing mode: normal mesh tools and interaction
         handle_transform_gizmo(ctx, state, mouse_pos, inside_viewport, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
@@ -1212,7 +1466,7 @@ pub fn draw_modeler_viewport_ext(
         // Update hover state every frame (like world editor) - but not when gizmo is active
         let is_active_viewport = state.active_viewport == viewport_id;
         if is_active_viewport && !state.drag_manager.is_dragging() && state.gizmo_hovered_axis.is_none() {
-            update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height);
+            update_hover_state(state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
         }
 
         // Handle box selection (left-drag without hitting an element or gizmo)
@@ -1240,15 +1494,32 @@ pub fn draw_modeler_viewport_ext(
         }
     }
 
+    // Handle skeleton interaction (when Skeleton component selected)
+    let skeleton_selected = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx))
+        .map(|c| c.is_skeleton())
+        .unwrap_or(false);
+
+    if skeleton_selected && inside_viewport {
+        handle_skeleton_interaction(ctx, state, mouse_pos, draw_x, draw_y, draw_w, draw_h, fb_width, fb_height, viewport_id);
+    }
+
     // Handle single-click selection using hover system (like world editor)
-    // Only in mesh editing mode (not when a non-Mesh component is selected)
-    if !non_mesh_component_selected
-        && inside_viewport && ctx.mouse.left_pressed
+    // Handles both mesh selection and bone selection (click-based)
+    // Skip if radial menu is open - menu consumes clicks
+    if inside_viewport && ctx.mouse.left_pressed
         && state.modal_transform == ModalTransform::None
         && state.gizmo_hovered_axis.is_none()
         && !state.drag_manager.is_dragging()
+        && !state.radial_menu.is_open
     {
         handle_hover_click(state);
+        // Reset pending start to THIS click's position. handle_drag_move runs before
+        // handle_hover_click, so it may have been unable to set the pending start
+        // (e.g., a gizmo drag was active at that point but ended in handle_transform_gizmo).
+        // Without this, a stale pending start from a previous interaction could trigger
+        // an unintended free drag on the next frame with a huge position delta.
+        state.free_drag_pending_start = Some(mouse_pos);
     }
 
     // Restore original camera and ortho settings after ortho rendering
@@ -1272,8 +1543,8 @@ fn handle_box_selection(
     fb_height: usize,
     viewport_id: ViewportId,
 ) {
-    // Don't start box select during modal transforms or other drags
-    if state.modal_transform != ModalTransform::None {
+    // Don't start box select during modal transforms, other drags, or bone tip dragging
+    if state.modal_transform != ModalTransform::None || state.bone_creation.is_some() {
         return;
     }
 
@@ -1309,6 +1580,7 @@ fn handle_box_selection(
             // End the drag and clear viewport ownership
             state.drag_manager.end();
             state.box_select_viewport = None;
+            state.free_drag_pending_start = None;
         }
     } else if !state.drag_manager.is_dragging() {
         // Not in any drag - check for box select start
@@ -1359,6 +1631,16 @@ fn apply_box_selection(
     fb_height: usize,
     viewport_id: ViewportId,
 ) {
+    // Skip if Mesh component is hidden - nothing to select
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.is_component_hidden(idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return;
+    }
+
     // For ortho viewports, we need to set up the ortho projection from the viewport's camera
     // The raster_settings.ortho_projection is None at this point because it gets reset after rendering
     let is_ortho = matches!(viewport_id, ViewportId::Top | ViewportId::Front | ViewportId::Side);
@@ -1391,6 +1673,26 @@ fn apply_box_selection(
 
     let mesh = state.mesh();
 
+    // Pre-compute all bone transforms for per-vertex skinning (same as find_hovered_element)
+    let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
+
+    // Get mesh's default bone index
+    let default_bone_idx = state.selected_object().and_then(|obj| obj.default_bone_index);
+
+    // Helper to transform vertex position to world space (per-vertex bone)
+    let get_world_pos = |v: &crate::rasterizer::Vertex| -> Vec3 {
+        let bone_idx = v.bone_index.or(default_bone_idx);
+        let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+        if let Some((bone_pos, bone_rot)) = bone_transform {
+            rotate_by_euler(v.pos, bone_rot) + bone_pos
+        } else {
+            v.pos
+        }
+    };
+
     // Check if adding to selection (Shift or X held)
     let add_to_selection = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
                         || is_key_down(KeyCode::X);
@@ -1404,8 +1706,9 @@ fn apply_box_selection(
             };
 
             for (idx, vert) in mesh.vertices.iter().enumerate() {
+                let world_pos = get_world_pos(vert);
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    world_pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1438,12 +1741,12 @@ fn apply_box_selection(
             };
 
             for (idx, face) in mesh.faces.iter().enumerate() {
-                // Use face center for box selection (average of all vertices)
-                let verts: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi))
+                // Use face center for box selection (average of transformed vertices)
+                let world_positions: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| get_world_pos(v)))
                     .collect();
-                if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                if !world_positions.is_empty() {
+                    let center = world_positions.iter().fold(Vec3::ZERO, |acc, &p| acc + p) * (1.0 / world_positions.len() as f32);
                     if let Some((sx, sy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
@@ -1489,15 +1792,30 @@ fn draw_selected_object_brackets(state: &ModelerState, fb: &mut Framebuffer) {
         return;
     }
 
+    // Pre-compute all bone transforms for per-vertex skinning
+    let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
+
     let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
     let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
     for v in &mesh.vertices {
-        min.x = min.x.min(v.pos.x);
-        min.y = min.y.min(v.pos.y);
-        min.z = min.z.min(v.pos.z);
-        max.x = max.x.max(v.pos.x);
-        max.y = max.y.max(v.pos.y);
-        max.z = max.z.max(v.pos.z);
+        // Per-vertex bone assignment with fallback to mesh default
+        let bone_idx = v.bone_index.or(obj.default_bone_index);
+        let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+        // Transform vertex to world space
+        let pos = if let Some((bone_pos, bone_rot)) = bone_transform {
+            rotate_by_euler(v.pos, bone_rot) + bone_pos
+        } else {
+            v.pos
+        };
+        min.x = min.x.min(pos.x);
+        min.y = min.y.min(pos.y);
+        min.z = min.z.min(pos.z);
+        max.x = max.x.max(pos.x);
+        max.y = max.y.max(pos.y);
+        max.z = max.z.max(pos.z);
     }
 
     // Add margin to avoid z-fighting with mesh geometry
@@ -1566,7 +1884,20 @@ fn draw_selected_object_brackets(state: &ModelerState, fb: &mut Framebuffer) {
 }
 
 /// Draw selection and hover overlays for mesh editing (like world editor)
-fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
+///
+/// `world_vertices` - Pre-computed world-space vertex positions (with bone transforms applied).
+/// If None, falls back to reading positions directly from mesh (for non-bone-bound meshes).
+fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer, world_vertices: Option<&[Vec3]>) {
+    // Skip if Mesh component is hidden
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.is_component_hidden(idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return;
+    }
+
     let mesh = state.mesh();
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
@@ -1574,6 +1905,15 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     let hover_color = RasterColor::new(255, 200, 150);   // Orange for hover
     let select_color = RasterColor::new(100, 180, 255);  // Blue for selection
     let edge_overlay_color = RasterColor::new(80, 80, 80);  // Gray for edge overlay
+
+    // Helper to get vertex world position - uses cached positions if available
+    let get_pos = |idx: usize| -> Option<Vec3> {
+        if let Some(positions) = world_vertices {
+            positions.get(idx).copied()
+        } else {
+            mesh.vertices.get(idx).map(|v| v.pos)
+        }
+    };
 
     // =========================================================================
     // Draw all edges with semi-transparent overlay (always visible in solid mode)
@@ -1583,10 +1923,10 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     if !state.raster_settings.wireframe_overlay {
         for face in &mesh.faces {
             for (v0_idx, v1_idx) in face.edges() {
-                if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                if let (Some(p0), Some(p1)) = (get_pos(v0_idx), get_pos(v1_idx)) {
                     if let (Some((sx0, sy0, z0)), Some((sx1, sy1, z1))) = (
-                        world_to_screen_with_ortho_depth(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                        world_to_screen_with_ortho_depth(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                        world_to_screen_with_ortho_depth(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                        world_to_screen_with_ortho_depth(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                     ) {
                         fb.draw_line_3d_alpha(sx0 as i32, sy0 as i32, z0, sx1 as i32, sy1 as i32, z1, edge_overlay_color, 191);
                     }
@@ -1596,18 +1936,20 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
 
         // Draw vertex dots with semi-transparent overlay
         let vertex_overlay_color = RasterColor::new(40, 40, 50);
-        for vert in &mesh.vertices {
-            if let Some((sx, sy)) = world_to_screen_with_ortho(
-                vert.pos,
-                camera.position,
-                camera.basis_x,
-                camera.basis_y,
-                camera.basis_z,
-                fb.width,
-                fb.height,
-                ortho,
-            ) {
-                fb.draw_circle_alpha(sx as i32, sy as i32, 3, vertex_overlay_color, 140);
+        for idx in 0..mesh.vertices.len() {
+            if let Some(pos) = get_pos(idx) {
+                if let Some((sx, sy)) = world_to_screen_with_ortho(
+                    pos,
+                    camera.position,
+                    camera.basis_x,
+                    camera.basis_y,
+                    camera.basis_z,
+                    fb.width,
+                    fb.height,
+                    ortho,
+                ) {
+                    fb.draw_circle_alpha(sx as i32, sy as i32, 3, vertex_overlay_color, 140);
+                }
             }
         }
     }
@@ -1616,9 +1958,9 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // Draw hovered vertex (if any) - orange dot
     // =========================================================================
     if let Some(hovered_idx) = state.hovered_vertex {
-        if let Some(vert) = mesh.vertices.get(hovered_idx) {
+        if let Some(pos) = get_pos(hovered_idx) {
             if let Some((sx, sy)) = world_to_screen_with_ortho(
-                vert.pos,
+                pos,
                 camera.position,
                 camera.basis_x,
                 camera.basis_y,
@@ -1636,10 +1978,10 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // Draw hovered edge (if any) - orange line
     // =========================================================================
     if let Some((v0_idx, v1_idx)) = state.hovered_edge {
-        if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+        if let (Some(p0), Some(p1)) = (get_pos(v0_idx), get_pos(v1_idx)) {
             if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
             ) {
                 fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, hover_color);
                 // Draw thicker by drawing adjacent lines
@@ -1656,8 +1998,8 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
         if let Some(face) = mesh.faces.get(hovered_idx) {
             // Draw face edges (all edges of n-gon)
             let screen_positions: Vec<_> = face.vertices.iter()
-                .filter_map(|&vi| mesh.vertices.get(vi))
-                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                .filter_map(|&vi| get_pos(vi))
+                .filter_map(|p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                 .collect();
 
             let n = screen_positions.len();
@@ -1682,9 +2024,9 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // =========================================================================
     if let ModelerSelection::Vertices(selected_verts) = &state.selection {
         for &idx in selected_verts {
-            if let Some(vert) = mesh.vertices.get(idx) {
+            if let Some(pos) = get_pos(idx) {
                 if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
+                    pos,
                     camera.position,
                     camera.basis_x,
                     camera.basis_y,
@@ -1704,10 +2046,10 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
     // =========================================================================
     if let ModelerSelection::Edges(selected_edges) = &state.selection {
         for (v0_idx, v1_idx) in selected_edges {
-            if let (Some(v0), Some(v1)) = (mesh.vertices.get(*v0_idx), mesh.vertices.get(*v1_idx)) {
+            if let (Some(p0), Some(p1)) = (get_pos(*v0_idx), get_pos(*v1_idx)) {
                 if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                    world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                 ) {
                     fb.draw_line(sx0 as i32, sy0 as i32, sx1 as i32, sy1 as i32, select_color);
                     fb.draw_line(sx0 as i32 + 1, sy0 as i32, sx1 as i32 + 1, sy1 as i32, select_color);
@@ -1727,7 +2069,7 @@ fn draw_mesh_selection_overlays(state: &ModelerState, fb: &mut Framebuffer) {
             if let Some(face) = mesh.faces.get(face_idx) {
                 // Collect world positions and screen positions
                 let world_positions: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| v.pos))
+                    .filter_map(|&vi| get_pos(vi))
                     .collect();
                 let screen_positions: Vec<_> = world_positions.iter()
                     .filter_map(|&p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
@@ -1771,6 +2113,7 @@ fn draw_box_selection_preview(
     fb_x1: f32,
     fb_y1: f32,
     viewport_id: ViewportId,
+    world_vertices: Option<&[Vec3]>,
 ) {
     let is_ortho = matches!(viewport_id, ViewportId::Top | ViewportId::Front | ViewportId::Side);
 
@@ -1802,23 +2145,34 @@ fn draw_box_selection_preview(
     let mesh = state.mesh();
     let preview_color = RasterColor::new(255, 220, 100); // Yellow/gold for preview
 
+    // Helper to get vertex world position - uses cached positions if available
+    let get_pos = |idx: usize| -> Option<Vec3> {
+        if let Some(positions) = world_vertices {
+            positions.get(idx).copied()
+        } else {
+            mesh.vertices.get(idx).map(|v| v.pos)
+        }
+    };
+
     match state.select_mode {
         SelectMode::Vertex => {
             // Highlight vertices inside the box
-            for vert in &mesh.vertices {
-                if let Some((sx, sy)) = world_to_screen_with_ortho(
-                    vert.pos,
-                    camera.position,
-                    camera.basis_x,
-                    camera.basis_y,
-                    camera.basis_z,
-                    fb.width,
-                    fb.height,
-                    ortho,
-                ) {
-                    if sx >= fb_x0 && sx <= fb_x1 && sy >= fb_y0 && sy <= fb_y1 {
-                        // Draw highlighted vertex
-                        fb.draw_circle(sx as i32, sy as i32, 6, preview_color);
+            for idx in 0..mesh.vertices.len() {
+                if let Some(pos) = get_pos(idx) {
+                    if let Some((sx, sy)) = world_to_screen_with_ortho(
+                        pos,
+                        camera.position,
+                        camera.basis_x,
+                        camera.basis_y,
+                        camera.basis_z,
+                        fb.width,
+                        fb.height,
+                        ortho,
+                    ) {
+                        if sx >= fb_x0 && sx <= fb_x1 && sy >= fb_y0 && sy <= fb_y1 {
+                            // Draw highlighted vertex
+                            fb.draw_circle(sx as i32, sy as i32, 6, preview_color);
+                        }
                     }
                 }
             }
@@ -1833,10 +2187,10 @@ fn draw_box_selection_preview(
                         continue;
                     }
 
-                    if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                    if let (Some(p0), Some(p1)) = (get_pos(v0_idx), get_pos(v1_idx)) {
                         if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                            world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
-                            world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
+                            world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho),
                         ) {
                             // Check if midpoint is inside box
                             let mid_x = (sx0 + sx1) / 2.0;
@@ -1854,11 +2208,11 @@ fn draw_box_selection_preview(
         SelectMode::Face => {
             // Highlight faces where center is inside the box
             for face in &mesh.faces {
-                let verts: Vec<_> = face.vertices.iter()
-                    .filter_map(|&vi| mesh.vertices.get(vi))
+                let world_positions: Vec<_> = face.vertices.iter()
+                    .filter_map(|&vi| get_pos(vi))
                     .collect();
-                if !verts.is_empty() {
-                    let center = verts.iter().map(|v| v.pos).fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / verts.len() as f32);
+                if !world_positions.is_empty() {
+                    let center = world_positions.iter().copied().fold(Vec3::ZERO, |acc, p| acc + p) * (1.0 / world_positions.len() as f32);
                     if let Some((cx, cy)) = world_to_screen_with_ortho(
                         center,
                         camera.position,
@@ -1871,8 +2225,8 @@ fn draw_box_selection_preview(
                     ) {
                         if cx >= fb_x0 && cx <= fb_x1 && cy >= fb_y0 && cy <= fb_y1 {
                             // Draw face outline in preview color
-                            let screen_positions: Vec<_> = verts.iter()
-                                .filter_map(|v| world_to_screen_with_ortho(v.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
+                            let screen_positions: Vec<_> = world_positions.iter()
+                                .filter_map(|&p| world_to_screen_with_ortho(p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb.width, fb.height, ortho))
                                 .collect();
                             let n = screen_positions.len();
                             if n >= 3 {
@@ -2028,10 +2382,43 @@ fn find_hovered_element(
     fb_width: usize,
     fb_height: usize,
 ) -> (Option<usize>, Option<(usize, usize)>, Option<usize>) {
+    // Skip if Mesh component is hidden - nothing to hover
+    let mesh_hidden = state.asset.components.iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, crate::asset::AssetComponent::Mesh { .. }))
+        .map(|(idx, _)| state.is_component_hidden(idx))
+        .unwrap_or(false);
+    if mesh_hidden {
+        return (None, None, None);
+    }
+
     let (mouse_fb_x, mouse_fb_y) = mouse_fb;
     let camera = &state.camera;
     let mesh = state.mesh();
     let ortho = state.raster_settings.ortho_projection.as_ref();
+
+    // Pre-compute all bone transforms for per-vertex skinning
+    let bone_transforms: Vec<(Vec3, Vec3)> = (0..state.skeleton().len())
+        .map(|i| state.get_bone_world_transform(i))
+        .collect();
+
+    // Get mesh's default bone index
+    let default_bone_idx = state.selected_object().and_then(|obj| obj.default_bone_index);
+
+    // Helper to transform vertex position to world space (per-vertex bone)
+    let get_world_pos = |idx: usize| -> Option<Vec3> {
+        mesh.vertices.get(idx).map(|v| {
+            // Per-vertex bone assignment with fallback to mesh default
+            let bone_idx = v.bone_index.or(default_bone_idx);
+            let bone_transform = bone_idx.and_then(|idx| bone_transforms.get(idx)).copied();
+
+            if let Some((bone_pos, bone_rot)) = bone_transform {
+                rotate_by_euler(v.pos, bone_rot) + bone_pos
+            } else {
+                v.pos
+            }
+        })
+    };
 
     // Check if current object is double-sided (allow selecting backfaces)
     let double_sided = state.selected_object()
@@ -2052,16 +2439,16 @@ fn find_hovered_element(
     for face in &mesh.faces {
         // For backface culling, use first 3 vertices (like face_normal calculation)
         if face.vertices.len() >= 3 {
-            if let (Some(v0), Some(v1), Some(v2)) = (
-                mesh.vertices.get(face.vertices[0]),
-                mesh.vertices.get(face.vertices[1]),
-                mesh.vertices.get(face.vertices[2]),
+            if let (Some(p0), Some(p1), Some(p2)) = (
+                get_world_pos(face.vertices[0]),
+                get_world_pos(face.vertices[1]),
+                get_world_pos(face.vertices[2]),
             ) {
                 // Use screen-space signed area for backface culling (same as rasterizer)
                 if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                    world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                    world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                    world_to_screen_with_ortho(p2, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                 ) {
                     // 2D screen-space signed area (PS1-style) - positive = front-facing
                     let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -2086,28 +2473,32 @@ fn find_hovered_element(
     }
 
     // Check vertices first (highest priority) - only if on front-facing face (unless X-ray or double-sided)
-    for (idx, vert) in mesh.vertices.iter().enumerate() {
+    for idx in 0..mesh.vertices.len() {
         if !state.xray_mode && !double_sided && !vertex_on_front_face[idx] {
             continue; // Skip vertices only on backfaces (X-ray/double-sided allows selecting through)
         }
-        // Skip vertices on the non-editable side when mirror is enabled
-        if !state.current_mirror_settings().is_editable_side(vert.pos) {
-            continue;
-        }
-        if let Some((sx, sy)) = world_to_screen_with_ortho(
-            vert.pos,
-            camera.position,
-            camera.basis_x,
-            camera.basis_y,
-            camera.basis_z,
-            fb_width,
-            fb_height,
-            ortho,
-        ) {
-            let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
-            if dist < VERTEX_THRESHOLD {
-                if hovered_vertex.map_or(true, |(_, best_dist)| dist < best_dist) {
-                    hovered_vertex = Some((idx, dist));
+        if let Some(pos) = get_world_pos(idx) {
+            // Skip vertices on the non-editable side when mirror is enabled
+            // Note: mirror check uses local position since mirror plane is in local space
+            let local_pos = mesh.vertices[idx].pos;
+            if !state.current_mirror_settings().is_editable_side(local_pos) {
+                continue;
+            }
+            if let Some((sx, sy)) = world_to_screen_with_ortho(
+                pos,
+                camera.position,
+                camera.basis_x,
+                camera.basis_y,
+                camera.basis_z,
+                fb_width,
+                fb_height,
+                ortho,
+            ) {
+                let dist = ((mouse_fb_x - sx).powi(2) + (mouse_fb_y - sy).powi(2)).sqrt();
+                if dist < VERTEX_THRESHOLD {
+                    if hovered_vertex.map_or(true, |(_, best_dist)| dist < best_dist) {
+                        hovered_vertex = Some((idx, dist));
+                    }
                 }
             }
         }
@@ -2126,14 +2517,17 @@ fn find_hovered_element(
                     continue;
                 }
 
-                if let (Some(v0), Some(v1)) = (mesh.vertices.get(v0_idx), mesh.vertices.get(v1_idx)) {
+                if let (Some(p0), Some(p1)) = (get_world_pos(v0_idx), get_world_pos(v1_idx)) {
                     // Skip edges with any vertex on non-editable side when mirror is enabled
-                    if !state.current_mirror_settings().is_editable_side(v0.pos) || !state.current_mirror_settings().is_editable_side(v1.pos) {
+                    // Note: mirror check uses local positions
+                    let local_p0 = mesh.vertices[v0_idx].pos;
+                    let local_p1 = mesh.vertices[v1_idx].pos;
+                    if !state.current_mirror_settings().is_editable_side(local_p0) || !state.current_mirror_settings().is_editable_side(local_p1) {
                         continue;
                     }
                     if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
-                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         let dist = point_to_line_distance(mouse_fb_x, mouse_fb_y, sx0, sy0, sx1, sy1);
                         if dist < EDGE_THRESHOLD {
@@ -2151,6 +2545,7 @@ fn find_hovered_element(
     if hovered_vertex.is_none() && hovered_edge.is_none() {
         for (idx, face) in mesh.faces.iter().enumerate() {
             // Skip faces with any vertex on non-editable side when mirror is enabled
+            // Note: mirror check uses local positions
             let face_on_editable_side = face.vertices.iter().all(|&vi| {
                 mesh.vertices.get(vi)
                     .map(|v| state.current_mirror_settings().is_editable_side(v.pos))
@@ -2161,16 +2556,16 @@ fn find_hovered_element(
             }
             // Triangulate the n-gon face and check each triangle
             for [i0, i1, i2] in face.triangulate() {
-                if let (Some(v0), Some(v1), Some(v2)) = (
-                    mesh.vertices.get(i0),
-                    mesh.vertices.get(i1),
-                    mesh.vertices.get(i2),
+                if let (Some(p0), Some(p1), Some(p2)) = (
+                    get_world_pos(i0),
+                    get_world_pos(i1),
+                    get_world_pos(i2),
                 ) {
                     // Use screen-space signed area for backface culling (same as rasterizer)
                     if let (Some((sx0, sy0)), Some((sx1, sy1)), Some((sx2, sy2))) = (
-                        world_to_screen_with_ortho(v0.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v1.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
-                        world_to_screen_with_ortho(v2.pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p0, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p1, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
+                        world_to_screen_with_ortho(p2, camera.position, camera.basis_x, camera.basis_y, camera.basis_z, fb_width, fb_height, ortho),
                     ) {
                         // 2D screen-space signed area (PS1-style) - positive = front-facing
                         let signed_area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
@@ -2183,9 +2578,9 @@ fn find_hovered_element(
                             // Calculate depth at mouse position for Z-ordering
                             let depth = interpolate_depth_in_triangle(
                                 mouse_fb_x, mouse_fb_y,
-                                sx0, sy0, (v0.pos - camera.position).dot(camera.basis_z),
-                                sx1, sy1, (v1.pos - camera.position).dot(camera.basis_z),
-                                sx2, sy2, (v2.pos - camera.position).dot(camera.basis_z),
+                                sx0, sy0, (p0 - camera.position).dot(camera.basis_z),
+                                sx1, sy1, (p1 - camera.position).dot(camera.basis_z),
+                                sx2, sy2, (p2 - camera.position).dot(camera.basis_z),
                             );
                             // Pick the closest (smallest depth) face
                             if hovered_face.map_or(true, |(_, best_depth)| depth < best_depth) {
@@ -2256,12 +2651,15 @@ fn update_hover_state(
     draw_x: f32, draw_y: f32,
     draw_w: f32, draw_h: f32,
     fb_width: usize, fb_height: usize,
+    viewport_id: ViewportId,
 ) {
     // Don't update hover during transforms or box select
     if state.modal_transform != ModalTransform::None || state.drag_manager.is_dragging() {
         state.hovered_vertex = None;
         state.hovered_edge = None;
         state.hovered_face = None;
+        state.hovered_bone = None;
+        state.hovered_bone_tip = None;
         return;
     }
 
@@ -2273,6 +2671,8 @@ fn update_hover_state(
         state.hovered_vertex = None;
         state.hovered_edge = None;
         state.hovered_face = None;
+        state.hovered_bone = None;
+        state.hovered_bone_tip = None;
         return;
     }
 
@@ -2280,10 +2680,396 @@ fn update_hover_state(
     let fb_x = (mouse_pos.0 - draw_x) / draw_w * fb_width as f32;
     let fb_y = (mouse_pos.1 - draw_y) / draw_h * fb_height as f32;
 
-    let (vert, edge, face) = find_hovered_element(state, (fb_x, fb_y), fb_width, fb_height);
-    state.hovered_vertex = vert;
-    state.hovered_edge = edge;
-    state.hovered_face = face;
+    // Determine which component type is selected for hover isolation
+    let selected_component_type = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx));
+    let mesh_component_selected = selected_component_type.map(|c| c.is_mesh()).unwrap_or(false);
+    let skeleton_component_selected = selected_component_type.map(|c| c.is_skeleton()).unwrap_or(false);
+
+    // Clear all hover states first
+    state.hovered_bone = None;
+    state.hovered_bone_tip = None;
+    state.hovered_vertex = None;
+    state.hovered_edge = None;
+    state.hovered_face = None;
+
+    // Only check bone hover when skeleton component is selected
+    if skeleton_component_selected && state.show_bones && !state.skeleton().is_empty() {
+        let (base, tip) = find_hovered_bone_part(state, (fb_x, fb_y), fb_width, fb_height, viewport_id);
+        state.hovered_bone = base;
+        state.hovered_bone_tip = tip;
+    }
+
+    // Only check mesh hover when mesh component is selected (and not hovering over bone)
+    if mesh_component_selected && state.hovered_bone.is_none() && state.hovered_bone_tip.is_none() {
+        let (vert, edge, face) = find_hovered_element(state, (fb_x, fb_y), fb_width, fb_height);
+        state.hovered_vertex = vert;
+        state.hovered_edge = edge;
+        state.hovered_face = face;
+    }
+
+    // Click-through: if nothing hovered in the current component, test other visible components
+    let nothing_hovered = state.hovered_bone.is_none()
+        && state.hovered_bone_tip.is_none()
+        && state.hovered_vertex.is_none()
+        && state.hovered_edge.is_none()
+        && state.hovered_face.is_none();
+
+    if nothing_hovered {
+        // Test bones if we haven't already (skeleton not currently selected)
+        if !skeleton_component_selected && state.show_bones && !state.skeleton().is_empty() {
+            let skeleton_visible = state.asset.components.iter()
+                .position(|c| c.is_skeleton())
+                .map(|idx| !state.is_component_hidden(idx))
+                .unwrap_or(false);
+            if skeleton_visible {
+                let (base, tip) = find_hovered_bone_part(state, (fb_x, fb_y), fb_width, fb_height, viewport_id);
+                state.hovered_bone = base;
+                state.hovered_bone_tip = tip;
+            }
+        }
+
+        // Test mesh if we haven't already (mesh not currently selected, and no bone found)
+        if !mesh_component_selected && state.hovered_bone.is_none() && state.hovered_bone_tip.is_none() {
+            let mesh_visible = state.asset.components.iter()
+                .position(|c| c.is_mesh())
+                .map(|idx| !state.is_component_hidden(idx))
+                .unwrap_or(false);
+            if mesh_visible {
+                let (vert, edge, face) = find_hovered_element(state, (fb_x, fb_y), fb_width, fb_height);
+                state.hovered_vertex = vert;
+                state.hovered_edge = edge;
+                state.hovered_face = face;
+            }
+        }
+    }
+
+    // Set hover status messages
+    if let Some(tip_idx) = state.hovered_bone_tip {
+        let name = state.skeleton().get(tip_idx)
+            .map(|b| b.name.as_str()).unwrap_or("?");
+        state.set_status(&format!("Tip: {} (click to select tip)", name), 0.0);
+    } else if let Some(bone_idx) = state.hovered_bone {
+        let name = state.skeleton().get(bone_idx)
+            .map(|b| b.name.as_str()).unwrap_or("?");
+        state.set_status(&format!("Bone: {} (click to select)", name), 0.0);
+    } else if let Some(v_idx) = state.hovered_vertex {
+        state.set_status(&format!("Vertex {}", v_idx), 0.0);
+    } else if let Some((e0, e1)) = state.hovered_edge {
+        state.set_status(&format!("Edge {}-{}", e0, e1), 0.0);
+    } else if let Some(f_idx) = state.hovered_face {
+        state.set_status(&format!("Face {}", f_idx), 0.0);
+    }
+}
+
+/// Find the bone part under the cursor: (base_hover, tip_hover)
+/// Returns which bone's base or tip is being hovered (mutually exclusive)
+fn find_hovered_bone_part(
+    state: &ModelerState,
+    fb_pos: (f32, f32),
+    fb_width: usize,
+    fb_height: usize,
+    viewport_id: ViewportId,
+) -> (Option<usize>, Option<usize>) {
+    use crate::rasterizer::{Camera, OrthoProjection};
+
+    let skeleton = state.skeleton();
+    if skeleton.is_empty() {
+        return (None, None);
+    }
+
+    // Use ortho camera for ortho viewports, perspective camera otherwise
+    let is_ortho = viewport_id != ViewportId::Perspective;
+
+    // Construct camera and ortho projection based on viewport type
+    let (camera, ortho) = if is_ortho {
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        let view_distance = 50000.0;
+        let mut cam = match viewport_id {
+            ViewportId::Top => Camera::ortho_top(),
+            ViewportId::Front => Camera::ortho_front(),
+            ViewportId::Side => Camera::ortho_side(),
+            ViewportId::Perspective => unreachable!(),
+        };
+        match viewport_id {
+            ViewportId::Top => cam.position = Vec3::new(0.0, view_distance, 0.0),
+            ViewportId::Front => cam.position = Vec3::new(0.0, 0.0, view_distance),
+            ViewportId::Side => cam.position = Vec3::new(view_distance, 0.0, 0.0),
+            ViewportId::Perspective => unreachable!(),
+        }
+        let ortho_proj = OrthoProjection {
+            zoom: ortho_cam.zoom,
+            center_x: ortho_cam.center.x,
+            center_y: ortho_cam.center.y,
+        };
+        (cam, Some(ortho_proj))
+    } else {
+        (state.camera.clone(), None)
+    };
+    let ortho_ref = ortho.as_ref();
+
+    // First, check if hovering near any bone's base or tip (screen space)
+    const TIP_RADIUS: f32 = 12.0;  // Screen pixels for tip/base hover
+
+    let mut closest_base: Option<(usize, f32)> = None;
+    let mut closest_tip: Option<(usize, f32)> = None;
+
+    for (idx, _bone) in skeleton.iter().enumerate() {
+        let (base_pos, _) = state.get_bone_world_transform(idx);
+        let tip_pos = state.get_bone_tip_position(idx);
+
+        // Project base and tip to screen
+        if let Some((base_sx, base_sy)) = world_to_screen_with_ortho(
+            base_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb_width, fb_height, ortho_ref
+        ) {
+            let base_dist = ((fb_pos.0 - base_sx).powi(2) + (fb_pos.1 - base_sy).powi(2)).sqrt();
+            if base_dist < TIP_RADIUS {
+                if closest_base.is_none() || base_dist < closest_base.unwrap().1 {
+                    closest_base = Some((idx, base_dist));
+                }
+            }
+        }
+
+        if let Some((tip_sx, tip_sy)) = world_to_screen_with_ortho(
+            tip_pos, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb_width, fb_height, ortho_ref
+        ) {
+            let tip_dist = ((fb_pos.0 - tip_sx).powi(2) + (fb_pos.1 - tip_sy).powi(2)).sqrt();
+            if tip_dist < TIP_RADIUS {
+                if closest_tip.is_none() || tip_dist < closest_tip.unwrap().1 {
+                    closest_tip = Some((idx, tip_dist));
+                }
+            }
+        }
+    }
+
+    // Tip takes priority over base (more precise selection)
+    if let Some((tip_idx, tip_dist)) = closest_tip {
+        if let Some((base_idx, base_dist)) = closest_base {
+            // Both are close - pick the closer one
+            if tip_dist <= base_dist {
+                return (None, Some(tip_idx));
+            } else {
+                return (Some(base_idx), None);
+            }
+        }
+        return (None, Some(tip_idx));
+    }
+
+    if let Some((base_idx, _)) = closest_base {
+        return (Some(base_idx), None);
+    }
+
+    // If not hovering on base/tip, check bone body using ray intersection
+    let ray = screen_to_ray(fb_pos.0, fb_pos.1, fb_width, fb_height, &camera);
+
+    let mut closest_bone: Option<usize> = None;
+    let mut closest_dist = f32::MAX;
+
+    for (idx, bone) in skeleton.iter().enumerate() {
+        let (base_pos, _) = state.get_bone_world_transform(idx);
+        let tip_pos = state.get_bone_tip_position(idx);
+        let pick_radius = bone.display_width();
+
+        if let Some(dist) = ray_bone_intersect(ray.origin, ray.direction, base_pos, tip_pos, pick_radius) {
+            if dist < closest_dist {
+                closest_dist = dist;
+                closest_bone = Some(idx);
+            }
+        }
+    }
+
+    // Clicking on bone body selects the base (move whole bone)
+    (closest_bone, None)
+}
+
+/// Calculate Euler rotation (X, Z) to point from default Y-up to a target direction
+fn direction_to_rotation(dir: Vec3) -> Vec3 {
+    let len = dir.len();
+    if len < 0.001 {
+        return Vec3::ZERO;
+    }
+    let d = dir * (1.0 / len);
+
+    // X rotation: pitch (tilt forward/back)
+    let rot_x = (-d.z).atan2((d.x * d.x + d.y * d.y).sqrt()).to_degrees();
+    // Z rotation: yaw (turn left/right)
+    let rot_z = d.x.atan2(d.y).to_degrees();
+
+    Vec3::new(rot_x, 0.0, rot_z)
+}
+
+/// Handle skeleton interaction in viewport - bone tip dragging
+fn handle_skeleton_interaction(
+    ctx: &UiContext,
+    state: &mut ModelerState,
+    mouse_pos: (f32, f32),
+    draw_x: f32, draw_y: f32,
+    draw_w: f32, draw_h: f32,
+    fb_width: usize, fb_height: usize,
+    viewport_id: ViewportId,
+) {
+    // Convert screen to framebuffer coords
+    let fb_x = (mouse_pos.0 - draw_x) / draw_w * fb_width as f32;
+    let fb_y = (mouse_pos.1 - draw_y) / draw_h * fb_height as f32;
+    let is_ortho = viewport_id != ViewportId::Perspective;
+
+    // Get 3D position from screen coords
+    let world_pos = if is_ortho {
+        // Ortho mode: convert screen position directly to world position
+        let ortho_cam = state.get_ortho_camera(viewport_id);
+        let zoom = ortho_cam.zoom;
+        let center = ortho_cam.center;
+
+        // Screen center to world offset
+        let half_w = fb_width as f32 / 2.0;
+        let half_h = fb_height as f32 / 2.0;
+        let world_x = (fb_x - half_w) / zoom + center.x;
+        let world_y = -(fb_y - half_h) / zoom + center.y; // Y inverted
+
+        // Convert camera-space coordinates to world using camera basis vectors
+        let bone_coord = state.selected_bone
+            .map(|idx| state.get_bone_tip_position(idx))
+            .unwrap_or(Vec3::ZERO);
+
+        let cam = match viewport_id {
+            ViewportId::Top => Camera::ortho_top(),
+            ViewportId::Front => Camera::ortho_front(),
+            ViewportId::Side => Camera::ortho_side(),
+            ViewportId::Perspective => unreachable!(),
+        };
+        let bone_depth = bone_coord.dot(cam.basis_z);
+        cam.basis_x * world_x + cam.basis_y * world_y + cam.basis_z * bone_depth
+    } else {
+        // Perspective mode: use ray casting onto a plane
+        let ray = screen_to_ray(fb_x, fb_y, fb_width, fb_height, &state.camera);
+
+        if let Some(bone_idx) = state.selected_bone {
+            let (base_pos, _) = state.get_bone_world_transform(bone_idx);
+            // Find intersection with plane at base_pos perpendicular to camera
+            let plane_normal = state.camera.basis_z;
+            let plane_d = base_pos.dot(plane_normal);
+            let denom = ray.direction.dot(plane_normal);
+            if denom.abs() > 0.001 {
+                let t = (plane_d - ray.origin.dot(plane_normal)) / denom;
+                if t > 0.0 {
+                    ray.origin + ray.direction * t
+                } else {
+                    ray.origin + ray.direction * 500.0
+                }
+            } else {
+                ray.origin + ray.direction * 500.0
+            }
+        } else {
+            ray.origin + ray.direction * 500.0
+        }
+    };
+
+    // Check if we should start dragging a bone tip
+    // Don't start if gizmo is being used or already dragging
+    if ctx.mouse.left_pressed && state.bone_creation.is_none()
+        && state.gizmo_hovered_axis.is_none() && !state.drag_manager.is_dragging() {
+        if let Some(bone_idx) = state.selected_bone {
+            let tip_pos = state.get_bone_tip_position(bone_idx);
+            let (base_pos, _) = state.get_bone_world_transform(bone_idx);
+
+            // Check if click is near the tip (in screen space)
+            let tip_screen = world_to_screen_with_ortho_depth(
+                tip_pos,
+                state.camera.position,
+                state.camera.basis_x,
+                state.camera.basis_y,
+                state.camera.basis_z,
+                fb_width,
+                fb_height,
+                state.raster_settings.ortho_projection.as_ref(),
+            );
+
+            if let Some((tip_sx, tip_sy, _)) = tip_screen {
+                let dist = ((fb_x - tip_sx).powi(2) + (fb_y - tip_sy).powi(2)).sqrt();
+                if dist < 20.0 {
+                    // Compute offset so the tip doesn't snap to mouse position
+                    // drag_offset = tip_pos - world_pos, so during update: new_tip = world_pos + drag_offset
+                    let drag_offset = tip_pos - world_pos;
+                    // Save undo before starting drag
+                    state.save_undo_skeleton("Move Bone Tip");
+                    // Start tip drag - use bone_creation state to track the drag
+                    state.bone_creation = Some(super::state::BoneCreationState {
+                        parent: Some(bone_idx), // Store which bone we're editing
+                        start_pos: base_pos,
+                        end_pos: tip_pos,
+                        drag_offset,
+                    });
+                    state.set_status("Drag to adjust bone", 1.0);
+                }
+            }
+        }
+    }
+
+    // Update drag
+    if ctx.mouse.left_down {
+        if let Some(ref mut creation) = state.bone_creation {
+            if let Some(bone_idx) = creation.parent {
+                // Apply drag_offset to prevent snapping to mouse position
+                // new_tip = world_pos + drag_offset (where drag_offset = original_tip - initial_world_pos)
+                let adjusted_pos = world_pos + creation.drag_offset;
+
+                // Apply snapping to the tip position (Z key disables snap)
+                let snap_disabled = is_key_down(KeyCode::Z);
+                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                let snapped_pos = if snap_enabled {
+                    state.snap_settings.snap_vec3(adjusted_pos)
+                } else {
+                    adjusted_pos
+                };
+
+                // Update the tip position
+                creation.end_pos = snapped_pos;
+
+                // Calculate new bone direction and length
+                let bone_vec = creation.end_pos - creation.start_pos;
+                let new_length = bone_vec.len().max(20.0); // Minimum length
+
+                // direction_to_rotation gives WORLD rotation, but we need LOCAL rotation
+                // For child bones, subtract parent's accumulated rotation
+                let world_rotation = direction_to_rotation(bone_vec);
+                let parent_rotation = state.skeleton().get(bone_idx)
+                    .and_then(|b| b.parent)
+                    .map(|parent_idx| {
+                        let (_, parent_rot) = state.get_bone_world_transform(parent_idx);
+                        parent_rot
+                    })
+                    .unwrap_or(Vec3::ZERO);
+                let new_rotation = world_rotation - parent_rotation;
+
+                // Apply to the bone
+                let old_length = state.skeleton().get(bone_idx).map(|b| b.length).unwrap_or(0.0);
+                if let Some(bones) = state.asset.skeleton_mut() {
+                    if let Some(bone) = bones.get_mut(bone_idx) {
+                        bone.length = new_length;
+                        bone.local_rotation = new_rotation;
+                        state.dirty = true;
+                    }
+                    // Smart mode: only update children that were at the tip
+                    for bone in bones.iter_mut() {
+                        if bone.parent == Some(bone_idx) {
+                            let was_at_tip = (bone.local_position.y - old_length).abs() < 1.0;
+                            if was_at_tip {
+                                bone.local_position.y = new_length;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // End drag
+    if !ctx.mouse.left_down && state.bone_creation.is_some() {
+        state.bone_creation = None;
+        state.set_status("Bone adjusted", 1.0);
+    }
 }
 
 /// Handle click on hovered element (replaces mode-based selection)
@@ -2291,6 +3077,76 @@ fn handle_hover_click(state: &mut ModelerState) {
     // Multi-select with Shift OR X key
     let multi_select = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift)
                     || is_key_down(KeyCode::X);
+
+    // Handle bone TIP selection (click on tip = change direction/length)
+    if let Some(bone_idx) = state.hovered_bone_tip {
+        if multi_select {
+            match &mut state.selection {
+                ModelerSelection::BoneTips(tips) => {
+                    if let Some(pos) = tips.iter().position(|&b| b == bone_idx) {
+                        tips.remove(pos);
+                        state.selected_bone = tips.first().copied();
+                    } else {
+                        tips.push(bone_idx);
+                        state.selected_bone = Some(bone_idx);
+                    }
+                }
+                _ => {
+                    state.selection = ModelerSelection::BoneTips(vec![bone_idx]);
+                    state.selected_bone = Some(bone_idx);
+                }
+            }
+        } else {
+            state.selection = ModelerSelection::BoneTips(vec![bone_idx]);
+            state.selected_bone = Some(bone_idx);
+        }
+
+        let skeleton_comp_idx = state.asset.components.iter().position(|c| c.is_skeleton());
+        if skeleton_comp_idx.is_some() {
+            state.selected_component = skeleton_comp_idx;
+        }
+
+        let bone_name = state.skeleton().get(bone_idx)
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
+        state.set_status(&format!("Selected tip: {} (G to rotate/resize)", bone_name), 1.0);
+        return;
+    }
+
+    // Handle bone BASE/BODY selection (click on body = select base for moving)
+    if let Some(bone_idx) = state.hovered_bone {
+        if multi_select {
+            match &mut state.selection {
+                ModelerSelection::Bones(bones) => {
+                    if let Some(pos) = bones.iter().position(|&b| b == bone_idx) {
+                        bones.remove(pos);
+                        state.selected_bone = bones.first().copied();
+                    } else {
+                        bones.push(bone_idx);
+                        state.selected_bone = Some(bone_idx);
+                    }
+                }
+                _ => {
+                    state.selection = ModelerSelection::Bones(vec![bone_idx]);
+                    state.selected_bone = Some(bone_idx);
+                }
+            }
+        } else {
+            state.selection = ModelerSelection::Bones(vec![bone_idx]);
+            state.selected_bone = Some(bone_idx);
+        }
+
+        let skeleton_comp_idx = state.asset.components.iter().position(|c| c.is_skeleton());
+        if skeleton_comp_idx.is_some() {
+            state.selected_component = skeleton_comp_idx;
+        }
+
+        let bone_name = state.skeleton().get(bone_idx)
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
+        state.set_status(&format!("Selected bone: {} (G to move)", bone_name), 1.0);
+        return;
+    }
 
     // Priority: vertex > edge > face
     if let Some(vert_idx) = state.hovered_vertex {
@@ -2313,6 +3169,12 @@ fn handle_hover_click(state: &mut ModelerState) {
             state.set_selection(ModelerSelection::Vertices(vec![vert_idx]));
         }
         state.select_mode = SelectMode::Vertex;
+        // Auto-select mesh component (click-through from skeleton/other)
+        let mesh_comp_idx = state.asset.components.iter().position(|c| c.is_mesh());
+        if mesh_comp_idx.is_some() && state.selected_component != mesh_comp_idx {
+            state.selected_component = mesh_comp_idx;
+            state.selected_bone = None;
+        }
         return;
     }
 
@@ -2336,10 +3198,35 @@ fn handle_hover_click(state: &mut ModelerState) {
             state.set_selection(ModelerSelection::Edges(vec![(v0, v1)]));
         }
         state.select_mode = SelectMode::Edge;
+        // Auto-select mesh component (click-through from skeleton/other)
+        let mesh_comp_idx = state.asset.components.iter().position(|c| c.is_mesh());
+        if mesh_comp_idx.is_some() && state.selected_component != mesh_comp_idx {
+            state.selected_component = mesh_comp_idx;
+            state.selected_bone = None;
+        }
         return;
     }
 
     if let Some(face_idx) = state.hovered_face {
+        // DEBUG: Log face selection change
+        {
+            let mesh = state.mesh();
+            if let Some(face) = mesh.faces.get(face_idx) {
+                let verts: Vec<Vec3> = face.vertices.iter()
+                    .filter_map(|&vi| mesh.vertices.get(vi).map(|v| v.pos))
+                    .collect();
+                let center = if !verts.is_empty() {
+                    verts.iter().fold(Vec3::ZERO, |acc, p| acc + *p) * (1.0 / verts.len() as f32)
+                } else { Vec3::ZERO };
+                eprintln!("[FACE_SELECT] Selecting face {} (verts: {:?}, center: ({:.3}, {:.3}, {:.3}))",
+                    face_idx, face.vertices, center.x, center.y, center.z);
+                for &vi in &face.vertices {
+                    if let Some(v) = mesh.vertices.get(vi) {
+                        eprintln!("[FACE_SELECT]   vert[{}] = ({:.3}, {:.3}, {:.3})", vi, v.pos.x, v.pos.y, v.pos.z);
+                    }
+                }
+            }
+        }
         if multi_select {
             // Toggle face in selection - save undo first
             state.save_selection_undo();
@@ -2359,6 +3246,12 @@ fn handle_hover_click(state: &mut ModelerState) {
             state.set_selection(ModelerSelection::Faces(vec![face_idx]));
         }
         state.select_mode = SelectMode::Face;
+        // Auto-select mesh component (click-through from skeleton/other)
+        let mesh_comp_idx = state.asset.components.iter().position(|c| c.is_mesh());
+        if mesh_comp_idx.is_some() && state.selected_component != mesh_comp_idx {
+            state.selected_component = mesh_comp_idx;
+            state.selected_bone = None;
+        }
         return;
     }
 
@@ -2418,7 +3311,52 @@ fn setup_gizmo(
     fb_width: usize,
     fb_height: usize,
 ) -> Option<GizmoSetup> {
-    let center = state.selection.compute_center(state.mesh())?;
+    // Compute center based on selection type
+    let center = if let Some(bone_indices) = state.selection.bones() {
+        // For bone base selection, compute center from bone base positions
+        if bone_indices.is_empty() {
+            return None;
+        }
+        let skeleton = state.skeleton();
+        let sum: Vec3 = bone_indices.iter()
+            .filter_map(|&idx| {
+                if idx < skeleton.len() {
+                    let (base_pos, _) = state.get_bone_world_transform(idx);
+                    Some(base_pos)
+                } else {
+                    None
+                }
+            })
+            .fold(Vec3::ZERO, |acc, pos| acc + pos);
+        let count = bone_indices.iter().filter(|&&idx| idx < skeleton.len()).count();
+        if count == 0 {
+            return None;
+        }
+        sum * (1.0 / count as f32)
+    } else if let Some(tip_indices) = state.selection.bone_tips() {
+        // For bone tip selection, compute center from bone tip positions
+        if tip_indices.is_empty() {
+            return None;
+        }
+        let skeleton = state.skeleton();
+        let sum: Vec3 = tip_indices.iter()
+            .filter_map(|&idx| {
+                if idx < skeleton.len() {
+                    Some(state.get_bone_tip_position(idx))
+                } else {
+                    None
+                }
+            })
+            .fold(Vec3::ZERO, |acc, pos| acc + pos);
+        let count = tip_indices.iter().filter(|&&idx| idx < skeleton.len()).count();
+        if count == 0 {
+            return None;
+        }
+        sum * (1.0 / count as f32)
+    } else {
+        // Use compute_selection_center which handles bone transforms for bound meshes
+        state.compute_selection_center()?
+    };
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
@@ -2427,10 +3365,12 @@ fn setup_gizmo(
         None => return None,
     };
 
+    // Get orientation basis (respects Global/Local mode and bone transforms)
+    let (basis_x, basis_y, basis_z) = state.compute_orientation_basis();
     let axis_dirs = [
-        (Axis::X, Vec3::new(1.0, 0.0, 0.0), RED),
-        (Axis::Y, Vec3::new(0.0, 1.0, 0.0), GREEN),
-        (Axis::Z, Vec3::new(0.0, 0.0, 1.0), BLUE),
+        (Axis::X, basis_x, RED),
+        (Axis::Y, basis_y, GREEN),
+        (Axis::Z, basis_z, BLUE),
     ];
 
     // In ortho mode, use a fixed world-space size scaled by zoom
@@ -2520,84 +3460,137 @@ fn handle_move_gizmo(
         return;
     }
 
-    // Handle ongoing drag
+    // Handle ongoing drag — unified path for both ortho and perspective
     if is_dragging && owns_drag {
         if ctx.mouse.left_down {
-            if is_ortho {
-                // Ortho mode: use screen-to-world delta (simpler, more precise)
-                let drag_zoom = state.ortho_drag_zoom;
+            let fb_mouse = (
+                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+            );
+            let ortho = state.raster_settings.ortho_projection.as_ref();
 
-                // Get mouse delta from drag start
-                if let Some(drag_state) = &state.drag_manager.state {
-                    let dx = mouse_pos.0 - drag_state.initial_mouse.0;
-                    let dy = mouse_pos.1 - drag_state.initial_mouse.1;
+            let result = state.drag_manager.update(
+                fb_mouse,
+                &state.camera,
+                fb_width,
+                fb_height,
+                ortho,
+            );
 
-                    // Convert screen delta to world delta based on viewport
-                    let world_dx = dx / drag_zoom;
-                    let world_dy = -dy / drag_zoom; // Y inverted
+            if let DragUpdateResult::Move { positions, .. } = result {
+                let snap_disabled = is_key_down(KeyCode::Z);
+                let snap_enabled = state.snap_settings.enabled && !snap_disabled;
+                let snap_settings = state.snap_settings.clone();
 
-                    let mut delta = match viewport_id {
-                        ViewportId::Top => Vec3::new(world_dx, 0.0, world_dy),    // XZ plane
-                        ViewportId::Front => Vec3::new(world_dx, world_dy, 0.0),  // XY plane
-                        ViewportId::Side => Vec3::new(0.0, world_dy, world_dx),   // ZY plane
-                        ViewportId::Perspective => Vec3::ZERO,
-                    };
+                if state.gizmo_bone_drag {
+                    // Apply to bone bases
+                    for (bone_idx, new_pos) in positions {
+                        let snapped = if snap_enabled {
+                            snap_settings.snap_vec3(new_pos)
+                        } else {
+                            new_pos
+                        };
 
-                    // Apply axis constraint if present
-                    if let super::drag::ActiveDrag::Move(tracker) = &state.drag_manager.active {
-                        if let Some(axis) = &tracker.axis {
-                            match axis {
-                                crate::ui::drag_tracker::Axis::X => { delta.y = 0.0; delta.z = 0.0; }
-                                crate::ui::drag_tracker::Axis::Y => { delta.x = 0.0; delta.z = 0.0; }
-                                crate::ui::drag_tracker::Axis::Z => { delta.x = 0.0; delta.y = 0.0; }
+                        // Check if this bone has a parent
+                        let parent_idx = state.skeleton().get(bone_idx).and_then(|b| b.parent);
+
+                        if let Some(parent_idx) = parent_idx {
+                            let shift_held = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+
+                            if shift_held {
+                                // SHIFT held: old behavior - move parent's tip
+                                let (parent_base, _) = state.get_bone_world_transform(parent_idx);
+                                let parent_vec = snapped - parent_base;
+                                let new_parent_length = parent_vec.len().max(1.0);
+                                let parent_world_rot = direction_to_rotation(parent_vec);
+
+                                let grandparent_rot = state.skeleton().get(parent_idx)
+                                    .and_then(|b| b.parent)
+                                    .map(|gp_idx| state.get_bone_world_transform(gp_idx).1)
+                                    .unwrap_or(Vec3::ZERO);
+                                let new_parent_local_rot = parent_world_rot - grandparent_rot;
+
+                                let old_parent_length = state.skeleton().get(parent_idx).map(|b| b.length).unwrap_or(0.0);
+                                if let Some(bones) = state.asset.skeleton_mut() {
+                                    if let Some(parent) = bones.get_mut(parent_idx) {
+                                        parent.local_rotation = new_parent_local_rot;
+                                        parent.length = new_parent_length;
+                                    }
+                                    // Smart mode: only update children that were at the tip
+                                    for bone in bones.iter_mut() {
+                                        if bone.parent == Some(parent_idx) {
+                                            let was_at_tip = (bone.local_position.y - old_parent_length).abs() < 1.0;
+                                            if was_at_tip {
+                                                bone.local_position.y = new_parent_length;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Normal drag: slide attachment point along parent
+                                let (parent_base, _) = state.get_bone_world_transform(parent_idx);
+                                let parent_tip = state.get_bone_tip_position(parent_idx);
+                                let parent_axis = (parent_tip - parent_base).normalize();
+                                let parent_length = state.skeleton().get(parent_idx).map(|b| b.length).unwrap_or(200.0);
+
+                                // Project drag position onto parent axis
+                                let to_drag = snapped - parent_base;
+                                let along_parent = to_drag.dot(parent_axis).clamp(0.0, parent_length);
+
+                                // Update child's local_position to slide along parent
+                                if let Some(bones) = state.asset.skeleton_mut() {
+                                    if let Some(bone) = bones.get_mut(bone_idx) {
+                                        bone.local_position.y = along_parent;
+                                    }
+                                }
+                            }
+                        } else {
+                            // ROOT bone: can move local_position freely
+                            if let Some(bones) = state.asset.skeleton_mut() {
+                                if let Some(bone) = bones.get_mut(bone_idx) {
+                                    bone.local_position = snapped;
+                                }
                             }
                         }
-
-                        // Apply delta to initial positions
-                        let snap_disabled = is_key_down(KeyCode::Z);
-                        let snap_enabled = state.snap_settings.enabled && !snap_disabled;
-                        let snap_size = state.snap_settings.grid_size;
-
-                        let updates: Vec<_> = tracker.initial_positions.iter()
-                            .map(|(idx, start_pos)| (*idx, *start_pos + delta))
-                            .collect();
-
-                        let mirror_settings = state.current_mirror_settings();
-                        if let Some(mesh) = state.mesh_mut() {
-                            for (idx, mut new_pos) in updates {
-                                if snap_enabled {
-                                    new_pos.x = (new_pos.x / snap_size).round() * snap_size;
-                                    new_pos.y = (new_pos.y / snap_size).round() * snap_size;
-                                    new_pos.z = (new_pos.z / snap_size).round() * snap_size;
-                                }
-                                // Constrain center vertices to mirror plane
-                                new_pos = mirror_settings.constrain_to_plane(new_pos);
-                                if let Some(vert) = mesh.vertices.get_mut(idx) {
-                                    vert.pos = new_pos;
-                                }
-                            }
-                        }
-                        state.dirty = true;
                     }
-                }
-            } else {
-                // Perspective mode: use ray casting via DragManager
-                let fb_mouse = (
-                    (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-                    (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-                );
+                } else if state.gizmo_bone_tip_drag {
+                    // Apply to bone tips (changes rotation/length)
+                    for (bone_idx, new_tip_pos) in positions {
+                        // Get the bone's base position (fixed during tip drag)
+                        let (base_pos, _current_world_rot) = state.get_bone_world_transform(bone_idx);
+                        let bone_vec = new_tip_pos - base_pos;
+                        let new_length = bone_vec.len().max(1.0);
 
-                let result = state.drag_manager.update(
-                    fb_mouse,
-                    &state.camera,
-                    fb_width,
-                    fb_height,
-                );
+                        // Convert direction to world rotation, then to local rotation
+                        let world_rotation = direction_to_rotation(bone_vec);
+                        let parent_rotation = state.skeleton().get(bone_idx)
+                            .and_then(|b| b.parent)
+                            .map(|parent_idx| {
+                                let (_, parent_rot) = state.get_bone_world_transform(parent_idx);
+                                parent_rot
+                            })
+                            .unwrap_or(Vec3::ZERO);
+                        let new_rotation = world_rotation - parent_rotation;
 
-                if let DragUpdateResult::Move { positions, .. } = result {
-                    let snap_disabled = is_key_down(KeyCode::Z);
-                    let snap_enabled = state.snap_settings.enabled && !snap_disabled;
-                    let snap_settings = state.snap_settings.clone();
+                        let old_length = state.skeleton().get(bone_idx).map(|b| b.length).unwrap_or(0.0);
+                        if let Some(bones) = state.asset.skeleton_mut() {
+                            if let Some(bone) = bones.get_mut(bone_idx) {
+                                bone.local_rotation = new_rotation;
+                                bone.length = new_length;
+                            }
+                            // Smart mode: only update children that were at the tip
+                            for bone in bones.iter_mut() {
+                                if bone.parent == Some(bone_idx) {
+                                    let was_at_tip = (bone.local_position.y - old_length).abs() < 1.0;
+                                    if was_at_tip {
+                                        bone.local_position.y = new_length;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Apply to mesh vertices
                     let mirror_settings = state.current_mirror_settings();
                     if let Some(mesh) = state.mesh_mut() {
                         for (vert_idx, new_pos) in positions {
@@ -2612,14 +3605,19 @@ fn handle_move_gizmo(
                             }
                         }
                     }
-                    state.dirty = true;
                 }
+                state.dirty = true;
             }
         } else {
             // End drag - sync tool state
             state.tool_box.tools.move_tool.end_drag();
             state.drag_manager.end();
             state.ortho_drag_viewport = None;
+            state.gizmo_bone_drag = false;
+            state.gizmo_bone_tip_drag = false;
+            // Clear stale free-drag pending start (set during the click that initiated
+            // this gizmo drag, before handle_drag_move knew a gizmo drag would start)
+            state.free_drag_pending_start = None;
         }
     }
 
@@ -2644,62 +3642,99 @@ fn handle_move_gizmo(
     // Start drag on click
     if ctx.mouse.left_pressed && inside_viewport && state.gizmo_hovered_axis.is_some() && !is_dragging {
         let axis = state.gizmo_hovered_axis.unwrap();
+        eprintln!("[GIZMO_DRAG] Starting gizmo drag on axis {:?}, selection: {:?}", axis, state.selection.summary());
 
-        // Get vertex indices and initial positions
-        let mesh = state.mesh();
-        let mut indices = state.selection.get_affected_vertex_indices(mesh);
-        if state.vertex_linking {
-            indices = mesh.expand_to_coincident(&indices, 0.001);
-        }
+        // Check if we're moving bones, bone tips, or vertices
+        let (indices, initial_positions, is_bone_drag, is_bone_tip_drag) = if let Some(bone_indices) = state.selection.bones() {
+            // Bone BASE selection - get bone indices and their local_position values
+            let skeleton = state.skeleton();
+            let positions: Vec<(usize, Vec3)> = bone_indices.iter()
+                .filter_map(|&idx| skeleton.get(idx).map(|b| (idx, b.local_position)))
+                .collect();
+            let indices: Vec<usize> = positions.iter().map(|(idx, _)| *idx).collect();
+            (indices, positions, true, false)
+        } else if let Some(tip_indices) = state.selection.bone_tips() {
+            // Bone TIP selection - get bone indices and their TIP world positions
+            let positions: Vec<(usize, Vec3)> = tip_indices.iter()
+                .map(|&idx| {
+                    let tip_pos = state.get_bone_tip_position(idx);
+                    (idx, tip_pos)
+                })
+                .collect();
+            let indices: Vec<usize> = positions.iter().map(|(idx, _)| *idx).collect();
+            (indices, positions, false, true)
+        } else {
+            // Vertex selection - get vertex indices and positions
+            let mesh = state.mesh();
+            let mut indices = state.selection.get_affected_vertex_indices(mesh);
+            if state.vertex_linking {
+                indices = mesh.expand_to_coincident(&indices, 0.001);
+            }
+            let positions: Vec<(usize, Vec3)> = indices.iter()
+                .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
+                .collect();
+            (indices, positions, false, false)
+        };
 
-        let initial_positions: Vec<(usize, Vec3)> = indices.iter()
-            .filter_map(|&idx| mesh.vertices.get(idx).map(|v| (idx, v.pos)))
-            .collect();
+        // Track whether this is a bone drag
+        state.gizmo_bone_drag = is_bone_drag;
+        state.gizmo_bone_tip_drag = is_bone_tip_drag;
 
         // Save undo state BEFORE starting the gizmo drag
-        state.push_undo("Gizmo Move");
+        if is_bone_drag || is_bone_tip_drag {
+            let undo_name = if is_bone_drag { "Move Bones" } else { "Move Bone Tips" };
+            state.save_undo_skeleton(undo_name);
+        } else {
+            state.push_undo("Gizmo Move");
+        }
 
-        // Set up ortho-specific tracking
+        // Track viewport ownership for ortho drags
         if is_ortho {
             state.ortho_drag_viewport = Some(viewport_id);
-            let ortho_cam = state.get_ortho_camera(viewport_id);
-            state.ortho_drag_zoom = ortho_cam.zoom;
         }
 
         // Start drag with DragManager and sync tool state
         let ui_axis = to_ui_axis(axis);
         state.tool_box.tools.move_tool.start_drag(Some(ui_axis));
 
-        if is_ortho {
-            // For ortho, use screen coordinates (we calculate delta from screen, not ray casting)
-            state.drag_manager.start_move(
-                setup.center,
-                mouse_pos,  // Use screen coordinates directly
-                Some(ui_axis),
-                indices,
-                initial_positions,
-                state.snap_settings.enabled,
-                state.snap_settings.grid_size,
-            );
+        // Get bone rotation for world-to-local delta transformation (vertex moves on bone-bound meshes)
+        let bone_rotation = if !is_bone_drag && !is_bone_tip_drag {
+            state.selected_object()
+                .and_then(|obj| obj.default_bone_index)
+                .map(|bone_idx| state.get_bone_world_transform(bone_idx).1)
         } else {
-            // For perspective, use framebuffer coordinates for ray casting
-            let fb_mouse = (
-                (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
-                (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
-            );
-            state.drag_manager.start_move_3d(
-                setup.center,
-                fb_mouse,
-                Some(ui_axis),
-                indices,
-                initial_positions,
-                state.snap_settings.enabled,
-                state.snap_settings.grid_size,
-                &state.camera,
-                fb_width,
-                fb_height,
-            );
-        }
+            None
+        };
+
+        // Get axis direction from orientation basis (for Local mode)
+        let (basis_x, basis_y, basis_z) = state.compute_orientation_basis();
+        let axis_direction = match axis {
+            Axis::X => basis_x,
+            Axis::Y => basis_y,
+            Axis::Z => basis_z,
+        };
+
+        // Unified drag start: use ray casting for both ortho and perspective
+        let fb_mouse = (
+            (mouse_pos.0 - draw_x) / draw_w * fb_width as f32,
+            (mouse_pos.1 - draw_y) / draw_h * fb_height as f32,
+        );
+        let ortho = state.raster_settings.ortho_projection.as_ref();
+        state.drag_manager.start_move_3d_with_bone(
+            setup.center,
+            fb_mouse,
+            Some(ui_axis),
+            Some(axis_direction),
+            indices,
+            initial_positions,
+            state.snap_settings.enabled,
+            state.snap_settings.grid_size,
+            &state.camera,
+            fb_width,
+            fb_height,
+            bone_rotation,
+            ortho,
+        );
     }
 
     // Draw move gizmo (arrows)
@@ -2775,6 +3810,7 @@ fn handle_scale_gizmo(
                 &state.camera,
                 fb_width,
                 fb_height,
+                None,
             );
 
             if let DragUpdateResult::Scale { positions, .. } = result {
@@ -2799,6 +3835,7 @@ fn handle_scale_gizmo(
             // End drag - sync tool state
             state.tool_box.tools.scale.end_drag();
             state.drag_manager.end();
+            state.free_drag_pending_start = None;
         }
     }
 
@@ -2941,6 +3978,7 @@ fn handle_rotate_gizmo(
                 &state.camera,
                 fb_width,
                 fb_height,
+                None,
             );
 
             if let DragUpdateResult::Rotate { positions, .. } = result {
@@ -2965,6 +4003,7 @@ fn handle_rotate_gizmo(
             // End drag - sync tool state
             state.tool_box.tools.rotate.end_drag();
             state.drag_manager.end();
+            state.free_drag_pending_start = None;
         }
     }
 
@@ -3138,14 +4177,13 @@ fn handle_rotate_gizmo(
 fn draw_component_gizmos(
     state: &ModelerState,
     fb: &mut Framebuffer,
-    hidden_components: &std::collections::HashSet<usize>,
 ) {
     let camera = &state.camera;
     let ortho = state.raster_settings.ortho_projection.as_ref();
 
     // Draw all visible light components as octahedrons
     for (comp_idx, component) in state.asset.components.iter().enumerate() {
-        if hidden_components.contains(&comp_idx) {
+        if state.is_component_hidden(comp_idx) {
             continue;
         }
 
@@ -3164,7 +4202,158 @@ fn draw_component_gizmos(
 
                 draw_filled_octahedron(fb, camera, ortho, light_pos, size, gizmo_color);
             }
+            crate::asset::AssetComponent::Collision { shape, is_trigger } => {
+                let is_selected = state.selected_component == Some(comp_idx);
+                let wire_color = if is_selected {
+                    RasterColor::new(255, 255, 255)
+                } else if *is_trigger {
+                    RasterColor::new(100, 255, 150)
+                } else {
+                    RasterColor::new(100, 150, 255)
+                };
+
+                draw_collision_wireframe(fb, camera, ortho, shape, wire_color, state.asset.bounds());
+            }
             _ => {}
+        }
+    }
+}
+
+/// Draw a collision shape wireframe in the modeler viewport.
+/// Works across all 4 panels (perspective + ortho) by projecting 3D points.
+fn draw_collision_wireframe(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    ortho: Option<&OrthoProjection>,
+    shape: &crate::asset::CollisionShapeDef,
+    color: RasterColor,
+    mesh_bounds: Option<(Vec3, Vec3)>,
+) {
+    use crate::asset::CollisionShapeDef;
+
+    let fb_w = fb.width;
+    let fb_h = fb.height;
+
+    let project = |p: Vec3| -> Option<(i32, i32, f32)> {
+        world_to_screen_with_ortho_depth(
+            p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb_w, fb_h, ortho,
+        ).map(|(x, y, z)| (x as i32, y as i32, z))
+    };
+
+    // Collect edges as pairs of 3D points, then draw after projection
+    let mut edges: Vec<(Vec3, Vec3)> = Vec::new();
+
+    match shape {
+        CollisionShapeDef::Sphere { radius } => {
+            let r = *radius;
+            let segments = 24;
+            for ring in 0..3 {
+                for i in 0..segments {
+                    let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                    let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                    let (p0, p1) = match ring {
+                        0 => (Vec3::new(r * a0.cos(), 0.0, r * a0.sin()),
+                              Vec3::new(r * a1.cos(), 0.0, r * a1.sin())),
+                        1 => (Vec3::new(r * a0.cos(), r * a0.sin(), 0.0),
+                              Vec3::new(r * a1.cos(), r * a1.sin(), 0.0)),
+                        _ => (Vec3::new(0.0, r * a0.cos(), r * a0.sin()),
+                              Vec3::new(0.0, r * a1.cos(), r * a1.sin())),
+                    };
+                    edges.push((p0, p1));
+                }
+            }
+        }
+        CollisionShapeDef::Box { half_extents } => {
+            let hx = half_extents[0];
+            let hy = half_extents[1];
+            let hz = half_extents[2];
+            let corners = [
+                Vec3::new(-hx, -hy, -hz), Vec3::new( hx, -hy, -hz),
+                Vec3::new( hx, -hy,  hz), Vec3::new(-hx, -hy,  hz),
+                Vec3::new(-hx,  hy, -hz), Vec3::new( hx,  hy, -hz),
+                Vec3::new( hx,  hy,  hz), Vec3::new(-hx,  hy,  hz),
+            ];
+            let box_edges: [(usize, usize); 12] = [
+                (0,1),(1,2),(2,3),(3,0),
+                (4,5),(5,6),(6,7),(7,4),
+                (0,4),(1,5),(2,6),(3,7),
+            ];
+            for (a, b) in box_edges {
+                edges.push((corners[a], corners[b]));
+            }
+        }
+        CollisionShapeDef::Cylinder { radius, height } => {
+            let r = *radius;
+            let h = *height;
+            let segments = 24;
+            for i in 0..segments {
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                let bx0 = r * a0.cos(); let bz0 = r * a0.sin();
+                let bx1 = r * a1.cos(); let bz1 = r * a1.sin();
+                edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx1, 0.0, bz1)));
+                edges.push((Vec3::new(bx0, h, bz0), Vec3::new(bx1, h, bz1)));
+                if i % 6 == 0 {
+                    edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx0, h, bz0)));
+                }
+            }
+        }
+        CollisionShapeDef::Capsule { radius, height } => {
+            let r = *radius;
+            let h = *height;
+            let segments = 24;
+            for i in 0..segments {
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                let bx0 = r * a0.cos(); let bz0 = r * a0.sin();
+                let bx1 = r * a1.cos(); let bz1 = r * a1.sin();
+                edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx1, 0.0, bz1)));
+                edges.push((Vec3::new(bx0, h, bz0), Vec3::new(bx1, h, bz1)));
+                if i % 6 == 0 {
+                    edges.push((Vec3::new(bx0, 0.0, bz0), Vec3::new(bx0, h, bz0)));
+                }
+            }
+            let half_segs = segments / 2;
+            for i in 0..half_segs {
+                let a0 = (i as f32 / half_segs as f32) * std::f32::consts::PI;
+                let a1 = ((i + 1) as f32 / half_segs as f32) * std::f32::consts::PI;
+                // Bottom hemisphere arcs (XY and ZY planes)
+                edges.push((Vec3::new(r * a0.cos(), -r * a0.sin(), 0.0),
+                            Vec3::new(r * a1.cos(), -r * a1.sin(), 0.0)));
+                edges.push((Vec3::new(0.0, -r * a0.sin(), r * a0.cos()),
+                            Vec3::new(0.0, -r * a1.sin(), r * a1.cos())));
+                // Top hemisphere arcs
+                edges.push((Vec3::new(r * a0.cos(), h + r * a0.sin(), 0.0),
+                            Vec3::new(r * a1.cos(), h + r * a1.sin(), 0.0)));
+                edges.push((Vec3::new(0.0, h + r * a0.sin(), r * a0.cos()),
+                            Vec3::new(0.0, h + r * a1.sin(), r * a1.cos())));
+            }
+        }
+        CollisionShapeDef::FromMesh => {
+            if let Some((min, max)) = mesh_bounds {
+                let corners = [
+                    Vec3::new(min.x, min.y, min.z), Vec3::new(max.x, min.y, min.z),
+                    Vec3::new(max.x, min.y, max.z), Vec3::new(min.x, min.y, max.z),
+                    Vec3::new(min.x, max.y, min.z), Vec3::new(max.x, max.y, min.z),
+                    Vec3::new(max.x, max.y, max.z), Vec3::new(min.x, max.y, max.z),
+                ];
+                let box_edges: [(usize, usize); 12] = [
+                    (0,1),(1,2),(2,3),(3,0),
+                    (4,5),(5,6),(6,7),(7,4),
+                    (0,4),(1,5),(2,6),(3,7),
+                ];
+                for (a, b) in box_edges {
+                    edges.push((corners[a], corners[b]));
+                }
+            }
+        }
+    }
+
+    // Project and draw all edges
+    for (a, b) in &edges {
+        if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (project(*a), project(*b)) {
+            fb.draw_line_3d(x0, y0, z0, x1, y1, z1, color);
         }
     }
 }
