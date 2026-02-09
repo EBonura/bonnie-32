@@ -202,24 +202,28 @@ fn serve(port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Regenerate texture manifest based on actual directories present
-fn regenerate_texture_manifest(textures_dir: &Path) -> Result<()> {
-    let mut manifest = String::new();
+/// Regenerate texture-pack manifests based on actual directories present.
+/// Creates a top-level manifest listing pack directory names, and a per-pack
+/// manifest inside each directory listing the PNG/JPG files.
+fn regenerate_texture_manifest(packs_dir: &Path) -> Result<()> {
+    let mut top_manifest = String::new();
 
     // Get sorted list of texture pack directories
-    let mut packs: Vec<_> = std::fs::read_dir(textures_dir)?
+    let mut packs: Vec<_> = std::fs::read_dir(packs_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .collect();
     packs.sort_by_key(|e| e.file_name());
 
-    for pack in packs {
+    for pack in &packs {
         let pack_name = pack.file_name();
         let pack_name = pack_name.to_string_lossy();
 
-        manifest.push_str(&format!("[{}]\n", pack_name));
+        // Add directory name to top-level manifest
+        top_manifest.push_str(&format!("{}\n", pack_name));
 
-        // Get sorted list of textures in this pack
+        // Generate per-pack manifest listing image files
+        let mut pack_manifest = String::new();
         let mut textures: Vec<_> = std::fs::read_dir(pack.path())?
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -232,12 +236,14 @@ fn regenerate_texture_manifest(textures_dir: &Path) -> Result<()> {
         textures.sort_by_key(|e| e.file_name());
 
         for tex in textures {
-            manifest.push_str(&format!("{}\n", tex.file_name().to_string_lossy()));
+            pack_manifest.push_str(&format!("{}\n", tex.file_name().to_string_lossy()));
         }
+
+        std::fs::write(pack.path().join("manifest.txt"), pack_manifest)?;
     }
 
-    std::fs::write(textures_dir.join("manifest.txt"), manifest)?;
-    println!("Regenerated texture manifest");
+    std::fs::write(packs_dir.join("manifest.txt"), top_manifest)?;
+    println!("Regenerated texture-pack manifests ({} packs)", packs.len());
     Ok(())
 }
 
