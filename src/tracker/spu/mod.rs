@@ -18,6 +18,7 @@ use reverb::{SpuReverb, ReverbType};
 use tables::MAX_VOICES;
 use types::SampleLibrary;
 use voice::Voice;
+use convert::SoundFont;
 
 /// PS1 SPU Core — 24-voice mixer with reverb
 pub struct SpuCore {
@@ -25,7 +26,9 @@ pub struct SpuCore {
     voices: [Voice; MAX_VOICES],
     /// Hardware-accurate reverb processor
     reverb: SpuReverb,
-    /// Loaded sample library (SF2 → ADPCM)
+    /// Parsed SF2 soundfont — kept for on-demand instrument conversion
+    soundfont: Option<SoundFont>,
+    /// Loaded sample library (SF2 → ADPCM, instruments loaded on demand)
     sample_library: Option<SampleLibrary>,
 
     /// Master volume (0.0 to 2.0)
@@ -41,6 +44,7 @@ impl SpuCore {
         Self {
             voices: std::array::from_fn(|_| Voice::new()),
             reverb: SpuReverb::new(),
+            soundfont: None,
             sample_library: None,
             master_volume: 1.0,
             channel_programs: [0u8; MAX_VOICES],
@@ -48,20 +52,93 @@ impl SpuCore {
         }
     }
 
-    /// Load a sample library (created by convert::convert_sf2_to_spu)
-    pub fn load_sample_library(&mut self, library: SampleLibrary) {
+    /// Store a parsed SF2 soundfont for on-demand instrument loading.
+    /// Creates an empty SampleLibrary — instruments are converted lazily
+    /// when note_on or set_program is called.
+    pub fn load_soundfont(&mut self, soundfont: SoundFont, name: String) {
         self.all_notes_off();
-        self.sample_library = Some(library);
+        self.soundfont = Some(soundfont);
+        self.sample_library = Some(SampleLibrary::new(name));
     }
 
-    /// Check if a sample library is loaded
+    /// Check if a soundfont is loaded (instruments may not be converted yet)
     pub fn is_loaded(&self) -> bool {
-        self.sample_library.is_some()
+        self.soundfont.is_some()
     }
 
     /// Get the source soundfont name
     pub fn source_name(&self) -> Option<&str> {
         self.sample_library.as_ref().map(|l| l.source_name.as_str())
+    }
+
+    /// Ensure a GM program is loaded into SPU RAM, converting on demand.
+    /// If SPU RAM is full, resets and reloads only the active channel programs.
+    ///
+    /// Conversion is wrapped in catch_unwind to prevent panics during ADPCM
+    /// encoding from poisoning the audio mutex (this function is called while
+    /// the mutex is held).
+    fn ensure_program_loaded(&mut self, program: u8) {
+        // Already loaded?
+        if let Some(lib) = &self.sample_library {
+            if lib.instrument(program).is_some() {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // Take soundfont temporarily to avoid borrow conflict
+        let soundfont = match self.soundfont.take() {
+            Some(sf) => sf,
+            None => return,
+        };
+
+        // Wrap conversion in catch_unwind — if ADPCM encoding panics (e.g., from
+        // bad SF2 data), we recover gracefully instead of poisoning the mutex.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // First attempt: convert into existing SPU RAM
+            let success = convert::convert_single_program(
+                &soundfont, program, self.sample_library.as_mut().unwrap(),
+            );
+
+            if !success {
+                // SPU RAM full — collect active programs, reset, and reload
+                let mut active_programs: Vec<u8> = self.channel_programs.iter().copied().collect();
+                active_programs.push(program);
+                active_programs.sort();
+                active_programs.dedup();
+
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!(
+                    "SPU: RAM full, reloading {} active programs: {:?}",
+                    active_programs.len(), active_programs,
+                );
+
+                // Stop all voices (inlined to avoid borrow conflict)
+                for voice in &mut self.voices {
+                    voice.active = false;
+                }
+
+                let library = self.sample_library.as_mut().unwrap();
+                library.reset();
+
+                for &prog in &active_programs {
+                    if !convert::convert_single_program(&soundfont, prog, library) {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        eprintln!("SPU: failed to reload program {} after reset", prog);
+                        break;
+                    }
+                }
+            }
+        }));
+
+        if result.is_err() {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("SPU: panic during conversion of program {}, skipping", program);
+        }
+
+        // Put soundfont back
+        self.soundfont = Some(soundfont);
     }
 
     // =========================================================================
@@ -114,12 +191,17 @@ impl SpuCore {
         let reverb_in_right = clamp16(reverb_in_right);
         let (reverb_left, reverb_right) = self.reverb.process_sample(reverb_in_left, reverb_in_right);
 
-        // Mix dry + reverb
-        let wet = self.reverb.wet_level();
-        let dry_mix = 1.0 - wet;
-
-        let left = dry_left as f32 * dry_mix + reverb_left as f32 * wet;
-        let right = dry_right as f32 * dry_mix + reverb_right as f32 * wet;
+        // Mix dry + reverb (only apply wet/dry mix when reverb is active)
+        let (left, right) = if self.reverb.is_enabled() {
+            let wet = self.reverb.wet_level();
+            let dry_mix = 1.0 - wet;
+            (
+                dry_left as f32 * dry_mix + reverb_left as f32 * wet,
+                dry_right as f32 * dry_mix + reverb_right as f32 * wet,
+            )
+        } else {
+            (dry_left as f32, dry_right as f32)
+        };
 
         // Apply master volume and convert to f32 (-1.0 to 1.0)
         let scale = self.master_volume / 32768.0;
@@ -136,28 +218,54 @@ impl SpuCore {
     /// and starts playback on the specified voice.
     pub fn note_on(&mut self, voice_idx: usize, program: u8, note: u8, velocity: u8) {
         if voice_idx >= MAX_VOICES {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("SPU note_on: voice_idx {} >= MAX_VOICES {}", voice_idx, MAX_VOICES);
             return;
         }
 
+        // On-demand: ensure this program is converted and loaded
+        self.ensure_program_loaded(program);
+
         let library = match &self.sample_library {
             Some(lib) => lib,
-            None => return,
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("SPU note_on: no soundfont loaded!");
+                return;
+            }
         };
 
-        // Find the instrument bank for this program
         let bank = match library.instrument(program) {
             Some(b) => b,
-            None => return,
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("SPU note_on: program {} could not be loaded from SF2", program);
+                return;
+            }
         };
 
         // Find the region that covers this note
         let region = match bank.region_for_note(note) {
             Some(r) => r,
-            None => return,
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("SPU note_on: no region covers note {} in program {}", note, program);
+                return;
+            }
         };
 
         // Store program for this channel
         self.channel_programs[voice_idx] = program;
+
+        // Debug: verify note routing (TODO: remove after debugging)
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!(
+            "SPU note_on: voice={} prog={} note={} vel={} region=[{}-{}] base_note={} pitch={} vol={} addr=0x{:X}",
+            voice_idx, program, note, velocity,
+            region.key_lo, region.key_hi, region.base_note,
+            region.pitch_for_note(note), region.default_volume,
+            region.spu_ram_offset,
+        );
 
         // Trigger the voice
         self.voices[voice_idx].key_on(region, note, velocity);

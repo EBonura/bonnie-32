@@ -121,6 +121,10 @@ pub struct TrackerState {
 
     /// MIDI keyboard input
     pub midi: MidiInput,
+
+    /// Track which note was triggered by mouse click on piano keys
+    /// (note, channel) — used to send note_off when mouse is released anywhere
+    pub piano_mouse_note: Option<(u8, usize)>,
 }
 
 /// Soundfont filename
@@ -234,6 +238,7 @@ impl TrackerState {
             tap_times: Vec::new(),
             pattern_split: SplitPanel::horizontal(2000).with_ratio(0.6).with_min_size(200.0),
             midi: MidiInput::new(),
+            piano_mouse_note: None,
         }
     }
 

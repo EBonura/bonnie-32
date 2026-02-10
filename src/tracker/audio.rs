@@ -8,13 +8,27 @@
 //! Gaussian interpolation, ADSR envelopes, and reverb processing.
 //! SF2 soundfonts are converted to PS1 ADPCM at load time.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use super::spu::SpuCore;
 use super::spu::reverb::ReverbType;
-use super::spu::convert::{convert_sf2_to_spu, GM_NAMES};
+use super::spu::convert::{parse_sf2, GM_NAMES};
 use super::spu::tables::MAX_VOICES;
+
+/// Lock a mutex, recovering gracefully from poisoning.
+///
+/// A mutex becomes poisoned when a thread panics while holding the lock.
+/// This can happen if `spu.tick()` panics in the audio callback, or if
+/// `ensure_program_loaded()` panics during ADPCM encoding. Rather than
+/// crashing the entire application, we recover the inner data and continue.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("SPU: mutex was poisoned, recovering");
+        poisoned.into_inner()
+    })
+}
 
 /// Sample rate for audio output
 pub const SAMPLE_RATE: u32 = 44100;
@@ -187,13 +201,25 @@ mod native {
         let stream = device.build_output_stream(
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut state = state.lock().unwrap();
-                let samples_needed = data.len() / 2;
+                // Wrap in catch_unwind to prevent panics from aborting
+                // (this callback is called from CoreAudio via extern "C",
+                // so panics cannot unwind and would cause a hard abort)
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut state = lock_or_recover(&state);
+                    let samples_needed = data.len() / 2;
 
-                for i in 0..samples_needed {
-                    let (l, r) = state.spu.tick();
-                    data[i * 2] = l * OUTPUT_GAIN;
-                    data[i * 2 + 1] = r * OUTPUT_GAIN;
+                    for i in 0..samples_needed {
+                        let (l, r) = state.spu.tick();
+                        data[i * 2] = l * OUTPUT_GAIN;
+                        data[i * 2 + 1] = r * OUTPUT_GAIN;
+                    }
+                }));
+
+                if result.is_err() {
+                    // Panic occurred inside tick — output silence
+                    for sample in data.iter_mut() {
+                        *sample = 0.0;
+                    }
                 }
             },
             |err| eprintln!("Audio stream error: {}", err),
@@ -312,29 +338,29 @@ impl AudioEngine {
 
     /// Set the PS1 reverb preset
     pub fn set_reverb_preset(&self, reverb_type: ReverbType) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         state.spu.set_reverb_preset(reverb_type);
     }
 
     /// Get current reverb type
     pub fn reverb_type(&self) -> ReverbType {
-        self.state.lock().unwrap().spu.reverb_type()
+        lock_or_recover(&self.state).spu.reverb_type()
     }
 
     /// Set reverb wet/dry mix (0.0 = dry, 1.0 = wet)
     pub fn set_reverb_wet_level(&self, level: f32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         state.spu.set_reverb_wet_level(level);
     }
 
     /// Get reverb wet level
     pub fn reverb_wet_level(&self) -> f32 {
-        self.state.lock().unwrap().spu.reverb_wet_level()
+        lock_or_recover(&self.state).spu.reverb_wet_level()
     }
 
     /// Clear reverb buffers (call when stopping playback)
     pub fn clear_reverb(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         state.spu.clear_reverb();
     }
 
@@ -347,13 +373,13 @@ impl AudioEngine {
     /// With per-voice SPU Gaussian interpolation, sample rate degradation
     /// is inherent in the voice pitch. This setting is stored for UI display.
     pub fn set_output_sample_rate(&self, rate: OutputSampleRate) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         state.output_sample_rate = rate;
     }
 
     /// Get current output sample rate mode
     pub fn output_sample_rate(&self) -> OutputSampleRate {
-        self.state.lock().unwrap().output_sample_rate
+        lock_or_recover(&self.state).output_sample_rate
     }
 
     // =========================================================================
@@ -362,24 +388,24 @@ impl AudioEngine {
 
     /// Set master volume (0.0 to 2.0)
     pub fn set_master_volume(&self, volume: f32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         state.spu.set_master_volume(volume);
     }
 
     /// Get master volume
     pub fn master_volume(&self) -> f32 {
-        self.state.lock().unwrap().spu.master_volume()
+        lock_or_recover(&self.state).spu.master_volume()
     }
 
     /// Enable or disable SPU resampling emulation (backward compat)
     pub fn set_spu_resampling_enabled(&self, enabled: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         state.spu_resampling_enabled = enabled;
     }
 
     /// Check if SPU resampling is enabled
     pub fn is_spu_resampling_enabled(&self) -> bool {
-        self.state.lock().unwrap().spu_resampling_enabled
+        lock_or_recover(&self.state).spu_resampling_enabled
     }
 
     // =========================================================================
@@ -401,13 +427,17 @@ impl AudioEngine {
 
     /// Load a soundfont from bytes (works on all platforms including WASM)
     ///
-    /// Converts SF2 PCM samples to PS1 ADPCM and loads into the SPU core.
+    /// Parses the SF2 and stores it for on-demand instrument conversion.
+    /// Individual programs are converted to ADPCM lazily when needed.
     pub fn load_soundfont_from_bytes(&mut self, bytes: &[u8], name: Option<String>) -> Result<(), String> {
-        let sf_name = name.as_deref().unwrap_or("unknown.sf2");
-        let library = convert_sf2_to_spu(bytes, sf_name)?;
+        let sf_name = name.as_deref().unwrap_or("unknown.sf2").to_string();
+        let soundfont = parse_sf2(bytes)?;
 
-        let mut state = self.state.lock().unwrap();
-        state.spu.load_sample_library(library);
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("SPU: parsed SF2 '{}', instruments will be loaded on demand", sf_name);
+
+        let mut state = lock_or_recover(&self.state);
+        state.spu.load_soundfont(soundfont, sf_name);
         state.playing = true;
 
         self.soundfont_name = name;
@@ -416,7 +446,7 @@ impl AudioEngine {
 
     /// Check if a soundfont is loaded
     pub fn is_loaded(&self) -> bool {
-        self.state.lock().unwrap().spu.is_loaded()
+        lock_or_recover(&self.state).spu.is_loaded()
     }
 
     /// Get the loaded soundfont name
@@ -431,7 +461,7 @@ impl AudioEngine {
     /// Render and output audio (WASM only - must be called each frame with delta time)
     #[cfg(target_arch = "wasm32")]
     pub fn render_audio(&mut self, delta: f64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
 
         // Calculate exact samples needed based on actual elapsed time
         self.sample_accumulator += delta * SAMPLE_RATE as f64;
@@ -471,8 +501,10 @@ impl AudioEngine {
     ///
     /// Triggers the SPU voice for the given channel with the current program.
     pub fn note_on(&self, channel: i32, key: i32, velocity: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("AudioEngine::note_on called: ch={} key={} vel={} loaded={}", channel, key, velocity, state.spu.is_loaded());
         if ch >= MAX_VOICES {
             return;
         }
@@ -493,7 +525,7 @@ impl AudioEngine {
 
     /// Stop a note (note off)
     pub fn note_off(&self, channel: i32, _key: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;
@@ -503,7 +535,7 @@ impl AudioEngine {
 
     /// Stop all notes
     pub fn all_notes_off(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         state.spu.all_notes_off();
     }
 
@@ -513,7 +545,7 @@ impl AudioEngine {
 
     /// Set the instrument (program) for a channel
     pub fn set_program(&self, channel: i32, program: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;
@@ -523,7 +555,7 @@ impl AudioEngine {
 
     /// Set channel volume (CC 7)
     pub fn set_volume(&self, channel: i32, volume: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;
@@ -534,7 +566,7 @@ impl AudioEngine {
 
     /// Set channel pan (CC 10)
     pub fn set_pan(&self, channel: i32, pan: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;
@@ -545,7 +577,7 @@ impl AudioEngine {
 
     /// Set pitch bend (0-16383, center = 8192)
     pub fn set_pitch_bend(&self, channel: i32, value: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;
@@ -556,7 +588,7 @@ impl AudioEngine {
 
     /// Set modulation wheel (CC 1)
     pub fn set_modulation(&self, channel: i32, value: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;
@@ -568,7 +600,7 @@ impl AudioEngine {
 
     /// Set expression (CC 11)
     pub fn set_expression(&self, channel: i32, value: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;
@@ -579,7 +611,7 @@ impl AudioEngine {
 
     /// Reset all controllers on a channel
     pub fn reset_controllers(&self, channel: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
         if ch >= MAX_VOICES {
             return;

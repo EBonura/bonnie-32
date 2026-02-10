@@ -10,193 +10,219 @@
 //! spu_core.load_sample_library(library);
 //! ```
 
-use rustysynth::{SoundFont, LoopMode};
+pub use rustysynth::SoundFont;
+use rustysynth::LoopMode;
 use super::adpcm;
 use super::types::{
     AdsrParams, SampleRegion, InstrumentBank, SampleLibrary,
 };
 use super::tables::NATIVE_PITCH;
 
-/// Convert an SF2 soundfont to a PS1 SPU sample library
-///
-/// Extracts all GM bank 0 presets (programs 0-127), encodes their
-/// PCM samples to ADPCM, and stores them in virtual SPU RAM.
-pub fn convert_sf2_to_spu(sf2_data: &[u8], name: &str) -> Result<SampleLibrary, String> {
+/// Parse an SF2 soundfont from bytes without converting any samples.
+/// The returned SoundFont can be stored and used for on-demand conversion.
+pub fn parse_sf2(sf2_data: &[u8]) -> Result<SoundFont, String> {
     let mut cursor = std::io::Cursor::new(sf2_data);
-    let soundfont = SoundFont::new(&mut cursor)
-        .map_err(|e| format!("Failed to parse SF2: {:?}", e))?;
+    SoundFont::new(&mut cursor)
+        .map_err(|e| format!("Failed to parse SF2: {:?}", e))
+}
+
+/// Convert a single GM program from an SF2 soundfont into SPU RAM.
+///
+/// Finds the bank-0 preset matching `program`, encodes its PCM samples
+/// to ADPCM, and allocates them in the library's SPU RAM.
+/// Returns `true` if the program was converted (or already loaded),
+/// `false` if SPU RAM is full.
+pub fn convert_single_program(
+    soundfont: &SoundFont,
+    program: u8,
+    library: &mut SampleLibrary,
+) -> bool {
+    // Already loaded?
+    if library.instrument(program).is_some() {
+        return true;
+    }
 
     let wave_data = soundfont.get_wave_data();
     let sample_headers = soundfont.get_sample_headers();
     let presets = soundfont.get_presets();
     let instruments = soundfont.get_instruments();
 
-    let mut library = SampleLibrary::new(name.to_string());
-    let mut total_samples = 0;
-
-    // Process all presets in bank 0 (GM melodic)
-    for preset in presets {
-        if preset.get_bank_number() != 0 {
-            continue;
+    // Find the bank-0 preset matching this program number
+    let preset = match presets.iter().find(|p| {
+        p.get_bank_number() == 0 && p.get_patch_number() == program as i32
+    }) {
+        Some(p) => p,
+        None => {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("SPU convert: no bank-0 preset for program {}", program);
+            return false;
         }
+    };
 
-        let program = preset.get_patch_number() as u8;
-        if program > 127 {
-            continue;
-        }
-
-        let mut bank = InstrumentBank {
-            name: preset.get_name().to_string(),
-            program,
-            regions: Vec::new(),
-        };
-
-        // Iterate preset regions → instruments → instrument regions
-        for preset_region in preset.get_regions() {
-            let inst_id = preset_region.get_instrument_id();
-            if inst_id >= instruments.len() {
-                continue;
-            }
-            let instrument = &instruments[inst_id];
-
-            for region in instrument.get_regions() {
-                // Get key range
-                let key_lo = region.get_key_range_start().max(0).min(127) as u8;
-                let key_hi = region.get_key_range_end().max(0).min(127) as u8;
-                if key_lo > key_hi {
-                    continue;
-                }
-
-                // Get sample info
-                let sample_start = region.get_sample_start() as usize;
-                let sample_end = region.get_sample_end() as usize;
-                if sample_start >= sample_end || sample_end > wave_data.len() {
-                    continue;
-                }
-
-                // Extract PCM samples
-                let pcm_data = &wave_data[sample_start..sample_end];
-                if pcm_data.is_empty() {
-                    continue;
-                }
-
-                // Get loop points (relative to sample start)
-                let loop_mode = region.get_sample_modes();
-                let has_loop = loop_mode != LoopMode::NoLoop;
-                let loop_start_sample = if has_loop {
-                    let ls = region.get_sample_start_loop() as usize;
-                    if ls >= sample_start { Some(ls - sample_start) } else { None }
-                } else {
-                    None
-                };
-                let loop_end_sample = if has_loop {
-                    let le = region.get_sample_end_loop() as usize;
-                    if le > sample_start { Some(le - sample_start) } else { None }
-                } else {
-                    None
-                };
-
-                // Get root key and pitch info
-                let root_key = region.get_root_key();
-                let base_note = if root_key >= 0 && root_key <= 127 {
-                    root_key as u8
-                } else {
-                    // Fall back to sample header original_pitch
-                    let sid = region.get_sample_id();
-                    if sid < sample_headers.len() {
-                        let op = sample_headers[sid].get_original_pitch();
-                        if op >= 0 && op <= 127 { op as u8 } else { 60 }
-                    } else {
-                        60
-                    }
-                };
-
-                // Calculate base pitch register value
-                // PS1 pitch 0x1000 = 44100Hz playback
-                // If sample_rate != 44100, adjust: base_pitch = (sample_rate / 44100) * 0x1000
-                let sid = region.get_sample_id();
-                let sample_rate = if sid < sample_headers.len() {
-                    sample_headers[sid].get_sample_rate() as f64
-                } else {
-                    44100.0
-                };
-                let base_pitch = ((sample_rate / 44100.0) * NATIVE_PITCH as f64) as u16;
-
-                // Get fine tuning
-                let fine_tune = (region.get_fine_tune()
-                    + region.get_coarse_tune() * 100) as i16;
-
-                // Encode PCM → ADPCM
-                let adpcm_data = adpcm::encode_pcm_to_adpcm(
-                    pcm_data,
-                    loop_start_sample,
-                    loop_end_sample,
-                );
-
-                // Allocate in SPU RAM
-                let spu_ram_offset = match library.spu_ram.allocate(&adpcm_data) {
-                    Some(offset) => offset,
-                    None => {
-                        // SPU RAM full — skip remaining samples
-                        break;
-                    }
-                };
-
-                // Calculate loop address in SPU RAM
-                let loop_offset = if has_loop {
-                    let loop_block = loop_start_sample.unwrap_or(0) / 28;
-                    spu_ram_offset + (loop_block as u32 * 16)
-                } else {
-                    spu_ram_offset
-                };
-
-                // Convert SF2 envelope to PS1 ADSR
-                let adsr = sf2_envelope_to_adsr(region);
-
-                // Get volume from attenuation
-                let attenuation_db = region.get_initial_attenuation();
-                let vol_scale = 10.0_f32.powf(-attenuation_db / 20.0);
-                let default_volume = (0x3FFF as f32 * vol_scale).min(0x3FFF as f32) as i16;
-
-                bank.regions.push(SampleRegion {
-                    spu_ram_offset,
-                    loop_offset,
-                    has_loop,
-                    adpcm_length: adpcm_data.len() as u32,
-                    base_note,
-                    base_pitch,
-                    key_lo,
-                    key_hi,
-                    adsr,
-                    default_volume,
-                    fine_tune,
-                });
-
-                total_samples += 1;
-            }
-        }
-
-        // Sort regions by key_lo for efficient lookup
-        bank.regions.sort_by_key(|r| r.key_lo);
-
-        if !bank.regions.is_empty() {
-            library.instruments.push(bank);
-        }
-    }
-
-    library.sample_count = total_samples;
-
-    // Log conversion stats
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!(
-        "SPU: Converted {} → {} samples, {} instruments, {:.0}KB SPU RAM used",
-        name,
-        total_samples,
-        library.instruments.len(),
+        "SPU convert: loading program {} '{}' ({} regions) — {:.0}KB used",
+        program, preset.get_name(), preset.get_regions().len(),
         library.spu_ram.allocated_bytes() as f64 / 1024.0,
     );
 
-    Ok(library)
+    let mut bank = InstrumentBank {
+        name: preset.get_name().to_string(),
+        program,
+        regions: Vec::new(),
+    };
+
+    let mut spu_ram_full = false;
+
+    for preset_region in preset.get_regions() {
+        if spu_ram_full {
+            break;
+        }
+        let inst_id = preset_region.get_instrument_id();
+        if inst_id >= instruments.len() {
+            continue;
+        }
+        let instrument = &instruments[inst_id];
+
+        // Preset region constrains which notes route to this instrument
+        let preset_key_lo = preset_region.get_key_range_start().max(0).min(127) as u8;
+        let preset_key_hi = preset_region.get_key_range_end().max(0).min(127) as u8;
+
+        for region in instrument.get_regions() {
+            let inst_key_lo = region.get_key_range_start().max(0).min(127) as u8;
+            let inst_key_hi = region.get_key_range_end().max(0).min(127) as u8;
+
+            // Effective key range = intersection of preset and instrument ranges
+            let key_lo = inst_key_lo.max(preset_key_lo);
+            let key_hi = inst_key_hi.min(preset_key_hi);
+            if key_lo > key_hi {
+                continue;
+            }
+
+            let sample_start = region.get_sample_start() as usize;
+            let sample_end = region.get_sample_end() as usize;
+            if sample_start >= sample_end || sample_end > wave_data.len() {
+                continue;
+            }
+
+            let pcm_data = &wave_data[sample_start..sample_end];
+            if pcm_data.is_empty() {
+                continue;
+            }
+
+            // Loop points
+            let loop_mode = region.get_sample_modes();
+            let has_loop = loop_mode != LoopMode::NoLoop;
+            let loop_start_sample = if has_loop {
+                let ls = region.get_sample_start_loop() as usize;
+                if ls >= sample_start { Some(ls - sample_start) } else { None }
+            } else {
+                None
+            };
+            let loop_end_sample = if has_loop {
+                let le = region.get_sample_end_loop() as usize;
+                if le > sample_start { Some(le - sample_start) } else { None }
+            } else {
+                None
+            };
+
+            // Root key
+            let root_key = region.get_root_key();
+            let base_note = if root_key >= 0 && root_key <= 127 {
+                root_key as u8
+            } else {
+                let sid = region.get_sample_id();
+                if sid < sample_headers.len() {
+                    let op = sample_headers[sid].get_original_pitch();
+                    if op >= 0 && op <= 127 { op as u8 } else { 60 }
+                } else {
+                    60
+                }
+            };
+
+            // Base pitch
+            let sid = region.get_sample_id();
+            let sample_rate = if sid < sample_headers.len() {
+                sample_headers[sid].get_sample_rate() as f64
+            } else {
+                44100.0
+            };
+            let base_pitch = ((sample_rate / 44100.0) * NATIVE_PITCH as f64) as u16;
+
+            let fine_tune = (region.get_fine_tune()
+                + region.get_coarse_tune() * 100) as i16;
+
+            // Encode PCM → ADPCM
+            let adpcm_data = adpcm::encode_pcm_to_adpcm(
+                pcm_data,
+                loop_start_sample,
+                loop_end_sample,
+            );
+
+            // Allocate in SPU RAM
+            let spu_ram_offset = match library.spu_ram.allocate(&adpcm_data) {
+                Some(offset) => offset,
+                None => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    eprintln!("    SPU RAM full at prog={}", program);
+                    spu_ram_full = true;
+                    break;
+                }
+            };
+
+            let loop_offset = if has_loop {
+                let loop_block = loop_start_sample.unwrap_or(0) / 28;
+                spu_ram_offset + (loop_block as u32 * 16)
+            } else {
+                spu_ram_offset
+            };
+
+            let adsr = sf2_envelope_to_adsr(region);
+
+            let attenuation_cb = region.get_initial_attenuation();
+            let vol_scale = if attenuation_cb <= 0.0 {
+                1.0_f32
+            } else {
+                10.0_f32.powf(-attenuation_cb / 200.0)
+            };
+            let default_volume = (0x3FFF as f32 * vol_scale).max(0.0).min(0x3FFF as f32) as i16;
+
+            bank.regions.push(SampleRegion {
+                spu_ram_offset,
+                loop_offset,
+                has_loop,
+                adpcm_length: adpcm_data.len() as u32,
+                base_note,
+                base_pitch,
+                key_lo,
+                key_hi,
+                adsr,
+                default_volume,
+                fine_tune,
+            });
+
+            library.sample_count += 1;
+        }
+    }
+
+    if spu_ram_full && bank.regions.is_empty() {
+        return false;
+    }
+
+    bank.regions.sort_by_key(|r| r.key_lo);
+
+    if !bank.regions.is_empty() {
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!(
+            "SPU convert: loaded program {} '{}' — {} regions, {:.0}KB used",
+            program, bank.name, bank.regions.len(),
+            library.spu_ram.allocated_bytes() as f64 / 1024.0,
+        );
+        library.instruments.push(bank);
+        true
+    } else {
+        false
+    }
 }
 
 /// Convert SF2 volume envelope parameters to PS1 ADSR register values

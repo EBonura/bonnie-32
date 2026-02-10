@@ -1198,10 +1198,12 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
         // Click to play
         if is_hovered && ctx.mouse.left_pressed {
+            // Release any previously held mouse note first
+            if let Some((prev_note, prev_ch)) = state.piano_mouse_note.take() {
+                state.audio.note_off(prev_ch as i32, prev_note as i32);
+            }
             state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
-        }
-        if is_hovered && ctx.mouse.left_released {
-            state.audio.note_off(state.current_channel as i32, midi_note as i32);
+            state.piano_mouse_note = Some((midi_note, state.current_channel));
         }
 
         // Note name at bottom (only show for C notes to reduce clutter)
@@ -1240,16 +1242,25 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
 
         // Click to play
         if is_hovered && ctx.mouse.left_pressed {
+            // Release any previously held mouse note first
+            if let Some((prev_note, prev_ch)) = state.piano_mouse_note.take() {
+                state.audio.note_off(prev_ch as i32, prev_note as i32);
+            }
             state.audio.note_on(state.current_channel as i32, midi_note as i32, 100);
-        }
-        if is_hovered && ctx.mouse.left_released {
-            state.audio.note_off(state.current_channel as i32, midi_note as i32);
+            state.piano_mouse_note = Some((midi_note, state.current_channel));
         }
 
         // Keyboard shortcut label (single label per key - continuous layout)
         if let Some(label) = get_key_label(*semitone) {
             let label_color = if is_key_pressed { WHITE } else { Color::new(0.6, 0.6, 0.6, 1.0) };
             draw_text(label, key_x + 3.0, piano_y + black_key_h - 5.0, 9.0, label_color);
+        }
+    }
+
+    // Release mouse-held piano note when mouse button is released (anywhere)
+    if ctx.mouse.left_released {
+        if let Some((note, ch)) = state.piano_mouse_note.take() {
+            state.audio.note_off(ch as i32, note as i32);
         }
     }
 

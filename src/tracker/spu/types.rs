@@ -437,4 +437,12 @@ impl SampleLibrary {
             .map(|b| (b.program, b.name.clone()))
             .collect()
     }
+
+    /// Reset the library — clear SPU RAM and all instruments
+    /// Used when SPU RAM is full and we need to reload a different set of programs
+    pub fn reset(&mut self) {
+        self.spu_ram.reset();
+        self.instruments.clear();
+        self.sample_count = 0;
+    }
 }
