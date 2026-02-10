@@ -2,7 +2,7 @@
 
 use super::audio::{AudioEngine, OutputSampleRate};
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
-use super::psx_reverb::ReverbType;
+use super::spu::reverb::ReverbType;
 use super::actions::create_tracker_actions;
 use super::song_browser::SongBrowser;
 use crate::storage::Storage;

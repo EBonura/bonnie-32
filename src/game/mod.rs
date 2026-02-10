@@ -25,6 +25,7 @@ pub mod event;
 pub mod transform;
 pub mod components;
 pub mod collision;
+pub mod particles;
 pub mod runtime;
 pub mod renderer;
 
