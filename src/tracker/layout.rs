@@ -11,7 +11,7 @@ use crate::ui::{
     NOTE_COLOR, INST_COLOR, VOL_COLOR, FX_COLOR,
 };
 use super::state::{TrackerState, TrackerView};
-use super::psx_reverb::ReverbType;
+use super::spu::reverb::ReverbType;
 use super::actions::build_context;
 use crate::input::MidiMessage;
 use super::song_browser::{SongBrowserAction, next_available_song_name};

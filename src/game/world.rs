@@ -92,6 +92,12 @@ pub struct World {
 
     /// Spawn points for enemies (for respawn on rest)
     pub spawn_points: ComponentStorage<SpawnPoint>,
+
+    /// Trigger volumes for area-based events
+    pub triggers: ComponentStorage<Trigger>,
+
+    /// Particle emitters attached to entities
+    pub emitters: ComponentStorage<super::particles::ParticleEmitter>,
 }
 
 impl World {
@@ -125,6 +131,8 @@ impl World {
             keys: ComponentStorage::new(),
             checkpoints: ComponentStorage::new(),
             spawn_points: ComponentStorage::new(),
+            triggers: ComponentStorage::new(),
+            emitters: ComponentStorage::new(),
         }
     }
 
@@ -197,6 +205,8 @@ impl World {
         self.keys.clear_slot(idx);
         self.checkpoints.clear_slot(idx);
         self.spawn_points.clear_slot(idx);
+        self.triggers.clear_slot(idx);
+        self.emitters.clear_slot(idx);
     }
 
     /// Process all queued despawns. Call at end of frame.

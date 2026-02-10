@@ -133,6 +133,9 @@ pub struct GameToolState {
     /// Event queues for game systems
     pub events: Events,
 
+    /// Particle pool for visual effects
+    pub particles: super::particles::ParticlePool,
+
     /// Game camera (separate from editor camera)
     pub camera: Camera,
 
@@ -209,6 +212,7 @@ impl GameToolState {
         Self {
             world: World::new(),
             events: Events::new(),
+            particles: super::particles::ParticlePool::new(),
             camera,
             orbit_target,
             orbit_distance,
@@ -376,6 +380,7 @@ impl GameToolState {
             // Reset ECS world when stopping
             self.world = World::new();
             self.events = Events::new();
+            self.particles.clear();
             self.player_entity = None;
         }
     }
@@ -384,6 +389,7 @@ impl GameToolState {
     pub fn reset(&mut self) {
         self.world = World::new();
         self.events = Events::new();
+        self.particles.clear();
         self.player_entity = None;
         self.playing = false;
     }
@@ -467,6 +473,262 @@ impl GameToolState {
             let global = super::GlobalTransform::from_transform(transform);
             self.world.global_transforms.insert(entity, global);
         }
+
+        // =====================================================================
+        // Hitbox vs Hurtbox Collision System
+        // =====================================================================
+        // Collect hitboxes and hurtboxes to avoid borrow conflicts
+        let hitboxes: Vec<(u32, super::components::Hitbox)> = self.world.hitboxes
+            .iter()
+            .filter(|(_, h)| h.active)
+            .map(|(idx, h)| (idx, *h))
+            .collect();
+        let hurtboxes: Vec<(u32, super::components::Hurtbox)> = self.world.hurtboxes
+            .iter()
+            .map(|(idx, h)| (idx, *h))
+            .collect();
+
+        for &(hit_idx, ref hitbox) in &hitboxes {
+            let hit_entity = Entity::new(hit_idx, 0);
+            let hit_pos = self.world.transforms.get(hit_entity)
+                .map(|t| t.position)
+                .unwrap_or(Vec3::ZERO);
+
+            for &(hurt_idx, ref hurtbox) in &hurtboxes {
+                // Don't collide with self
+                if hit_idx == hurt_idx {
+                    continue;
+                }
+                let hurt_entity = Entity::new(hurt_idx, 0);
+
+                // Skip same-team (unless Neutral, which hits everyone)
+                if hitbox.team != super::components::Team::Neutral {
+                    // Player hitboxes shouldn't hurt players, enemy hitboxes shouldn't hurt enemies
+                    let is_player_hit = self.world.players.contains(hit_entity);
+                    let is_player_hurt = self.world.players.contains(hurt_entity);
+                    if is_player_hit == is_player_hurt {
+                        continue; // Same side — skip
+                    }
+                }
+
+                let hurt_pos = self.world.transforms.get(hurt_entity)
+                    .map(|t| t.position)
+                    .unwrap_or(Vec3::ZERO);
+
+                if let Some(contact_point) = super::collision::shapes_overlap(
+                    hit_pos, &hitbox.shape,
+                    hurt_pos, &hurtbox.shape,
+                ) {
+                    let damage = (hitbox.damage as f32 * hurtbox.damage_multiplier) as i32;
+
+                    // Send collision event
+                    self.events.collision.send(super::event::CollisionEvent {
+                        entity_a: hit_entity,
+                        entity_b: hurt_entity,
+                        point: contact_point,
+                    });
+
+                    // Apply damage if hitbox has damage
+                    if damage > 0 {
+                        self.events.damage.send(super::event::DamageEvent {
+                            target: hurt_entity,
+                            source: Some(hit_entity),
+                            amount: damage,
+                            position: contact_point,
+                        });
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // Projectile Collision System
+        // =====================================================================
+        let projectiles: Vec<(u32, super::components::Projectile, super::components::Hitbox)> =
+            self.world.projectiles.iter()
+                .filter_map(|(idx, proj)| {
+                    let entity = Entity::new(idx, 0);
+                    self.world.hitboxes.get(entity).map(|h| (idx, *proj, *h))
+                })
+                .collect();
+
+        for (proj_idx, projectile, hitbox) in projectiles {
+            let proj_entity = Entity::new(proj_idx, 0);
+            let proj_pos = self.world.transforms.get(proj_entity)
+                .map(|t| t.position)
+                .unwrap_or(Vec3::ZERO);
+
+            for &(hurt_idx, ref hurtbox) in &hurtboxes {
+                let hurt_entity = Entity::new(hurt_idx, 0);
+                // Don't hit the projectile's owner
+                if hurt_entity == projectile.owner {
+                    continue;
+                }
+                let hurt_pos = self.world.transforms.get(hurt_entity)
+                    .map(|t| t.position)
+                    .unwrap_or(Vec3::ZERO);
+
+                if let Some(contact_point) = super::collision::shapes_overlap(
+                    proj_pos, &hitbox.shape,
+                    hurt_pos, &hurtbox.shape,
+                ) {
+                    let damage = (projectile.damage as f32 * hurtbox.damage_multiplier) as i32;
+
+                    self.events.damage.send(super::event::DamageEvent {
+                        target: hurt_entity,
+                        source: Some(proj_entity),
+                        amount: damage,
+                        position: contact_point,
+                    });
+
+                    // Despawn projectile on hit
+                    self.world.despawn(proj_entity);
+                    break; // Projectile is consumed
+                }
+            }
+        }
+
+        // =====================================================================
+        // Trigger Volume System
+        // =====================================================================
+        // Collect trigger data to avoid borrow conflicts
+        let trigger_data: Vec<(u32, super::components::Trigger)> = self.world.triggers
+            .iter()
+            .map(|(idx, t)| (idx, t.clone()))
+            .collect();
+        // Collect all entity positions that can enter triggers (entities with transforms)
+        let entity_positions: Vec<(u32, Vec3)> = self.world.transforms
+            .iter()
+            .map(|(idx, t)| (idx, t.position))
+            .collect();
+
+        for (trig_idx, mut trigger) in trigger_data {
+            let trig_entity = Entity::new(trig_idx, 0);
+            let trig_pos = self.world.transforms.get(trig_entity)
+                .map(|t| t.position)
+                .unwrap_or(Vec3::ZERO);
+
+            let mut new_occupants: Vec<u32> = Vec::new();
+
+            for &(ent_idx, ent_pos) in &entity_positions {
+                // Don't trigger on self
+                if ent_idx == trig_idx {
+                    continue;
+                }
+
+                if super::collision::point_in_shape(ent_pos, trig_pos, &trigger.shape) {
+                    new_occupants.push(ent_idx);
+
+                    // Check if this entity just entered (wasn't in occupants before)
+                    if !trigger.occupants.contains(&ent_idx) {
+                        if let Some(ref event_name) = trigger.on_enter {
+                            self.events.trigger_enter.send(super::event::TriggerEvent {
+                                trigger: trig_entity,
+                                other: Entity::new(ent_idx, 0),
+                                trigger_id: trigger.trigger_id.clone(),
+                                event_name: Some(event_name.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Check for exits: entities that were in occupants but are no longer
+            for &old_idx in &trigger.occupants {
+                if !new_occupants.contains(&old_idx) {
+                    if let Some(ref event_name) = trigger.on_exit {
+                        self.events.trigger_exit.send(super::event::TriggerEvent {
+                            trigger: trig_entity,
+                            other: Entity::new(old_idx, 0),
+                            trigger_id: trigger.trigger_id.clone(),
+                            event_name: Some(event_name.clone()),
+                        });
+                    }
+                }
+            }
+
+            // Update occupants list
+            trigger.occupants = new_occupants;
+            self.world.triggers.insert(trig_entity, trigger);
+        }
+
+        // =====================================================================
+        // Damage Application System: Process damage events
+        // =====================================================================
+        let damage_events: Vec<super::event::DamageEvent> = self.events.damage.iter().copied().collect();
+        for damage in &damage_events {
+            if let Some(health) = self.world.health.get_mut(damage.target) {
+                let died = health.damage(damage.amount);
+                if died {
+                    let pos = self.world.transforms.get(damage.target)
+                        .map(|t| t.position)
+                        .unwrap_or(damage.position);
+                    self.events.death.send(super::event::DeathEvent {
+                        entity: damage.target,
+                        killer: damage.source,
+                        position: pos,
+                    });
+                } else {
+                    // Grant i-frames on hit
+                    health.set_invincible(30); // ~0.5 seconds at 60fps
+                }
+            }
+        }
+
+        // =====================================================================
+        // Particle Emitter System: Spawn particles from active emitters
+        // =====================================================================
+        let emitter_data: Vec<(u32, super::particles::ParticleEmitter)> = self.world.emitters
+            .iter()
+            .filter(|(_, e)| e.active)
+            .map(|(idx, e)| (idx, e.clone()))
+            .collect();
+
+        for (idx, mut emitter) in emitter_data {
+            let entity = Entity::new(idx, 0);
+            let origin = self.world.transforms.get(entity)
+                .map(|t| t.position)
+                .unwrap_or(Vec3::ZERO);
+
+            // Continuous emission based on spawn rate
+            if emitter.def.spawn_rate > 0.0 {
+                emitter.spawn_accumulator += emitter.def.spawn_rate * delta_time;
+                while emitter.spawn_accumulator >= 1.0 {
+                    self.particles.spawn_one(&emitter.def, origin);
+                    emitter.spawn_accumulator -= 1.0;
+                }
+            }
+
+            self.world.emitters.insert(entity, emitter);
+        }
+
+        // =====================================================================
+        // Event-Driven Particles: Spawn VFX from damage and death events
+        // =====================================================================
+        for damage in &damage_events {
+            // Spawn hit sparks at damage location
+            self.particles.spawn_burst(
+                &super::particles::ParticleEmitterDef::sparks(),
+                damage.position,
+                8,
+            );
+        }
+
+        let death_events: Vec<super::event::DeathEvent> = self.events.death.iter().copied().collect();
+        for death in &death_events {
+            // Spawn death burst at death location
+            self.particles.spawn_burst(
+                &super::particles::ParticleEmitterDef::blood(),
+                death.position,
+                16,
+            );
+        }
+
+        // =====================================================================
+        // Particle Pool Update: Physics simulation for all live particles
+        // =====================================================================
+        let gravity = level.player_settings.gravity;
+        self.particles.update(delta_time, gravity);
 
         // =====================================================================
         // Health System: Tick invincibility frames

@@ -124,11 +124,14 @@ pub enum AssetComponent {
     ///
     /// Smoke, fire, sparkles, etc.
     Particle {
-        /// Particle effect identifier
+        /// Particle effect identifier (for preset lookup: "fire", "sparks", "dust", "blood")
         effect: String,
         /// Offset from asset origin
         #[serde(default)]
         offset: [f32; 3],
+        /// Full emitter definition (overrides preset if provided)
+        #[serde(default)]
+        emitter_def: Option<crate::game::particles::ParticleEmitterDef>,
     },
 
     /// Character controller for movement
