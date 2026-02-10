@@ -880,9 +880,15 @@ fn draw_components_section(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32,
         state.delete_component_dialog = Some(idx);
     } else if let Some(idx) = select_idx {
         state.selected_component = Some(idx);
-        // Clear mesh selection when selecting a non-Mesh component
         if let Some(comp) = state.asset.components.get(idx) {
-            if !matches!(comp, crate::asset::AssetComponent::Mesh { .. }) {
+            // For Collision with linked mesh, auto-select that mesh part
+            if let crate::asset::AssetComponent::Collision { collision_mesh: Some(ref name), .. } = comp {
+                let mesh_name = name.clone();
+                if let Some(obj_idx) = state.objects().iter().position(|o| o.name == mesh_name) {
+                    state.selected_object = Some(obj_idx);
+                }
+            } else if !matches!(comp, crate::asset::AssetComponent::Mesh { .. }) {
+                // Clear mesh selection when selecting a non-Mesh, non-Collision component
                 state.selection.clear();
             }
         }
@@ -975,6 +981,7 @@ fn create_default_component(type_name: &str) -> AssetComponent {
         "Collision" => AssetComponent::Collision {
             shape: CollisionShapeDef::FromMesh,
             is_trigger: false,
+            collision_mesh: None, // Mesh part created at add site
         },
         "Light" => AssetComponent::Light {
             color: [255, 255, 200],
@@ -1010,6 +1017,7 @@ fn create_default_component(type_name: &str) -> AssetComponent {
         "Particle" => AssetComponent::Particle {
             effect: "smoke".to_string(),
             offset: [0.0, 0.0, 0.0],
+            emitter_def: None,
         },
         "CharacterController" => AssetComponent::CharacterController {
             height: 1536.0,
@@ -1037,6 +1045,7 @@ fn create_default_component(type_name: &str) -> AssetComponent {
         _ => AssetComponent::Collision {
             shape: CollisionShapeDef::FromMesh,
             is_trigger: false,
+            collision_mesh: None,
         },
     }
 }
@@ -1066,8 +1075,8 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
             // Mesh is handled specially by draw_mesh_editor_content, should not reach here
             return;
         }
-        AssetComponent::Collision { shape, is_trigger } => {
-            draw_collision_editor(ctx, x, y, width, shape, is_trigger, icon_font)
+        AssetComponent::Collision { is_trigger, collision_mesh, .. } => {
+            draw_collision_editor(ctx, x, y, width, is_trigger, collision_mesh, icon_font)
         }
         AssetComponent::Light { color, intensity, radius, offset } => {
             draw_light_component_editor(ctx, x, y, width, color, intensity, radius, offset, &mut state.light_color_slider, icon_font)
@@ -1087,7 +1096,7 @@ fn draw_component_editor(ctx: &mut UiContext, x: f32, y: &mut f32, width: f32, s
         AssetComponent::Audio { sound, volume, radius, looping } => {
             draw_audio_editor(ctx, x, y, width, sound, volume, radius, looping, icon_font)
         }
-        AssetComponent::Particle { effect, offset } => {
+        AssetComponent::Particle { effect, offset, .. } => {
             draw_particle_editor(ctx, x, y, width, effect, offset, icon_font)
         }
         AssetComponent::CharacterController { height, radius, step_height } => {
@@ -1778,57 +1787,29 @@ fn draw_collision_editor(
     x: f32,
     y: &mut f32,
     width: f32,
-    shape: &mut crate::asset::CollisionShapeDef,
     is_trigger: &mut bool,
+    collision_mesh: &mut Option<String>,
     _icon_font: Option<&Font>,
 ) -> bool {
-    use crate::asset::CollisionShapeDef;
     let mut modified = false;
     let line_height = 20.0;
 
-    // Shape type dropdown (simplified - just show current)
-    draw_text("Shape:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-    let shape_desc = shape.description();
-    draw_text(&shape_desc, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-    *y += line_height;
-
-    // Shape type buttons
-    let btn_w = (width - 12.0) / 5.0;
-    let shapes = [
-        ("Mesh", CollisionShapeDef::FromMesh),
-        ("Box", CollisionShapeDef::Box { half_extents: [256.0, 256.0, 256.0] }),
-        ("Sphere", CollisionShapeDef::Sphere { radius: 256.0 }),
-        ("Capsule", CollisionShapeDef::Capsule { radius: 128.0, height: 512.0 }),
-        ("Cylinder", CollisionShapeDef::Cylinder { radius: 128.0, height: 512.0 }),
-    ];
-
-    for (i, (name, default_shape)) in shapes.iter().enumerate() {
-        let btn_x = x + 4.0 + i as f32 * btn_w;
-        let btn_rect = Rect::new(btn_x, *y, btn_w - 2.0, 18.0);
-        let is_active = std::mem::discriminant(shape) == std::mem::discriminant(default_shape);
-        let hovered = ctx.mouse.inside(&btn_rect);
-
-        let bg = if is_active {
-            ACCENT_COLOR
-        } else if hovered {
-            Color::from_rgba(60, 60, 70, 255)
-        } else {
-            Color::from_rgba(45, 45, 50, 255)
-        };
-        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
-
-        let text_color = if is_active { Color::from_rgba(20, 20, 25, 255) } else { TEXT_COLOR };
-        draw_text(name, btn_x + 4.0, *y + 13.0, 11.0, text_color);
-
-        if hovered && ctx.mouse.left_pressed && !is_active {
-            *shape = default_shape.clone();
-            modified = true;
-        }
+    // Show linked mesh name
+    if let Some(mesh_name) = collision_mesh {
+        draw_text("Mesh:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        draw_text(mesh_name, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    } else {
+        draw_text("Legacy shape (no mesh)", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
     }
     *y += line_height;
 
+    // Hint: use Tab wheel for shape, G/R/S for editing
+    draw_text("Tab: change shape", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    *y += line_height;
+    draw_text("G/R/S: edit mesh", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+    *y += line_height;
+
     // Is Trigger toggle
-    let _trigger_rect = Rect::new(x + 4.0, *y, width - 8.0, 18.0);
     draw_text("Is Trigger:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
 
     let toggle_x = x + width - 40.0;
@@ -1842,84 +1823,6 @@ fn draw_collision_editor(
         modified = true;
     }
     *y += line_height;
-
-    // Dimension sliders per shape type
-    let slider_x = x + 70.0;
-    let slider_w = width - 110.0;
-    let slider_h = 10.0;
-    let track_bg = Color::from_rgba(40, 40, 45, 255);
-    let max_dim = 2048.0;
-
-    match shape {
-        CollisionShapeDef::Sphere { radius } => {
-            // Radius slider
-            draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
-            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
-            let fill = (radius.clamp(0.0, max_dim) / max_dim) * slider_w;
-            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
-            draw_text(&format!("{:.0}", *radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
-                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
-                *radius = t * max_dim;
-                modified = true;
-            }
-            *y += line_height;
-        }
-        CollisionShapeDef::Box { half_extents } => {
-            let labels = ["Width:", "Height:", "Depth:"];
-            for (i, label) in labels.iter().enumerate() {
-                draw_text(label, x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-                let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
-                draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
-                let val = half_extents[i];
-                let fill = (val.clamp(0.0, max_dim) / max_dim) * slider_w;
-                draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
-                // Display as full extent (double the half)
-                draw_text(&format!("{:.0}", val * 2.0), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-                if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
-                    let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
-                    half_extents[i] = t * max_dim;
-                    modified = true;
-                }
-                *y += line_height;
-            }
-        }
-        CollisionShapeDef::Capsule { radius, height } | CollisionShapeDef::Cylinder { radius, height } => {
-            // Radius slider
-            draw_text("Radius:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
-            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
-            let fill = (radius.clamp(0.0, max_dim) / max_dim) * slider_w;
-            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
-            draw_text(&format!("{:.0}", *radius), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
-                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
-                *radius = t * max_dim;
-                modified = true;
-            }
-            *y += line_height;
-
-            // Height slider
-            draw_text("Height:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-            let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
-            draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
-            let max_h = 4096.0;
-            let fill = (height.clamp(0.0, max_h) / max_h) * slider_w;
-            draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
-            draw_text(&format!("{:.0}", *height), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
-            if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
-                let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
-                *height = t * max_h;
-                modified = true;
-            }
-            *y += line_height;
-        }
-        CollisionShapeDef::FromMesh => {
-            draw_text("Auto-fit to mesh bounds", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-            *y += line_height;
-        }
-    }
 
     modified
 }
@@ -2372,26 +2275,74 @@ fn draw_audio_editor(
 
 /// Draw particle component editor
 fn draw_particle_editor(
-    _ctx: &mut UiContext,
+    ctx: &mut UiContext,
     x: f32,
     y: &mut f32,
-    _width: f32,
+    width: f32,
     effect: &mut String,
     offset: &mut [f32; 3],
     _icon_font: Option<&Font>,
 ) -> bool {
     let line_height = 20.0;
+    let mut modified = false;
 
-    draw_text("Effect:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-    draw_text(effect, x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    // Preset buttons
+    draw_text("Preset:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
     *y += line_height;
 
-    draw_text("Offset:", x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
-    draw_text(&format!("X:{:.0} Y:{:.0} Z:{:.0}", offset[0], offset[1], offset[2]),
-        x + 50.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+    let presets = ["fire", "sparks", "dust", "blood"];
+    let btn_w = (width - 12.0) / presets.len() as f32;
+    for (i, preset_name) in presets.iter().enumerate() {
+        let btn_x = x + 4.0 + i as f32 * btn_w;
+        let btn_rect = Rect::new(btn_x, *y, btn_w - 2.0, 18.0);
+        let is_active = effect.as_str() == *preset_name;
+        let hovered = ctx.mouse.inside(&btn_rect);
+
+        let bg = if is_active {
+            ACCENT_COLOR
+        } else if hovered {
+            Color::from_rgba(60, 60, 70, 255)
+        } else {
+            Color::from_rgba(45, 45, 50, 255)
+        };
+        draw_rectangle(btn_rect.x, btn_rect.y, btn_rect.w, btn_rect.h, bg);
+
+        let text_color = if is_active { Color::from_rgba(20, 20, 25, 255) } else { TEXT_COLOR };
+        draw_text(preset_name, btn_x + 4.0, *y + 13.0, 11.0, text_color);
+
+        if hovered && ctx.mouse.left_pressed && !is_active {
+            *effect = preset_name.to_string();
+            modified = true;
+        }
+    }
     *y += line_height;
 
-    false
+    // Offset sliders
+    let slider_x = x + 70.0;
+    let slider_w = width - 110.0;
+    let slider_h = 10.0;
+    let track_bg = Color::from_rgba(40, 40, 45, 255);
+    let max_offset = 512.0;
+
+    let labels = ["Offset X:", "Offset Y:", "Offset Z:"];
+    for (i, label) in labels.iter().enumerate() {
+        draw_text(label, x + 4.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_DIM);
+        let sr = Rect::new(slider_x, *y + 4.0, slider_w, slider_h);
+        draw_rectangle(sr.x, sr.y, sr.w, sr.h, track_bg);
+        // Map [-max_offset, max_offset] to [0, 1]
+        let norm = (offset[i] + max_offset) / (2.0 * max_offset);
+        let fill = norm.clamp(0.0, 1.0) * slider_w;
+        draw_rectangle(sr.x, sr.y, fill, sr.h, ACCENT_COLOR);
+        draw_text(&format!("{:.0}", offset[i]), x + width - 35.0, *y + 14.0, FONT_SIZE_CONTENT, TEXT_COLOR);
+        if ctx.mouse.inside(&sr) && ctx.mouse.left_down {
+            let t = ((ctx.mouse.x - sr.x) / slider_w).clamp(0.0, 1.0);
+            offset[i] = t * 2.0 * max_offset - max_offset;
+            modified = true;
+        }
+        *y += line_height;
+    }
+
+    modified
 }
 
 /// Draw character controller component editor
@@ -7518,17 +7469,34 @@ fn draw_add_component_popup(ctx: &mut UiContext, _left_rect: Rect, state: &mut M
         let item_rect = Rect::new(menu_rect.x + 2.0, item_y, menu_rect.w - 4.0, item_height);
 
         if dropdown_item(ctx, item_rect, type_name, Some((icon_char, icon_font)), false) {
-            let new_component = create_default_component(type_name);
-            let is_skeleton = new_component.is_skeleton();
+            let is_collision = type_name == "Collision";
+            let is_skeleton_type = type_name == "Skeleton";
+            let mut new_component = create_default_component(type_name);
+
+            // For Collision, create a linked MeshPart (cube by default)
+            if is_collision {
+                let mesh_name = state.generate_unique_object_name("Collision");
+                let collision_obj = MeshPart::with_mesh(&mesh_name, EditableMesh::cube(512.0));
+                let obj_idx = state.add_object(collision_obj);
+                // Update the component with the linked mesh name
+                if let AssetComponent::Collision { collision_mesh, .. } = &mut new_component {
+                    *collision_mesh = Some(mesh_name);
+                }
+                state.selected_object = Some(obj_idx);
+            }
+
             state.asset.components.push(new_component);
             state.selected_component = Some(state.asset.components.len() - 1);
             state.dropdown.close();
 
             // For Skeleton, also select the default Root bone
-            if is_skeleton {
+            if is_skeleton_type {
                 state.selected_bone = Some(0);
                 state.selection = super::state::ModelerSelection::Bones(vec![0]);
                 state.set_status("Created skeleton with Root bone", 1.0);
+            }
+            if is_collision {
+                state.set_status("Added Collision with editable mesh", 1.0);
             }
         }
 
@@ -8237,7 +8205,7 @@ fn draw_snap_menu(ctx: &mut UiContext, state: &mut ModelerState) {
 
 /// Open the radial menu at the given position with context-appropriate items
 fn open_radial_menu(state: &mut ModelerState, x: f32, y: f32) {
-    use super::radial_menu::{RadialMenuItem, build_context_items};
+    use super::radial_menu::{RadialMenuItem, build_context_items, ComponentContext};
 
     // Determine what's selected
     let has_vertex_selection = matches!(&state.selection, super::state::ModelerSelection::Vertices(v) if !v.is_empty());
@@ -8247,8 +8215,18 @@ fn open_radial_menu(state: &mut ModelerState, x: f32, y: f32) {
     // Get bone names if skeleton exists
     let bone_names: Vec<String> = state.skeleton().iter().map(|b| b.name.clone()).collect();
 
+    // Determine component context from selected component
+    let component_ctx = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx))
+        .map(|comp| match comp {
+            crate::asset::AssetComponent::Collision { collision_mesh: Some(_), .. } => ComponentContext::Collision,
+            crate::asset::AssetComponent::Particle { .. } => ComponentContext::Particle,
+            _ => ComponentContext::None,
+        })
+        .unwrap_or(ComponentContext::None);
+
     // Build context-sensitive items
-    let items = build_context_items(has_vertex_selection, has_face_selection, has_edge_selection, &bone_names);
+    let items = build_context_items(has_vertex_selection, has_face_selection, has_edge_selection, &bone_names, component_ctx);
 
     state.radial_menu.open(x, y, items);
 }
@@ -8321,9 +8299,55 @@ fn handle_radial_menu_action(state: &mut ModelerState, action_id: &str) {
         "prim_prism" => {
             add_primitive_at_origin(state, PrimitiveType::Prism);
         }
+        // Collision shape replacement (replaces the selected collision mesh)
+        "coll_cube" => replace_collision_mesh(state, PrimitiveType::Cube),
+        "coll_cylinder" => replace_collision_mesh(state, PrimitiveType::Cylinder),
+        "coll_prism" => replace_collision_mesh(state, PrimitiveType::Prism),
+        "coll_plane" => replace_collision_mesh(state, PrimitiveType::Plane),
+        "coll_pyramid" => replace_collision_mesh(state, PrimitiveType::Pyramid),
+        "coll_hex" => replace_collision_mesh(state, PrimitiveType::Hex),
+        // Particle preset selection
+        "part_fire" | "part_sparks" | "part_dust" | "part_blood" => {
+            let preset = action_id.strip_prefix("part_").unwrap_or("fire");
+            if let Some(comp_idx) = state.selected_component {
+                if let Some(comp) = state.asset.components.get_mut(comp_idx) {
+                    if let AssetComponent::Particle { effect, .. } = comp {
+                        *effect = preset.to_string();
+                        state.set_status(&format!("Set particle preset: {}", preset), 1.0);
+                    }
+                }
+            }
+        }
         _ => {
             // Unknown action
         }
+    }
+}
+
+/// Replace the collision mesh with a new primitive shape
+fn replace_collision_mesh(state: &mut ModelerState, prim: PrimitiveType) {
+    // Find the collision mesh name from the selected component
+    let mesh_name = state.selected_component
+        .and_then(|idx| state.asset.components.get(idx))
+        .and_then(|comp| {
+            if let AssetComponent::Collision { collision_mesh: Some(name), .. } = comp {
+                Some(name.clone())
+            } else {
+                None
+            }
+        });
+
+    if let Some(mesh_name) = mesh_name {
+        // Push undo before mutating
+        state.push_undo(&format!("Change collision to {}", prim.label()));
+        let new_mesh = prim.create(512.0);
+        // Find the mesh part and replace its mesh
+        if let Some(objects) = state.objects_mut() {
+            if let Some(obj) = objects.iter_mut().find(|o| o.name == mesh_name) {
+                obj.mesh = new_mesh;
+            }
+        }
+        state.set_status(&format!("Collision shape: {}", prim.label()), 1.0);
     }
 }
 

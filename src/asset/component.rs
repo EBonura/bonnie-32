@@ -28,13 +28,19 @@ pub enum AssetComponent {
     /// Collision shape for physics
     ///
     /// Defines how the asset interacts with physics and other entities.
+    /// The collision volume is defined by a linked MeshPart (editable like any mesh).
+    /// Legacy `shape` field is kept for backward compatibility with old saves.
     Collision {
-        /// The collision shape definition
+        /// Legacy collision shape definition (used when collision_mesh is None)
         shape: CollisionShapeDef,
         /// If true, this is a trigger zone (pass-through, fires events)
         /// If false, this is a solid collider (blocks movement)
         #[serde(default)]
         is_trigger: bool,
+        /// Name of the linked MeshPart that defines the collision volume
+        /// When set, the collision shape is defined by this editable mesh
+        #[serde(default)]
+        collision_mesh: Option<String>,
     },
 
     /// Point light attached to asset
