@@ -364,17 +364,24 @@ pub struct SampleRegion {
     pub key_hi: u8,
     /// ADSR envelope parameters for this sample
     pub adsr: AdsrParams,
-    /// Base volume for this sample (0-0x3FFF)
+    /// Base volume for this sample (0-0x7FFF, PS1 voice volume range)
     pub default_volume: i16,
-    /// Fine tuning in cents (-100 to +100)
+    /// Fine tuning in cents (combined preset + instrument coarse_tune*100 + fine_tune)
     pub fine_tune: i16,
+    /// Scale tuning: cents per semitone (default 100 = equal temperament)
+    /// 0 = all notes play at root pitch, 50 = half-step per key, etc.
+    pub scale_tuning: i16,
 }
 
 impl SampleRegion {
     /// Calculate the SPU pitch register value for a given MIDI note
-    /// Uses equal temperament: pitch = base_pitch * 2^((note - base_note + fine_tune/100) / 12)
+    ///
+    /// Applies scale_tuning (cents per semitone) and fine_tune offset.
+    /// scale_tuning=100 gives standard equal temperament.
     pub fn pitch_for_note(&self, note: u8) -> u16 {
-        let semitone_diff = note as f64 - self.base_note as f64 + self.fine_tune as f64 / 100.0;
+        let key_diff = note as f64 - self.base_note as f64;
+        let scale = self.scale_tuning as f64 / 100.0;
+        let semitone_diff = key_diff * scale + self.fine_tune as f64 / 100.0;
         let ratio = (semitone_diff / 12.0).exp2();
         let pitch = (self.base_pitch as f64 * ratio) as u32;
         // Clamp to PS1 max pitch (0x3FFF)
@@ -394,9 +401,24 @@ pub struct InstrumentBank {
 }
 
 impl InstrumentBank {
-    /// Find the region that covers a given MIDI note
+    /// Find the best region that covers a given MIDI note.
+    ///
+    /// When multiple regions overlap the same note (e.g., after velocity layer
+    /// filtering leaves near-duplicates), prefer the narrowest key range —
+    /// it's the most specific match for this note.
     pub fn region_for_note(&self, note: u8) -> Option<&SampleRegion> {
-        self.regions.iter().find(|r| note >= r.key_lo && note <= r.key_hi)
+        let mut best: Option<&SampleRegion> = None;
+        let mut best_span: u8 = u8::MAX;
+        for r in &self.regions {
+            if note >= r.key_lo && note <= r.key_hi {
+                let span = r.key_hi - r.key_lo;
+                if span < best_span {
+                    best = Some(r);
+                    best_span = span;
+                }
+            }
+        }
+        best
     }
 }
 

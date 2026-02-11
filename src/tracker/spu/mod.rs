@@ -13,6 +13,8 @@ pub mod tables;
 pub mod types;
 pub mod voice;
 pub mod convert;
+#[cfg(test)]
+mod pipeline_test;
 
 use reverb::{SpuReverb, ReverbType};
 use tables::MAX_VOICES;

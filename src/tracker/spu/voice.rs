@@ -190,11 +190,11 @@ pub struct Voice {
     adsr_envelope: VolumeEnvelope,
 
     // --- Volume ---
-    /// Base volume from instrument region (0 to 0x3FFF)
+    /// Base volume from instrument region (0 to 0x7FFF, PS1 voice volume range)
     base_volume: i16,
-    /// Left volume (-0x4000 to 0x3FFF), applied as >> 15
+    /// Left volume (0 to 0x7FFF), applied as >> 15
     volume_left: i16,
-    /// Right volume (-0x4000 to 0x3FFF), applied as >> 15
+    /// Right volume (0 to 0x7FFF), applied as >> 15
     volume_right: i16,
 
     // --- Flags ---
@@ -275,12 +275,36 @@ impl Voice {
         self.adsr_phase = AdsrPhase::Attack;
         self.update_adsr_envelope();
 
+        // Dump ADSR parameters for debugging
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let p = &self.adsr_params;
+            let atk_rate = self.compute_attack_rate();
+            let dec_rate = self.compute_decay_rate();
+            let sus_rate = self.compute_sustain_rate();
+            let rel_rate = self.compute_release_rate();
+            eprintln!(
+                "  ADSR: atk={}{} dec={} sus_lvl={} sus={}{}{} rel={}{}",
+                atk_rate, if p.attack_exp { "e" } else { "l" },
+                dec_rate,
+                p.sustain_level,
+                sus_rate, if p.sustain_exp { "e" } else { "l" },
+                if p.sustain_decrease { "-" } else { "+" },
+                rel_rate, if p.release_exp { "e" } else { "l" },
+            );
+            eprintln!(
+                "        sustain_target=0x{:04X} pitch=0x{:04X} base_vol={}",
+                p.sustain_level_i16(), self.pitch, region.default_volume,
+            );
+        }
+
         // Store base volume from instrument region for set_volume_from_pan
-        self.base_volume = region.default_volume.min(0x3FFF);
+        // PS1 volume registers range 0-0x7FFF (unity gain with >> 15)
+        self.base_volume = region.default_volume.min(0x7FFF);
 
         // Set initial volume (will be overridden by sync_voice_volume if called)
         let vol = (self.base_volume as i32 * velocity as i32) / 127;
-        let vol = vol.clamp(0, 0x3FFF) as i16;
+        let vol = vol.clamp(0, 0x7FFF) as i16;
         self.volume_left = vol;
         self.volume_right = vol;
 
@@ -303,14 +327,14 @@ impl Voice {
     /// Set stereo volume from pan position (0=left, 64=center, 127=right)
     /// and MIDI volume (0-127, from CC7*CC11)
     ///
-    /// Combines base_volume (0-0x3FFF, from instrument region) with MIDI
+    /// Combines base_volume (0-0x7FFF, from instrument region) with MIDI
     /// volume and velocity to produce SPU-range L/R volumes for the >> 15
     /// shift in tick().
     pub fn set_volume_from_pan(&mut self, pan: u8, volume: u8) {
-        // Scale: base_volume (0-0x3FFF) * volume (0-127) * velocity (0-127) / (127*127)
+        // Scale: base_volume (0-0x7FFF) * volume (0-127) * velocity (0-127) / (127*127)
         let combined = (self.base_volume as i32 * volume as i32 * self.velocity as i32)
             / (127 * 127);
-        let combined = combined.clamp(0, 0x3FFF) as f32;
+        let combined = combined.clamp(0, 0x7FFF) as f32;
 
         // Equal-power panning
         let pan_f = pan as f32 / 127.0;
@@ -547,6 +571,12 @@ impl Voice {
             };
 
             if reached_target {
+                // Clamp level to target on transition (matches Duckstation).
+                // Attack→Decay: ensures level is exactly 0x7FFF, not some overshoot.
+                // Decay→Sustain: ensures level is exactly sustain_target, preventing
+                // fast decays from overshooting.
+                self.adsr_level = self.adsr_target;
+
                 self.adsr_phase = match self.adsr_phase {
                     AdsrPhase::Attack => AdsrPhase::Decay,
                     AdsrPhase::Decay => AdsrPhase::Sustain,
