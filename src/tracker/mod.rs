@@ -3,7 +3,8 @@
 //! A pattern-based music tracker with SF2 soundfont support.
 //! Inspired by Picotron's tracker design.
 //!
-//! Features authentic PS1 SPU reverb emulation based on the nocash specifications.
+//! Features hardware-accurate PS1 SPU emulation: ADPCM decode,
+//! Gaussian interpolation, ADSR envelopes, and reverb per voice.
 //!
 //! Note: Some pattern/state API not yet fully used by the editor UI.
 
@@ -13,7 +14,7 @@ mod state;
 mod audio;
 mod pattern;
 mod layout;
-mod psx_reverb;
+mod spu;
 mod io;
 pub mod actions;
 mod song_browser;
@@ -27,7 +28,7 @@ pub use audio::{AudioEngine, OutputSampleRate};
 pub use pattern::*;
 pub use layout::{draw_tracker, draw_song_browser};
 #[allow(unused_imports)]
-pub use psx_reverb::{PsxReverb, ReverbType};
+pub use spu::reverb::ReverbType;
 // WASM async loading functions for song browser
 #[allow(unused_imports)]
 pub use song_browser::{load_song_list, load_song_async};

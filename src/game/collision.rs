@@ -3,10 +3,13 @@
 //! TR-style cylinder collision against sector-based level geometry.
 //! The player is modeled as a vertical cylinder that collides with
 //! floor/ceiling heights in each sector.
+//!
+//! Also provides entity-entity overlap tests (sphere-sphere, sphere-AABB)
+//! for hitbox/hurtbox combat and trigger volume detection.
 
 use crate::rasterizer::Vec3;
 use crate::world::Level;
-use super::components::{CharacterController, character};
+use super::components::{CharacterController, CollisionShape, character};
 
 /// Result of a collision check
 #[derive(Debug, Clone, Copy)]
@@ -190,4 +193,124 @@ pub fn move_and_slide(
     }
 
     result.position
+}
+
+// =============================================================================
+// Entity-Entity Overlap Tests
+// =============================================================================
+
+/// Test if two collision shapes overlap, given their world-space positions.
+/// Returns the approximate overlap point if they intersect.
+pub fn shapes_overlap(
+    pos_a: Vec3, shape_a: &CollisionShape,
+    pos_b: Vec3, shape_b: &CollisionShape,
+) -> Option<Vec3> {
+    match (shape_a, shape_b) {
+        (CollisionShape::Sphere { radius: ra }, CollisionShape::Sphere { radius: rb }) => {
+            sphere_sphere(pos_a, *ra, pos_b, *rb)
+        }
+        (CollisionShape::Sphere { radius }, CollisionShape::Box { half_extents }) => {
+            sphere_aabb(pos_a, *radius, pos_b, *half_extents)
+        }
+        (CollisionShape::Box { half_extents }, CollisionShape::Sphere { radius }) => {
+            sphere_aabb(pos_b, *radius, pos_a, *half_extents)
+        }
+        (CollisionShape::Box { half_extents: ha }, CollisionShape::Box { half_extents: hb }) => {
+            aabb_aabb(pos_a, *ha, pos_b, *hb)
+        }
+        (CollisionShape::Sphere { radius }, CollisionShape::Capsule { radius: cr, height }) => {
+            sphere_capsule(pos_a, *radius, pos_b, *cr, *height)
+        }
+        (CollisionShape::Capsule { radius: cr, height }, CollisionShape::Sphere { radius }) => {
+            sphere_capsule(pos_b, *radius, pos_a, *cr, *height)
+        }
+        // Capsule-capsule and capsule-box: approximate as sphere for simplicity
+        (CollisionShape::Capsule { radius: ra, height: ha }, CollisionShape::Capsule { radius: rb, height: hb }) => {
+            // Treat each capsule as a sphere centered at its midpoint
+            let mid_a = Vec3::new(pos_a.x, pos_a.y + ha * 0.5, pos_a.z);
+            let mid_b = Vec3::new(pos_b.x, pos_b.y + hb * 0.5, pos_b.z);
+            sphere_sphere(mid_a, ra + ha * 0.5, mid_b, rb + hb * 0.5)
+        }
+        (CollisionShape::Capsule { radius, height }, CollisionShape::Box { half_extents }) => {
+            let mid = Vec3::new(pos_a.x, pos_a.y + height * 0.5, pos_a.z);
+            sphere_aabb(mid, radius + height * 0.5, pos_b, *half_extents)
+        }
+        (CollisionShape::Box { half_extents }, CollisionShape::Capsule { radius, height }) => {
+            let mid = Vec3::new(pos_b.x, pos_b.y + height * 0.5, pos_b.z);
+            sphere_aabb(mid, radius + height * 0.5, pos_a, *half_extents)
+        }
+    }
+}
+
+/// Test if a point is inside a collision shape at the given position
+pub fn point_in_shape(point: Vec3, shape_pos: Vec3, shape: &CollisionShape) -> bool {
+    match shape {
+        CollisionShape::Sphere { radius } => {
+            let d = point - shape_pos;
+            d.dot(d) <= radius * radius
+        }
+        CollisionShape::Box { half_extents } => {
+            let d = point - shape_pos;
+            d.x.abs() <= half_extents.x && d.y.abs() <= half_extents.y && d.z.abs() <= half_extents.z
+        }
+        CollisionShape::Capsule { radius, height } => {
+            // Capsule: cylinder from pos.y to pos.y+height with hemispherical caps
+            let dy = point.y - shape_pos.y;
+            let clamped_y = dy.clamp(0.0, *height);
+            let closest = Vec3::new(shape_pos.x, shape_pos.y + clamped_y, shape_pos.z);
+            let d = point - closest;
+            d.dot(d) <= radius * radius
+        }
+    }
+}
+
+// --- Primitive overlap tests ---
+
+fn sphere_sphere(pos_a: Vec3, ra: f32, pos_b: Vec3, rb: f32) -> Option<Vec3> {
+    let diff = pos_b - pos_a;
+    let dist_sq = diff.dot(diff);
+    let combined = ra + rb;
+    if dist_sq <= combined * combined {
+        // Midpoint between the two centers as approximate contact point
+        Some(pos_a + diff * 0.5)
+    } else {
+        None
+    }
+}
+
+fn sphere_aabb(sphere_pos: Vec3, radius: f32, box_pos: Vec3, half: Vec3) -> Option<Vec3> {
+    // Find the closest point on the AABB to the sphere center
+    let clamped = Vec3::new(
+        (sphere_pos.x - box_pos.x).clamp(-half.x, half.x) + box_pos.x,
+        (sphere_pos.y - box_pos.y).clamp(-half.y, half.y) + box_pos.y,
+        (sphere_pos.z - box_pos.z).clamp(-half.z, half.z) + box_pos.z,
+    );
+    let diff = sphere_pos - clamped;
+    if diff.dot(diff) <= radius * radius {
+        Some(clamped)
+    } else {
+        None
+    }
+}
+
+fn aabb_aabb(pos_a: Vec3, ha: Vec3, pos_b: Vec3, hb: Vec3) -> Option<Vec3> {
+    let dx = (pos_a.x - pos_b.x).abs();
+    let dy = (pos_a.y - pos_b.y).abs();
+    let dz = (pos_a.z - pos_b.z).abs();
+    if dx <= ha.x + hb.x && dy <= ha.y + hb.y && dz <= ha.z + hb.z {
+        Some((pos_a + pos_b) * 0.5)
+    } else {
+        None
+    }
+}
+
+fn sphere_capsule(
+    sphere_pos: Vec3, sphere_r: f32,
+    cap_pos: Vec3, cap_r: f32, cap_h: f32,
+) -> Option<Vec3> {
+    // Find closest point on the capsule's line segment to the sphere center
+    let dy = sphere_pos.y - cap_pos.y;
+    let clamped_y = dy.clamp(0.0, cap_h);
+    let closest = Vec3::new(cap_pos.x, cap_pos.y + clamped_y, cap_pos.z);
+    sphere_sphere(sphere_pos, sphere_r, closest, cap_r)
 }

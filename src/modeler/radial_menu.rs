@@ -443,14 +443,49 @@ fn draw_half_circle(cx: f32, cy: f32, radius: f32, left_half: bool, color: Color
     }
 }
 
-/// Build context-sensitive menu items based on current selection
+/// Component context for building context-sensitive radial menu items
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComponentContext {
+    /// No specific component context (normal mesh editing)
+    None,
+    /// Collision component selected - show shape replacement options
+    Collision,
+    /// Particle component selected - show preset options
+    Particle,
+}
+
+/// Build context-sensitive menu items based on current selection and component context
 pub fn build_context_items(
     has_vertex_selection: bool,
     has_face_selection: bool,
     has_edge_selection: bool,
     bone_names: &[String],
+    component_ctx: ComponentContext,
 ) -> Vec<RadialMenuItem> {
     let mut items = Vec::new();
+
+    // Component-specific menus
+    match component_ctx {
+        ComponentContext::Collision => {
+            // Collision shape replacement options
+            items.push(RadialMenuItem::new("coll_cube", "Cube").with_icon('□'));
+            items.push(RadialMenuItem::new("coll_cylinder", "Cylinder").with_icon('○'));
+            items.push(RadialMenuItem::new("coll_prism", "Prism").with_icon('△'));
+            items.push(RadialMenuItem::new("coll_plane", "Plane").with_icon('▬'));
+            items.push(RadialMenuItem::new("coll_pyramid", "Pyramid").with_icon('▲'));
+            items.push(RadialMenuItem::new("coll_hex", "Hexagon").with_icon('⬡'));
+            return items;
+        }
+        ComponentContext::Particle => {
+            // Particle preset options
+            items.push(RadialMenuItem::new("part_fire", "Fire").with_icon('F'));
+            items.push(RadialMenuItem::new("part_sparks", "Sparks").with_icon('*'));
+            items.push(RadialMenuItem::new("part_dust", "Dust").with_icon('~'));
+            items.push(RadialMenuItem::new("part_blood", "Blood").with_icon('B'));
+            return items;
+        }
+        ComponentContext::None => {}
+    }
 
     // Show bone assignment for any geometry selection (vertex, face, or edge)
     let has_any_selection = has_vertex_selection || has_face_selection || has_edge_selection;

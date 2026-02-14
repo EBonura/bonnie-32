@@ -355,6 +355,38 @@ impl SpawnPoint {
 }
 
 // =============================================================================
+// Trigger Volume Component
+// =============================================================================
+
+/// Trigger volume that fires events when entities enter/exit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trigger {
+    /// Unique identifier for this trigger
+    pub trigger_id: String,
+    /// Collision shape defining the trigger bounds
+    pub shape: CollisionShape,
+    /// Event name to fire on enter (if any)
+    pub on_enter: Option<String>,
+    /// Event name to fire on exit (if any)
+    pub on_exit: Option<String>,
+    /// Entities currently inside this trigger (tracked by index for enter/exit detection)
+    #[serde(skip)]
+    pub occupants: Vec<u32>,
+}
+
+impl Trigger {
+    pub fn new(trigger_id: String, shape: CollisionShape) -> Self {
+        Self {
+            trigger_id,
+            shape,
+            on_enter: None,
+            on_exit: None,
+            occupants: Vec::new(),
+        }
+    }
+}
+
+// =============================================================================
 // AI / Behavior Components (for future expansion)
 // =============================================================================
 
