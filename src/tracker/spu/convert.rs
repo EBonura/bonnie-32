@@ -242,14 +242,23 @@ pub fn convert_single_program(
 
             let adsr = sf2_envelope_to_adsr(region, has_loop);
 
-            // Combined attenuation: preset + instrument (additive)
-            // NOTE: rustysynth returns decibels (raw centibels * 0.1), not centibels!
-            // So we use the dB→linear formula: 10^(-dB / 20)
+            // Volume calculation matching rustysynth/Polyphone behavior.
+            //
+            // rustysynth applies only 40% of initial_attenuation (a Polyphone-derived
+            // correction that "improves loudness variability"), plus 50% of filter Q
+            // as additional attenuation. See rustysynth voice.rs:
+            //   sample_attenuation = 0.4 * region.get_initial_attenuation()
+            //   filter_attenuation = 0.5 * region.get_initial_filter_q()
+            //   decibels = ... - sample_attenuation - filter_attenuation
+            //
+            // get_initial_attenuation() returns decibels (raw centibels * 0.1).
             let attenuation_db = region.get_initial_attenuation() + preset_attenuation;
-            let vol_scale = if attenuation_db <= 0.0 {
+            let filter_q_db = region.get_initial_filter_q();
+            let effective_attenuation = 0.4 * attenuation_db + 0.5 * filter_q_db;
+            let vol_scale = if effective_attenuation <= 0.0 {
                 1.0_f32
             } else {
-                10.0_f32.powf(-attenuation_db / 20.0)
+                10.0_f32.powf(-effective_attenuation / 20.0)
             };
             let default_volume = (0x7FFF as f32 * vol_scale).max(0.0).min(0x7FFF as f32) as i16;
 
@@ -336,8 +345,8 @@ pub fn convert_single_program(
                     num_blocks, rt_max_err, rt_rms, snr_db,
                 );
                 eprintln!(
-                    "         vol={} atten={:.1} | env: a={:.4} d={:.4} s={:.1} r={:.4}",
-                    default_volume, attenuation_db, sf2_atk, sf2_dec, sf2_sus, sf2_rel,
+                    "         vol={} atten={:.1}dB fq={:.1}dB eff={:.1}dB | env: a={:.4} d={:.4} s={:.1} r={:.4}",
+                    default_volume, attenuation_db, filter_q_db, effective_attenuation, sf2_atk, sf2_dec, sf2_sus, sf2_rel,
                 );
                 eprintln!(
                     "         pitch: @root=0x{:04X} @+12=0x{:04X} @-12=0x{:04X} ratio={}",
@@ -363,6 +372,63 @@ pub fn convert_single_program(
 
     bank.regions.sort_by_key(|r| r.key_lo);
 
+    // Layer combination volume boost: SF2 presets can stack multiple instrument
+    // regions for the same note (e.g., "String Ensemble" = slow pad + fast attack
+    // + ensemble layers). The SPU plays only one region per note, so we boost the
+    // selected region's volume to approximate the combined output of all
+    // overlapping layers.
+    for i in 0..bank.regions.len() {
+        let mid_note = (bank.regions[i].key_lo + bank.regions[i].key_hi) / 2;
+
+        // Simulate region_for_note: find the narrowest-span region covering mid_note
+        let mut best_idx = None;
+        let mut best_span = u8::MAX;
+        for (j, r) in bank.regions.iter().enumerate() {
+            if mid_note >= r.key_lo && mid_note <= r.key_hi {
+                let span = r.key_hi - r.key_lo;
+                if span < best_span {
+                    best_idx = Some(j);
+                    best_span = span;
+                }
+            }
+        }
+
+        if best_idx != Some(i) {
+            continue; // This region wouldn't be selected by region_for_note
+        }
+
+        // Sum squared volumes of all overlapping regions for this note (RMS combination
+        // models uncorrelated signals; real layers are partially correlated but this is
+        // a reasonable approximation)
+        let mut vol_sq_sum: f64 = 0.0;
+        let mut overlap_count = 0u32;
+        for r in &bank.regions {
+            if mid_note >= r.key_lo && mid_note <= r.key_hi {
+                vol_sq_sum += (r.default_volume as f64).powi(2);
+                overlap_count += 1;
+            }
+        }
+
+        if overlap_count <= 1 {
+            continue; // No overlapping layers
+        }
+
+        let combined_vol = vol_sq_sum.sqrt();
+        let current_vol = bank.regions[i].default_volume.max(1) as f64;
+        let boost = combined_vol / current_vol;
+        let new_vol = (current_vol * boost).min(0x7FFF as f64) as i16;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!(
+            "    layer_boost: region [{}-{}] {} overlapping layers, vol {} → {} ({:+.1}dB)",
+            bank.regions[i].key_lo, bank.regions[i].key_hi,
+            overlap_count, bank.regions[i].default_volume, new_vol,
+            20.0 * boost.log10(),
+        );
+
+        bank.regions[i].default_volume = new_vol;
+    }
+
     if !bank.regions.is_empty() {
         #[cfg(not(target_arch = "wasm32"))]
         eprintln!(
@@ -381,7 +447,7 @@ pub fn convert_single_program(
 ///
 /// Treats `data` as one complete cycle of a periodic waveform, so the
 /// interpolation wraps from the last sample back to the first.
-fn resample_loop_linear(data: &[i16], target_len: usize) -> Vec<i16> {
+pub(crate) fn resample_loop_linear(data: &[i16], target_len: usize) -> Vec<i16> {
     let src_len = data.len();
     if src_len == 0 || target_len == 0 {
         return vec![0i16; target_len];
@@ -417,7 +483,7 @@ fn resample_loop_linear(data: &[i16], target_len: usize) -> Vec<i16> {
 ///
 /// Returns (new_pcm, aligned_loop_start, aligned_loop_end, pitch_correction).
 /// The pitch_correction factor should be multiplied into base_pitch.
-fn align_loop_to_adpcm_blocks(
+pub(crate) fn align_loop_to_adpcm_blocks(
     pcm: &[i16],
     loop_start: usize,
     loop_end: usize,
@@ -441,46 +507,89 @@ fn align_loop_to_adpcm_blocks(
     let phase_offset = aligned_start - loop_start;
 
     // Step 2: Find nearest multiple of 28 for the loop length.
-    let nearest_down = (loop_len / blk) * blk;
-    let nearest_up = nearest_down + blk;
-    let target_len = if nearest_down > 0
-        && (loop_len - nearest_down) <= (nearest_up - loop_len)
-    {
-        nearest_down
-    } else {
-        nearest_up
+    // If direct alignment causes >1% pitch error, try repeating the loop
+    // content 2-8× first — a doubled/tripled loop may align to 28 samples
+    // with less (or zero) pitch error. This matters for instruments with
+    // long pre-loop portions (e.g., Piano sustain loops) where the
+    // pitch_correction also shifts the pre-loop pitch audibly.
+    let (target_len, repetitions) = {
+        let mut best_target = 0usize;
+        let mut best_reps = 1usize;
+        let mut best_error = f64::MAX;
+
+        // Cap expansion: repeated loop can't exceed 4× original or 2240
+        // samples (80 ADPCM blocks = 1280 bytes), whichever is larger.
+        // This prevents excessive SPU RAM usage from loop repetition.
+        let max_target = (loop_len * 4).max(2240);
+
+        // Search up to max_target/loop_len repetitions (capped at 56).
+        // Short loops (e.g., 41 samples) may need many repetitions to reach
+        // perfect block alignment: GCD(41,28)=1, so 28 reps are needed for
+        // zero pitch correction. This is still small in SPU RAM (1148 samples
+        // = 656 bytes) and worth the precision for bass/lead instruments.
+        let max_reps = (max_target / loop_len.max(1)).min(56);
+        for reps in 1..=max_reps {
+            let rep_len = loop_len * reps;
+            if rep_len > max_target {
+                break;
+            }
+            let down = (rep_len / blk) * blk;
+            let up = down + blk;
+
+            for candidate in [down, up] {
+                if candidate == 0 || candidate > max_target {
+                    continue;
+                }
+                // pitch_correction per single loop cycle
+                let correction = candidate as f64 / rep_len as f64;
+                let error = (correction - 1.0).abs();
+                if error < best_error {
+                    best_error = error;
+                    best_target = candidate;
+                    best_reps = reps;
+                }
+            }
+
+            // Perfect alignment found, stop searching
+            if best_error < 1e-10 {
+                break;
+            }
+        }
+
+        (best_target, best_reps)
     };
 
     // Pitch correction: the resampled loop has target_len samples per cycle
-    // instead of loop_len. Multiply base_pitch by this to maintain correct
-    // playback frequency.
-    let pitch_correction = target_len as f64 / loop_len as f64;
+    // instead of loop_len * repetitions. Multiply base_pitch by this to
+    // maintain correct playback frequency.
+    let effective_loop_len = loop_len * repetitions;
+    let pitch_correction = target_len as f64 / effective_loop_len as f64;
 
     let aligned_end = aligned_start + target_len;
 
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!(
-        "    align_loop: {}..{} (len={}) → {}..{} (resample {}→{}, {:.2}%, {} blocks)",
+        "    align_loop: {}..{} (len={}) → {}..{} ({}× rep, resample {}→{}, {:.2}%, {} blocks)",
         loop_start, loop_end, loop_len,
-        aligned_start, aligned_end, loop_len, target_len,
+        aligned_start, aligned_end,
+        repetitions, effective_loop_len, target_len,
         (pitch_correction - 1.0) * 100.0,
         target_len / blk,
     );
 
-    // Step 3: Extract phase-shifted loop content.
-    // Starting at phase_offset ensures seamless continuity with the pre-loop
-    // (sample at aligned_start-1 is loop[phase_offset-1], first loop sample
-    // is loop[phase_offset], which are consecutive in the original waveform).
+    // Step 3: Build repeated + phase-shifted loop content.
+    // Starting at phase_offset ensures seamless continuity with the pre-loop.
+    // If repetitions > 1, the loop is repeated to reach better alignment.
     let loop_data = &pcm[loop_start..loop_end.min(pcm.len())];
-    let phase_shifted: Vec<i16> = (0..loop_len)
+    let repeated: Vec<i16> = (0..effective_loop_len)
         .map(|i| loop_data[(phase_offset + i) % loop_len])
         .collect();
 
     // Step 4: Resample to target_len (nearest multiple of 28).
-    let resampled = if target_len == loop_len {
-        phase_shifted
+    let resampled = if target_len == effective_loop_len {
+        repeated
     } else {
-        resample_loop_linear(&phase_shifted, target_len)
+        resample_loop_linear(&repeated, target_len)
     };
 
     // Step 5: Build new PCM data.
@@ -510,7 +619,7 @@ fn align_loop_to_adpcm_blocks(
 /// (~4ms), then crossfading to the loop content. The rest of the pre-loop
 /// is filled with copies of the loop, so the note stabilizes immediately
 /// after the attack.
-fn normalize_pre_loop_amplitude(pcm: &mut [i16], loop_start: usize, loop_end: usize) {
+pub(crate) fn normalize_pre_loop_amplitude(pcm: &mut [i16], loop_start: usize, loop_end: usize) {
     let le = loop_end.min(pcm.len());
     if loop_start >= le {
         return;
@@ -550,9 +659,14 @@ fn normalize_pre_loop_amplitude(pcm: &mut [i16], loop_start: usize, loop_end: us
         (sum / pre_len as f64).sqrt()
     };
 
-    // Only apply if the pre-loop differs significantly from the loop
-    if pre_rms < loop_rms * 1.5 && pre_rms > loop_rms * 0.67 {
-        return; // Close enough already
+    // Only normalize when the LOOP is significantly louder than the pre-loop.
+    // This prevents a jarring volume JUMP at the loop boundary (upward step → click).
+    //
+    // When the pre-loop is louder (natural decay like Piano), preserve the original
+    // content — the transition from loud pre-loop to quieter loop is the instrument's
+    // natural decay and should not be replaced with loop content.
+    if pre_rms >= loop_rms * 0.67 {
+        return; // Pre-loop is at or above loop level — no upward jump to fix
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -605,19 +719,12 @@ fn sf2_envelope_to_adsr(region: &rustysynth::InstrumentRegion, has_loop: bool) -
     // Attack mode: use exponential for longer attacks
     let attack_exp = attack_time > 0.1;
 
-    // For looped instruments, cap the decay time so the note reaches its
-    // sustain level quickly. SF2 instruments like bass have 10+ second decays
-    // (modeling natural string decay), but for PS1/tracker playback, looped
-    // samples should stabilize fast. Non-looped samples (piano, percussion)
-    // keep their natural decay since the sample ends on its own.
-    let effective_decay_time = if has_loop {
-        decay_time.min(0.3)
-    } else {
-        decay_time
-    };
-
-    // Convert decay time to PS1 decay shift (0-15)
-    let decay_shift = time_to_decay_rate(effective_decay_time);
+    // Convert decay time to PS1 decay shift (0-15).
+    // The PS1 hardware caps decay at shift=15 (~1.7s), which is a natural
+    // upper limit. No artificial capping needed — instruments like bass with
+    // 10+ second SF2 decays get the slowest PS1 decay, preserving their
+    // plucky character while staying within hardware limits.
+    let decay_shift = time_to_decay_rate(decay_time);
 
     // Convert sustain level (rustysynth returns decibels of attenuation)
     // 0 dB = full volume, 100 dB = essentially silent
@@ -627,17 +734,7 @@ fn sf2_envelope_to_adsr(region: &rustysynth::InstrumentRegion, has_loop: bool) -
     } else {
         10.0_f32.powf(-sustain_db / 20.0) // Convert decibels to linear amplitude
     };
-    let sustain_level_raw = ((sustain_ratio * 15.0).round() as u8).min(15);
-
-    // For looped instruments, enforce a minimum sustain level so the ADSR
-    // contributes minimal volume drop. Level 14 → target 0x7800 (94% of max).
-    // Combined with pre-loop amplitude normalization, this keeps notes at
-    // a consistent volume throughout playback.
-    let sustain_level = if has_loop {
-        sustain_level_raw.max(14)
-    } else {
-        sustain_level_raw
-    };
+    let sustain_level = ((sustain_ratio * 15.0).round() as u8).min(15);
 
     // Convert release time to PS1 release shift (0-31)
     let release_shift = time_to_release_rate(release_time);
@@ -678,13 +775,13 @@ fn sf2_envelope_to_adsr(region: &rustysynth::InstrumentRegion, has_loop: bool) -
 ///   time(rate) ≈ BASE_ENV_TIME * 2^(rate / 4)
 ///
 /// Therefore: rate = 4 * log2(time / BASE_ENV_TIME)
-const BASE_ENV_TIME: f64 = 32767.0 / 14336.0 / 44100.0;
+pub(crate) const BASE_ENV_TIME: f64 = 32767.0 / 14336.0 / 44100.0;
 
 /// Convert time (seconds) to PS1 ADSR rate (0-127)
 ///
 /// The PS1 ADSR doubles the envelope time every 4 rate units.
 /// rate = 4 * log2(time / BASE_ENV_TIME)
-fn seconds_to_rate(time: f32) -> u8 {
+pub(crate) fn seconds_to_rate(time: f32) -> u8 {
     if time <= 0.0 {
         return 0;
     }
@@ -694,7 +791,7 @@ fn seconds_to_rate(time: f32) -> u8 {
 
 /// Convert an envelope time (seconds) to PS1 attack rate (shift, step)
 /// PS1 rate = shift * 4 + step (0-127), lower = faster
-fn time_to_rate(time: f32, _decreasing: bool) -> (u8, u8) {
+pub(crate) fn time_to_rate(time: f32, _decreasing: bool) -> (u8, u8) {
     let rate = seconds_to_rate(time);
     let shift = rate / 4;
     let step = rate % 4;
@@ -703,7 +800,7 @@ fn time_to_rate(time: f32, _decreasing: bool) -> (u8, u8) {
 
 /// Convert decay time to PS1 decay shift (0-15)
 /// Decay only has a 4-bit shift (0-15), effective rate = shift * 4 (0-60)
-fn time_to_decay_rate(time: f32) -> u8 {
+pub(crate) fn time_to_decay_rate(time: f32) -> u8 {
     let rate = seconds_to_rate(time);
     // Decay rate = shift * 4, shift is 0-15
     (rate / 4).min(15)
@@ -711,7 +808,7 @@ fn time_to_decay_rate(time: f32) -> u8 {
 
 /// Convert release time to PS1 release shift (0-31)
 /// Release only has a 5-bit shift (0-31), effective rate = shift * 4 (0-124)
-fn time_to_release_rate(time: f32) -> u8 {
+pub(crate) fn time_to_release_rate(time: f32) -> u8 {
     let rate = seconds_to_rate(time);
     // Release rate = shift * 4, shift is 0-31
     (rate / 4).min(31)

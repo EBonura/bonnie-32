@@ -303,7 +303,11 @@ impl Voice {
         self.base_volume = region.default_volume.min(0x7FFF);
 
         // Set initial volume (will be overridden by sync_voice_volume if called)
-        let vol = (self.base_volume as i32 * velocity as i32) / 127;
+        // Velocity uses squared curve to match MIDI/GM/SF2 conventions:
+        // gain = (vel/127)^2. This matches rustysynth's note_gain calculation
+        // and produces natural velocity dynamics for SF2-sourced instruments.
+        let vel_sq = (velocity as i32 * velocity as i32) / 127;
+        let vol = (self.base_volume as i32 * vel_sq) / 127;
         let vol = vol.clamp(0, 0x7FFF) as i16;
         self.volume_left = vol;
         self.volume_right = vol;
@@ -331,9 +335,11 @@ impl Voice {
     /// volume and velocity to produce SPU-range L/R volumes for the >> 15
     /// shift in tick().
     pub fn set_volume_from_pan(&mut self, pan: u8, volume: u8) {
-        // Scale: base_volume (0-0x7FFF) * volume (0-127) * velocity (0-127) / (127*127)
-        let combined = (self.base_volume as i32 * volume as i32 * self.velocity as i32)
-            / (127 * 127);
+        // MIDI/GM/SF2 standard: both volume and velocity use squared curves.
+        // Matches rustysynth: channel_gain = (vol * expr)^2, note_gain includes (vel/127)^2.
+        let vel_sq = (self.velocity as i32 * self.velocity as i32) / 127; // max 127
+        let vol_sq = (volume as i32 * volume as i32) / 127; // max 127
+        let combined = (self.base_volume as i32 * vol_sq * vel_sq) / (127 * 127);
         let combined = combined.clamp(0, 0x7FFF) as f32;
 
         // Equal-power panning

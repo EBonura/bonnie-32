@@ -2092,6 +2092,1775 @@ mod spu_pipeline {
     }
 
     // =========================================================================
+    // AUDIO COMPARISON TOOLKIT
+    // =========================================================================
+
+    /// Autocorrelation-based frequency measurement — robust for complex waveforms.
+    ///
+    /// Uses normalized autocorrelation to find the fundamental period.
+    /// Much more reliable than zero-crossing for harmonically rich instruments.
+    fn autocorrelation_frequency(samples: &[i16], sample_rate: u32, min_freq: f64, max_freq: f64) -> f64 {
+        if samples.len() < 64 {
+            return 0.0;
+        }
+
+        let min_lag = (sample_rate as f64 / max_freq).floor() as usize;
+        let max_lag = (sample_rate as f64 / min_freq).ceil() as usize;
+        let max_lag = max_lag.min(samples.len() / 2);
+        let min_lag = min_lag.max(1);
+
+        if min_lag >= max_lag {
+            return 0.0;
+        }
+
+        // Compute mean for DC removal
+        let mean: f64 = samples.iter().map(|&s| s as f64).sum::<f64>() / samples.len() as f64;
+
+        // Compute autocorrelation at lag 0 (for normalization)
+        let n = samples.len() - max_lag;
+        let r0: f64 = (0..n).map(|i| {
+            let v = samples[i] as f64 - mean;
+            v * v
+        }).sum();
+
+        if r0 == 0.0 {
+            return 0.0;
+        }
+
+        // Compute normalized autocorrelation for all lags
+        let mut acf = vec![0.0f64; max_lag + 1];
+        for lag in min_lag..=max_lag {
+            let r: f64 = (0..n).map(|i| {
+                (samples[i] as f64 - mean) * (samples[i + lag] as f64 - mean)
+            }).sum();
+            acf[lag] = r / r0;
+        }
+
+        // Find the best lag using octave disambiguation.
+        // Strategy: find the global peak, then check if a peak at half the lag
+        // (double frequency) is also strong. If so, the shorter lag is likely
+        // the true fundamental (the longer lag is a sub-harmonic artifact).
+        let mut best_lag = min_lag;
+        let mut best_r: f64 = f64::NEG_INFINITY;
+
+        for lag in min_lag..=max_lag {
+            if acf[lag] > best_r {
+                best_r = acf[lag];
+                best_lag = lag;
+            }
+        }
+
+        // Octave disambiguation: check half-lag (2× frequency)
+        // If the peak at half the lag is at least 80% as strong, prefer it
+        // as the true fundamental (avoids sub-harmonic detection).
+        let half_lag = best_lag / 2;
+        if half_lag >= min_lag && half_lag <= max_lag {
+            // Search ±2 samples around the expected half-lag for the local peak
+            let search_lo = half_lag.saturating_sub(2).max(min_lag);
+            let search_hi = (half_lag + 2).min(max_lag);
+            let mut half_best_lag = half_lag;
+            let mut half_best_r = f64::NEG_INFINITY;
+            for lag in search_lo..=search_hi {
+                if acf[lag] > half_best_r {
+                    half_best_r = acf[lag];
+                    half_best_lag = lag;
+                }
+            }
+            if half_best_r > best_r * 0.8 {
+                best_lag = half_best_lag;
+                best_r = half_best_r;
+            }
+        }
+
+        // Also check double-lag (0.5× frequency) — if our detected frequency
+        // is an octave too high, the true fundamental is at double the lag.
+        let double_lag = best_lag * 2;
+        if double_lag >= min_lag && double_lag <= max_lag {
+            let search_lo = double_lag.saturating_sub(2).max(min_lag);
+            let search_hi = (double_lag + 2).min(max_lag);
+            let mut dbl_best_r = f64::NEG_INFINITY;
+            for lag in search_lo..=search_hi {
+                if acf[lag] > dbl_best_r {
+                    dbl_best_r = acf[lag];
+                }
+            }
+            // Only prefer double-lag if it's STRONGER (not just 80%)
+            // since we want to prefer shorter lag (higher freq) when equal
+            if dbl_best_r > best_r * 1.05 {
+                best_lag = double_lag;
+                best_r = dbl_best_r;
+            }
+        }
+
+        // Parabolic interpolation around peak for sub-sample accuracy
+        if best_lag > min_lag && best_lag < max_lag {
+            let r_prev = acf[best_lag - 1];
+            let r_peak = best_r;
+            let r_next = acf[best_lag + 1];
+
+            let denom = r_prev - 2.0 * r_peak + r_next;
+            if denom.abs() > 1e-12 {
+                let delta = 0.5 * (r_prev - r_next) / denom;
+                if delta.is_finite() && delta.abs() < 1.0 {
+                    return sample_rate as f64 / (best_lag as f64 + delta);
+                }
+            }
+        }
+
+        sample_rate as f64 / best_lag as f64
+    }
+
+    /// Click/pop detection report
+    struct ClickReport {
+        click_count: usize,
+        click_positions: Vec<usize>,
+        max_spike_ratio: f64,
+    }
+
+    /// Detect clicks and pops in audio by finding sudden amplitude jumps.
+    ///
+    /// Uses a two-stage approach to avoid false positives on periodic waveforms
+    /// (sawtooth, square, brass attacks):
+    /// 1. Compute sample-to-sample diffs
+    /// 2. Find the signal period via autocorrelation of the diff signal
+    /// 3. Use a window of at least 3 periods so that natural waveform transients
+    ///    are included in the rolling statistics
+    /// 4. Flag diffs exceeding `threshold_ratio` × local rolling max (not mean)
+    ///    — this prevents false positives from periodic sharp transitions
+    fn detect_clicks(samples: &[i16], _window_size: usize, threshold_ratio: f64) -> ClickReport {
+        if samples.len() < 200 {
+            return ClickReport { click_count: 0, click_positions: vec![], max_spike_ratio: 0.0 };
+        }
+
+        let diffs: Vec<f64> = (1..samples.len())
+            .map(|i| (samples[i] as f64 - samples[i - 1] as f64).abs())
+            .collect();
+
+        // Estimate signal period from the diff signal's autocorrelation.
+        // Look for the first strong peak after lag 20 (min ~2200 Hz).
+        let acf_len = diffs.len().min(2000);
+        let acf_max_lag = acf_len / 2;
+        let mut period_estimate = 200usize; // fallback
+
+        if acf_len > 100 {
+            let mean_d: f64 = diffs[..acf_len].iter().sum::<f64>() / acf_len as f64;
+            let r0: f64 = diffs[..acf_len].iter().map(|&d| (d - mean_d).powi(2)).sum();
+
+            if r0 > 0.0 {
+                // Find first peak in autocorrelation after the initial decay
+                let mut prev_r = f64::MAX;
+                let mut rising = false;
+                for lag in 20..acf_max_lag {
+                    let r: f64 = (0..acf_len - lag).map(|i| {
+                        (diffs[i] - mean_d) * (diffs[i + lag] - mean_d)
+                    }).sum::<f64>() / r0;
+
+                    if r > prev_r {
+                        rising = true;
+                    } else if rising && r < prev_r && prev_r > 0.3 {
+                        // Found a peak
+                        period_estimate = lag - 1;
+                        break;
+                    }
+                    prev_r = r;
+                }
+            }
+        }
+
+        // Window must cover at least 3 full periods of the signal
+        // so that periodic transients (sawtooth edges, etc.) are in the stats
+        let window = (period_estimate * 3).max(200);
+
+        let mut click_positions = Vec::new();
+        let mut max_spike_ratio: f64 = 0.0;
+
+        // Use rolling MAX of diffs (not mean) — this way periodic sharp edges
+        // set a high baseline, and only truly anomalous spikes exceed it
+        for i in window..diffs.len().saturating_sub(window) {
+            // Compute the local rolling max over the window (excluding immediate neighbors)
+            let region_start = i.saturating_sub(window);
+            let region_end = i;
+            let local_max: f64 = diffs[region_start..region_end].iter()
+                .copied()
+                .fold(0.0f64, f64::max);
+
+            if local_max > 0.0 {
+                let ratio = diffs[i] / local_max;
+                if ratio > max_spike_ratio {
+                    max_spike_ratio = ratio;
+                }
+                if ratio > threshold_ratio {
+                    let too_close = click_positions.last()
+                        .map_or(false, |&last: &usize| i - last < window);
+                    if !too_close {
+                        click_positions.push(i + 1);
+                    }
+                }
+            }
+        }
+
+        ClickReport {
+            click_count: click_positions.len(),
+            click_positions,
+            max_spike_ratio,
+        }
+    }
+
+    /// Goertzel algorithm — compute magnitude at a specific frequency.
+    /// No FFT dependency needed. O(N) per frequency.
+    fn goertzel_magnitude(samples: &[i16], sample_rate: u32, target_freq: f64) -> f64 {
+        let n = samples.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let k = (target_freq * n as f64 / sample_rate as f64).round();
+        let w = 2.0 * PI * k / n as f64;
+        let coeff = 2.0 * w.cos();
+
+        let mut s0: f64 = 0.0;
+        let mut s1: f64 = 0.0;
+        let mut s2: f64;
+
+        for &sample in samples {
+            s2 = s1;
+            s1 = s0;
+            s0 = sample as f64 + coeff * s1 - s2;
+        }
+
+        let power = s0 * s0 + s1 * s1 - coeff * s0 * s1;
+        (power / (n as f64 * n as f64)).sqrt()
+    }
+
+    /// Compute spectral similarity between two signals.
+    /// Returns 0.0-1.0 (cosine similarity of magnitude spectra at given frequencies).
+    fn spectral_similarity(a: &[i16], b: &[i16], sample_rate: u32, freqs: &[f64]) -> f64 {
+        if freqs.is_empty() {
+            return 1.0;
+        }
+
+        let mags_a: Vec<f64> = freqs.iter().map(|&f| goertzel_magnitude(a, sample_rate, f)).collect();
+        let mags_b: Vec<f64> = freqs.iter().map(|&f| goertzel_magnitude(b, sample_rate, f)).collect();
+
+        // Normalize
+        let norm_a: f64 = mags_a.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let norm_b: f64 = mags_b.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
+
+        let dot: f64 = mags_a.iter().zip(mags_b.iter()).map(|(a, b)| a * b).sum();
+        (dot / (norm_a * norm_b)).clamp(0.0, 1.0)
+    }
+
+    /// Extract amplitude envelope using RMS in sliding windows.
+    fn extract_envelope(samples: &[i16], window_size: usize) -> Vec<f64> {
+        if samples.is_empty() || window_size == 0 {
+            return vec![];
+        }
+        let num_windows = samples.len() / window_size;
+        (0..num_windows).map(|w| {
+            let start = w * window_size;
+            let end = (start + window_size).min(samples.len());
+            rms(&samples[start..end])
+        }).collect()
+    }
+
+    /// Compute Pearson correlation between two envelope sequences.
+    fn envelope_similarity(a: &[f64], b: &[f64]) -> f64 {
+        let n = a.len().min(b.len());
+        if n < 2 {
+            return 0.0;
+        }
+
+        let mean_a: f64 = a[..n].iter().sum::<f64>() / n as f64;
+        let mean_b: f64 = b[..n].iter().sum::<f64>() / n as f64;
+
+        let mut cov: f64 = 0.0;
+        let mut var_a: f64 = 0.0;
+        let mut var_b: f64 = 0.0;
+
+        for i in 0..n {
+            let da = a[i] - mean_a;
+            let db = b[i] - mean_b;
+            cov += da * db;
+            var_a += da * da;
+            var_b += db * db;
+        }
+
+        if var_a == 0.0 || var_b == 0.0 {
+            return 0.0;
+        }
+
+        (cov / (var_a.sqrt() * var_b.sqrt())).clamp(-1.0, 1.0)
+    }
+
+    /// Comprehensive audio comparison result
+    #[derive(Debug)]
+    struct AudioComparison {
+        /// Ratio of measured vs expected frequency (1.0 = perfect match)
+        frequency_match: f64,
+        /// Signal-to-noise ratio vs reference in dB (higher = better)
+        snr_db: f64,
+        /// Number of detected clicks/pops
+        click_count: usize,
+        /// Spectral similarity 0.0-1.0
+        spectral_similarity: f64,
+        /// Envelope correlation -1.0 to 1.0
+        envelope_correlation: f64,
+        /// Frequency stddev across time windows (Hz, 0 = perfect stability)
+        pitch_stability_hz: f64,
+    }
+
+    /// Run all audio comparisons and return a structured report.
+    fn compare_audio(
+        output: &[i16],
+        reference: Option<&[i16]>,
+        expected_freq: f64,
+        sample_rate: u32,
+    ) -> AudioComparison {
+        // 1. Frequency measurement via autocorrelation
+        // Use 0.7x-1.5x range to avoid subharmonic/period-doubling confusion
+        let min_freq = (expected_freq * 0.7).max(20.0);
+        let max_freq = (expected_freq * 1.5).min(sample_rate as f64 / 2.0);
+        let measured_freq = autocorrelation_frequency(output, sample_rate, min_freq, max_freq);
+        let frequency_match = if expected_freq > 0.0 && measured_freq > 0.0 {
+            1.0 - ((measured_freq - expected_freq) / expected_freq).abs()
+        } else {
+            0.0
+        };
+
+        // 2. SNR vs reference
+        let snr = if let Some(ref_samples) = reference {
+            let len = output.len().min(ref_samples.len());
+            let mut errors = Vec::with_capacity(len);
+            for i in 0..len {
+                errors.push((output[i] as i32 - ref_samples[i] as i32).clamp(-32768, 32767) as i16);
+            }
+            snr_db(rms(ref_samples), rms(&errors))
+        } else {
+            f64::NAN
+        };
+
+        // 3. Click detection
+        let clicks = detect_clicks(output, 100, 4.0);
+
+        // 4. Spectral similarity vs reference
+        let spec_sim = if let Some(ref_samples) = reference {
+            let fundamental = measured_freq.max(expected_freq);
+            let freqs: Vec<f64> = (1..=8).map(|h| fundamental * h as f64)
+                .filter(|&f| f < sample_rate as f64 / 2.0)
+                .collect();
+            spectral_similarity(output, ref_samples, sample_rate, &freqs)
+        } else {
+            f64::NAN
+        };
+
+        // 5. Envelope correlation vs reference
+        let env_corr = if let Some(ref_samples) = reference {
+            let env_out = extract_envelope(output, 1024);
+            let env_ref = extract_envelope(ref_samples, 1024);
+            envelope_similarity(&env_out, &env_ref)
+        } else {
+            f64::NAN
+        };
+
+        // 6. Pitch stability across time windows
+        let window_samples = sample_rate as usize / 2; // 500ms windows
+        let num_windows = output.len() / window_samples;
+        let pitch_stability = if num_windows >= 2 {
+            let freqs: Vec<f64> = (0..num_windows).map(|w| {
+                let start = w * window_samples;
+                let end = (start + window_samples).min(output.len());
+                autocorrelation_frequency(&output[start..end], sample_rate, min_freq, max_freq)
+            }).filter(|&f| f > 0.0).collect();
+
+            if freqs.len() >= 2 {
+                let mean = freqs.iter().sum::<f64>() / freqs.len() as f64;
+                let variance = freqs.iter().map(|&f| (f - mean).powi(2)).sum::<f64>() / freqs.len() as f64;
+                variance.sqrt()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        AudioComparison {
+            frequency_match,
+            snr_db: snr,
+            click_count: clicks.click_count,
+            spectral_similarity: spec_sim,
+            envelope_correlation: env_corr,
+            pitch_stability_hz: pitch_stability,
+        }
+    }
+
+    /// Print a comparison report to stderr
+    fn print_comparison(label: &str, cmp: &AudioComparison) {
+        eprintln!("    {} comparison:", label);
+        eprintln!("      freq_match={:.3} snr={:.1}dB clicks={} spectral={:.3} envelope={:.3} pitch_stddev={:.2}Hz",
+            cmp.frequency_match, cmp.snr_db, cmp.click_count,
+            cmp.spectral_similarity, cmp.envelope_correlation, cmp.pitch_stability_hz);
+    }
+
+    // =========================================================================
+    // TEST 16: Loop alignment correctness
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_16_loop_alignment() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 16: align_loop_to_adpcm_blocks() Correctness");
+        eprintln!("{}\n", "=".repeat(70));
+
+        use crate::tracker::spu::convert::{align_loop_to_adpcm_blocks, resample_loop_linear};
+
+        let test_cases: Vec<(&str, usize, usize, usize)> = vec![
+            // (name, pcm_len, loop_start, loop_end)
+            ("aligned_28",       200, 0,   28),
+            ("aligned_56",       200, 0,   56),
+            ("aligned_280",      500, 0,   280),
+            ("off_by_1",         200, 0,   29),
+            ("off_by_5",         200, 0,   33),
+            ("short_loop_10",    200, 0,   10),
+            ("short_loop_20",    200, 0,   20),
+            ("mid_loop_200",     500, 0,   200),
+            ("long_loop_1000",  2000, 0,   1000),
+            ("nonzero_start",    500, 100, 300),
+            ("start_near_28",    500, 25,  225),
+            ("tiny_4",           100, 0,   4),
+        ];
+
+        for (name, pcm_len, loop_start, loop_end) in &test_cases {
+            // Generate a sine wave so we can verify frequency preservation
+            let pcm = generate_sine(440.0, *pcm_len as f64 / 44100.0, 44100, 20000.0);
+            let pcm = &pcm[..(*pcm_len).min(pcm.len())];
+
+            let (aligned_pcm, new_start, new_end, pitch_correction) =
+                align_loop_to_adpcm_blocks(pcm, *loop_start, *loop_end);
+
+            let new_loop_len = new_end.saturating_sub(new_start);
+            let orig_loop_len = loop_end.saturating_sub(*loop_start);
+
+            eprintln!(
+                "  {:<20} orig=[{}-{}] len={} → new=[{}-{}] len={} pcf={:.4} total={}",
+                name, loop_start, loop_end, orig_loop_len,
+                new_start, new_end, new_loop_len, pitch_correction, aligned_pcm.len(),
+            );
+
+            // Assertions: alignment
+            assert_eq!(new_start % 28, 0,
+                "{}: loop_start {} not aligned to 28", name, new_start);
+            assert_eq!(new_loop_len % 28, 0,
+                "{}: loop_len {} not aligned to 28", name, new_loop_len);
+            assert!(new_loop_len > 0,
+                "{}: loop_len is 0", name);
+            assert!(new_end <= aligned_pcm.len(),
+                "{}: new_end {} > pcm_len {}", name, new_end, aligned_pcm.len());
+
+            // Pitch correction should be positive
+            assert!(pitch_correction > 0.0,
+                "{}: pitch_correction {} <= 0", name, pitch_correction);
+
+            // For already-aligned loops, correction should be 1.0
+            if orig_loop_len > 0 && orig_loop_len % 28 == 0 && *loop_start % 28 == 0 {
+                assert!((pitch_correction - 1.0).abs() < 0.01,
+                    "{}: aligned loop should have correction ~1.0, got {}", name, pitch_correction);
+            }
+        }
+
+        eprintln!("\n  All loop alignment assertions passed.");
+    }
+
+    // =========================================================================
+    // TEST 17: Pre-loop normalization
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_17_preloop_normalization() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 17: normalize_pre_loop_amplitude() Correctness");
+        eprintln!("{}\n", "=".repeat(70));
+
+        use crate::tracker::spu::convert::normalize_pre_loop_amplitude;
+
+        // Case 1: Pre-loop at half amplitude, loop at full
+        {
+            let pre_loop_len = 500;
+            let loop_len = 500;
+            let total = pre_loop_len + loop_len;
+
+            let mut pcm: Vec<i16> = Vec::with_capacity(total);
+            // Pre-loop: half amplitude sine
+            pcm.extend(generate_sine(440.0, pre_loop_len as f64 / 44100.0, 44100, 10000.0).iter().take(pre_loop_len));
+            // Loop: full amplitude sine
+            pcm.extend(generate_sine(440.0, loop_len as f64 / 44100.0, 44100, 20000.0).iter().take(loop_len));
+
+            let pre_rms_before = rms(&pcm[..pre_loop_len]);
+            let loop_rms = rms(&pcm[pre_loop_len..total]);
+
+            let backup = pcm.clone();
+            normalize_pre_loop_amplitude(&mut pcm, pre_loop_len, total);
+
+            let pre_rms_after = rms(&pcm[200..pre_loop_len]); // skip attack transient
+
+            eprintln!("  Case 1 (half→full): pre_rms={:.0}→{:.0} loop_rms={:.0}",
+                pre_rms_before, pre_rms_after, loop_rms);
+
+            // After normalization, pre-loop RMS should be closer to loop RMS
+            let ratio_before = pre_rms_before / loop_rms;
+            let ratio_after = pre_rms_after / loop_rms;
+            eprintln!("    ratio: {:.2} → {:.2} (should be closer to 1.0)", ratio_before, ratio_after);
+
+            // First ~176 samples (4ms attack) should be preserved
+            let attack_samples = 176;
+            let attack_match: bool = pcm[..attack_samples.min(pre_loop_len)]
+                .iter().zip(backup[..attack_samples.min(pre_loop_len)].iter())
+                .all(|(&a, &b)| a == b);
+            eprintln!("    attack preserved (first {} samples): {}", attack_samples, attack_match);
+            assert!(attack_match, "Attack transient should be preserved");
+
+            // Check for clicks at the crossfade boundary
+            let crossfade_region = &pcm[attack_samples..pre_loop_len.min(pcm.len())];
+            if crossfade_region.len() > 10 {
+                let clicks = detect_clicks(crossfade_region, 50, 6.0);
+                eprintln!("    crossfade clicks: {} (max_spike={:.1})", clicks.click_count, clicks.max_spike_ratio);
+            }
+        }
+
+        // Case 2: Equal amplitude — should NOT modify
+        {
+            let pre_loop_len = 500;
+            let loop_len = 500;
+            let total = pre_loop_len + loop_len;
+
+            let mut pcm: Vec<i16> = Vec::with_capacity(total);
+            pcm.extend(generate_sine(440.0, pre_loop_len as f64 / 44100.0, 44100, 15000.0).iter().take(pre_loop_len));
+            pcm.extend(generate_sine(440.0, loop_len as f64 / 44100.0, 44100, 15000.0).iter().take(loop_len));
+
+            let backup = pcm.clone();
+            normalize_pre_loop_amplitude(&mut pcm, pre_loop_len, total);
+
+            let changed = pcm.iter().zip(backup.iter()).any(|(&a, &b)| a != b);
+            eprintln!("  Case 2 (equal amplitude): modified={} (should be false)", changed);
+        }
+
+        // Case 3: Short sample — should NOT modify
+        {
+            let mut pcm = generate_sine(440.0, 200.0 / 44100.0, 44100, 15000.0);
+            let pcm_len = pcm.len();
+            let backup = pcm.clone();
+            normalize_pre_loop_amplitude(&mut pcm, 100, pcm_len);
+
+            let changed = pcm.iter().zip(backup.iter()).any(|(&a, &b)| a != b);
+            eprintln!("  Case 3 (short sample, {} samples): modified={} (should be false)", pcm_len, changed);
+        }
+
+        eprintln!("\n  Pre-loop normalization tests complete.");
+    }
+
+    // =========================================================================
+    // TEST 18: Rate conversion functions
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_18_rate_conversion() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 18: seconds_to_rate() and time_to_rate() Accuracy");
+        eprintln!("{}\n", "=".repeat(70));
+
+        use crate::tracker::spu::convert::{seconds_to_rate, time_to_rate, time_to_decay_rate, time_to_release_rate, BASE_ENV_TIME};
+
+        // Test monotonicity: longer time → higher rate (slower envelope)
+        let times: Vec<f32> = vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0];
+        let rates: Vec<u8> = times.iter().map(|&t| seconds_to_rate(t)).collect();
+
+        eprintln!("  {:>8} {:>6} {:>10} {:>10}", "Time(s)", "Rate", "Shift", "Step");
+        eprintln!("  {}", "-".repeat(40));
+        for (i, (&time, &rate)) in times.iter().zip(rates.iter()).enumerate() {
+            let (shift, step) = time_to_rate(time, false);
+            eprintln!("  {:>8.4} {:>6} {:>10} {:>10}", time, rate, shift, step);
+
+            // Monotonicity check
+            if i > 0 {
+                assert!(rate >= rates[i - 1],
+                    "Monotonicity violated: time {} → rate {}, but time {} → rate {}",
+                    times[i - 1], rates[i - 1], time, rate);
+            }
+        }
+
+        // Test edge cases
+        assert_eq!(seconds_to_rate(0.0), 0, "Zero time should give rate 0");
+        assert_eq!(seconds_to_rate(-1.0), 0, "Negative time should give rate 0");
+        let rate_max = seconds_to_rate(100.0);
+        assert!(rate_max <= 127, "Rate should cap at 127, got {}", rate_max);
+
+        // Test decay rate clamping
+        for &time in &times {
+            let decay_shift = time_to_decay_rate(time);
+            assert!(decay_shift <= 15, "Decay shift {} > 15 for time {}", decay_shift, time);
+        }
+
+        // Test release rate clamping
+        for &time in &times {
+            let release_shift = time_to_release_rate(time);
+            assert!(release_shift <= 31, "Release shift {} > 31 for time {}", release_shift, time);
+        }
+
+        // Test round-trip: rate → time → rate consistency
+        // Use the formula: time = BASE_ENV_TIME * 2^(rate/4)
+        eprintln!("\n  Round-trip verification:");
+        for rate in (0..=120).step_by(8) {
+            let expected_time = BASE_ENV_TIME * 2.0_f64.powf(rate as f64 / 4.0);
+            let recovered_rate = seconds_to_rate(expected_time as f32);
+            let diff = (recovered_rate as i32 - rate as i32).abs();
+            eprintln!("    rate={:>3} → time={:.6}s → rate={:>3} (diff={})",
+                rate, expected_time, recovered_rate, diff);
+            assert!(diff <= 1, "Round-trip error too large: {} → {} → {} (diff={})",
+                rate, expected_time, recovered_rate, diff);
+        }
+
+        eprintln!("\n  Rate conversion tests passed.");
+    }
+
+    // =========================================================================
+    // TEST 19: pitch_for_note with SF2-derived parameters
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_19_pitch_from_sf2() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 19: pitch_for_note() with SF2-Derived Parameters");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP: Could not read SF2: {}", e);
+                return;
+            }
+        };
+
+        let soundfont = match crate::tracker::spu::convert::parse_sf2(&sf2_bytes) {
+            Ok(sf) => sf,
+            Err(e) => {
+                eprintln!("  SKIP: {}", e);
+                return;
+            }
+        };
+
+        let test_programs: Vec<(u8, &str)> = vec![
+            (0, "Piano"), (32, "Acoustic Bass"), (40, "Violin"),
+            (73, "Flute"), (80, "Square Lead"),
+        ];
+
+        let mut library = SampleLibrary::new("test".to_string());
+
+        for (program, label) in &test_programs {
+            crate::tracker::spu::convert::convert_single_program(
+                &soundfont, *program, &mut library,
+            );
+
+            let bank = match library.instrument(*program) {
+                Some(b) => b,
+                None => {
+                    eprintln!("  {}: SKIP (no bank)", label);
+                    continue;
+                }
+            };
+
+            eprintln!("  --- {} (program {}) ---", label, program);
+            for (i, region) in bank.regions.iter().enumerate() {
+                let root = region.base_note;
+                let bp = region.base_pitch;
+
+                // At root note, pitch should equal base_pitch * 2^(fine_tune/1200)
+                // (fine_tune is applied by pitch_for_note even at root)
+                let pitch_at_root = region.pitch_for_note(root);
+                let expected_root_pitch = bp as f64
+                    * (region.fine_tune as f64 / 100.0 / 12.0).exp2();
+                let root_err = (pitch_at_root as f64 - expected_root_pitch).abs()
+                    / expected_root_pitch * 100.0;
+
+                // Octave up: pitch should double from root pitch
+                let octave_up = root.saturating_add(12);
+                if octave_up <= region.key_hi {
+                    let pitch_up = region.pitch_for_note(octave_up);
+                    let expected_up = (expected_root_pitch * 2.0).min(0x3FFF as f64);
+                    let up_err = (pitch_up as f64 - expected_up).abs() / expected_up * 100.0;
+
+                    eprintln!(
+                        "    region {} [{}-{}] root={} bp=0x{:04X} ft={} st={}: root_pitch=0x{:04X} expected=0x{:04X} err={:.2}% octave_up=0x{:04X} err={:.2}%",
+                        i, region.key_lo, region.key_hi, root, bp, region.fine_tune, region.scale_tuning,
+                        pitch_at_root, expected_root_pitch as u16, root_err, pitch_up, up_err,
+                    );
+
+                    if expected_up < 0x3FFF as f64 { // Not clamped
+                        assert!(up_err < 2.0,
+                            "{} region {}: octave up error {:.2}% (0x{:04X} vs expected 0x{:04X})",
+                            label, i, up_err, pitch_up, expected_up as u16);
+                    }
+                }
+
+                assert!(root_err < 1.0,
+                    "{} region {}: root pitch error {:.2}% (0x{:04X} vs expected 0x{:04X})",
+                    label, i, root_err, pitch_at_root, expected_root_pitch as u16);
+
+                // Play through SPU and verify frequency
+                let mut voice = Voice::new();
+                voice.key_on(region, root, 127);
+
+                let num_samples = 44100; // 1 second
+                let mut output = Vec::with_capacity(num_samples);
+                for _ in 0..num_samples {
+                    let (left, _) = voice.tick(&library.spu_ram);
+                    output.push(left.clamp(-32768, 32767) as i16);
+                }
+
+                let expected_freq = 440.0 * 2.0_f64.powf((root as f64 - 69.0) / 12.0);
+                let cmp = compare_audio(&output[500..], None, expected_freq, 44100);
+                eprintln!("      SPU playback: freq_match={:.3} clicks={} stability={:.2}Hz",
+                    cmp.frequency_match, cmp.click_count, cmp.pitch_stability_hz);
+
+                assert!(cmp.frequency_match > 0.95,
+                    "{} region {}: frequency match {:.3} too low (expected {:.1}Hz)",
+                    label, i, cmp.frequency_match, expected_freq);
+            }
+        }
+
+        eprintln!("\n  Pitch from SF2 tests passed.");
+    }
+
+    // =========================================================================
+    // TEST 20: Click/pop detection at loop boundaries
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_20_click_detection() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 20: Click/Pop Detection at Loop Boundaries");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP: Could not read SF2: {}", e);
+                return;
+            }
+        };
+
+        let soundfont = match crate::tracker::spu::convert::parse_sf2(&sf2_bytes) {
+            Ok(sf) => sf,
+            Err(e) => {
+                eprintln!("  SKIP: {}", e);
+                return;
+            }
+        };
+
+        let test_matrix: Vec<(u8, &str, Vec<u8>)> = vec![
+            (0,  "Piano",    vec![48, 60, 72]),
+            (32, "AcBass",   vec![36, 43, 48]),
+            (48, "Strings",  vec![48, 60, 72]),
+            (56, "Trumpet",  vec![60, 67, 72]),
+            (73, "Flute",    vec![60, 72, 84]),
+        ];
+
+        let mut library = SampleLibrary::new("test".to_string());
+        let mut any_clicks = false;
+
+        for (program, label, notes) in &test_matrix {
+            crate::tracker::spu::convert::convert_single_program(
+                &soundfont, *program, &mut library,
+            );
+
+            let bank = match library.instrument(*program) {
+                Some(b) => b,
+                None => {
+                    eprintln!("  {}: SKIP", label);
+                    continue;
+                }
+            };
+
+            for &note in notes {
+                let region = match bank.region_for_note(note) {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                if !region.has_loop {
+                    continue;
+                }
+
+                let mut voice = Voice::new();
+                voice.key_on(region, note, 100);
+
+                // Play for 3 seconds (sustained, no key_off)
+                let num_samples = 132300;
+                let mut output = Vec::with_capacity(num_samples);
+                for _ in 0..num_samples {
+                    let (left, _) = voice.tick(&library.spu_ram);
+                    output.push(left.clamp(-32768, 32767) as i16);
+                }
+
+                // Skip attack transient, analyze sustained portion
+                let skip = 4410; // 100ms
+                let analysis = &output[skip..];
+                let clicks = detect_clicks(analysis, 100, 4.0);
+
+                let note_name = midi_note_name(note);
+                if clicks.click_count > 0 {
+                    any_clicks = true;
+                    eprintln!(
+                        "  {:<8} {:<3} ({:<3}): {} CLICKS at {:?} (max_spike={:.1})",
+                        label, note, note_name, clicks.click_count,
+                        &clicks.click_positions[..clicks.click_positions.len().min(5)],
+                        clicks.max_spike_ratio,
+                    );
+
+                    // Write WAV for investigation
+                    write_wav_mono(
+                        &format!("{}/20_clicks/{}_{}.wav", OUT_DIR, label, note),
+                        &output, 44100,
+                    );
+                } else {
+                    eprintln!(
+                        "  {:<8} {:<3} ({:<3}): OK (max_spike={:.1})",
+                        label, note, note_name, clicks.max_spike_ratio,
+                    );
+                }
+            }
+        }
+
+        if any_clicks {
+            eprintln!("\n  WARNING: Clicks detected! WAVs written to {}/20_clicks/", OUT_DIR);
+        } else {
+            eprintln!("\n  No clicks detected in any instrument/note combination.");
+        }
+    }
+
+    // =========================================================================
+    // TEST 21: Frequency stability over sustained playback
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_21_frequency_stability() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 21: Frequency Stability Over Sustained Playback");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP: Could not read SF2: {}", e);
+                return;
+            }
+        };
+
+        let soundfont = match crate::tracker::spu::convert::parse_sf2(&sf2_bytes) {
+            Ok(sf) => sf,
+            Err(e) => {
+                eprintln!("  SKIP: {}", e);
+                return;
+            }
+        };
+
+        let test_instruments: Vec<(u8, &str, u8)> = vec![
+            (0,  "Piano",    60),
+            (32, "AcBass",   36),
+            (40, "Violin",   60),
+            (73, "Flute",    72),
+            (80, "SqLead",   60),
+        ];
+
+        let mut library = SampleLibrary::new("test".to_string());
+
+        for (program, label, note) in &test_instruments {
+            crate::tracker::spu::convert::convert_single_program(
+                &soundfont, *program, &mut library,
+            );
+
+            let bank = match library.instrument(*program) {
+                Some(b) => b,
+                None => {
+                    eprintln!("  {}: SKIP", label);
+                    continue;
+                }
+            };
+
+            let region = match bank.region_for_note(*note) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let mut voice = Voice::new();
+            voice.key_on(region, *note, 100);
+
+            // Play for 4 seconds
+            let total = 176400;
+            let mut output = Vec::with_capacity(total);
+            for _ in 0..total {
+                let (left, _) = voice.tick(&library.spu_ram);
+                output.push(left.clamp(-32768, 32767) as i16);
+            }
+
+            let expected_freq = 440.0 * 2.0_f64.powf((*note as f64 - 69.0) / 12.0);
+
+            // Measure frequency in 500ms windows
+            // Skip first 2 windows (1s) — ADPCM decoder warmup + Gaussian interp
+            // need prior samples to stabilize
+            let window = 22050;
+            let skip_windows = 2;
+            let mut freqs = Vec::new();
+
+            for w in skip_windows..(total / window) {
+                let start = w * window;
+                let end = (start + window).min(total);
+                let slice = &output[start..end];
+                let min_f = (expected_freq * 0.7).max(20.0);
+                let max_f = (expected_freq * 1.5).min(20000.0);
+                let f = autocorrelation_frequency(slice, 44100, min_f, max_f);
+                if f > 0.0 {
+                    freqs.push(f);
+                }
+            }
+
+            if freqs.len() < 2 {
+                eprintln!("  {:<8} note={}: SKIP (too few valid windows)", label, note);
+                continue;
+            }
+
+            let mean_freq = freqs.iter().sum::<f64>() / freqs.len() as f64;
+            let stddev = (freqs.iter().map(|&f| (f - mean_freq).powi(2)).sum::<f64>() / freqs.len() as f64).sqrt();
+            let max_deviation_pct = freqs.iter().map(|&f| ((f - mean_freq) / mean_freq * 100.0).abs()).fold(0.0_f64, f64::max);
+            let freq_err_pct = ((mean_freq - expected_freq) / expected_freq * 100.0).abs();
+
+            eprintln!(
+                "  {:<8} note={} expected={:.1}Hz mean={:.1}Hz err={:.2}% stddev={:.2}Hz max_dev={:.2}%",
+                label, note, expected_freq, mean_freq, freq_err_pct, stddev, max_deviation_pct,
+            );
+            for (i, &f) in freqs.iter().enumerate() {
+                eprintln!("    window {}: {:.1}Hz", i + skip_windows, f);
+            }
+
+            assert!(max_deviation_pct < 3.0,
+                "{}: pitch drift {:.2}% exceeds 3% threshold", label, max_deviation_pct);
+        }
+
+        eprintln!("\n  Frequency stability tests complete.");
+    }
+
+    // =========================================================================
+    // TEST 22: ADPCM encoding quality per instrument program
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_22_adpcm_quality_per_program() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 22: ADPCM Encoding Quality Per Instrument Program");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP: Could not read SF2: {}", e);
+                return;
+            }
+        };
+
+        let soundfont = match crate::tracker::spu::convert::parse_sf2(&sf2_bytes) {
+            Ok(sf) => sf,
+            Err(e) => {
+                eprintln!("  SKIP: {}", e);
+                return;
+            }
+        };
+
+        let wave_data = soundfont.get_wave_data();
+        let sample_headers = soundfont.get_sample_headers();
+        let presets = soundfont.get_presets();
+        let instruments = soundfont.get_instruments();
+
+        eprintln!("  {:>4} {:<30} {:>8} {:>8} {:>8}", "Prog", "Name", "Samples", "SNR(dB)", "Status");
+        eprintln!("  {}", "-".repeat(65));
+
+        let mut poor_quality = Vec::new();
+
+        for program in 0..128u8 {
+            let preset = match presets.iter().find(|p| {
+                p.get_bank_number() == 0 && p.get_patch_number() == program as i32
+            }) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Find the first usable sample
+            let mut raw_pcm: Option<Vec<i16>> = None;
+            'find: for pr in preset.get_regions() {
+                let inst_id = pr.get_instrument_id();
+                if inst_id >= instruments.len() { continue; }
+                for ir in instruments[inst_id].get_regions() {
+                    let start = ir.get_sample_start() as usize;
+                    let end = ir.get_sample_end() as usize;
+                    if start < end && end <= wave_data.len() && end - start > 28 {
+                        raw_pcm = Some(wave_data[start..end].to_vec());
+                        break 'find;
+                    }
+                }
+            }
+
+            let raw_pcm = match raw_pcm {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Encode and decode
+            let encoded = crate::tracker::spu::adpcm::encode_pcm_to_adpcm(&raw_pcm, None, None);
+            let num_blocks = encoded.len() / 16;
+            let mut decoded = Vec::new();
+            let mut prev1: i16 = 0;
+            let mut prev2: i16 = 0;
+            for b in 0..num_blocks {
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&encoded[b * 16..(b + 1) * 16]);
+                let block = AdpcmBlock::from_bytes(&bytes);
+                let mut output = [0i16; 28];
+                crate::tracker::spu::adpcm::decode_block(&block, &mut prev1, &mut prev2, &mut output);
+                decoded.extend_from_slice(&output);
+            }
+
+            let len = raw_pcm.len().min(decoded.len());
+            let mut errors: Vec<i16> = Vec::with_capacity(len);
+            for i in 0..len {
+                errors.push((raw_pcm[i] as i32 - decoded[i] as i32).clamp(-32768, 32767) as i16);
+            }
+
+            let orig_rms = rms(&raw_pcm);
+            let err_rms = rms(&errors);
+            let snr = snr_db(orig_rms, err_rms);
+
+            let name = crate::tracker::spu::convert::GM_NAMES.get(program as usize)
+                .unwrap_or(&"?");
+
+            let status = if snr < 10.0 { "BAD" } else if snr < 20.0 { "POOR" } else { "OK" };
+
+            if snr < 15.0 {
+                poor_quality.push((program, name.to_string(), snr));
+            }
+
+            eprintln!("  {:>4} {:<30} {:>8} {:>8.1} {:>8}",
+                program, name, raw_pcm.len(), snr, status);
+        }
+
+        if !poor_quality.is_empty() {
+            eprintln!("\n  Programs with SNR < 15dB:");
+            for (prog, name, snr) in &poor_quality {
+                eprintln!("    prog={} {}: {:.1}dB", prog, name, snr);
+            }
+        }
+
+        eprintln!("\n  ADPCM quality scan complete.");
+    }
+
+    // =========================================================================
+    // TEST 23: Full pipeline A/B comparison — SPU output vs raw SF2 PCM
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_23_full_pipeline_comparison() {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 23: Full Pipeline A/B Comparison — SPU vs Raw SF2 PCM");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP: Could not read SF2: {}", e);
+                return;
+            }
+        };
+
+        let soundfont = match crate::tracker::spu::convert::parse_sf2(&sf2_bytes) {
+            Ok(sf) => sf,
+            Err(e) => {
+                eprintln!("  SKIP: {}", e);
+                return;
+            }
+        };
+
+        let wave_data = soundfont.get_wave_data();
+        let sample_headers = soundfont.get_sample_headers();
+        let presets = soundfont.get_presets();
+        let instruments_sf2 = soundfont.get_instruments();
+
+        let test_cases: Vec<(u8, &str, u8)> = vec![
+            (0,  "Piano",     60),
+            (32, "AcBass",    36),
+            (40, "Violin",    60),
+            (48, "Strings",   60),
+            (56, "Trumpet",   67),
+            (73, "Flute",     72),
+            (80, "SqLead",    60),
+        ];
+
+        let mut library = SampleLibrary::new("test".to_string());
+        let mut failures: Vec<String> = Vec::new();
+
+        for (program, label, note) in &test_cases {
+            crate::tracker::spu::convert::convert_single_program(
+                &soundfont, *program, &mut library,
+            );
+
+            let bank = match library.instrument(*program) {
+                Some(b) => b,
+                None => {
+                    eprintln!("  {}: SKIP (no bank)", label);
+                    continue;
+                }
+            };
+
+            let region = match bank.region_for_note(*note) {
+                Some(r) => r,
+                None => {
+                    eprintln!("  {}: SKIP (no region for note {})", label, note);
+                    continue;
+                }
+            };
+
+            // Extract raw PCM from SF2 for this program
+            let mut raw_pcm: Option<Vec<i16>> = None;
+            let mut raw_sr: u32 = 44100;
+
+            let preset = presets.iter().find(|p| {
+                p.get_bank_number() == 0 && p.get_patch_number() == *program as i32
+            });
+            if let Some(preset) = preset {
+                'find: for pr in preset.get_regions() {
+                    let inst_id = pr.get_instrument_id();
+                    if inst_id >= instruments_sf2.len() { continue; }
+                    for ir in instruments_sf2[inst_id].get_regions() {
+                        let start = ir.get_sample_start() as usize;
+                        let end = ir.get_sample_end() as usize;
+                        if start < end && end <= wave_data.len() {
+                            raw_pcm = Some(wave_data[start..end].to_vec());
+                            let sid = ir.get_sample_id();
+                            if sid < sample_headers.len() {
+                                raw_sr = sample_headers[sid].get_sample_rate() as u32;
+                            }
+                            break 'find;
+                        }
+                    }
+                }
+            }
+
+            // Play through SPU
+            let mut voice = Voice::new();
+            voice.key_on(region, *note, 100);
+
+            let total_samples = 88200; // 2 seconds
+            let key_off = 66150;       // 1.5 seconds
+            let mut left_out = Vec::with_capacity(total_samples);
+
+            for i in 0..total_samples {
+                if i == key_off { voice.key_off(); }
+                let (left, _) = voice.tick(&library.spu_ram);
+                left_out.push(left.clamp(-32768, 32767) as i16);
+            }
+
+            let expected_freq = 440.0 * 2.0_f64.powf((*note as f64 - 69.0) / 12.0);
+            let skip = 500;
+            let sustain_region = &left_out[skip..key_off];
+
+            // Compare against raw PCM if available
+            let ref_slice = raw_pcm.as_ref().map(|p| &p[..p.len().min(sustain_region.len())]);
+            let cmp = compare_audio(sustain_region, ref_slice, expected_freq, 44100);
+
+            eprintln!("  {:<8} note={} ({}) expected={:.1}Hz:", label, note, midi_note_name(*note), expected_freq);
+            print_comparison(label, &cmp);
+
+            // Write WAVs for investigation
+            write_wav_mono(
+                &format!("{}/23_pipeline/{}_note{}_spu.wav", OUT_DIR, label, note),
+                &left_out, 44100,
+            );
+            if let Some(ref raw) = raw_pcm {
+                write_wav_mono(
+                    &format!("{}/23_pipeline/{}_note{}_raw.wav", OUT_DIR, label, note),
+                    raw, raw_sr,
+                );
+            }
+
+            // Collect results for summary (frequency focus; click detection in test 20)
+            if cmp.frequency_match < 0.90 {
+                failures.push(format!(
+                    "{} note={}: freq_match={:.3} (expected >0.90)",
+                    label, note, cmp.frequency_match
+                ));
+            }
+        }
+
+        eprintln!("\n  WAVs written to {}/23_pipeline/", OUT_DIR);
+        if !failures.is_empty() {
+            eprintln!("\n  ISSUES FOUND:");
+            for f in &failures {
+                eprintln!("    - {}", f);
+            }
+        }
+        eprintln!("  Full pipeline comparison complete.");
+        assert!(failures.is_empty(), "Pipeline comparison found {} issues:\n{}",
+            failures.len(), failures.join("\n"));
+    }
+
+    // =========================================================================
+    // TEST 24: E Major Scale — SF2 (rustysynth) vs PSX SPU side-by-side
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_24_emajor_scale_comparison() {
+        use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
+        use std::sync::Arc;
+
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 24: E Major Scale — SF2 (rustysynth) vs PSX SPU Comparison");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP: {}", e);
+                return;
+            }
+        };
+
+        // E major scale: E4, F#4, G#4, A4, B4, C#5, D#5, E5
+        let scale_notes: Vec<u8> = vec![64, 66, 68, 69, 71, 73, 75, 76];
+        let sample_rate: u32 = 44100;
+        let note_duration = sample_rate as usize / 2;  // 0.5s per note
+        let release_duration = sample_rate as usize / 4; // 0.25s release tail
+        let silence_gap = sample_rate as usize / 20; // 50ms gap between notes
+        let velocity: u8 = 100;
+
+        // Programs to test
+        let programs: Vec<(u8, &str)> = vec![
+            (0,  "Piano"),
+            (32, "AcBass"),
+            (48, "Strings"),
+            (73, "Flute"),
+            (80, "SqLead"),
+        ];
+
+        let out_dir = format!("{}/24_scale_comparison", OUT_DIR);
+        fs::create_dir_all(&out_dir).ok();
+
+        // =====================================================================
+        // A) Render via rustysynth (SF2 reference)
+        // =====================================================================
+        eprintln!("  --- Rendering SF2 reference (rustysynth) ---");
+
+        let soundfont_ref = Arc::new(
+            SoundFont::new(&mut std::io::Cursor::new(&sf2_bytes))
+                .expect("Failed to parse SF2 for rustysynth")
+        );
+        let settings = SynthesizerSettings::new(sample_rate as i32);
+        let mut synth = Synthesizer::new(&soundfont_ref, &settings)
+            .expect("Failed to create rustysynth Synthesizer");
+
+        for &(program, label) in &programs {
+            // Set program on channel 0
+            synth.process_midi_message(0, 0xC0, program as i32, 0);
+            // Set volume to max
+            synth.process_midi_message(0, 0xB0, 7, 127);
+
+            let total_samples = scale_notes.len() * (note_duration + release_duration + silence_gap);
+            let mut left_buf = vec![0.0f32; total_samples];
+            let mut right_buf = vec![0.0f32; total_samples];
+
+            let mut pos = 0;
+            for &note in &scale_notes {
+                // Note on
+                synth.note_on(0, note as i32, velocity as i32);
+
+                // Render sustain
+                let end = (pos + note_duration).min(total_samples);
+                synth.render(&mut left_buf[pos..end], &mut right_buf[pos..end]);
+                pos = end;
+
+                // Note off
+                synth.note_off(0, note as i32);
+
+                // Render release tail
+                let end = (pos + release_duration).min(total_samples);
+                synth.render(&mut left_buf[pos..end], &mut right_buf[pos..end]);
+                pos = end;
+
+                // Silence gap
+                let end = (pos + silence_gap).min(total_samples);
+                synth.render(&mut left_buf[pos..end], &mut right_buf[pos..end]);
+                pos = end;
+            }
+
+            // Convert f32 → i16
+            let left_i16: Vec<i16> = left_buf[..pos].iter()
+                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect();
+            let right_i16: Vec<i16> = right_buf[..pos].iter()
+                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect();
+
+            let path = format!("{}/{}_sf2_reference.wav", out_dir, label);
+            write_wav_stereo(&path, &left_i16, &right_i16, sample_rate);
+            eprintln!("    {} SF2: {} samples → {}", label, pos, path);
+        }
+
+        // =====================================================================
+        // B) Render via PSX SPU pipeline
+        // =====================================================================
+        eprintln!("\n  --- Rendering PSX SPU pipeline ---");
+
+        let soundfont_spu = crate::tracker::spu::convert::parse_sf2(&sf2_bytes)
+            .expect("Failed to parse SF2 for SPU");
+        let mut spu = SpuCore::new();
+        spu.load_soundfont(soundfont_spu, "TimGM6mb".to_string());
+
+        let mut spu_outputs: std::collections::HashMap<String, (Vec<i16>, Vec<i16>)> =
+            std::collections::HashMap::new();
+
+        for &(program, label) in &programs {
+            let total_samples = scale_notes.len() * (note_duration + release_duration + silence_gap);
+            let mut left_out = Vec::with_capacity(total_samples);
+            let mut right_out = Vec::with_capacity(total_samples);
+
+            for &note in &scale_notes {
+                // Use voice 0, set program and play
+                spu.note_on(0, program, note, velocity);
+                // Apply center pan + MIDI default channel volume (100/127)
+                // to match rustysynth's default channel settings
+                spu.set_voice_pan(0, 64, 100);
+
+                // Render sustain
+                for _ in 0..note_duration {
+                    let (l, r) = spu.tick();
+                    left_out.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    right_out.push((r * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+
+                // Note off
+                spu.note_off(0);
+
+                // Render release tail
+                for _ in 0..release_duration {
+                    let (l, r) = spu.tick();
+                    left_out.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    right_out.push((r * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+
+                // Silence gap
+                for _ in 0..silence_gap {
+                    let (l, r) = spu.tick();
+                    left_out.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    right_out.push((r * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+            }
+
+            let path = format!("{}/{}_psx_spu.wav", out_dir, label);
+            write_wav_stereo(&path, &left_out, &right_out, sample_rate);
+            eprintln!("    {} SPU: {} samples → {}", label, left_out.len(), path);
+
+            // Store for cross-comparison
+            spu_outputs.insert(label.to_string(), (left_out, right_out));
+        }
+
+        // =====================================================================
+        // C) Detailed cross-comparison: SF2 vs SPU per note
+        // =====================================================================
+        eprintln!("\n  --- Detailed A/B comparison ---");
+        eprintln!("  {:>10} {:>5} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "Instrument", "Note", "FreqErr", "VolDiff", "Spectral", "Envelope", "SF2_RMS", "SPU_RMS");
+        eprintln!("  {}", "-".repeat(75));
+
+        let samples_per_note = note_duration + release_duration + silence_gap;
+
+        for &(program, label) in &programs {
+            // Re-render SF2 reference for this program to get per-note slices
+            synth.process_midi_message(0, 0xC0, program as i32, 0);
+            synth.process_midi_message(0, 0xB0, 7, 127);
+
+            let total_samples = scale_notes.len() * samples_per_note;
+            let mut sf2_left = vec![0.0f32; total_samples];
+            let mut sf2_right = vec![0.0f32; total_samples];
+
+            let mut pos = 0;
+            for &note in &scale_notes {
+                synth.note_on(0, note as i32, velocity as i32);
+                let end = (pos + note_duration).min(total_samples);
+                synth.render(&mut sf2_left[pos..end], &mut sf2_right[pos..end]);
+                pos = end;
+                synth.note_off(0, note as i32);
+                let end = (pos + release_duration).min(total_samples);
+                synth.render(&mut sf2_left[pos..end], &mut sf2_right[pos..end]);
+                pos = end;
+                let end = (pos + silence_gap).min(total_samples);
+                synth.render(&mut sf2_left[pos..end], &mut sf2_right[pos..end]);
+                pos = end;
+            }
+
+            let sf2_i16: Vec<i16> = sf2_left[..pos].iter()
+                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect();
+
+            let (spu_left, _spu_right) = spu_outputs.get(label).unwrap();
+
+            for (i, &note) in scale_notes.iter().enumerate() {
+                let sustain_start = i * samples_per_note + 500; // skip 500 samples of attack
+                let sustain_end = i * samples_per_note + note_duration;
+                if sustain_end > sf2_i16.len() || sustain_end > spu_left.len() { break; }
+
+                let sf2_slice = &sf2_i16[sustain_start..sustain_end];
+                let spu_slice = &spu_left[sustain_start..sustain_end];
+
+                let expected_freq = 440.0 * 2.0_f64.powf((note as f64 - 69.0) / 12.0);
+
+                // Frequency measurement
+                let sf2_freq = autocorrelation_frequency(sf2_slice, sample_rate, expected_freq * 0.7, expected_freq * 1.5);
+                let spu_freq = autocorrelation_frequency(spu_slice, sample_rate, expected_freq * 0.7, expected_freq * 1.5);
+                let freq_err = if sf2_freq > 0.0 && spu_freq > 0.0 {
+                    ((spu_freq - sf2_freq) / sf2_freq * 100.0)
+                } else { f64::NAN };
+
+                // Volume comparison (RMS)
+                let sf2_rms = rms(sf2_slice);
+                let spu_rms = rms(spu_slice);
+                let vol_diff_db = if sf2_rms > 0.0 && spu_rms > 0.0 {
+                    20.0 * (spu_rms / sf2_rms).log10()
+                } else { f64::NAN };
+
+                // Spectral similarity
+                let freqs: Vec<f64> = (1..=8).map(|h| expected_freq * h as f64)
+                    .filter(|&f| f < sample_rate as f64 / 2.0)
+                    .collect();
+                let spec = spectral_similarity(spu_slice, sf2_slice, sample_rate, &freqs);
+
+                // Envelope similarity
+                let sf2_env = extract_envelope(sf2_slice, 1000);
+                let spu_env = extract_envelope(spu_slice, 1000);
+                let env_corr = envelope_similarity(&sf2_env, &spu_env);
+
+                eprintln!(
+                    "  {:>10} {:>5} {:>+7.2}% {:>+7.1}dB {:>8.3} {:>8.3} {:>8.0} {:>8.0}",
+                    label, midi_note_name(note), freq_err, vol_diff_db, spec, env_corr,
+                    sf2_rms, spu_rms,
+                );
+            }
+        }
+
+        eprintln!("\n  WAVs written to {}/", out_dir);
+        eprintln!("  Compare: *_sf2_reference.wav vs *_psx_spu.wav");
+        eprintln!("  E Major Scale comparison complete.\n");
+    }
+
+    // =========================================================================
+    // TEST 25: Broad GM instrument coverage
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_25_broad_instrument_test() {
+        use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
+        use std::sync::Arc;
+
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 25: Broad GM Instrument Test — SF2 vs PSX SPU");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP: {}", e);
+                return;
+            }
+        };
+
+        // Test notes: C4, E4, G4, C5 (a major chord spread)
+        let test_notes: Vec<u8> = vec![60, 64, 67, 72];
+        let sample_rate: u32 = 44100;
+        let note_duration = sample_rate as usize / 2;     // 0.5s sustain
+        let release_duration = sample_rate as usize / 4;   // 0.25s release
+        let silence_gap = sample_rate as usize / 20;       // 50ms gap
+        let velocity: u8 = 100;
+
+        // 64 GM instruments across all families
+        let programs: Vec<(u8, &str)> = vec![
+            // Piano (0-7)
+            (0,  "AcPiano"),
+            (1,  "BrPiano"),
+            (2,  "ElGrand"),
+            (4,  "EPiano1"),
+            (5,  "EPiano2"),
+            (6,  "Harpsi"),
+            (7,  "Clavi"),
+            // Chromatic Percussion (8-15)
+            (8,  "Celesta"),
+            (9,  "Glocken"),
+            (10, "MusicBox"),
+            (11, "Vibes"),
+            (12, "Marimba2"),
+            (13, "Xylophon"),
+            (14, "TubBell"),
+            (15, "Dulcimer"),
+            // Organ (16-23)
+            (16, "Organ1"),
+            (17, "Organ2"),
+            (18, "Organ3"),
+            (19, "ChOrgan"),
+            (20, "ReedOrg"),
+            (21, "Accordn"),
+            (22, "Harmoni"),
+            // Guitar (24-31)
+            (24, "NylonGtr"),
+            (25, "SteelGtr"),
+            (26, "JazzGtr"),
+            (27, "ClnElGtr"),
+            (28, "MuteGtr"),
+            (29, "OvDrGtr"),
+            (30, "DistGtr"),
+            (31, "GtrHarm"),
+            // Bass (32-39)
+            (32, "AcBass"),
+            (33, "FingrBas"),
+            (34, "PickBas"),
+            (35, "Fretles"),
+            (36, "SlapBs1"),
+            (37, "SlapBs2"),
+            (38, "SynBas1"),
+            (39, "SynBas2"),
+            // Strings (40-47)
+            (40, "Violin"),
+            (41, "Viola"),
+            (42, "Cello"),
+            (44, "TremStr"),
+            (45, "PizzStr"),
+            (46, "OrchHrp"),
+            (48, "StrEns"),
+            // Ensemble (49-55)
+            (49, "SlwStr"),
+            (50, "SynStr1"),
+            (52, "Choir"),
+            (53, "OohVox"),
+            (54, "SynVox"),
+            // Brass (56-63)
+            (56, "Trumpet"),
+            (57, "Trmbone"),
+            (58, "Tuba"),
+            (59, "MuteTpt"),
+            (60, "FrHorn"),
+            (61, "BrassSc"),
+            (62, "SynBrs1"),
+            // Reed (64-71)
+            (64, "SopSax"),
+            (65, "AltoSax"),
+            (66, "TenSax"),
+            (67, "BariSax"),
+            (68, "Oboe"),
+            (69, "EngHorn"),
+            (70, "Bassoon"),
+            (71, "Clari"),
+            // Pipe (72-79)
+            (72, "Piccolo"),
+            (73, "Flute"),
+            (74, "Recorder"),
+            (75, "PanFlut"),
+            (76, "Bottle"),
+            (78, "Whistle"),
+            // Synth Lead (80-87)
+            (80, "SqLead"),
+            (81, "SawLead"),
+            (82, "Callope"),
+            (83, "ChifLd"),
+            (84, "Charang"),
+            (85, "Voice"),
+            // Synth Pad (88-95)
+            (88, "Pad1New"),
+            (89, "Pad2Wrm"),
+            (90, "Pad3Pol"),
+            (91, "Pad4Chr"),
+            (92, "Pad5Bow"),
+            (94, "Pad7Hal"),
+            // Synth Effects (96-103)
+            (98, "Crystal"),
+            (99, "Atmosph"),
+            (100, "Bright"),
+            (101, "Goblin"),
+            // Ethnic (104-111)
+            (104, "Sitar"),
+            (105, "Banjo"),
+            (107, "Koto"),
+            (108, "Kalimba"),
+        ];
+
+        let out_dir = format!("{}/25_broad_instruments", OUT_DIR);
+        fs::create_dir_all(&out_dir).ok();
+
+        // Parse SF2 for both renderers
+        let soundfont_ref = Arc::new(
+            SoundFont::new(&mut std::io::Cursor::new(&sf2_bytes))
+                .expect("Failed to parse SF2 for rustysynth")
+        );
+        let settings = SynthesizerSettings::new(sample_rate as i32);
+        let mut synth = Synthesizer::new(&soundfont_ref, &settings)
+            .expect("Failed to create rustysynth Synthesizer");
+
+        let soundfont_spu = crate::tracker::spu::convert::parse_sf2(&sf2_bytes)
+            .expect("Failed to parse SF2 for SPU");
+        let mut spu = SpuCore::new();
+        spu.load_soundfont(soundfont_spu, "TimGM6mb".to_string());
+
+        let samples_per_note = note_duration + release_duration + silence_gap;
+
+        // Results table
+        eprintln!("  {:>10} {:>5} {:>8} {:>8} {:>8} {:>8} {:>6}",
+            "Instr", "Note", "FreqErr", "VolDiff", "Spectrl", "Envelop", "Clicks");
+        eprintln!("  {}", "-".repeat(62));
+
+        let mut total_tests = 0u32;
+        let mut freq_pass = 0u32;
+        let mut vol_pass = 0u32;
+        let mut click_pass = 0u32;
+
+        for &(program, label) in &programs {
+            // ---- Render SF2 reference ----
+            synth.process_midi_message(0, 0xC0, program as i32, 0);
+            synth.process_midi_message(0, 0xB0, 7, 127);
+
+            let total_samples = test_notes.len() * samples_per_note;
+            let mut sf2_left = vec![0.0f32; total_samples];
+            let mut sf2_right = vec![0.0f32; total_samples];
+
+            let mut pos = 0;
+            for &note in &test_notes {
+                synth.note_on(0, note as i32, velocity as i32);
+                let end = (pos + note_duration).min(total_samples);
+                synth.render(&mut sf2_left[pos..end], &mut sf2_right[pos..end]);
+                pos = end;
+                synth.note_off(0, note as i32);
+                let end = (pos + release_duration).min(total_samples);
+                synth.render(&mut sf2_left[pos..end], &mut sf2_right[pos..end]);
+                pos = end;
+                let end = (pos + silence_gap).min(total_samples);
+                synth.render(&mut sf2_left[pos..end], &mut sf2_right[pos..end]);
+                pos = end;
+            }
+
+            let sf2_i16: Vec<i16> = sf2_left[..pos].iter()
+                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect();
+            let sf2_right_i16: Vec<i16> = sf2_right[..pos].iter()
+                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect();
+
+            // Write SF2 reference WAV
+            let path = format!("{}/{:03}_{}_sf2.wav", out_dir, program, label);
+            write_wav_stereo(&path, &sf2_i16, &sf2_right_i16, sample_rate);
+
+            // ---- Render SPU ----
+            let mut spu_left_out = Vec::with_capacity(total_samples);
+            let mut spu_right_out = Vec::with_capacity(total_samples);
+
+            for &note in &test_notes {
+                spu.note_on(0, program, note, velocity);
+                spu.set_voice_pan(0, 64, 100);
+
+                for _ in 0..note_duration {
+                    let (l, r) = spu.tick();
+                    spu_left_out.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    spu_right_out.push((r * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+                spu.note_off(0);
+                for _ in 0..release_duration {
+                    let (l, r) = spu.tick();
+                    spu_left_out.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    spu_right_out.push((r * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+                for _ in 0..silence_gap {
+                    let (l, r) = spu.tick();
+                    spu_left_out.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    spu_right_out.push((r * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+            }
+
+            // Write SPU WAV
+            let path = format!("{}/{:03}_{}_spu.wav", out_dir, program, label);
+            write_wav_stereo(&path, &spu_left_out, &spu_right_out, sample_rate);
+
+            // ---- Per-note comparison ----
+            for (i, &note) in test_notes.iter().enumerate() {
+                let sustain_start = i * samples_per_note + 500;
+                let sustain_end = i * samples_per_note + note_duration;
+                if sustain_end > sf2_i16.len() || sustain_end > spu_left_out.len() { break; }
+
+                let sf2_slice = &sf2_i16[sustain_start..sustain_end];
+                let spu_slice = &spu_left_out[sustain_start..sustain_end];
+
+                let expected_freq = 440.0 * 2.0_f64.powf((note as f64 - 69.0) / 12.0);
+
+                // Frequency
+                let sf2_freq = autocorrelation_frequency(sf2_slice, sample_rate, expected_freq * 0.5, expected_freq * 2.0);
+                let spu_freq = autocorrelation_frequency(spu_slice, sample_rate, expected_freq * 0.5, expected_freq * 2.0);
+                let freq_err = if sf2_freq > 0.0 && spu_freq > 0.0 {
+                    (spu_freq - sf2_freq) / sf2_freq * 100.0
+                } else { f64::NAN };
+
+                // Volume
+                let sf2_rms = rms(sf2_slice);
+                let spu_rms = rms(spu_slice);
+                let vol_diff_db = if sf2_rms > 0.0 && spu_rms > 0.0 {
+                    20.0 * (spu_rms / sf2_rms).log10()
+                } else { f64::NAN };
+
+                // Spectral
+                let freqs: Vec<f64> = (1..=8).map(|h| expected_freq * h as f64)
+                    .filter(|&f| f < sample_rate as f64 / 2.0)
+                    .collect();
+                let spec = spectral_similarity(spu_slice, sf2_slice, sample_rate, &freqs);
+
+                // Envelope
+                let sf2_env = extract_envelope(sf2_slice, 1000);
+                let spu_env = extract_envelope(spu_slice, 1000);
+                let env_corr = envelope_similarity(&sf2_env, &spu_env);
+
+                // Click detection (full note including attack)
+                let full_start = i * samples_per_note;
+                let full_end = (i + 1) * samples_per_note;
+                let clicks = if full_end <= spu_left_out.len() {
+                    detect_clicks(&spu_left_out[full_start..full_end], 100, 4.0).click_count
+                } else { 0 };
+
+                eprintln!(
+                    "  {:>10} {:>5} {:>+7.2}% {:>+7.1}dB {:>8.3} {:>8.3} {:>6}",
+                    label, midi_note_name(note), freq_err, vol_diff_db, spec, env_corr, clicks,
+                );
+
+                total_tests += 1;
+                if freq_err.abs() < 2.0 { freq_pass += 1; }
+                if vol_diff_db.abs() < 10.0 { vol_pass += 1; }
+                if clicks == 0 { click_pass += 1; }
+            }
+        }
+
+        eprintln!("\n  --- Summary ---");
+        eprintln!("  Pitch:  {}/{} within 2% ({:.0}%)", freq_pass, total_tests, freq_pass as f64 / total_tests as f64 * 100.0);
+        eprintln!("  Volume: {}/{} within 10dB ({:.0}%)", vol_pass, total_tests, vol_pass as f64 / total_tests as f64 * 100.0);
+        eprintln!("  Clicks: {}/{} clean ({:.0}%)", click_pass, total_tests, click_pass as f64 / total_tests as f64 * 100.0);
+        eprintln!("\n  WAVs written to {}/", out_dir);
+        eprintln!("  Files: NNN_Label_sf2.wav vs NNN_Label_spu.wav\n");
+    }
+
+    // =========================================================================
     // TEST 11 helper types
     // =========================================================================
 
