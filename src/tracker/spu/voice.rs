@@ -198,8 +198,6 @@ pub struct Voice {
     volume_right: i16,
 
     // --- Flags ---
-    /// Whether this voice sends to the reverb unit
-    pub reverb_enabled: bool,
     /// ENDX flag — set when sample reaches loop end
     pub end_flag: bool,
 
@@ -235,7 +233,6 @@ impl Voice {
             base_volume: 0x3FFF,
             volume_left: 0x3FFF,
             volume_right: 0x3FFF,
-            reverb_enabled: false,
             end_flag: false,
             instrument: 0,
             note: 0,
@@ -275,29 +272,6 @@ impl Voice {
         self.adsr_phase = AdsrPhase::Attack;
         self.update_adsr_envelope();
 
-        // Dump ADSR parameters for debugging
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let p = &self.adsr_params;
-            let atk_rate = self.compute_attack_rate();
-            let dec_rate = self.compute_decay_rate();
-            let sus_rate = self.compute_sustain_rate();
-            let rel_rate = self.compute_release_rate();
-            eprintln!(
-                "  ADSR: atk={}{} dec={} sus_lvl={} sus={}{}{} rel={}{}",
-                atk_rate, if p.attack_exp { "e" } else { "l" },
-                dec_rate,
-                p.sustain_level,
-                sus_rate, if p.sustain_exp { "e" } else { "l" },
-                if p.sustain_decrease { "-" } else { "+" },
-                rel_rate, if p.release_exp { "e" } else { "l" },
-            );
-            eprintln!(
-                "        sustain_target=0x{:04X} pitch=0x{:04X} base_vol={}",
-                p.sustain_level_i16(), self.pitch, region.default_volume,
-            );
-        }
-
         // Store base volume from instrument region for set_volume_from_pan
         // PS1 volume registers range 0-0x7FFF (unity gain with >> 15)
         self.base_volume = region.default_volume.min(0x7FFF);
@@ -322,8 +296,6 @@ impl Voice {
         if self.adsr_phase == AdsrPhase::Off || self.adsr_phase == AdsrPhase::Release {
             return;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        eprintln!("SPU voice key_off: note={} phase={:?} level={}", self.note, self.adsr_phase, self.adsr_level);
         self.adsr_phase = AdsrPhase::Release;
         self.update_adsr_envelope();
     }

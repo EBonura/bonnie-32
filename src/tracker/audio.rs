@@ -16,6 +16,160 @@ use super::spu::reverb::ReverbType;
 use super::spu::convert::{parse_sf2, GM_NAMES};
 use super::spu::tables::MAX_VOICES;
 
+// =============================================================================
+// Voice Allocator — PS1 SPU driver-level voice management
+// =============================================================================
+//
+// The PS1 SPU hardware has 24 independent voices with no concept of "channels".
+// The software driver (PsyQ libspu/libsnd) manages voice allocation, mapping
+// (channel, note) pairs to hardware voices. This allocator replicates that
+// driver layer, keeping SpuCore as pure hardware.
+
+/// Maximum number of channels the allocator supports
+const MAX_CHANNELS: usize = 24;
+
+/// Information about a voice's current assignment
+#[derive(Clone, Copy)]
+struct VoiceSlot {
+    /// Which channel owns this voice (or None if free)
+    channel: Option<usize>,
+    /// Which MIDI note is playing (for note_off matching)
+    note: u8,
+    /// Monotonic counter for age-based stealing (higher = newer)
+    age: u64,
+    /// Whether the voice has received key_off (in release phase)
+    releasing: bool,
+}
+
+impl Default for VoiceSlot {
+    fn default() -> Self {
+        Self { channel: None, note: 0, age: 0, releasing: false }
+    }
+}
+
+/// Allocates SPU hardware voices to (channel, note) requests.
+///
+/// Matches the role of PS1 sound drivers like PsyQ libspu:
+/// - Finds free voices for new notes
+/// - Tracks ownership for note_off routing
+/// - Steals voices when all 24 are busy (oldest releasing first)
+struct VoiceAllocator {
+    slots: [VoiceSlot; MAX_VOICES],
+    counter: u64,
+}
+
+impl VoiceAllocator {
+    fn new() -> Self {
+        Self {
+            slots: [VoiceSlot::default(); MAX_VOICES],
+            counter: 0,
+        }
+    }
+
+    /// Allocate a voice for a (channel, note) pair.
+    ///
+    /// Priority:
+    /// 1. Same (channel, note) already playing — retrigger
+    /// 2. Free voice (channel == None)
+    /// 3. Oldest voice in release phase
+    /// 4. Oldest voice overall (voice stealing)
+    fn allocate(&mut self, channel: usize, note: u8) -> usize {
+        self.counter += 1;
+
+        // 1. Retrigger: same (channel, note)
+        for i in 0..MAX_VOICES {
+            if self.slots[i].channel == Some(channel) && self.slots[i].note == note {
+                self.slots[i].age = self.counter;
+                self.slots[i].releasing = false;
+                return i;
+            }
+        }
+
+        // 2. Free voice
+        for i in 0..MAX_VOICES {
+            if self.slots[i].channel.is_none() {
+                self.slots[i] = VoiceSlot {
+                    channel: Some(channel),
+                    note,
+                    age: self.counter,
+                    releasing: false,
+                };
+                return i;
+            }
+        }
+
+        // 3. Steal oldest releasing voice
+        let mut best: Option<(usize, u64)> = None;
+        for i in 0..MAX_VOICES {
+            if self.slots[i].releasing {
+                if best.is_none() || self.slots[i].age < best.unwrap().1 {
+                    best = Some((i, self.slots[i].age));
+                }
+            }
+        }
+        if let Some((idx, _)) = best {
+            self.slots[idx] = VoiceSlot {
+                channel: Some(channel),
+                note,
+                age: self.counter,
+                releasing: false,
+            };
+            return idx;
+        }
+
+        // 4. Steal oldest voice overall
+        let mut oldest_idx = 0;
+        for i in 1..MAX_VOICES {
+            if self.slots[i].age < self.slots[oldest_idx].age {
+                oldest_idx = i;
+            }
+        }
+        self.slots[oldest_idx] = VoiceSlot {
+            channel: Some(channel),
+            note,
+            age: self.counter,
+            releasing: false,
+        };
+        oldest_idx
+    }
+
+    /// Release voices matching (channel, note). Returns released voice indices.
+    fn release(&mut self, channel: usize, note: u8) -> Vec<usize> {
+        let mut released = Vec::new();
+        for i in 0..MAX_VOICES {
+            if self.slots[i].channel == Some(channel) && self.slots[i].note == note {
+                self.slots[i].releasing = true;
+                released.push(i);
+            }
+        }
+        released
+    }
+
+    /// Get all voice indices assigned to a channel.
+    fn voices_for_channel(&self, channel: usize) -> Vec<usize> {
+        (0..MAX_VOICES)
+            .filter(|&i| self.slots[i].channel == Some(channel))
+            .collect()
+    }
+
+    /// Release all voices on a channel. Returns released voice indices.
+    fn release_channel(&mut self, channel: usize) -> Vec<usize> {
+        let mut released = Vec::new();
+        for i in 0..MAX_VOICES {
+            if self.slots[i].channel == Some(channel) {
+                self.slots[i].releasing = true;
+                released.push(i);
+            }
+        }
+        released
+    }
+
+    /// Free all voice assignments.
+    fn clear(&mut self) {
+        self.slots = [VoiceSlot::default(); MAX_VOICES];
+    }
+}
+
 /// Lock a mutex, recovering gracefully from poisoning.
 ///
 /// A mutex becomes poisoned when a thread panics while holding the lock.
@@ -111,22 +265,30 @@ pub type OutputSampleRate = SpuPitch;
 
 /// Audio engine state shared between main thread and audio callback
 struct AudioState {
-    /// PS1 SPU core — 24 voices with ADPCM, Gaussian interp, ADSR, reverb
+    /// PS1 SPU core — 24 hardware voices
     spu: SpuCore,
+    /// Voice allocator — maps (channel, note) to SPU voices (driver layer)
+    allocator: VoiceAllocator,
     /// Whether audio is playing
     playing: bool,
+    /// Per-channel program (GM instrument number, 0-127)
+    channel_programs: [u8; MAX_CHANNELS],
     /// Per-channel volume (MIDI CC 7), 0-127
-    channel_volume: [u8; MAX_VOICES],
+    channel_volume: [u8; MAX_CHANNELS],
     /// Per-channel expression (MIDI CC 11), 0-127
-    channel_expression: [u8; MAX_VOICES],
+    channel_expression: [u8; MAX_CHANNELS],
     /// Per-channel pan (MIDI CC 10), 0-127 (64=center)
-    channel_pan: [u8; MAX_VOICES],
+    channel_pan: [u8; MAX_CHANNELS],
     /// Per-channel modulation (MIDI CC 1), stored for UI display
-    channel_modulation: [u8; MAX_VOICES],
-    /// Per-channel base pitch (set during note_on, for pitch bend calculation)
-    channel_base_pitch: [u16; MAX_VOICES],
+    channel_modulation: [u8; MAX_CHANNELS],
+    /// Per-voice base pitch (set during note_on, for pitch bend calculation)
+    /// Indexed by SPU voice, not channel, since each voice has its own pitch.
+    voice_base_pitch: [u16; MAX_VOICES],
     /// Per-channel pitch bend (0-16383, center=8192)
-    channel_pitch_bend: [i32; MAX_VOICES],
+    channel_pitch_bend: [i32; MAX_CHANNELS],
+    /// Per-channel reverb send level (0=off, 127=full)
+    /// Maps to effect_amount in ChannelSettings
+    channel_reverb_send: [u8; MAX_CHANNELS],
     /// Global sample rate mode (backward compat for UI)
     output_sample_rate: SpuPitch,
     /// Whether SPU resampling mode is enabled (backward compat)
@@ -137,13 +299,16 @@ impl AudioState {
     fn new() -> Self {
         Self {
             spu: SpuCore::new(),
+            allocator: VoiceAllocator::new(),
             playing: false,
-            channel_volume: [100u8; MAX_VOICES],
-            channel_expression: [127u8; MAX_VOICES],
-            channel_pan: [64u8; MAX_VOICES],
-            channel_modulation: [0u8; MAX_VOICES],
-            channel_base_pitch: [0u16; MAX_VOICES],
-            channel_pitch_bend: [8192i32; MAX_VOICES],
+            channel_programs: [0u8; MAX_CHANNELS],
+            channel_volume: [100u8; MAX_CHANNELS],
+            channel_expression: [127u8; MAX_CHANNELS],
+            channel_pan: [64u8; MAX_CHANNELS],
+            channel_modulation: [0u8; MAX_CHANNELS],
+            voice_base_pitch: [0u16; MAX_VOICES],
+            channel_pitch_bend: [8192i32; MAX_CHANNELS],
+            channel_reverb_send: [64u8; MAX_CHANNELS], // default 50% send
             output_sample_rate: SpuPitch::NATIVE,
             spu_resampling_enabled: true,
         }
@@ -156,25 +321,30 @@ impl AudioState {
         ((v * e) / 127).min(127) as u8
     }
 
-    /// Sync pan + volume to the SPU voice for a channel
+    /// Sync pan + volume to all SPU voices owned by a channel
     fn sync_voice_volume(&mut self, channel: usize) {
         let vol = self.effective_volume(channel);
         let pan = self.channel_pan[channel];
-        self.spu.set_voice_pan(channel, pan, vol);
+        let voices = self.allocator.voices_for_channel(channel);
+        for voice_idx in voices {
+            self.spu.set_voice_pan(voice_idx, pan, vol);
+        }
     }
 
-    /// Apply pitch bend to a voice using stored base_pitch
+    /// Apply pitch bend to all voices owned by a channel
     fn apply_pitch_bend(&mut self, channel: usize) {
-        let base = self.channel_base_pitch[channel] as f64;
-        if base == 0.0 {
-            return;
-        }
         let bend = self.channel_pitch_bend[channel];
-        // Pitch bend range: +/- 2 semitones
         let semitones = (bend - 8192) as f64 / 8192.0 * 2.0;
         let ratio = (semitones / 12.0).exp2();
-        let new_pitch = (base * ratio) as u16;
-        self.spu.set_voice_pitch(channel, new_pitch.min(0x3FFF));
+        let voices = self.allocator.voices_for_channel(channel);
+        for voice_idx in voices {
+            let base = self.voice_base_pitch[voice_idx] as f64;
+            if base == 0.0 {
+                continue;
+            }
+            let new_pitch = (base * ratio) as u16;
+            self.spu.set_voice_pitch(voice_idx, new_pitch.min(0x3FFF));
+        }
     }
 }
 
@@ -437,6 +607,7 @@ impl AudioEngine {
         eprintln!("SPU: parsed SF2 '{}', instruments will be loaded on demand", sf_name);
 
         let mut state = lock_or_recover(&self.state);
+        state.allocator.clear();
         state.spu.load_soundfont(soundfont, sf_name);
         state.playing = true;
 
@@ -499,87 +670,118 @@ impl AudioEngine {
 
     /// Play a note (note on)
     ///
-    /// Triggers the SPU voice for the given channel with the current program.
+    /// Allocates an SPU voice via the voice allocator (PS1 driver layer),
+    /// then triggers it on the hardware. Multiple notes on the same channel
+    /// get separate voices, enabling polyphony up to 24 voices total.
     pub fn note_on(&self, channel: i32, key: i32, velocity: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        #[cfg(not(target_arch = "wasm32"))]
-        eprintln!("AudioEngine::note_on called: ch={} key={} vel={} loaded={}", channel, key, velocity, state.spu.is_loaded());
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
-        let program = state.spu.program(ch);
+        let program = state.channel_programs[ch];
         let note = (key as u8).min(127);
         let vel = (velocity as u8).min(127);
 
-        state.spu.note_on(ch, program, note, vel);
+        // Allocate a hardware voice (may steal from releasing/oldest)
+        let voice_idx = state.allocator.allocate(ch, note);
 
-        // Store base pitch for pitch bend calculations
-        state.channel_base_pitch[ch] = state.spu.voice_pitch(ch);
-        // Reset pitch bend to center
-        state.channel_pitch_bend[ch] = 8192;
+        // Trigger the SPU voice
+        state.spu.note_on(voice_idx, program, note, vel);
 
-        // Apply current pan/volume settings to the new voice
-        state.sync_voice_volume(ch);
+        // Store base pitch for pitch bend calculations (per-voice)
+        state.voice_base_pitch[voice_idx] = state.spu.voice_pitch(voice_idx);
+
+        // Apply current channel pan/volume settings to the new voice
+        let vol = state.effective_volume(ch);
+        let pan = state.channel_pan[ch];
+        state.spu.set_voice_pan(voice_idx, pan, vol);
+
+        // Apply per-channel reverb send level to this voice
+        let reverb_send = state.channel_reverb_send[ch];
+        state.spu.set_voice_reverb_send(voice_idx, reverb_send);
     }
 
     /// Stop a note (note off)
-    pub fn note_off(&self, channel: i32, _key: i32) {
+    ///
+    /// Finds the SPU voice(s) playing this (channel, note) and releases them.
+    /// The ADSR enters release phase — the voice isn't freed until it decays.
+    pub fn note_off(&self, channel: i32, key: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
-        state.spu.note_off(ch);
+        let note = (key as u8).min(127);
+        let released = state.allocator.release(ch, note);
+        for voice_idx in released {
+            state.spu.note_off(voice_idx);
+        }
     }
 
-    /// Stop all notes
+    /// Release all notes on a specific channel.
+    /// Used by tracker playback where each channel is monophonic.
+    pub fn channel_notes_off(&self, channel: i32) {
+        let mut state = lock_or_recover(&self.state);
+        let ch = channel as usize;
+        if ch >= MAX_CHANNELS {
+            return;
+        }
+        let released = state.allocator.release_channel(ch);
+        for voice_idx in released {
+            state.spu.note_off(voice_idx);
+        }
+    }
+
+    /// Stop all notes on all channels
     pub fn all_notes_off(&self) {
         let mut state = lock_or_recover(&self.state);
         state.spu.all_notes_off();
+        state.allocator.clear();
     }
 
     // =========================================================================
     // Channel controls
     // =========================================================================
 
-    /// Set the instrument (program) for a channel
+    /// Set the instrument (program) for a channel.
+    /// Stored in the driver layer — applied when note_on allocates a voice.
     pub fn set_program(&self, channel: i32, program: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
-        state.spu.set_program(ch, program as u8);
+        state.channel_programs[ch] = program as u8;
     }
 
-    /// Set channel volume (CC 7)
+    /// Set channel volume (CC 7) — applies to all voices on the channel
     pub fn set_volume(&self, channel: i32, volume: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
         state.channel_volume[ch] = (volume as u8).min(127);
         state.sync_voice_volume(ch);
     }
 
-    /// Set channel pan (CC 10)
+    /// Set channel pan (CC 10) — applies to all voices on the channel
     pub fn set_pan(&self, channel: i32, pan: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
         state.channel_pan[ch] = (pan as u8).min(127);
         state.sync_voice_volume(ch);
     }
 
-    /// Set pitch bend (0-16383, center = 8192)
+    /// Set pitch bend (0-16383, center = 8192) — applies to all voices on the channel
     pub fn set_pitch_bend(&self, channel: i32, value: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
         state.channel_pitch_bend[ch] = value.clamp(0, 16383);
@@ -590,7 +792,7 @@ impl AudioEngine {
     pub fn set_modulation(&self, channel: i32, value: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
         state.channel_modulation[ch] = (value as u8).min(127);
@@ -598,22 +800,39 @@ impl AudioEngine {
         // (PS1 SPU has no hardware modulation wheel support)
     }
 
-    /// Set expression (CC 11)
+    /// Set expression (CC 11) — applies to all voices on the channel
     pub fn set_expression(&self, channel: i32, value: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
         state.channel_expression[ch] = (value as u8).min(127);
         state.sync_voice_volume(ch);
     }
 
+    /// Set reverb send level for a channel (0=off, 127=full)
+    /// Updates all currently active voices on the channel.
+    pub fn set_reverb_send(&self, channel: i32, level: i32) {
+        let mut state = lock_or_recover(&self.state);
+        let ch = channel as usize;
+        if ch >= MAX_CHANNELS {
+            return;
+        }
+        let level = (level as u8).min(127);
+        state.channel_reverb_send[ch] = level;
+        // Update all active voices on this channel
+        let voices = state.allocator.voices_for_channel(ch);
+        for voice_idx in voices {
+            state.spu.set_voice_reverb_send(voice_idx, level);
+        }
+    }
+
     /// Reset all controllers on a channel
     pub fn reset_controllers(&self, channel: i32) {
         let mut state = lock_or_recover(&self.state);
         let ch = channel as usize;
-        if ch >= MAX_VOICES {
+        if ch >= MAX_CHANNELS {
             return;
         }
         state.channel_volume[ch] = 100;
@@ -621,6 +840,7 @@ impl AudioEngine {
         state.channel_pan[ch] = 64;
         state.channel_modulation[ch] = 0;
         state.channel_pitch_bend[ch] = 8192;
+        state.channel_reverb_send[ch] = 64;
         state.sync_voice_volume(ch);
     }
 

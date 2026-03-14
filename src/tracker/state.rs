@@ -929,8 +929,8 @@ impl TrackerState {
         for (channel, pitch, inst, volume, _) in notes_to_play {
             if let Some(p) = pitch {
                 if p == 0xFF {
-                    // Note off
-                    self.audio.note_off(channel as i32, 0);
+                    // Note off — release all voices on this channel
+                    self.audio.channel_notes_off(channel as i32);
                     self.last_played_notes[channel] = None;
                 } else {
                     // Check if same note is already playing (sustain behavior like Picotron)
@@ -1448,6 +1448,7 @@ impl TrackerState {
         self.audio.set_pan(ch, settings.pan as i32);
         self.audio.set_modulation(ch, settings.modulation as i32);
         self.audio.set_expression(ch, settings.expression as i32);
+        self.audio.set_reverb_send(ch, settings.effect_amount as i32);
     }
 
     /// Apply the current channel's reverb and sample rate settings to the audio engine
@@ -1520,6 +1521,7 @@ impl TrackerState {
     pub fn set_channel_effect_amount(&mut self, channel: usize, value: u8) {
         if let Some(settings) = self.song.channel_settings.get_mut(channel) {
             settings.effect_amount = value.min(127);
+            self.audio.set_reverb_send(channel as i32, value as i32);
             self.dirty = true;
         }
     }

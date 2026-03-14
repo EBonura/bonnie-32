@@ -37,8 +37,10 @@ pub struct SpuCore {
     master_volume: f32,
     /// Per-channel program (GM instrument number, 0-127)
     channel_programs: [u8; MAX_VOICES],
-    /// Per-channel reverb enable flags
-    channel_reverb: [bool; MAX_VOICES],
+    /// Per-voice reverb send level (0=off, 127=full send)
+    /// On real PS1 this is binary (EON register), but we extend it
+    /// to a continuous level for per-channel reverb depth control.
+    voice_reverb_send: [u8; MAX_VOICES],
 }
 
 impl SpuCore {
@@ -50,7 +52,7 @@ impl SpuCore {
             sample_library: None,
             master_volume: 1.0,
             channel_programs: [0u8; MAX_VOICES],
-            channel_reverb: [false; MAX_VOICES],
+            voice_reverb_send: [0u8; MAX_VOICES],
         }
     }
 
@@ -178,9 +180,13 @@ impl SpuCore {
             dry_left += left;
             dry_right += right;
 
-            if self.channel_reverb[i] {
-                reverb_in_left += left;
-                reverb_in_right += right;
+            // Per-voice reverb send: scale voice output into reverb input
+            // On real PS1, EON register is binary on/off per voice.
+            // We extend to 0-127 for per-channel reverb depth control.
+            let send = self.voice_reverb_send[i] as i32;
+            if send > 0 {
+                reverb_in_left += (left * send) >> 7;
+                reverb_in_right += (right * send) >> 7;
             }
         }
 
@@ -193,13 +199,12 @@ impl SpuCore {
         let reverb_in_right = clamp16(reverb_in_right);
         let (reverb_left, reverb_right) = self.reverb.process_sample(reverb_in_left, reverb_in_right);
 
-        // Mix dry + reverb (only apply wet/dry mix when reverb is active)
+        // Mix dry + reverb (PS1 hardware: dry always passes through, reverb is additive)
         let (left, right) = if self.reverb.is_enabled() {
             let wet = self.reverb.wet_level();
-            let dry_mix = 1.0 - wet;
             (
-                dry_left as f32 * dry_mix + reverb_left as f32 * wet,
-                dry_right as f32 * dry_mix + reverb_right as f32 * wet,
+                dry_left as f32 + reverb_left as f32 * wet,
+                dry_right as f32 + reverb_right as f32 * wet,
             )
         } else {
             (dry_left as f32, dry_right as f32)
@@ -256,22 +261,11 @@ impl SpuCore {
             }
         };
 
-        // Store program for this channel
+        // Store program for this voice
         self.channel_programs[voice_idx] = program;
-
-        // Debug: verify note routing (TODO: remove after debugging)
-        #[cfg(not(target_arch = "wasm32"))]
-        eprintln!(
-            "SPU note_on: voice={} prog={} note={} vel={} region=[{}-{}] base_note={} pitch={} vol={} addr=0x{:X}",
-            voice_idx, program, note, velocity,
-            region.key_lo, region.key_hi, region.base_note,
-            region.pitch_for_note(note), region.default_volume,
-            region.spu_ram_offset,
-        );
 
         // Trigger the voice
         self.voices[voice_idx].key_on(region, note, velocity);
-        self.voices[voice_idx].reverb_enabled = self.channel_reverb[voice_idx];
     }
 
     /// Release a note on a voice
@@ -323,11 +317,10 @@ impl SpuCore {
         }
     }
 
-    /// Enable/disable reverb send for a voice
-    pub fn set_voice_reverb(&mut self, voice_idx: usize, enabled: bool) {
+    /// Set reverb send level for a voice (0=off, 127=full)
+    pub fn set_voice_reverb_send(&mut self, voice_idx: usize, level: u8) {
         if voice_idx < MAX_VOICES {
-            self.channel_reverb[voice_idx] = enabled;
-            self.voices[voice_idx].reverb_enabled = enabled;
+            self.voice_reverb_send[voice_idx] = level;
         }
     }
 

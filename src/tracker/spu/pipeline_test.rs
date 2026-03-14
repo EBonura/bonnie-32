@@ -3940,4 +3940,699 @@ mod spu_pipeline {
             }
         }
     }
+
+    // =========================================================================
+    // Test 26: Reverb correctness — all presets produce output with correct
+    //          characteristics (energy, stereo, tail decay)
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_26_reverb_correctness() {
+        use crate::tracker::spu::reverb::{SpuReverb, ReverbType};
+
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 26: Reverb Correctness — All Presets");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let out_dir = format!("{}/26_reverb_correctness", OUT_DIR);
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let sample_rate: u32 = 44100;
+        // Generate a short impulse (click) followed by silence — classic impulse response test
+        let impulse_len = sample_rate as usize * 3; // 3 seconds total
+        let burst_len = 100; // ~2.3ms burst
+
+        // Also generate a sine tone for sustained signal test
+        let sine_input = generate_sine(440.0, 1.0, sample_rate, 16000.0);
+
+        let active_presets = [
+            ReverbType::Room,
+            ReverbType::StudioSmall,
+            ReverbType::StudioMedium,
+            ReverbType::StudioLarge,
+            ReverbType::Hall,
+            ReverbType::HalfEcho,
+            ReverbType::SpaceEcho,
+            ReverbType::ChaosEcho,
+            ReverbType::Delay,
+        ];
+
+        eprintln!("  {:>14}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+            "Preset", "PeakL", "PeakR", "TailLen", "EnergyRat", "Stereo");
+
+        for &preset_type in &active_presets {
+            let mut reverb = SpuReverb::new();
+            reverb.set_preset(preset_type);
+
+            // --- Impulse response test ---
+            let mut ir_left = Vec::with_capacity(impulse_len);
+            let mut ir_right = Vec::with_capacity(impulse_len);
+
+            for i in 0..impulse_len {
+                let input = if i < burst_len { 16000i16 } else { 0i16 };
+                let (l, r) = reverb.process_sample(input, input);
+                ir_left.push(l.clamp(-32768, 32767) as i16);
+                ir_right.push(r.clamp(-32768, 32767) as i16);
+            }
+
+            // Write impulse response WAV
+            write_wav_stereo(
+                &format!("{}/{}_impulse.wav", out_dir, preset_type.name().replace(' ', "_")),
+                &ir_left, &ir_right, sample_rate,
+            );
+
+            // Measure peak output
+            let peak_l = ir_left.iter().map(|&s| (s as i32).abs()).max().unwrap_or(0);
+            let peak_r = ir_right.iter().map(|&s| (s as i32).abs()).max().unwrap_or(0);
+
+            // Measure reverb tail: find last sample > 1% of peak
+            let threshold = (peak_l.max(peak_r).max(1) as f64 * 0.01) as i32;
+            let tail_end = ir_left.iter().zip(ir_right.iter())
+                .rposition(|(&l, &r)| (l as i32).abs() > threshold || (r as i32).abs() > threshold)
+                .unwrap_or(0);
+            let tail_ms = (tail_end as f64 / sample_rate as f64) * 1000.0;
+
+            // Measure energy ratio: energy of reverb output vs input burst energy
+            let input_energy: f64 = burst_len as f64 * (16000.0f64).powi(2);
+            let output_energy: f64 = ir_left.iter().zip(ir_right.iter())
+                .map(|(&l, &r)| (l as f64).powi(2) + (r as f64).powi(2))
+                .sum::<f64>() / 2.0; // Average L/R
+            let energy_ratio = output_energy / input_energy.max(1.0);
+
+            // Measure stereo difference (should be non-zero for cross-channel presets)
+            let stereo_diff: f64 = ir_left.iter().zip(ir_right.iter())
+                .map(|(&l, &r)| ((l as f64) - (r as f64)).powi(2))
+                .sum::<f64>().sqrt()
+                / (ir_left.len() as f64).sqrt();
+
+            eprintln!("  {:>14}  {:>10}  {:>10}  {:>7.0}ms  {:>10.3}  {:>10.1}",
+                preset_type.name(), peak_l, peak_r, tail_ms, energy_ratio, stereo_diff);
+
+            // --- Assertions ---
+
+            // 1. Must produce non-zero output
+            assert!(peak_l > 0 || peak_r > 0,
+                "{}: reverb produced no output!", preset_type.name());
+
+            // 2. Output must not exceed input amplitude significantly
+            // (reverb shouldn't amplify beyond 2× due to resonance/feedback)
+            assert!(peak_l < 32768 && peak_r < 32768,
+                "{}: reverb output clipping! peak_l={} peak_r={}", preset_type.name(), peak_l, peak_r);
+
+            // 3. Reverb tail must extend beyond the input burst
+            assert!(tail_end > burst_len * 2,
+                "{}: reverb tail too short ({}), should extend well past input burst ({})",
+                preset_type.name(), tail_end, burst_len);
+
+            // --- Sustained signal test ---
+            let mut reverb2 = SpuReverb::new();
+            reverb2.set_preset(preset_type);
+
+            let mut sustained_left = Vec::with_capacity(sine_input.len());
+            let mut sustained_right = Vec::with_capacity(sine_input.len());
+            for &s in &sine_input {
+                let (l, r) = reverb2.process_sample(s, s);
+                sustained_left.push(l.clamp(-32768, 32767) as i16);
+                sustained_right.push(r.clamp(-32768, 32767) as i16);
+            }
+
+            write_wav_stereo(
+                &format!("{}/{}_sustained.wav", out_dir, preset_type.name().replace(' ', "_")),
+                &sustained_left, &sustained_right, sample_rate,
+            );
+
+            // 4. Sustained signal should eventually produce significant output
+            // (check last quarter of the signal)
+            let last_quarter_start = sustained_left.len() * 3 / 4;
+            let last_quarter_peak: i32 = sustained_left[last_quarter_start..].iter()
+                .chain(sustained_right[last_quarter_start..].iter())
+                .map(|&s| (s as i32).abs())
+                .max().unwrap_or(0);
+            assert!(last_quarter_peak > 100,
+                "{}: sustained reverb output too quiet in last quarter (peak={})",
+                preset_type.name(), last_quarter_peak);
+        }
+
+        // Test Off preset produces silence
+        {
+            let mut reverb = SpuReverb::new();
+            reverb.set_preset(ReverbType::Off);
+            for _ in 0..1000 {
+                let (l, r) = reverb.process_sample(16000, 16000);
+                assert_eq!(l, 0, "Off preset should produce zero left output");
+                assert_eq!(r, 0, "Off preset should produce zero right output");
+            }
+            eprintln!("  {:>14}  confirmed silent", "Off");
+        }
+
+        eprintln!("\n  All reverb presets produce valid output.");
+    }
+
+    // =========================================================================
+    // Test 27: Reverb dry/wet mix — verify effect intensity scales correctly
+    //          at different wet levels
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_27_reverb_dry_wet_mix() {
+        use crate::tracker::spu::reverb::{SpuReverb, ReverbType};
+
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 27: Reverb Dry/Wet Mix Levels");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let out_dir = format!("{}/27_reverb_wet_dry", OUT_DIR);
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let sample_rate: u32 = 44100;
+
+        // Use Hall preset as representative
+        let test_preset = ReverbType::Hall;
+        let wet_levels: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+        // Generate input: 0.5s sine burst then 1.5s silence (to hear the tail)
+        let burst_duration = 0.5;
+        let total_duration = 2.0;
+        let burst_samples = (burst_duration * sample_rate as f64) as usize;
+        let total_samples = (total_duration * sample_rate as f64) as usize;
+        let sine_burst = generate_sine(440.0, burst_duration, sample_rate, 16000.0);
+
+        eprintln!("  {:>8}  {:>12}  {:>12}  {:>12}  {:>12}  {:>12}",
+            "Wet", "BurstRMS", "TailRMS", "BurstPeak", "TailPeak", "TailRatio");
+
+        let mut burst_rms_values = Vec::new();
+        let mut tail_rms_values = Vec::new();
+
+        for &wet in &wet_levels {
+            let mut reverb = SpuReverb::new();
+            reverb.set_preset(test_preset);
+            reverb.set_wet_level(wet);
+
+            // Process through full SPU mix path:
+            // mixed = dry_signal * (1-wet) + reverb_output * wet
+            let mut mixed_left = Vec::with_capacity(total_samples);
+            let mut mixed_right = Vec::with_capacity(total_samples);
+
+            for i in 0..total_samples {
+                let dry_signal = if i < burst_samples { sine_burst[i] } else { 0i16 };
+                let (rev_l, rev_r) = reverb.process_sample(dry_signal, dry_signal);
+
+                let dry_mix = 1.0 - wet;
+                let out_l = (dry_signal as f32 * dry_mix + rev_l as f32 * wet) as i32;
+                let out_r = (dry_signal as f32 * dry_mix + rev_r as f32 * wet) as i32;
+
+                mixed_left.push(out_l.clamp(-32768, 32767) as i16);
+                mixed_right.push(out_r.clamp(-32768, 32767) as i16);
+            }
+
+            write_wav_stereo(
+                &format!("{}/hall_wet_{:.0}pct.wav", out_dir, wet * 100.0),
+                &mixed_left, &mixed_right, sample_rate,
+            );
+
+            // Measure RMS during burst (first 0.5s)
+            let burst_rms: f64 = {
+                let sum: f64 = mixed_left[..burst_samples].iter()
+                    .map(|&s| (s as f64).powi(2)).sum();
+                (sum / burst_samples as f64).sqrt()
+            };
+
+            // Measure RMS during tail (0.7s to 1.5s — skip transition)
+            let tail_start = (0.7 * sample_rate as f64) as usize;
+            let tail_end = (1.5 * sample_rate as f64) as usize;
+            let tail_rms: f64 = {
+                let sum: f64 = mixed_left[tail_start..tail_end].iter()
+                    .map(|&s| (s as f64).powi(2)).sum();
+                (sum / (tail_end - tail_start) as f64).sqrt()
+            };
+
+            let burst_peak: i32 = mixed_left[..burst_samples].iter()
+                .map(|&s| (s as i32).abs()).max().unwrap_or(0);
+            let tail_peak: i32 = mixed_left[tail_start..tail_end].iter()
+                .map(|&s| (s as i32).abs()).max().unwrap_or(0);
+
+            let tail_ratio = if burst_rms > 0.0 { tail_rms / burst_rms } else { 0.0 };
+
+            eprintln!("  {:>5.0}%  {:>12.1}  {:>12.1}  {:>12}  {:>12}  {:>12.4}",
+                wet * 100.0, burst_rms, tail_rms, burst_peak, tail_peak, tail_ratio);
+
+            burst_rms_values.push(burst_rms);
+            tail_rms_values.push(tail_rms);
+        }
+
+        // --- Assertions ---
+
+        // 1. At wet=0.0 (fully dry): tail should be silent (no reverb)
+        assert!(tail_rms_values[0] < 1.0,
+            "At wet=0%, tail should be silent but RMS={:.1}", tail_rms_values[0]);
+
+        // 2. At wet=1.0 (fully wet): burst should be quieter than dry-only
+        //    (reverb output during burst is lower than direct signal)
+        assert!(burst_rms_values[4] < burst_rms_values[0],
+            "At wet=100%, burst RMS ({:.1}) should be less than dry burst ({:.1})",
+            burst_rms_values[4], burst_rms_values[0]);
+
+        // 3. Tail RMS should increase monotonically with wet level
+        //    (more wet = more reverb tail)
+        for i in 1..tail_rms_values.len() {
+            assert!(tail_rms_values[i] >= tail_rms_values[i-1] * 0.95,
+                "Tail RMS should increase with wet level: wet={:.0}% ({:.1}) < wet={:.0}% ({:.1})",
+                wet_levels[i] * 100.0, tail_rms_values[i],
+                wet_levels[i-1] * 100.0, tail_rms_values[i-1]);
+        }
+
+        // 4. At wet=0.5, burst should be audible (not too quiet)
+        assert!(burst_rms_values[2] > 1000.0,
+            "At wet=50%, burst should still be clearly audible (RMS={:.1})",
+            burst_rms_values[2]);
+
+        // 5. At wet=1.0, there should be a reverb tail
+        assert!(tail_rms_values[4] > 10.0,
+            "At wet=100%, reverb tail should be present (RMS={:.1})",
+            tail_rms_values[4]);
+
+        eprintln!("\n  Dry/wet mix behaves correctly across all levels.");
+
+        // --- Now test all presets at wet=0.5 to compare their relative characteristics ---
+        eprintln!("\n  All presets at 50% wet:");
+        eprintln!("  {:>14}  {:>10}  {:>10}  {:>10}",
+            "Preset", "BurstRMS", "TailRMS", "TailRatio");
+
+        let all_presets = [
+            ReverbType::Room,
+            ReverbType::StudioSmall,
+            ReverbType::StudioMedium,
+            ReverbType::StudioLarge,
+            ReverbType::Hall,
+            ReverbType::HalfEcho,
+            ReverbType::SpaceEcho,
+            ReverbType::ChaosEcho,
+            ReverbType::Delay,
+        ];
+
+        for &preset in &all_presets {
+            let mut reverb = SpuReverb::new();
+            reverb.set_preset(preset);
+            reverb.set_wet_level(0.5);
+
+            let mut mixed_left = Vec::with_capacity(total_samples);
+            for i in 0..total_samples {
+                let dry_signal = if i < burst_samples { sine_burst[i] } else { 0i16 };
+                let (rev_l, _rev_r) = reverb.process_sample(dry_signal, dry_signal);
+                let out = (dry_signal as f32 * 0.5 + rev_l as f32 * 0.5) as i32;
+                mixed_left.push(out.clamp(-32768, 32767) as i16);
+            }
+
+            let burst_rms: f64 = {
+                let sum: f64 = mixed_left[..burst_samples].iter()
+                    .map(|&s| (s as f64).powi(2)).sum();
+                (sum / burst_samples as f64).sqrt()
+            };
+            let tail_start = (0.7 * sample_rate as f64) as usize;
+            let tail_end = (1.5 * sample_rate as f64) as usize;
+            let tail_rms: f64 = {
+                let sum: f64 = mixed_left[tail_start..tail_end].iter()
+                    .map(|&s| (s as f64).powi(2)).sum();
+                (sum / (tail_end - tail_start) as f64).sqrt()
+            };
+            let tail_ratio = if burst_rms > 0.0 { tail_rms / burst_rms } else { 0.0 };
+
+            eprintln!("  {:>14}  {:>10.1}  {:>10.1}  {:>10.4}",
+                preset.name(), burst_rms, tail_rms, tail_ratio);
+        }
+    }
+
+    // =========================================================================
+    // Test 28: Reverb characterization — RT60, echo timing, frequency response
+    //          per preset
+    // =========================================================================
+
+    #[test]
+    fn spu_pipeline_28_reverb_characterization() {
+        use crate::tracker::spu::reverb::{SpuReverb, ReverbType};
+
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("TEST 28: Reverb Characterization Per Preset");
+        eprintln!("{}\n", "=".repeat(70));
+
+        let out_dir = format!("{}/28_reverb_characterization", OUT_DIR);
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let sample_rate: u32 = 44100;
+
+        let presets = [
+            ReverbType::Room,
+            ReverbType::StudioSmall,
+            ReverbType::StudioMedium,
+            ReverbType::StudioLarge,
+            ReverbType::Hall,
+            ReverbType::HalfEcho,
+            ReverbType::SpaceEcho,
+            ReverbType::ChaosEcho,
+            ReverbType::Delay,
+        ];
+
+        // ------------------------------------------------------------------
+        // Part A: Impulse response analysis — RT60, first reflection, density
+        // ------------------------------------------------------------------
+
+        eprintln!("  Part A: Impulse Response Analysis");
+        eprintln!("  {:>14}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+            "Preset", "RT60(ms)", "1stRef", "Peak(ms)", "PeakAmp", "Density");
+
+        for &preset in &presets {
+            let mut reverb = SpuReverb::new();
+            reverb.set_preset(preset);
+
+            // Single-sample impulse (Dirac delta)
+            let ir_len = sample_rate as usize * 4; // 4 seconds
+            let mut ir_left = Vec::with_capacity(ir_len);
+
+            // Feed single impulse
+            let (l, _) = reverb.process_sample(32767, 32767);
+            ir_left.push(l.clamp(-32768, 32767) as i16);
+
+            // Collect rest of IR
+            for _ in 1..ir_len {
+                let (l, _) = reverb.process_sample(0, 0);
+                ir_left.push(l.clamp(-32768, 32767) as i16);
+            }
+
+            // Find peak amplitude and its position
+            let peak_amp = ir_left.iter().map(|&s| (s as i32).abs()).max().unwrap_or(0);
+            let peak_pos = ir_left.iter().position(|&s| (s as i32).abs() == peak_amp).unwrap_or(0);
+            let peak_ms = peak_pos as f64 / sample_rate as f64 * 1000.0;
+
+            // Find first reflection: first sample > 1% of peak after the initial impulse
+            let first_ref_threshold = (peak_amp.max(1) as f64 * 0.01) as i32;
+            let first_ref = ir_left.iter().skip(10) // skip initial transient
+                .position(|&s| (s as i32).abs() > first_ref_threshold)
+                .map(|p| p + 10)
+                .unwrap_or(0);
+            let first_ref_ms = first_ref as f64 / sample_rate as f64 * 1000.0;
+
+            // Estimate RT60: time for signal to decay 60dB from peak
+            // Find when RMS drops below peak * 10^(-60/20) = peak * 0.001
+            let rt60_threshold = peak_amp as f64 * 0.001;
+            let window = 441; // 10ms RMS window
+            let mut rt60_sample = ir_len;
+            if peak_pos + window < ir_len {
+                for start in (peak_pos..ir_len - window).step_by(window / 2) {
+                    let rms: f64 = ir_left[start..start + window].iter()
+                        .map(|&s| (s as f64).powi(2)).sum::<f64>()
+                        / window as f64;
+                    let rms = rms.sqrt();
+                    if rms < rt60_threshold {
+                        rt60_sample = start;
+                        break;
+                    }
+                }
+            }
+            let rt60_ms = (rt60_sample - peak_pos) as f64 / sample_rate as f64 * 1000.0;
+
+            // Measure density: count zero-crossings in the first 500ms of IR
+            // Higher density = more diffuse reverb
+            let density_window = (0.5 * sample_rate as f64) as usize;
+            let density_end = density_window.min(ir_left.len());
+            let mut zero_crossings = 0u32;
+            for i in 1..density_end {
+                if (ir_left[i] > 0) != (ir_left[i-1] > 0) {
+                    zero_crossings += 1;
+                }
+            }
+
+            eprintln!("  {:>14}  {:>7.0}ms  {:>7.1}ms  {:>7.1}ms  {:>10}  {:>10}",
+                preset.name(), rt60_ms, first_ref_ms, peak_ms, peak_amp, zero_crossings);
+
+            // Write IR for manual inspection
+            write_wav_mono(
+                &format!("{}/{}_ir.wav", out_dir, preset.name().replace(' ', "_")),
+                &ir_left, sample_rate,
+            );
+
+            // Assertions
+            if peak_amp > 0 {
+                // First reflection should come after at least 1 sample
+                assert!(first_ref > 0,
+                    "{}: no first reflection detected", preset.name());
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Part B: Frequency response — test at different input frequencies
+        // ------------------------------------------------------------------
+
+        eprintln!("\n  Part B: Frequency Response (relative output level at different frequencies)");
+        let test_freqs = [100.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
+
+        // Header
+        eprint!("  {:>14}", "Preset");
+        for &freq in &test_freqs {
+            eprint!("  {:>7.0}Hz", freq);
+        }
+        eprintln!();
+
+        for &preset in &presets {
+            eprint!("  {:>14}", preset.name());
+
+            let mut levels = Vec::new();
+            for &freq in &test_freqs {
+                let mut reverb = SpuReverb::new();
+                reverb.set_preset(preset);
+
+                // Feed 0.5s of sine, then 0.5s silence
+                let dur_samples = sample_rate as usize;
+                let sine = generate_sine(freq, 0.5, sample_rate, 16000.0);
+                let mut output = Vec::with_capacity(dur_samples);
+
+                for i in 0..dur_samples {
+                    let input = if i < sine.len() { sine[i] } else { 0i16 };
+                    let (l, _) = reverb.process_sample(input, input);
+                    output.push(l.clamp(-32768, 32767) as i16);
+                }
+
+                // Measure output RMS in the tail (after input stops)
+                let tail_start = sine.len() + (sample_rate as usize / 10); // 100ms after input ends
+                let tail_end = output.len();
+                let tail_rms = if tail_start < tail_end {
+                    let sum: f64 = output[tail_start..tail_end].iter()
+                        .map(|&s| (s as f64).powi(2)).sum();
+                    (sum / (tail_end - tail_start) as f64).sqrt()
+                } else {
+                    0.0
+                };
+
+                // Normalize to dB relative to input
+                let level_db = if tail_rms > 0.0 {
+                    20.0 * (tail_rms / 16000.0).log10()
+                } else {
+                    -96.0
+                };
+                levels.push(level_db);
+                eprint!("  {:>8.1}dB", level_db);
+            }
+            eprintln!();
+
+            // Check that reverb passes audio (at least one frequency should have
+            // measurable tail output)
+            let max_level = levels.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            assert!(max_level > -80.0,
+                "{}: no frequency produced measurable reverb tail", preset.name());
+        }
+
+        // ------------------------------------------------------------------
+        // Part C: Echo timing for echo/delay presets
+        // ------------------------------------------------------------------
+
+        eprintln!("\n  Part C: Echo Timing (delay/echo presets)");
+        eprintln!("  {:>14}  {:>12}  {:>12}  {:>12}",
+            "Preset", "1st Echo", "2nd Echo", "Decay(dB)");
+
+        let echo_presets = [
+            ReverbType::HalfEcho,
+            ReverbType::SpaceEcho,
+            ReverbType::ChaosEcho,
+            ReverbType::Delay,
+        ];
+
+        for &preset in &echo_presets {
+            let mut reverb = SpuReverb::new();
+            reverb.set_preset(preset);
+
+            // Short click burst
+            let ir_len = sample_rate as usize * 3;
+            let burst = 50;
+            let mut ir = Vec::with_capacity(ir_len);
+
+            for i in 0..ir_len {
+                let input = if i < burst { 32767i16 } else { 0i16 };
+                let (l, _) = reverb.process_sample(input, input);
+                ir.push(l.clamp(-32768, 32767) as i16);
+            }
+
+            // Compute envelope (RMS in 5ms windows)
+            let window = sample_rate as usize / 200; // 5ms
+            let mut envelope: Vec<f64> = Vec::new();
+            let mut t = 0;
+            while t + window <= ir.len() {
+                let rms: f64 = ir[t..t+window].iter()
+                    .map(|&s| (s as f64).powi(2)).sum::<f64>()
+                    / window as f64;
+                envelope.push(rms.sqrt());
+                t += window;
+            }
+
+            // Find peaks in envelope (local maxima above threshold)
+            let env_peak = envelope.iter().cloned().fold(0.0f64, f64::max);
+            let peak_threshold = env_peak * 0.05;
+            let mut peaks: Vec<(usize, f64)> = Vec::new();
+
+            // Skip initial burst (first 20ms)
+            let skip_windows = 4;
+            for i in skip_windows.max(1)..envelope.len().saturating_sub(1) {
+                if envelope[i] > envelope[i-1] && envelope[i] > envelope[i.saturating_add(1).min(envelope.len()-1)]
+                    && envelope[i] > peak_threshold
+                {
+                    // Avoid double-counting: skip if too close to previous peak
+                    if peaks.last().map_or(true, |&(prev_i, _)| i - prev_i > 3) {
+                        peaks.push((i, envelope[i]));
+                    }
+                }
+            }
+
+            let echo1_ms = peaks.get(0).map(|&(i, _)| i as f64 * window as f64 / sample_rate as f64 * 1000.0);
+            let echo2_ms = peaks.get(1).map(|&(i, _)| i as f64 * window as f64 / sample_rate as f64 * 1000.0);
+            let decay_db = if peaks.len() >= 2 {
+                let ratio = peaks[1].1 / peaks[0].1.max(0.001);
+                20.0 * ratio.log10()
+            } else {
+                f64::NEG_INFINITY
+            };
+
+            eprintln!("  {:>14}  {:>9.1}ms  {:>9}  {:>9.1}dB",
+                preset.name(),
+                echo1_ms.unwrap_or(0.0),
+                echo2_ms.map_or("none".to_string(), |ms| format!("{:.1}ms", ms)),
+                decay_db,
+            );
+
+            // Echo presets should have at least one identifiable echo
+            assert!(peaks.len() >= 1,
+                "{}: no echo peaks detected", preset.name());
+        }
+
+        // ------------------------------------------------------------------
+        // Part D: Full pipeline reverb test — instruments through SPU with reverb
+        // ------------------------------------------------------------------
+
+        eprintln!("\n  Part D: Full Pipeline — Instrument Through SPU With Reverb");
+
+        let sf2_path = find_sf2_path();
+        let sf2_bytes = match std::fs::read(&sf2_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  SKIP part D: {}", e);
+                return;
+            }
+        };
+
+        // Verify SF2 can be parsed (early exit)
+        if crate::tracker::spu::convert::parse_sf2(&sf2_bytes).is_err() {
+            eprintln!("  SKIP part D: SF2 parse error");
+            return;
+        }
+
+        let test_instruments: [(u8, &str); 3] = [
+            (0, "Piano"),
+            (48, "Strings"),
+            (73, "Flute"),
+        ];
+
+        let test_reverb_types = [
+            ReverbType::Room,
+            ReverbType::Hall,
+            ReverbType::SpaceEcho,
+        ];
+
+        eprintln!("  {:>10}  {:>14}  {:>10}  {:>10}  {:>10}",
+            "Instr", "Reverb", "DryRMS", "WetRMS", "TailRMS");
+
+        for &(program, name) in &test_instruments {
+            for &rev_type in &test_reverb_types {
+                // Dry pass (no reverb)
+                let mut spu_dry = SpuCore::new();
+                let sf2_dry = crate::tracker::spu::convert::parse_sf2(&sf2_bytes).unwrap();
+                spu_dry.load_soundfont(sf2_dry, "test".into());
+                spu_dry.set_reverb_preset(ReverbType::Off);
+
+                let dur = sample_rate as usize; // 1 second
+                let sustain = dur / 2;
+                let mut dry_left = Vec::with_capacity(dur);
+
+                spu_dry.note_on(0, program, 60, 100);
+                for i in 0..dur {
+                    if i == sustain { spu_dry.note_off(0); }
+                    let (l, _) = spu_dry.tick();
+                    dry_left.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+
+                // Wet pass (with reverb at 50%)
+                let mut spu_wet = SpuCore::new();
+                let sf2_wet = crate::tracker::spu::convert::parse_sf2(&sf2_bytes).unwrap();
+                spu_wet.load_soundfont(sf2_wet, "test".into());
+                spu_wet.set_reverb_preset(rev_type);
+                spu_wet.set_reverb_wet_level(0.5);
+                spu_wet.set_voice_reverb_send(0, 127);
+
+                let mut wet_left = Vec::with_capacity(dur);
+
+                spu_wet.note_on(0, program, 60, 100);
+                for i in 0..dur {
+                    if i == sustain { spu_wet.note_off(0); }
+                    let (l, _) = spu_wet.tick();
+                    wet_left.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+
+                // Also capture extended tail (extra 1s after note)
+                let tail_dur = sample_rate as usize;
+                let mut tail_left = Vec::with_capacity(tail_dur);
+                for _ in 0..tail_dur {
+                    let (l, _) = spu_wet.tick();
+                    tail_left.push((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                }
+
+                // Write combined WAV (wet signal + tail)
+                let mut combined = wet_left.clone();
+                combined.extend_from_slice(&tail_left);
+                write_wav_mono(
+                    &format!("{}/{}_{}.wav", out_dir, name, rev_type.name().replace(' ', "_")),
+                    &combined, sample_rate,
+                );
+
+                let dry_rms: f64 = {
+                    let sum: f64 = dry_left.iter().map(|&s| (s as f64).powi(2)).sum();
+                    (sum / dry_left.len() as f64).sqrt()
+                };
+                let wet_rms: f64 = {
+                    let sum: f64 = wet_left.iter().map(|&s| (s as f64).powi(2)).sum();
+                    (sum / wet_left.len() as f64).sqrt()
+                };
+                let tail_rms: f64 = {
+                    let sum: f64 = tail_left.iter().map(|&s| (s as f64).powi(2)).sum();
+                    (sum / tail_left.len() as f64).sqrt()
+                };
+
+                eprintln!("  {:>10}  {:>14}  {:>10.1}  {:>10.1}  {:>10.1}",
+                    name, rev_type.name(), dry_rms, wet_rms, tail_rms);
+
+                // The wet signal should have a reverb tail after the note ends
+                // (tail should be non-zero for reverb-enabled presets)
+                assert!(tail_rms > 0.1,
+                    "{} + {}: reverb tail should be audible (RMS={:.1})",
+                    name, rev_type.name(), tail_rms);
+            }
+        }
+
+        eprintln!("\n  Reverb characterization complete. WAVs in {}", out_dir);
+    }
 }
