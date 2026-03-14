@@ -1318,16 +1318,16 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         }
     }
 
-    // Per-channel reverb preset (row of buttons)
+    // Global reverb preset (PS1 has a single reverb processor)
     let reverb_y = sr_y + sr_btn_h + 10.0;
     let preset_btn_w = 68.0;
     let preset_btn_h = 20.0;
     let preset_spacing = 2.0;
     let presets_per_row = 5;
 
-    // Get current channel's reverb settings (reuse channel_settings from above)
-    let current_reverb_idx = channel_settings.reverb_type;
-    let current_wet = channel_settings.wet;
+    // Read global reverb settings (shared by all channels, like real PS1)
+    let current_reverb_idx = state.song.reverb.preset;
+    let current_wet = state.song.reverb.wet;
 
     for (i, reverb_type) in ReverbType::ALL.iter().enumerate() {
         let row = i / presets_per_row;
@@ -1352,16 +1352,16 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         draw_text(reverb_type.name(), btn_x + 4.0, btn_y + 14.0, 11.0, text_color);
 
         if is_hovered && ctx.mouse.left_pressed {
-            state.set_channel_reverb_type(ch, reverb_type.to_index());
-            state.set_status(&format!("Ch{} Reverb: {}", ch + 1, reverb_type.name()), 1.0);
+            state.set_global_reverb_type(reverb_type.to_index());
+            state.set_status(&format!("Reverb: {}", reverb_type.name()), 1.0);
         }
     }
 
-    // Wet knob (next to reverb buttons)
+    // Wet knob (next to reverb buttons — global, affects all channels)
     let wet_knob_x = piano_x + presets_per_row as f32 * (preset_btn_w + preset_spacing) + 25.0;
     let wet_knob_y = reverb_y + preset_btn_h / 2.0 + 10.0;
     if let Some(new_val) = draw_mini_knob(ctx, wet_knob_x, wet_knob_y, 14.0, current_wet, "Wet", false) {
-        state.set_channel_wet(ch, new_val);
+        state.set_global_wet(new_val);
     }
 
     // Pan/Mod/Expr knobs below the reverb buttons
@@ -1519,18 +1519,24 @@ fn draw_instruments_view(ctx: &mut UiContext, rect: Rect, state: &mut TrackerSta
         draw_text(label, btn_x + 4.0, btn_y + 14.0, 11.0, text_color);
 
         if is_hovered && ctx.mouse.left_pressed {
-            // Insert effect at cursor position with the current effect amount
-            let effect_amount = state.song.get_channel_settings(ch).effect_amount;
-            state.set_effect(*effect_char, effect_amount);
-            state.set_status(&format!("Inserted {} ({})", label, effect_amount), 1.0);
+            // Insert effect at cursor position with a sensible default parameter
+            let default_param = match *effect_char {
+                'C' => 100, // SetVolume: 100 (near full)
+                'P' => 64,  // SetPan: center
+                'E' => 127, // SetExpression: full
+                'M' => 64,  // SetModulation: medium
+                _ => 32,    // Slides, arpeggio, etc: moderate amount
+            };
+            state.set_effect(*effect_char, default_param);
+            state.set_status(&format!("Inserted {} ({})", label, default_param), 1.0);
         }
     }
 
-    // Effect amount knob (controls the parameter value inserted)
-    let fx_amount_x = piano_x + fx_btns_per_row as f32 * (fx_btn_w + fx_btn_spacing) + 25.0;
-    let fx_amount_y = fx_btn_start_y + fx_btn_h / 2.0 + 2.0;
-    let current_fx_amount = state.song.get_channel_settings(ch).effect_amount;
-    if let Some(new_val) = draw_mini_knob(ctx, fx_amount_x, fx_amount_y, 14.0, current_fx_amount, "Amt", false) {
+    // Per-channel reverb send level (PS1 EON register extended to 0-127)
+    let send_knob_x = piano_x + fx_btns_per_row as f32 * (fx_btn_w + fx_btn_spacing) + 25.0;
+    let send_knob_y = fx_btn_start_y + fx_btn_h / 2.0 + 2.0;
+    let current_send = state.song.get_channel_settings(ch).effect_amount;
+    if let Some(new_val) = draw_mini_knob(ctx, send_knob_x, send_knob_y, 14.0, current_send, "Send", false) {
         state.set_channel_effect_amount(ch, new_val);
     }
 
