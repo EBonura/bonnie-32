@@ -4,12 +4,14 @@ pub mod content_browser;
 pub mod hierarchy;
 pub mod inspector;
 pub mod viewport;
+pub mod tracker;
 
 use context::{EditorAction, EditorContext, EditorMode};
 use content_browser::ContentBrowser;
 use hierarchy::HierarchyPanel;
 use inspector::InspectorPanel;
 use viewport::ViewportPanel;
+use tracker::TrackerPanel;
 
 pub struct Editor {
     pub ctx: EditorContext,
@@ -17,6 +19,7 @@ pub struct Editor {
     hierarchy: HierarchyPanel,
     inspector: InspectorPanel,
     pub viewport: ViewportPanel,
+    tracker: TrackerPanel,
 }
 
 impl Editor {
@@ -27,16 +30,26 @@ impl Editor {
             hierarchy: HierarchyPanel::new(),
             inspector: InspectorPanel::new(),
             viewport: ViewportPanel::new(),
+            tracker: TrackerPanel::new(),
         }
     }
 
     /// Draw all editor UI. Call this inside egui_ctx.run().
     pub fn draw(&mut self, egui_ctx: &egui::Context) {
         toolbar::draw_toolbar(egui_ctx, &mut self.ctx);
-        self.content_browser.draw(egui_ctx, &mut self.ctx);
-        self.hierarchy.draw(egui_ctx, &mut self.ctx);
-        self.inspector.draw(egui_ctx, &mut self.ctx);
-        self.viewport.draw(egui_ctx, &mut self.ctx);
+
+        match self.ctx.mode {
+            EditorMode::Tracker => {
+                self.tracker.draw(egui_ctx);
+            }
+            _ => {
+                // World editor / other modes
+                self.content_browser.draw(egui_ctx, &mut self.ctx);
+                self.hierarchy.draw(egui_ctx, &mut self.ctx);
+                self.inspector.draw(egui_ctx, &mut self.ctx);
+                self.viewport.draw(egui_ctx, &mut self.ctx);
+            }
+        }
     }
 
     /// Process any pending editor actions.
@@ -76,15 +89,17 @@ impl Editor {
         }
     }
 
+    /// Tick tracker playback
+    pub fn tick(&mut self, dt: f64) {
+        self.tracker.tick(dt);
+    }
+
     fn create_default_project(&mut self) {
-        // For now, create a project in a temp-ish location
-        // TODO: file dialog for choosing project directory
         let home = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
         let project_root = home.join("bonnie-32-projects").join("New Project");
 
         match crate::project::Project::create(project_root, "New Project") {
             Ok(mut project) => {
-                // Register bundled assets if available
                 let bundled_path = std::path::PathBuf::from("assets/samples");
                 if bundled_path.exists() {
                     project.register_bundled_assets(&bundled_path);

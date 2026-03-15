@@ -84,6 +84,9 @@ impl App {
             Err(e) => eprintln!("Render error: {e:?}"),
         }
 
+        // Tick tracker playback
+        self.editor.tick(dt as f64);
+
         // Process editor actions after rendering
         self.editor.process_actions();
     }
