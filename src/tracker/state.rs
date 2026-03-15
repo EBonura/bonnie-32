@@ -2,7 +2,7 @@
 
 use super::audio::{AudioEngine, OutputSampleRate};
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
-use super::psx_reverb::ReverbType;
+use super::spu::reverb::ReverbType;
 use super::actions::create_tracker_actions;
 use super::song_browser::SongBrowser;
 use crate::storage::Storage;
@@ -121,6 +121,10 @@ pub struct TrackerState {
 
     /// MIDI keyboard input
     pub midi: MidiInput,
+
+    /// Track which note was triggered by mouse click on piano keys
+    /// (note, channel) — used to send note_off when mouse is released anywhere
+    pub piano_mouse_note: Option<(u8, usize)>,
 }
 
 /// Soundfont filename
@@ -234,6 +238,7 @@ impl TrackerState {
             tap_times: Vec::new(),
             pattern_split: SplitPanel::horizontal(2000).with_ratio(0.6).with_min_size(200.0),
             midi: MidiInput::new(),
+            piano_mouse_note: None,
         }
     }
 
@@ -540,7 +545,7 @@ impl TrackerState {
             self.current_channel -= 1;
             self.current_column = 3; // fx param column (last column in channel)
             // Apply the new channel's reverb settings
-            self.apply_current_channel_reverb();
+            self.apply_current_channel_settings();
         }
     }
 
@@ -554,7 +559,7 @@ impl TrackerState {
             self.current_channel += 1;
             self.current_column = 0;
             // Apply the new channel's reverb settings
-            self.apply_current_channel_reverb();
+            self.apply_current_channel_settings();
         }
     }
 
@@ -563,7 +568,7 @@ impl TrackerState {
         let num_ch = self.num_channels();
         if self.current_channel < num_ch - 1 {
             self.current_channel += 1;
-            self.apply_current_channel_reverb();
+            self.apply_current_channel_settings();
         }
     }
 
@@ -571,7 +576,7 @@ impl TrackerState {
     pub fn prev_channel(&mut self) {
         if self.current_channel > 0 {
             self.current_channel -= 1;
-            self.apply_current_channel_reverb();
+            self.apply_current_channel_settings();
         }
     }
 
@@ -924,8 +929,8 @@ impl TrackerState {
         for (channel, pitch, inst, volume, _) in notes_to_play {
             if let Some(p) = pitch {
                 if p == 0xFF {
-                    // Note off
-                    self.audio.note_off(channel as i32, 0);
+                    // Note off — release all voices on this channel
+                    self.audio.channel_notes_off(channel as i32);
                     self.last_played_notes[channel] = None;
                 } else {
                     // Check if same note is already playing (sustain behavior like Picotron)
@@ -1443,18 +1448,28 @@ impl TrackerState {
         self.audio.set_pan(ch, settings.pan as i32);
         self.audio.set_modulation(ch, settings.modulation as i32);
         self.audio.set_expression(ch, settings.expression as i32);
+        self.audio.set_reverb_send(ch, settings.effect_amount as i32);
     }
 
-    /// Apply the current channel's reverb and sample rate settings to the audio engine
-    /// Call this when switching channels to update the global audio settings to match
-    pub fn apply_current_channel_reverb(&self) {
-        let settings = self.song.get_channel_settings(self.current_channel);
-        // Apply reverb settings
-        let reverb_type = ReverbType::from_index(settings.reverb_type);
-        self.audio.set_reverb_preset(reverb_type);
-        self.audio.set_reverb_wet_level(settings.wet as f32 / 127.0);
-        // Apply sample rate settings
+    /// Apply the current channel's sample rate settings to the audio engine
+    /// Call this when switching channels to update sample rate to match
+    pub fn apply_current_channel_settings(&self) {
         self.apply_current_channel_sample_rate();
+    }
+
+    /// Set the global reverb preset (PS1 has a single reverb processor)
+    pub fn set_global_reverb_type(&mut self, value: u8) {
+        self.song.reverb.preset = value.min(9);
+        let reverb_type = ReverbType::from_index(value);
+        self.audio.set_reverb_preset(reverb_type);
+        self.dirty = true;
+    }
+
+    /// Set the global reverb wet level (0-127)
+    pub fn set_global_wet(&mut self, value: u8) {
+        self.song.reverb.wet = value.min(127);
+        self.audio.set_reverb_wet_level(value as f32 / 127.0);
+        self.dirty = true;
     }
 
     /// Sync all channel settings to the audio engine
@@ -1489,32 +1504,10 @@ impl TrackerState {
         }
     }
 
-    pub fn set_channel_reverb_type(&mut self, channel: usize, value: u8) {
-        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
-            settings.reverb_type = value.min(9); // Clamp to valid range
-            self.dirty = true;
-            // Apply the reverb type for the current channel if it's being edited
-            if channel == self.current_channel {
-                let reverb_type = ReverbType::from_index(value);
-                self.audio.set_reverb_preset(reverb_type);
-            }
-        }
-    }
-
-    pub fn set_channel_wet(&mut self, channel: usize, value: u8) {
-        if let Some(settings) = self.song.channel_settings.get_mut(channel) {
-            settings.wet = value.min(127);
-            self.dirty = true;
-            // Apply the wet level for the current channel if it's being edited
-            if channel == self.current_channel {
-                self.audio.set_reverb_wet_level(value as f32 / 127.0);
-            }
-        }
-    }
-
     pub fn set_channel_effect_amount(&mut self, channel: usize, value: u8) {
         if let Some(settings) = self.song.channel_settings.get_mut(channel) {
             settings.effect_amount = value.min(127);
+            self.audio.set_reverb_send(channel as i32, value as i32);
             self.dirty = true;
         }
     }

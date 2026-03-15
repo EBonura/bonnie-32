@@ -152,6 +152,16 @@ pub fn draw_test_viewport(
         },
     );
 
+    // Render blob shadows under entities
+    if game.playing {
+        super::shadows::render_blob_shadows(fb, &game.camera, &game.world, level);
+    }
+
+    // Render particles
+    if game.playing {
+        game.particles.render(fb, &game.camera);
+    }
+
     // Render player wireframe cylinder if playing
     if game.playing {
         if let Some(player_pos) = game.get_player_position() {

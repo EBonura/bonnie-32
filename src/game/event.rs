@@ -90,6 +90,12 @@ pub struct Events {
 
     /// Player respawn requested
     pub respawn: EventQueue<RespawnEvent>,
+
+    /// Trigger volume entered
+    pub trigger_enter: EventQueue<TriggerEvent>,
+
+    /// Trigger volume exited
+    pub trigger_exit: EventQueue<TriggerEvent>,
 }
 
 impl Events {
@@ -103,6 +109,8 @@ impl Events {
             item_collected: EventQueue::new(),
             collision: EventQueue::new(),
             respawn: EventQueue::new(),
+            trigger_enter: EventQueue::new(),
+            trigger_exit: EventQueue::new(),
         }
     }
 
@@ -116,6 +124,8 @@ impl Events {
         self.item_collected.clear();
         self.collision.clear();
         self.respawn.clear();
+        self.trigger_enter.clear();
+        self.trigger_exit.clear();
     }
 }
 
@@ -209,6 +219,19 @@ pub struct RespawnEvent {
     pub player: Entity,
     /// Where to respawn (checkpoint position)
     pub position: Vec3,
+}
+
+/// A trigger volume was entered or exited
+#[derive(Debug, Clone)]
+pub struct TriggerEvent {
+    /// The trigger entity
+    pub trigger: Entity,
+    /// The entity that entered/exited the trigger
+    pub other: Entity,
+    /// The trigger identifier string
+    pub trigger_id: String,
+    /// The event name from the trigger definition (on_enter or on_exit)
+    pub event_name: Option<String>,
 }
 
 #[cfg(test)]
