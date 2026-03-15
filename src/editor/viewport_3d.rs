@@ -4200,7 +4200,7 @@ pub fn draw_viewport_3d(
                     let mut drew_collision = false;
                     if let Some(asset) = asset {
                         for comp in &asset.components {
-                            if let crate::asset::AssetComponent::Collision { shape, is_trigger } = comp {
+                            if let crate::asset::AssetComponent::Collision { shape, is_trigger, .. } = comp {
                                 let wire_color = if is_selected {
                                     RasterColor::new(255, 255, 255)
                                 } else if *is_trigger {

@@ -116,8 +116,12 @@ pub fn encode_pcm_to_adpcm(
         let block_samples = &padded[sample_offset..sample_offset + SAMPLES_PER_ADPCM_BLOCK];
 
         // Find best filter + shift combination
+        // Force filter 0 on loop start blocks so the decoder output doesn't
+        // depend on prev1/prev2 state — this prevents audible pops/clicks
+        // when the loop restarts with different ADPCM history.
+        let is_loop_start = loop_start_block.map_or(false, |ls| block_idx == ls);
         let (best_filter, best_shift, encoded_nibbles) =
-            find_best_encoding(block_samples, prev1, prev2);
+            find_best_encoding(block_samples, prev1, prev2, is_loop_start);
 
         // Build the ADPCM block
         let mut block_bytes = [0u8; 16];
@@ -169,13 +173,19 @@ fn find_best_encoding(
     samples: &[i16],
     prev1: i16,
     prev2: i16,
+    force_filter_zero: bool,
 ) -> (u8, u8, [u8; 28]) {
     let mut best_error: i64 = i64::MAX;
     let mut best_filter: u8 = 0;
     let mut best_shift: u8 = 0;
     let mut best_nibbles = [0u8; 28];
 
-    for filter in 0..5u8 {
+    // When force_filter_zero is set (loop start blocks), only use filter 0.
+    // Filter 0 has zero prediction coefficients, so the decoded output is
+    // independent of prev1/prev2 — this eliminates ADPCM state mismatch
+    // artifacts when the sample loops back.
+    let max_filter = if force_filter_zero { 1u8 } else { 5u8 };
+    for filter in 0..max_filter {
         let filter_pos = ADPCM_FILTER_POS[filter as usize];
         let filter_neg = ADPCM_FILTER_NEG[filter as usize];
 

@@ -4202,7 +4202,7 @@ fn draw_component_gizmos(
 
                 draw_filled_octahedron(fb, camera, ortho, light_pos, size, gizmo_color);
             }
-            crate::asset::AssetComponent::Collision { shape, is_trigger } => {
+            crate::asset::AssetComponent::Collision { shape, is_trigger, collision_mesh } => {
                 let is_selected = state.selected_component == Some(comp_idx);
                 let wire_color = if is_selected {
                     RasterColor::new(255, 255, 255)
@@ -4212,7 +4212,17 @@ fn draw_component_gizmos(
                     RasterColor::new(100, 150, 255)
                 };
 
-                draw_collision_wireframe(fb, camera, ortho, shape, wire_color, state.asset.bounds());
+                // If collision has a linked mesh part, draw wireframe from that mesh
+                if let Some(mesh_name) = collision_mesh {
+                    if let Some(objects) = state.asset.mesh() {
+                        if let Some(obj) = objects.iter().find(|o| &o.name == mesh_name) {
+                            draw_mesh_wireframe(fb, camera, ortho, &obj.mesh, wire_color);
+                        }
+                    }
+                } else {
+                    // Legacy: draw abstract shape wireframe
+                    draw_collision_wireframe(fb, camera, ortho, shape, wire_color, state.asset.bounds());
+                }
             }
             _ => {}
         }
@@ -4354,6 +4364,38 @@ fn draw_collision_wireframe(
     for (a, b) in &edges {
         if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (project(*a), project(*b)) {
             fb.draw_line_3d(x0, y0, z0, x1, y1, z1, color);
+        }
+    }
+}
+
+/// Draw wireframe edges for an EditableMesh (used for collision mesh visualization)
+fn draw_mesh_wireframe(
+    fb: &mut Framebuffer,
+    camera: &Camera,
+    ortho: Option<&OrthoProjection>,
+    mesh: &crate::modeler::mesh_editor::EditableMesh,
+    color: RasterColor,
+) {
+    let fb_w = fb.width;
+    let fb_h = fb.height;
+
+    let project = |p: Vec3| -> Option<(i32, i32, f32)> {
+        world_to_screen_with_ortho_depth(
+            p, camera.position, camera.basis_x, camera.basis_y, camera.basis_z,
+            fb_w, fb_h, ortho,
+        ).map(|(x, y, z)| (x as i32, y as i32, z))
+    };
+
+    for face in &mesh.faces {
+        let n = face.vertices.len();
+        for i in 0..n {
+            let vi0 = face.vertices[i];
+            let vi1 = face.vertices[(i + 1) % n];
+            if let (Some(v0), Some(v1)) = (mesh.vertices.get(vi0), mesh.vertices.get(vi1)) {
+                if let (Some((x0, y0, z0)), Some((x1, y1, z1))) = (project(v0.pos), project(v1.pos)) {
+                    fb.draw_line_3d(x0, y0, z0, x1, y1, z1, color);
+                }
+            }
         }
     }
 }

@@ -74,10 +74,16 @@ impl VolumeEnvelope {
         if rate < 44 {
             self.step <<= 11 - shift;
         } else if rate >= 48 {
-            self.counter_increment >>= (shift - 11) as u32;
-            // Rate with all bits set in mask = never tick (counter_increment stays 0)
-            if (rate & rate_mask) != rate_mask {
-                self.counter_increment = self.counter_increment.max(1);
+            let shift_amount = (shift - 11) as u32;
+            // u16 can only be shifted by 0-15; larger shifts produce 0 (envelope never ticks)
+            if shift_amount >= 16 {
+                self.counter_increment = 0;
+            } else {
+                self.counter_increment >>= shift_amount;
+                // Rate with all bits set in mask = never tick (counter_increment stays 0)
+                if (rate & rate_mask) != rate_mask {
+                    self.counter_increment = self.counter_increment.max(1);
+                }
             }
         }
         // rates 44-47: step and counter_increment stay at base values
@@ -184,14 +190,14 @@ pub struct Voice {
     adsr_envelope: VolumeEnvelope,
 
     // --- Volume ---
-    /// Left volume (-0x4000 to 0x3FFF), applied as >> 15
+    /// Base volume from instrument region (0 to 0x7FFF, PS1 voice volume range)
+    base_volume: i16,
+    /// Left volume (0 to 0x7FFF), applied as >> 15
     volume_left: i16,
-    /// Right volume (-0x4000 to 0x3FFF), applied as >> 15
+    /// Right volume (0 to 0x7FFF), applied as >> 15
     volume_right: i16,
 
     // --- Flags ---
-    /// Whether this voice sends to the reverb unit
-    pub reverb_enabled: bool,
     /// ENDX flag — set when sample reaches loop end
     pub end_flag: bool,
 
@@ -224,9 +230,9 @@ impl Voice {
             adsr_level: 0,
             adsr_target: 0,
             adsr_envelope: VolumeEnvelope::new(),
+            base_volume: 0x3FFF,
             volume_left: 0x3FFF,
             volume_right: 0x3FFF,
-            reverb_enabled: false,
             end_flag: false,
             instrument: 0,
             note: 0,
@@ -266,9 +272,17 @@ impl Voice {
         self.adsr_phase = AdsrPhase::Attack;
         self.update_adsr_envelope();
 
-        // Apply velocity to volume (scale region default by velocity)
-        let vol = (region.default_volume as i32 * velocity as i32) / 127;
-        let vol = vol.clamp(0, 0x3FFF) as i16;
+        // Store base volume from instrument region for set_volume_from_pan
+        // PS1 volume registers range 0-0x7FFF (unity gain with >> 15)
+        self.base_volume = region.default_volume.min(0x7FFF);
+
+        // Set initial volume (will be overridden by sync_voice_volume if called)
+        // Velocity uses squared curve to match MIDI/GM/SF2 conventions:
+        // gain = (vel/127)^2. This matches rustysynth's note_gain calculation
+        // and produces natural velocity dynamics for SF2-sourced instruments.
+        let vel_sq = (velocity as i32 * velocity as i32) / 127;
+        let vol = (self.base_volume as i32 * vel_sq) / 127;
+        let vol = vol.clamp(0, 0x7FFF) as i16;
         self.volume_left = vol;
         self.volume_right = vol;
 
@@ -287,16 +301,24 @@ impl Voice {
     }
 
     /// Set stereo volume from pan position (0=left, 64=center, 127=right)
-    /// and base volume (0-127)
+    /// and MIDI volume (0-127, from CC7*CC11)
+    ///
+    /// Combines base_volume (0-0x7FFF, from instrument region) with MIDI
+    /// volume and velocity to produce SPU-range L/R volumes for the >> 15
+    /// shift in tick().
     pub fn set_volume_from_pan(&mut self, pan: u8, volume: u8) {
-        let pan_f = pan as f32 / 127.0;
-        let base_vol = (volume as i32 * self.velocity as i32) / 127;
-        let base_vol = base_vol.clamp(0, 0x3FFF) as f32;
+        // MIDI/GM/SF2 standard: both volume and velocity use squared curves.
+        // Matches rustysynth: channel_gain = (vol * expr)^2, note_gain includes (vel/127)^2.
+        let vel_sq = (self.velocity as i32 * self.velocity as i32) / 127; // max 127
+        let vol_sq = (volume as i32 * volume as i32) / 127; // max 127
+        let combined = (self.base_volume as i32 * vol_sq * vel_sq) / (127 * 127);
+        let combined = combined.clamp(0, 0x7FFF) as f32;
 
         // Equal-power panning
+        let pan_f = pan as f32 / 127.0;
         let angle = pan_f * std::f32::consts::FRAC_PI_2;
-        self.volume_left = (base_vol * angle.cos()) as i16;
-        self.volume_right = (base_vol * angle.sin()) as i16;
+        self.volume_left = (combined * angle.cos()) as i16;
+        self.volume_right = (combined * angle.sin()) as i16;
     }
 
     /// Set pitch directly (for pitch bend, portamento, etc.)
@@ -412,16 +434,17 @@ impl Voice {
     /// block into gauss_history for cross-block Gaussian interpolation.
     /// This matches Duckstation's carryover of NUM_SAMPLES_FROM_LAST_ADPCM_BLOCK samples.
     fn decode_current_block(&mut self, spu_ram: &SpuRam) {
-        // Carry over last 4 samples from current block for cross-block interpolation
-        // gauss_history[0] = oldest (sample 24), gauss_history[3] = newest (sample 27)
-        if self.has_samples {
-            self.gauss_history = [
-                self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 4],
-                self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 3],
-                self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 2],
-                self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 1],
-            ];
-        }
+        // Always carry over last 4 samples for cross-block Gaussian interpolation.
+        // decoded_samples still contains the previous block's data (or zeros on first call).
+        // The old code guarded this with `if self.has_samples`, but has_samples is already
+        // false by the time we get here (set false when advancing blocks in tick()),
+        // which caused stale history and audible scratching at every block boundary.
+        self.gauss_history = [
+            self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 4],
+            self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 3],
+            self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 2],
+            self.decoded_samples[SAMPLES_PER_ADPCM_BLOCK - 1],
+        ];
 
         adpcm::decode_block_from_ram(
             spu_ram.data(),
@@ -508,6 +531,15 @@ impl Voice {
         // Tick the hardware envelope
         self.adsr_envelope.tick(&mut self.adsr_level);
 
+        // During release, if the level is very low, force it to Off.
+        // With exponential release the step shrinks as level drops (step * level >> 15),
+        // making the tail audibly silent long before mathematically reaching 0.
+        if self.adsr_phase == AdsrPhase::Release && self.adsr_level < 0x10 {
+            self.adsr_level = 0;
+            self.adsr_phase = AdsrPhase::Off;
+            return;
+        }
+
         // Check for phase transition (sustain phase never transitions on its own)
         if self.adsr_phase != AdsrPhase::Sustain {
             let reached_target = if self.adsr_envelope.decreasing {
@@ -517,6 +549,12 @@ impl Voice {
             };
 
             if reached_target {
+                // Clamp level to target on transition (matches Duckstation).
+                // Attack→Decay: ensures level is exactly 0x7FFF, not some overshoot.
+                // Decay→Sustain: ensures level is exactly sustain_target, preventing
+                // fast decays from overshooting.
+                self.adsr_level = self.adsr_target;
+
                 self.adsr_phase = match self.adsr_phase {
                     AdsrPhase::Attack => AdsrPhase::Decay,
                     AdsrPhase::Decay => AdsrPhase::Sustain,
