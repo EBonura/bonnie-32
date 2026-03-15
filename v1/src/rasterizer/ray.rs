@@ -36,7 +36,7 @@ const SCALE: f32 = 0.75;
 /// Generate a ray from screen coordinates through the camera.
 ///
 /// This properly inverts the projection used in project() and world_to_screen():
-/// ```text
+/// ```
 /// screen_x = (cam_x * 4 / (cam_z + 5)) * vs + center_x
 /// screen_y = (cam_y * 4 / (cam_z + 5)) * vs + center_y
 /// ```
@@ -98,7 +98,7 @@ pub fn screen_to_ray(
 /// Generate a parallel ray from screen coordinates for orthographic projection.
 ///
 /// Inverts the ortho projection formula:
-/// ```text
+/// ```
 /// sx = (cam_x - center_x) * zoom + half_w
 /// sy = -(cam_y - center_y) * zoom + half_h
 /// ```

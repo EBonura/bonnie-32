@@ -1,323 +1,156 @@
-//! Asset Component Definitions
-//!
-//! Components that can be attached to an asset. These are "templates" that
-//! spawn into runtime ECS components when the asset is instantiated.
-//!
-//! The key principle: Mesh is just another component with embedded data,
-//! not a special field. This enables mesh-less assets (pure triggers, lights, etc.)
-
 use serde::{Deserialize, Serialize};
-use crate::modeler::{MeshPart, RigBone};
-use crate::game::components::{EnemyType, ItemType};
+use super::handle::AssetHandle;
 
-/// Components that can be attached to an asset
-///
-/// These are design-time definitions that get converted to runtime ECS components
-/// when the asset is spawned into the game world.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AssetComponent {
-    /// 3D mesh - EMBEDDED data, not a file reference
-    ///
-    /// Contains full geometry + TextureRef::Id pointing to shared textures.
-    /// This is the visual representation of the asset.
     Mesh {
-        /// Mesh parts (each with geometry + texture reference)
-        parts: Vec<MeshPart>,
+        #[serde(default)]
+        mesh_data: AssetHandle,
     },
 
-    /// Collision shape for physics
-    ///
-    /// Defines how the asset interacts with physics and other entities.
-    /// The collision volume is defined by a linked MeshPart (editable like any mesh).
-    /// Legacy `shape` field is kept for backward compatibility with old saves.
     Collision {
-        /// Legacy collision shape definition (used when collision_mesh is None)
         shape: CollisionShapeDef,
-        /// If true, this is a trigger zone (pass-through, fires events)
-        /// If false, this is a solid collider (blocks movement)
         #[serde(default)]
         is_trigger: bool,
-        /// Name of the linked MeshPart that defines the collision volume
-        /// When set, the collision shape is defined by this editable mesh
         #[serde(default)]
-        collision_mesh: Option<String>,
+        collision_mesh: Option<AssetHandle>,
     },
 
-    /// Point light attached to asset
-    ///
-    /// For torch-holding enemies, glowing pickups, etc.
     Light {
-        /// RGB color (0-255)
         color: [u8; 3],
-        /// Light intensity multiplier
         intensity: f32,
-        /// Light falloff radius in world units
         radius: f32,
-        /// Offset from asset origin
         #[serde(default)]
         offset: [f32; 3],
     },
 
-    /// Trigger zone for scripting events
-    ///
-    /// Fires events when entities enter or exit the zone.
     Trigger {
-        /// Unique identifier for this trigger
         trigger_id: String,
-        /// Event name to fire on enter (if any)
         #[serde(default)]
         on_enter: Option<String>,
-        /// Event name to fire on exit (if any)
         #[serde(default)]
         on_exit: Option<String>,
     },
 
-    /// Collectible item
-    ///
-    /// Health pickups, keys, currency, upgrades.
     Pickup {
-        /// Type of item this pickup represents
         item_type: ItemType,
-        /// Respawn time in seconds (None = doesn't respawn)
         #[serde(default)]
         respawn_time: Option<f32>,
     },
 
-    /// Enemy definition
-    ///
-    /// Defines enemy behavior, stats, and combat properties.
     Enemy {
-        /// Type of enemy (affects AI behavior)
         enemy_type: EnemyType,
-        /// Starting health points
         health: i32,
-        /// Base damage dealt
         damage: i32,
-        /// Patrol radius in world units (for AI)
         #[serde(default)]
         patrol_radius: f32,
     },
 
-    /// Interactive door
-    ///
-    /// Can be locked, requiring a key to open.
     Door {
-        /// Key required to open (None = unlocked)
         #[serde(default)]
         required_key: Option<String>,
-        /// Whether the door starts in the open state
         #[serde(default)]
         start_open: bool,
     },
 
-    /// Audio source
-    ///
-    /// Ambient sounds, music zones, sound effects.
     Audio {
-        /// Sound file or identifier
-        sound: String,
-        /// Volume multiplier (0.0 - 1.0)
+        sound: AssetHandle,
         #[serde(default = "default_volume")]
         volume: f32,
-        /// Falloff radius in world units
         radius: f32,
-        /// Whether the sound loops
         #[serde(default)]
         looping: bool,
     },
 
-    /// Particle emitter
-    ///
-    /// Smoke, fire, sparkles, etc.
     Particle {
-        /// Particle effect identifier (for preset lookup: "fire", "sparks", "dust", "blood")
         effect: String,
-        /// Offset from asset origin
         #[serde(default)]
         offset: [f32; 3],
-        /// Full emitter definition (overrides preset if provided)
-        #[serde(default)]
-        emitter_def: Option<crate::game::particles::ParticleEmitterDef>,
     },
 
-    /// Character controller for movement
-    ///
-    /// For player or NPC movement with collision.
     CharacterController {
-        /// Character height for collision
         height: f32,
-        /// Collision cylinder radius
         radius: f32,
-        /// Maximum step-up height
         #[serde(default = "default_step_height")]
         step_height: f32,
     },
 
-    /// Spawn point for entities
-    ///
-    /// Controls spawn lifecycle. The asset's other components (Enemy, Pickup, etc.)
-    /// define what gets spawned. SpawnPoint just says "this spawns" and "does it come back".
     SpawnPoint {
-        /// Player start position (special case: position marker, no entity spawned)
         #[serde(default)]
         is_player: bool,
-        /// Respawns on rest/reload (true = enemies/consumables, false = bosses/key items)
         #[serde(default)]
         respawns: bool,
     },
 
-    /// Skeleton for animation (TR-style: bones define fixed structure)
-    ///
-    /// Bones define hierarchy and offsets. Animation keyframes store rotations.
-    /// Each MeshPart can be bound to a bone via bone_index.
     Skeleton {
-        /// The bone hierarchy
-        bones: Vec<RigBone>,
+        bones: Vec<BoneDef>,
+    },
+
+    Script {
+        script: AssetHandle,
     },
 }
 
-fn default_volume() -> f32 {
-    1.0
-}
-
-fn default_step_height() -> f32 {
-    384.0 // Default from game::components::character
-}
+fn default_volume() -> f32 { 1.0 }
+fn default_step_height() -> f32 { 384.0 }
 
 impl AssetComponent {
-    /// Get a human-readable name for this component type
     pub fn type_name(&self) -> &'static str {
         match self {
-            AssetComponent::Mesh { .. } => "Mesh",
-            AssetComponent::Collision { .. } => "Collision",
-            AssetComponent::Light { .. } => "Light",
-            AssetComponent::Trigger { .. } => "Trigger",
-            AssetComponent::Pickup { .. } => "Pickup",
-            AssetComponent::Enemy { .. } => "Enemy",
-            AssetComponent::Door { .. } => "Door",
-            AssetComponent::Audio { .. } => "Audio",
-            AssetComponent::Particle { .. } => "Particle",
-            AssetComponent::CharacterController { .. } => "CharacterController",
-            AssetComponent::SpawnPoint { .. } => "SpawnPoint",
-            AssetComponent::Skeleton { .. } => "Skeleton",
+            Self::Mesh { .. } => "Mesh",
+            Self::Collision { .. } => "Collision",
+            Self::Light { .. } => "Light",
+            Self::Trigger { .. } => "Trigger",
+            Self::Pickup { .. } => "Pickup",
+            Self::Enemy { .. } => "Enemy",
+            Self::Door { .. } => "Door",
+            Self::Audio { .. } => "Audio",
+            Self::Particle { .. } => "Particle",
+            Self::CharacterController { .. } => "CharacterController",
+            Self::SpawnPoint { .. } => "SpawnPoint",
+            Self::Skeleton { .. } => "Skeleton",
+            Self::Script { .. } => "Script",
         }
-    }
-
-    /// Get an icon character for this component type (for UI)
-    pub fn icon(&self) -> char {
-        match self {
-            AssetComponent::Mesh { .. } => '\u{E834}', // cube icon
-            AssetComponent::Collision { .. } => '\u{E835}', // box icon
-            AssetComponent::Light { .. } => '\u{E90F}', // lightbulb icon
-            AssetComponent::Trigger { .. } => '\u{E8B8}', // flag icon
-            AssetComponent::Pickup { .. } => '\u{E838}', // star icon
-            AssetComponent::Enemy { .. } => '\u{E87C}', // skull icon
-            AssetComponent::Door { .. } => '\u{E88A}', // door icon
-            AssetComponent::Audio { .. } => '\u{E050}', // speaker icon
-            AssetComponent::Particle { .. } => '\u{E3A5}', // sparkle icon
-            AssetComponent::CharacterController { .. } => '\u{E7FD}', // person icon
-            AssetComponent::SpawnPoint { .. } => '\u{E566}', // location icon
-            AssetComponent::Skeleton { .. } => '\u{E91B}', // accessibility icon (stick figure)
-        }
-    }
-
-    /// Check if this is a Mesh component
-    pub fn is_mesh(&self) -> bool {
-        matches!(self, AssetComponent::Mesh { .. })
-    }
-
-    /// Check if this is a Collision component
-    pub fn is_collision(&self) -> bool {
-        matches!(self, AssetComponent::Collision { .. })
-    }
-
-    /// Check if this is a Light component
-    pub fn is_light(&self) -> bool {
-        matches!(self, AssetComponent::Light { .. })
-    }
-
-    /// Check if this is an Enemy component
-    pub fn is_enemy(&self) -> bool {
-        matches!(self, AssetComponent::Enemy { .. })
-    }
-
-    /// Check if this is a SpawnPoint component
-    pub fn is_spawn_point(&self) -> bool {
-        matches!(self, AssetComponent::SpawnPoint { .. })
-    }
-
-    /// Check if this is a Skeleton component
-    pub fn is_skeleton(&self) -> bool {
-        matches!(self, AssetComponent::Skeleton { .. })
     }
 }
 
-/// Collision shape definition for assets
-///
-/// These are design-time definitions that get converted to runtime
-/// CollisionShape when the asset is spawned.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CollisionShapeDef {
-    /// Sphere with radius (simplest, good for most entities)
     Sphere { radius: f32 },
-    /// Axis-aligned box with half-extents
     Box { half_extents: [f32; 3] },
-    /// Capsule (cylinder with sphere caps) - good for humanoids
     Capsule { radius: f32, height: f32 },
-    /// Cylinder (flat top/bottom)
     Cylinder { radius: f32, height: f32 },
-    /// Auto-generate from mesh bounds (computed at load time)
     FromMesh,
-}
-
-impl CollisionShapeDef {
-    /// Create a sphere collision shape
-    pub fn sphere(radius: f32) -> Self {
-        CollisionShapeDef::Sphere { radius }
-    }
-
-    /// Create a box collision shape
-    pub fn box_shape(half_x: f32, half_y: f32, half_z: f32) -> Self {
-        CollisionShapeDef::Box {
-            half_extents: [half_x, half_y, half_z],
-        }
-    }
-
-    /// Create a capsule collision shape
-    pub fn capsule(radius: f32, height: f32) -> Self {
-        CollisionShapeDef::Capsule { radius, height }
-    }
-
-    /// Create a cylinder collision shape
-    pub fn cylinder(radius: f32, height: f32) -> Self {
-        CollisionShapeDef::Cylinder { radius, height }
-    }
-
-    /// Get a human-readable description of this shape
-    pub fn description(&self) -> String {
-        match self {
-            CollisionShapeDef::Sphere { radius } => format!("Sphere (r={:.0})", radius),
-            CollisionShapeDef::Box { half_extents } => {
-                format!("Box ({:.0}x{:.0}x{:.0})",
-                    half_extents[0] * 2.0,
-                    half_extents[1] * 2.0,
-                    half_extents[2] * 2.0
-                )
-            }
-            CollisionShapeDef::Capsule { radius, height } => {
-                format!("Capsule (r={:.0}, h={:.0})", radius, height)
-            }
-            CollisionShapeDef::Cylinder { radius, height } => {
-                format!("Cylinder (r={:.0}, h={:.0})", radius, height)
-            }
-            CollisionShapeDef::FromMesh => "From Mesh".to_string(),
-        }
-    }
 }
 
 impl Default for CollisionShapeDef {
     fn default() -> Self {
-        // Default to auto-compute from mesh
-        CollisionShapeDef::FromMesh
+        Self::FromMesh
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EnemyType {
+    Grunt,
+    Archer,
+    Heavy,
+    Swarm,
+    Elite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ItemType {
+    HealthPickup { amount: i32 },
+    Currency { amount: i32 },
+    Key { key_id: String },
+    Upgrade,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoneDef {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub local_position: [f32; 3],
+    pub local_rotation: [f32; 3],
+    pub length: f32,
 }
