@@ -43,6 +43,7 @@ pub enum EditorAction {
     SwitchMode(EditorMode),
     // Level actions
     NewLevel,
+    AddRoom,
     SaveLevel,
     // Song actions
     NewSong,

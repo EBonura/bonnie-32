@@ -1,6 +1,8 @@
-use crate::rasterizer::{Camera, Color, Framebuffer};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use crate::rasterizer::{Camera, Color, Framebuffer, Texture};
 use crate::rasterizer::constants::{WIDTH, HEIGHT};
-use crate::scene::Level;
+use crate::scene::{Level, TextureRef};
 use super::context::EditorContext;
 
 pub struct ViewportPanel {
@@ -8,12 +10,14 @@ pub struct ViewportPanel {
     pub camera: Camera,
     /// Cached render data from level rooms (vertices, faces)
     cached_render: Option<CachedLevelRender>,
+    /// Texture cache: (pack, name) → index into CachedLevelRender::textures
+    texture_cache: HashMap<(String, String), usize>,
 }
 
 struct CachedLevelRender {
     vertices: Vec<crate::rasterizer::Vertex>,
     faces: Vec<crate::rasterizer::Face>,
-    textures: Vec<crate::rasterizer::Texture>,
+    textures: Vec<Texture>,
 }
 
 impl ViewportPanel {
@@ -29,6 +33,7 @@ impl ViewportPanel {
             framebuffer: Framebuffer::new(WIDTH, HEIGHT),
             camera,
             cached_render: None,
+            texture_cache: HashMap::new(),
         }
     }
 
@@ -80,20 +85,58 @@ impl ViewportPanel {
         });
     }
 
-    /// Rebuild cached render data from a level
+    /// Rebuild cached render data from a level.
+    /// `project_root` is used to resolve texture files; pass `None` for untextured rendering.
     pub fn rebuild_from_level(&mut self, level: &Level) {
+        self.rebuild_from_level_with_textures(level, None);
+    }
+
+    /// Rebuild with optional texture resolution from a project root.
+    pub fn rebuild_from_level_with_textures(
+        &mut self,
+        level: &Level,
+        project_root: Option<&Path>,
+    ) {
+        // Use RefCell so the closure satisfies Fn (not FnMut) while still mutating state
+        use std::cell::RefCell;
+        let tex_cache: RefCell<HashMap<(String, String), usize>> = RefCell::new(HashMap::new());
+        let textures: RefCell<Vec<Texture>> = RefCell::new(Vec::new());
+        let project_root = project_root.map(|p| p.to_path_buf());
+
+        let resolve = |tex_ref: &TextureRef| -> Option<(usize, u32)> {
+            let key = (tex_ref.pack.clone(), tex_ref.name.clone());
+            {
+                let cache = tex_cache.borrow();
+                if let Some(&idx) = cache.get(&key) {
+                    let w = textures.borrow()[idx].width as u32;
+                    return Some((idx, w));
+                }
+            }
+            let path = resolve_texture_path(tex_ref, project_root.as_deref())?;
+            match Texture::from_file(&path) {
+                Ok(tex) => {
+                    let w = tex.width as u32;
+                    let mut cache = tex_cache.borrow_mut();
+                    let mut tex_vec = textures.borrow_mut();
+                    let idx = tex_vec.len();
+                    tex_vec.push(tex);
+                    cache.insert(key, idx);
+                    Some((idx, w))
+                }
+                Err(e) => {
+                    log::warn!("Failed to load texture {:?}/{}: {}", tex_ref.pack, tex_ref.name, e);
+                    None
+                }
+            }
+        };
+
         let mut all_vertices = Vec::new();
         let mut all_faces = Vec::new();
 
         for room in &level.rooms {
-            let (verts, faces) = room.to_render_data_with_textures(|_tex_ref| {
-                // No texture resolution yet — render untextured
-                None
-            });
-
+            let (verts, faces) = room.to_render_data_with_textures(&resolve);
             let offset = all_vertices.len();
             all_vertices.extend(verts);
-            // Offset face vertex indices
             for mut face in faces {
                 face.v0 += offset;
                 face.v1 += offset;
@@ -102,10 +145,11 @@ impl ViewportPanel {
             }
         }
 
+        self.texture_cache = tex_cache.into_inner();
         self.cached_render = Some(CachedLevelRender {
             vertices: all_vertices,
             faces: all_faces,
-            textures: Vec::new(),
+            textures: textures.into_inner(),
         });
     }
 
@@ -164,4 +208,36 @@ impl Default for ViewportPanel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolve a TextureRef to a file path, searching bundled and project dirs.
+fn resolve_texture_path(tex: &TextureRef, project_root: Option<&Path>) -> Option<PathBuf> {
+    if !tex.is_valid() { return None; }
+
+    let extensions = ["png", "jpg", "jpeg"];
+
+    // 1. Project textures directory: {root}/textures/{name}.{ext}
+    if let Some(root) = project_root {
+        for ext in extensions {
+            let p = root.join("textures").join(format!("{}.{}", tex.name, ext));
+            if p.exists() { return Some(p); }
+        }
+    }
+
+    // 2. Bundled runtime textures: assets/runtime/textures/{pack}/{name}.{ext}
+    for ext in extensions {
+        let p = PathBuf::from("assets/runtime/textures")
+            .join(&tex.pack)
+            .join(format!("{}.{}", tex.name, ext));
+        if p.exists() { return Some(p); }
+    }
+
+    // 3. Flat bundled: assets/runtime/textures/{name}.{ext}
+    for ext in extensions {
+        let p = PathBuf::from("assets/runtime/textures")
+            .join(format!("{}.{}", tex.name, ext));
+        if p.exists() { return Some(p); }
+    }
+
+    None
 }

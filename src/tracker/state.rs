@@ -1,7 +1,7 @@
 //! Tracker editor state
 
 use super::audio::AudioEngine;
-use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
+use super::pattern::{Song, Pattern, Note, Effect, MAX_CHANNELS};
 use super::spu::reverb::ReverbType;
 use crate::editor::undo::UndoStack;
 use std::path::PathBuf;
@@ -620,6 +620,156 @@ impl TrackerState {
 
         if let Some(pattern) = self.current_pattern_mut() {
             pattern.set(ch, row, Note::EMPTY);
+        }
+        self.dirty = true;
+    }
+
+    // ── Selection helpers ──────────────────────────────────────────────────
+
+    /// Returns the normalised (start, end) of the current selection as
+    /// (channel_min, channel_max, row_min, row_max).
+    fn selection_bounds(&self) -> Option<(usize, usize, usize, usize)> {
+        let (sc, sr, _) = self.selection_start?;
+        let (ec, er, _) = self.selection_end?;
+        let ch_min = sc.min(ec);
+        let ch_max = sc.max(ec);
+        let row_min = sr.min(er);
+        let row_max = sr.max(er);
+        Some((ch_min, ch_max, row_min, row_max))
+    }
+
+    pub fn select_all(&mut self) {
+        let Some(pattern) = self.song.patterns.get(self.current_pattern_idx) else { return };
+        let num_ch = pattern.num_channels().saturating_sub(1);
+        let last_row = pattern.length.saturating_sub(1);
+        self.selection_start = Some((0, 0, 0));
+        self.selection_end   = Some((num_ch, last_row, 4));
+    }
+
+    pub fn copy_selection(&mut self) {
+        let Some((ch_min, ch_max, row_min, row_max)) = self.selection_bounds() else {
+            // Nothing selected — copy single row at cursor across all channels
+            let row = self.current_row;
+            let Some(pattern) = self.song.patterns.get(self.current_pattern_idx) else { return };
+            let data: Vec<Vec<Note>> = (0..pattern.num_channels())
+                .map(|ch| vec![pattern.get(ch, row).copied().unwrap_or(Note::EMPTY)])
+                .collect();
+            self.clipboard = Some(data);
+            return;
+        };
+
+        let Some(pattern) = self.song.patterns.get(self.current_pattern_idx) else { return };
+        let data: Vec<Vec<Note>> = (ch_min..=ch_max)
+            .map(|ch| {
+                (row_min..=row_max)
+                    .map(|r| pattern.get(ch, r).copied().unwrap_or(Note::EMPTY))
+                    .collect()
+            })
+            .collect();
+        self.clipboard = Some(data);
+    }
+
+    pub fn cut_selection(&mut self) {
+        self.copy_selection();
+        // Now clear the selection
+        let Some((ch_min, ch_max, row_min, row_max)) = self.selection_bounds() else { return };
+        self.push_undo();
+        let pat_idx = self.current_pattern_idx;
+        if let Some(pattern) = self.song.patterns.get_mut(pat_idx) {
+            for ch in ch_min..=ch_max {
+                for row in row_min..=row_max {
+                    pattern.set(ch, row, Note::EMPTY);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub fn paste_clipboard(&mut self) {
+        let Some(data) = self.clipboard.clone() else { return };
+        self.push_undo();
+        let start_ch  = self.current_channel;
+        let start_row = self.current_row;
+        let pat_idx   = self.current_pattern_idx;
+
+        if let Some(pattern) = self.song.patterns.get_mut(pat_idx) {
+            for (ch_offset, ch_data) in data.iter().enumerate() {
+                let ch = start_ch + ch_offset;
+                for (row_offset, &note) in ch_data.iter().enumerate() {
+                    let row = start_row + row_offset;
+                    pattern.set(ch, row, note);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    // ── Cursor navigation ──────────────────────────────────────────────────
+
+    pub fn move_cursor_page_up(&mut self) {
+        self.current_row = self.current_row.saturating_sub(16);
+    }
+
+    pub fn move_cursor_page_down(&mut self) {
+        let len = self.song.patterns
+            .get(self.current_pattern_idx)
+            .map(|p| p.length)
+            .unwrap_or(64);
+        self.current_row = (self.current_row + 16).min(len.saturating_sub(1));
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.current_row = 0;
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        let len = self.song.patterns
+            .get(self.current_pattern_idx)
+            .map(|p| p.length)
+            .unwrap_or(64);
+        self.current_row = len.saturating_sub(1);
+    }
+
+    // ── Pattern management ─────────────────────────────────────────────────
+
+    pub fn new_pattern(&mut self) {
+        let num_ch = self.song.num_channels();
+        let len = self.song.patterns
+            .first()
+            .map(|p| p.length)
+            .unwrap_or(64);
+        let new_idx = self.song.patterns.len();
+        self.song.patterns.push(Pattern::with_channels(len, num_ch));
+        self.song.arrangement.push(new_idx);
+        self.current_pattern_idx = new_idx;
+        self.current_row = 0;
+        self.dirty = true;
+    }
+
+    pub fn duplicate_pattern(&mut self) {
+        let Some(pat) = self.song.patterns.get(self.current_pattern_idx).cloned() else { return };
+        let new_idx = self.song.patterns.len();
+        self.song.patterns.push(pat);
+        // Insert into arrangement right after the current arrangement slot
+        let arr_pos = self.song.arrangement
+            .iter()
+            .position(|&i| i == self.current_pattern_idx)
+            .unwrap_or(self.song.arrangement.len().saturating_sub(1));
+        self.song.arrangement.insert(arr_pos + 1, new_idx);
+        self.current_pattern_idx = new_idx;
+        self.current_row = 0;
+        self.dirty = true;
+    }
+
+    pub fn clear_pattern(&mut self) {
+        self.push_undo();
+        let num_ch = self.song.num_channels();
+        let len = self.song.patterns
+            .get(self.current_pattern_idx)
+            .map(|p| p.length)
+            .unwrap_or(64);
+        if let Some(pat) = self.song.patterns.get_mut(self.current_pattern_idx) {
+            *pat = Pattern::with_channels(len, num_ch);
         }
         self.dirty = true;
     }

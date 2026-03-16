@@ -12,6 +12,10 @@ pub mod icon {
     // Edit operations
     pub const UNDO: char = '\u{e19b}';
     pub const REDO: char = '\u{e143}';
+    pub const COPY: char = '\u{e08b}';   // Lucide "copy"
+    pub const CLIPBOARD: char = '\u{e07a}'; // Lucide "clipboard"
+    pub const ARROW_UP: char = '\u{e1ca}';  // Lucide "arrow-up"
+    pub const ARROW_DOWN: char = '\u{e1c8}'; // Lucide "arrow-down"
 
     // Playback / Transport
     pub const PLAY: char = '\u{e13c}';

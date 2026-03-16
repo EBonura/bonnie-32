@@ -1,6 +1,7 @@
 //! Tracker panel — egui UI for the music editor
 
 use crate::tracker::TrackerState;
+use crate::tracker::TrackerView;
 use crate::tracker::pattern::Note;
 use super::icons::{icon, icon_button, icon_toggle};
 use super::theme;
@@ -28,7 +29,10 @@ impl TrackerPanel {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.draw_pattern_view(ui);
+            match self.state.view {
+                TrackerView::Pattern     => self.draw_pattern_view(ui),
+                TrackerView::Arrangement => self.draw_arrangement_view(ui),
+            }
         });
 
         self.handle_keyboard(ctx);
@@ -46,39 +50,53 @@ impl TrackerPanel {
                 self.state.toggle_play();
             }
 
-            // Navigation
-            if i.key_pressed(egui::Key::ArrowUp) {
-                self.state.move_cursor_up();
-            }
-            if i.key_pressed(egui::Key::ArrowDown) {
-                self.state.move_cursor_down();
-            }
-            if i.key_pressed(egui::Key::ArrowLeft) {
-                self.state.move_cursor_left();
-            }
-            if i.key_pressed(egui::Key::ArrowRight) {
-                self.state.move_cursor_right();
-            }
-
-            // Pattern navigation (Ctrl+Left/Right)
-            if i.modifiers.command && i.key_pressed(egui::Key::ArrowLeft) {
-                self.state.prev_pattern();
-            }
-            if i.modifiers.command && i.key_pressed(egui::Key::ArrowRight) {
-                self.state.next_pattern();
-            }
-
-            // Octave (Ctrl+Up/Down)
-            if i.modifiers.command && i.key_pressed(egui::Key::ArrowUp) {
-                if self.state.octave < 9 {
-                    self.state.octave += 1;
+            // Ctrl combos (highest priority, checked before bare navigation)
+            if i.modifiers.command {
+                if i.key_pressed(egui::Key::A) {
+                    self.state.select_all();
+                    return;
+                }
+                if i.key_pressed(egui::Key::C) {
+                    self.state.copy_selection();
+                    return;
+                }
+                if i.key_pressed(egui::Key::X) {
+                    self.state.cut_selection();
+                    return;
+                }
+                if i.key_pressed(egui::Key::V) {
+                    self.state.paste_clipboard();
+                    return;
+                }
+                // Pattern navigation (Ctrl+Left/Right)
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    self.state.prev_pattern();
+                    return;
+                }
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    self.state.next_pattern();
+                    return;
+                }
+                // Octave (Ctrl+Up/Down)
+                if i.key_pressed(egui::Key::ArrowUp) {
+                    if self.state.octave < 9 { self.state.octave += 1; }
+                    return;
+                }
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    if self.state.octave > 0 { self.state.octave -= 1; }
+                    return;
                 }
             }
-            if i.modifiers.command && i.key_pressed(egui::Key::ArrowDown) {
-                if self.state.octave > 0 {
-                    self.state.octave -= 1;
-                }
-            }
+
+            // Bare navigation
+            if i.key_pressed(egui::Key::ArrowUp)   { self.state.move_cursor_up(); }
+            if i.key_pressed(egui::Key::ArrowDown)  { self.state.move_cursor_down(); }
+            if i.key_pressed(egui::Key::ArrowLeft)  { self.state.move_cursor_left(); }
+            if i.key_pressed(egui::Key::ArrowRight) { self.state.move_cursor_right(); }
+            if i.key_pressed(egui::Key::PageUp)     { self.state.move_cursor_page_up(); }
+            if i.key_pressed(egui::Key::PageDown)   { self.state.move_cursor_page_down(); }
+            if i.key_pressed(egui::Key::Home)       { self.state.move_cursor_home(); }
+            if i.key_pressed(egui::Key::End)        { self.state.move_cursor_end(); }
 
             // Delete = clear note
             if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
@@ -115,13 +133,45 @@ impl TrackerPanel {
 
     fn draw_transport(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            // Rewind
+            // View tabs
+            let pat_active = self.state.view == TrackerView::Pattern;
+            let arr_active = self.state.view == TrackerView::Arrangement;
+
+            let pat_resp = ui.add(
+                egui::Button::new(
+                    egui::RichText::new("Pattern")
+                        .color(if pat_active { theme::ACCENT } else { theme::TEXT_DIM })
+                ).frame(false).min_size(egui::vec2(0.0, 28.0))
+            );
+            if pat_resp.clicked() { self.state.view = TrackerView::Pattern; }
+            if pat_active {
+                ui.painter().line_segment(
+                    [pat_resp.rect.left_bottom(), pat_resp.rect.right_bottom()],
+                    egui::Stroke::new(2.0, theme::ACCENT),
+                );
+            }
+
+            let arr_resp = ui.add(
+                egui::Button::new(
+                    egui::RichText::new("Arrangement")
+                        .color(if arr_active { theme::ACCENT } else { theme::TEXT_DIM })
+                ).frame(false).min_size(egui::vec2(0.0, 28.0))
+            );
+            if arr_resp.clicked() { self.state.view = TrackerView::Arrangement; }
+            if arr_active {
+                ui.painter().line_segment(
+                    [arr_resp.rect.left_bottom(), arr_resp.rect.right_bottom()],
+                    egui::Stroke::new(2.0, theme::ACCENT),
+                );
+            }
+
+            ui.separator();
+
+            // Transport
             if icon_button(ui, icon::SKIP_BACK, theme::ICON_SIZE_MD, "Rewind to start") {
                 self.state.playback_row = 0;
                 self.state.current_row = 0;
             }
-
-            // Play / Stop
             let (play_icon, play_tip) = if self.state.playing {
                 (icon::SQUARE, "Stop")
             } else {
@@ -139,7 +189,6 @@ impl TrackerPanel {
             if ui.add(egui::DragValue::new(&mut bpm).range(40.0..=300.0).speed(0.5)).changed() {
                 self.state.song.bpm = bpm as u16;
             }
-
             if ui.small_button("Tap").clicked() {
                 if let Some(bpm) = self.state.tap_tempo() {
                     self.state.song.bpm = bpm;
@@ -167,16 +216,30 @@ impl TrackerPanel {
 
             ui.separator();
 
+            // Pattern actions (only in pattern view)
+            if self.state.view == TrackerView::Pattern {
+                if icon_button(ui, icon::PLUS, theme::ICON_SIZE_SM, "New pattern") {
+                    self.state.new_pattern();
+                }
+                if icon_button(ui, icon::LAYERS, theme::ICON_SIZE_SM, "Duplicate pattern") {
+                    self.state.duplicate_pattern();
+                }
+                if icon_button(ui, icon::TRASH, theme::ICON_SIZE_SM, "Clear pattern") {
+                    self.state.clear_pattern();
+                }
+                ui.separator();
+            }
+
             // Pattern info
             ui.label(format!(
                 "Pat {}/{} Row {}/{}",
                 self.state.current_pattern_idx + 1,
-                self.state.song.arrangement.len(),
+                self.state.song.patterns.len(),
                 self.state.current_row + 1,
                 self.state.pattern_length(),
             ));
 
-            // Song name
+            // Song name (right-aligned)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(&self.state.song.name);
             });
@@ -311,6 +374,130 @@ impl TrackerPanel {
                     }
                 });
             }
+        });
+    }
+
+    fn draw_arrangement_view(&mut self, ui: &mut egui::Ui) {
+        let row_h   = 28.0;
+        let pat_w   = 80.0;
+        let num_pat = self.state.song.patterns.len();
+
+        ui.horizontal(|ui| {
+            // ── Left column: pattern list ─────────────────────────────────
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Patterns").strong());
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .id_salt("arr_pat_list")
+                    .max_height(ui.available_height() - 8.0)
+                    .show(ui, |ui| {
+                        for pat_idx in 0..num_pat {
+                            let selected = pat_idx == self.state.current_pattern_idx;
+                            let label = format!("{:02}", pat_idx + 1);
+                            let resp = ui.add_sized(
+                                [56.0, row_h],
+                                egui::SelectableLabel::new(selected, label),
+                            );
+                            if resp.clicked() {
+                                self.state.current_pattern_idx = pat_idx;
+                                self.state.current_row = 0;
+                            }
+                        }
+                    });
+            });
+
+            ui.separator();
+
+            // ── Right column: arrangement sequence ───────────────────────
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Arrangement").strong());
+                ui.separator();
+
+                let arr_len = self.state.song.arrangement.len();
+
+                egui::ScrollArea::vertical()
+                    .id_salt("arr_sequence")
+                    .max_height(ui.available_height() - 8.0)
+                    .show(ui, |ui| {
+                        let mut remove_slot: Option<usize> = None;
+                        let mut move_up_slot: Option<usize> = None;
+                        let mut move_dn_slot: Option<usize> = None;
+
+                        for slot in 0..arr_len {
+                            let pat_idx = self.state.song.arrangement[slot];
+                            let is_playing = self.state.playing
+                                && slot == self.state.playback_pattern_idx;
+
+                            ui.horizontal(|ui| {
+                                // Playing indicator
+                                if is_playing {
+                                    ui.colored_label(theme::ACCENT, icon::PLAY.to_string());
+                                } else {
+                                    ui.label(format!("{:02}", slot + 1));
+                                }
+
+                                // Pattern slot selector
+                                let label = format!("Pat {:02}", pat_idx + 1);
+                                let resp = ui.add_sized(
+                                    [pat_w, row_h - 4.0],
+                                    egui::SelectableLabel::new(
+                                        !self.state.playing && slot == self.state.playback_pattern_idx,
+                                        label,
+                                    ),
+                                );
+                                if resp.clicked() {
+                                    self.state.current_pattern_idx = pat_idx;
+                                    self.state.view = TrackerView::Pattern;
+                                }
+
+                                // Drag-value to change which pattern this slot uses
+                                let mut idx_val = pat_idx as f32;
+                                if ui.add(
+                                    egui::DragValue::new(&mut idx_val)
+                                        .range(0.0..=(num_pat as f32 - 1.0))
+                                        .speed(0.1)
+                                        .prefix("=")
+                                ).changed() {
+                                    self.state.song.arrangement[slot] = idx_val as usize;
+                                    self.state.dirty = true;
+                                }
+
+                                // Reorder / remove
+                                if icon_button(ui, icon::CHEVRON_UP, theme::ICON_SIZE_SM, "Move up") && slot > 0 {
+                                    move_up_slot = Some(slot);
+                                }
+                                if icon_button(ui, icon::CHEVRON_DOWN, theme::ICON_SIZE_SM, "Move down") && slot + 1 < arr_len {
+                                    move_dn_slot = Some(slot);
+                                }
+                                if icon_button(ui, icon::MINUS, theme::ICON_SIZE_SM, "Remove slot") && arr_len > 1 {
+                                    remove_slot = Some(slot);
+                                }
+                            });
+                        }
+
+                        // Apply deferred mutations
+                        if let Some(s) = move_up_slot {
+                            self.state.song.arrangement.swap(s - 1, s);
+                            self.state.dirty = true;
+                        }
+                        if let Some(s) = move_dn_slot {
+                            self.state.song.arrangement.swap(s, s + 1);
+                            self.state.dirty = true;
+                        }
+                        if let Some(s) = remove_slot {
+                            self.state.song.arrangement.remove(s);
+                            self.state.dirty = true;
+                        }
+
+                        // Add slot button
+                        ui.separator();
+                        if ui.button("+ Add slot").clicked() {
+                            self.state.song.arrangement.push(0);
+                            self.state.dirty = true;
+                        }
+                    });
+            });
         });
     }
 

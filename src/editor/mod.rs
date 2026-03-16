@@ -133,6 +133,9 @@ impl Editor {
             EditorAction::NewLevel => {
                 self.new_level();
             }
+            EditorAction::AddRoom => {
+                self.add_room();
+            }
             EditorAction::SaveLevel => {
                 self.save_level();
             }
@@ -164,7 +167,7 @@ impl Editor {
                         if let Some(prev) = self.ctx.level_undo.undo(
                             self.ctx.current_level.clone().unwrap_or_default()
                         ) {
-                            self.viewport.rebuild_from_level(&prev);
+                            self.rebuild_viewport(&prev);
                             self.ctx.current_level = Some(prev);
                         }
                     }
@@ -180,7 +183,7 @@ impl Editor {
                         if let Some(next) = self.ctx.level_undo.redo(
                             self.ctx.current_level.clone().unwrap_or_default()
                         ) {
-                            self.viewport.rebuild_from_level(&next);
+                            self.rebuild_viewport(&next);
                             self.ctx.current_level = Some(next);
                         }
                     }
@@ -240,6 +243,33 @@ impl Editor {
         }
     }
 
+    /// Rebuild the viewport from the current level, resolving textures from the project if available.
+    fn rebuild_viewport(&mut self, level: &crate::scene::Level) {
+        let root = self.ctx.project.as_ref().map(|p| p.root().to_path_buf());
+        self.viewport.rebuild_from_level_with_textures(level, root.as_deref());
+    }
+
+    fn add_room(&mut self) {
+        use crate::rasterizer::Vec3;
+        use crate::scene::{Room, Sector, TextureRef};
+
+        let Some(level) = self.ctx.current_level.as_mut() else { return };
+
+        let new_id = level.rooms.len();
+        let offset_x = new_id as f32 * 4.0 * crate::scene::SECTOR_SIZE;
+        let mut room = Room::new(new_id, Vec3::new(offset_x, 0.0, 0.0), 4, 4);
+        let floor_tex = TextureRef::new("_DEFAULT", "checkerboard");
+        for x in 0..4 {
+            for z in 0..4 {
+                room.set_sector(x, z, Sector::with_floor(0.0, floor_tex.clone()));
+            }
+        }
+        level.rooms.push(room);
+        // Clone to release the mutable borrow on self.ctx before calling rebuild_viewport
+        let level_snap = level.clone();
+        self.rebuild_viewport(&level_snap);
+    }
+
     fn new_level(&mut self) {
         use crate::rasterizer::Vec3;
         use crate::scene::{Room, Level, Sector, TextureRef};
@@ -255,7 +285,7 @@ impl Editor {
         let mut level = Level::new();
         level.rooms.push(room);
 
-        self.viewport.rebuild_from_level(&level);
+        self.rebuild_viewport(&level);
         self.ctx.current_level = Some(level);
         self.ctx.mode = EditorMode::WorldEditor;
     }
@@ -290,7 +320,7 @@ impl Editor {
                 if let Some(path) = project.assets.resolve_path(&handle) {
                     match crate::scene::load_level(&path) {
                         Ok(level) => {
-                            self.viewport.rebuild_from_level(&level);
+                            self.rebuild_viewport(&level);
                             self.ctx.current_level = Some(level);
                             self.ctx.mode = EditorMode::WorldEditor;
                         }

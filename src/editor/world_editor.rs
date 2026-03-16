@@ -2,7 +2,7 @@
 //! macroquad draw calls → egui Painter. Same coordinate system, same tool set.
 
 use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use crate::scene::{Direction, Level, Room, Sector, HorizontalFace, TextureRef, SECTOR_SIZE};
+use crate::scene::{AssetInstance, Direction, Level, Room, Sector, HorizontalFace, VerticalFace, TextureRef, SECTOR_SIZE};
 use super::context::{EditorAction, EditorContext, Selection};
 use super::icons::{icon, icon_button, icon_toggle};
 use super::theme;
@@ -139,7 +139,7 @@ impl WorldEditorPanel {
                     ui.strong("Rooms");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_button(ui, icon::PLUS, theme::ICON_SIZE_SM, "Add room") {
-                            editor.request_action(EditorAction::NewLevel);
+                            editor.request_action(EditorAction::AddRoom);
                         }
                     });
                 });
@@ -194,60 +194,173 @@ impl WorldEditorPanel {
     }
 
     // -----------------------------------------------------------------------
-    // Right: sector properties
+    // Right: sector properties + object list
     // -----------------------------------------------------------------------
     fn draw_properties_panel(&mut self, ctx: &egui::Context, editor: &mut EditorContext) {
         egui::SidePanel::right("we_props")
             .resizable(true)
-            .default_width(200.0)
+            .default_width(220.0)
             .show(ctx, |ui| {
                 ui.strong("Properties");
                 ui.separator();
 
-                // Draw-tool settings (always visible)
+                // ── Brush settings (always visible) ─────────────────────
                 ui.label(egui::RichText::new("Brush").small().color(theme::TEXT_DIM));
                 ui.horizontal(|ui| {
                     ui.label("Floor Y:");
                     ui.add(egui::DragValue::new(&mut self.floor_height).speed(0.1));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Ceil Y:");
+                    ui.label("Ceil  Y:");
                     ui.add(egui::DragValue::new(&mut self.ceiling_height).speed(0.1));
                 });
 
                 ui.separator();
 
-                // Selected sector info
+                // ── Selected sector info ─────────────────────────────────
                 if let Some((gx, gz)) = self.selected_sector {
-                    ui.label(format!("Sector ({}, {})", gx, gz));
-                    if let Some(level) = &editor.current_level {
-                        if let Some(room) = level.rooms.get(self.current_room) {
-                            if let Some(sector) = room.get_sector(gx, gz) {
-                                if let Some(floor) = &sector.floor {
-                                    ui.label(format!("Floor Y: {:.2}", floor.avg_height()));
-                                } else {
-                                    ui.weak("No floor");
+                    ui.label(egui::RichText::new(format!("Sector ({}, {})", gx, gz)).strong());
+
+                    // Read-only sector info
+                    if let Some(room) = editor.current_level.as_ref()
+                        .and_then(|l| l.rooms.get(self.current_room))
+                    {
+                        if let Some(sector) = room.get_sector(gx, gz) {
+                            if let Some(floor) = &sector.floor {
+                                ui.label(format!("Floor Y: {:.2}", floor.avg_height()));
+                            } else {
+                                ui.weak("No floor");
+                            }
+                            if let Some(ceil) = &sector.ceiling {
+                                ui.label(format!("Ceiling Y: {:.2}", ceil.avg_height()));
+                            } else {
+                                ui.weak("No ceiling");
+                            }
+                            let wall_count = sector.walls_north.len()
+                                + sector.walls_east.len()
+                                + sector.walls_south.len()
+                                + sector.walls_west.len();
+                            ui.label(format!("Walls: {}", wall_count));
+                            let obj_count = room.objects.iter()
+                                .filter(|o| o.sector_x == gx && o.sector_z == gz)
+                                .count();
+                            ui.label(format!("Objects: {}", obj_count));
+                        } else {
+                            ui.weak("Empty sector");
+                        }
+                    }
+
+                    // In-place floor/ceiling height editing
+                    ui.separator();
+                    ui.label(egui::RichText::new("Edit sector").small().color(theme::TEXT_DIM));
+
+                    let mut changed = false;
+                    // We need mutable access — extract values first
+                    let (cur_floor, cur_ceil) = editor.current_level.as_ref()
+                        .and_then(|l| l.rooms.get(self.current_room))
+                        .and_then(|r| r.get_sector(gx, gz))
+                        .map(|s| (
+                            s.floor.as_ref().map(|f| f.avg_height()),
+                            s.ceiling.as_ref().map(|c| c.avg_height()),
+                        ))
+                        .unwrap_or((None, None));
+
+                    if let Some(mut fy) = cur_floor {
+                        let before = fy;
+                        ui.horizontal(|ui| {
+                            ui.label("Floor Y:");
+                            ui.add(egui::DragValue::new(&mut fy).speed(0.05));
+                        });
+                        if (fy - before).abs() > 1e-5 {
+                            if let Some(sector) = editor.current_level.as_mut()
+                                .and_then(|l| l.rooms.get_mut(self.current_room))
+                                .and_then(|r| r.sectors.get_mut(gx))
+                                .and_then(|col| col.get_mut(gz))
+                                .and_then(|s| s.as_mut())
+                            {
+                                if let Some(floor) = &mut sector.floor {
+                                    floor.heights = [fy; 4];
+                                    changed = true;
                                 }
-                                if let Some(ceil) = &sector.ceiling {
-                                    ui.label(format!("Ceiling Y: {:.2}", ceil.avg_height()));
-                                } else {
-                                    ui.weak("No ceiling");
-                                }
-                                let wall_count = sector.walls_north.len()
-                                    + sector.walls_east.len()
-                                    + sector.walls_south.len()
-                                    + sector.walls_west.len();
-                                ui.label(format!("Walls: {}", wall_count));
                             }
                         }
                     }
+                    if let Some(mut cy) = cur_ceil {
+                        let before = cy;
+                        ui.horizontal(|ui| {
+                            ui.label("Ceil  Y:");
+                            ui.add(egui::DragValue::new(&mut cy).speed(0.05));
+                        });
+                        if (cy - before).abs() > 1e-5 {
+                            if let Some(sector) = editor.current_level.as_mut()
+                                .and_then(|l| l.rooms.get_mut(self.current_room))
+                                .and_then(|r| r.sectors.get_mut(gx))
+                                .and_then(|col| col.get_mut(gz))
+                                .and_then(|s| s.as_mut())
+                            {
+                                if let Some(ceil) = &mut sector.ceiling {
+                                    ceil.heights = [cy; 4];
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    let _ = changed; // viewport rebuild on save
+
+                    ui.separator();
                 } else {
                     ui.weak("Click a sector to select it");
+                    ui.separator();
+                }
+
+                // ── Objects in current room ──────────────────────────────
+                ui.label(egui::RichText::new("Objects").small().color(theme::TEXT_DIM));
+
+                let room_idx = self.current_room;
+                let obj_count = editor.current_level.as_ref()
+                    .and_then(|l| l.rooms.get(room_idx))
+                    .map(|r| r.objects.len())
+                    .unwrap_or(0);
+
+                let mut remove_obj: Option<usize> = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("we_objects")
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for i in 0..obj_count {
+                            let obj = editor.current_level.as_ref()
+                                .and_then(|l| l.rooms.get(room_idx))
+                                .and_then(|r| r.objects.get(i));
+                            if let Some(obj) = obj {
+                                let label = if obj.name.is_empty() {
+                                    format!("[{}] Sector ({},{})", i, obj.sector_x, obj.sector_z)
+                                } else {
+                                    format!("[{}] {}", i, obj.name)
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&label).small());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if icon_button(ui, icon::TRASH, theme::ICON_SIZE_SM, "Remove object") {
+                                            remove_obj = Some(i);
+                                        }
+                                    });
+                                });
+                            }
+                        }
+                    });
+
+                if let Some(idx) = remove_obj {
+                    editor.push_level_undo();
+                    if let Some(room) = editor.current_level.as_mut()
+                        .and_then(|l| l.rooms.get_mut(room_idx))
+                    {
+                        if idx < room.objects.len() {
+                            room.objects.remove(idx);
+                        }
+                    }
                 }
 
                 ui.separator();
-
-                // Level save button
                 if ui.button("Save Level").clicked() {
                     editor.request_action(EditorAction::SaveLevel);
                 }
@@ -301,6 +414,17 @@ impl WorldEditorPanel {
                     let hovered = self.compute_hover(mouse_pos, level, &s2w);
                     self.hovered_sector = hovered;
 
+                    // Compute hovered edge for wall tool
+                    if self.tool == EditorTool::DrawWall {
+                        self.hovered_edge = hovered.and_then(|(gx, gz)| {
+                            level.rooms.get(self.current_room).and_then(|room| {
+                                self.compute_edge_hover(mouse_pos, room, gx, gz, &w2s)
+                            })
+                        });
+                    } else {
+                        self.hovered_edge = None;
+                    }
+
                     self.draw_rooms(&painter, level, &w2s, view_mode);
 
                     // Handle click — apply tool
@@ -314,7 +438,10 @@ impl WorldEditorPanel {
                     }
                     if response.dragged_by(egui::PointerButton::Primary) {
                         if let Some((gx, gz)) = hovered {
-                            self.apply_tool_at(editor, gx, gz);
+                            // Wall tool: only apply on drag if edge is hovered
+                            if self.tool != EditorTool::DrawWall || self.hovered_edge.is_some() {
+                                self.apply_tool_at(editor, gx, gz);
+                            }
                         }
                     }
                 } else {
@@ -502,11 +629,70 @@ impl WorldEditorPanel {
                 painter.rect_stroke(rect, 0.0, Stroke::new(2.0, theme::SECTOR_HOVER), StrokeKind::Middle);
             }
 
+            // Wall tool: hovered edge highlight
+            if is_current && self.tool == EditorTool::DrawWall && self.hovered_sector == Some((gx, gz)) {
+                if let Some(dir) = self.hovered_edge {
+                    let edge = match dir {
+                        Direction::North => Some((rect.left_top(), rect.right_top())),
+                        Direction::South => Some((rect.left_bottom(), rect.right_bottom())),
+                        Direction::West  => Some((rect.left_top(), rect.left_bottom())),
+                        Direction::East  => Some((rect.right_top(), rect.right_bottom())),
+                        _ => None,
+                    };
+                    if let Some((p0, p1)) = edge {
+                        painter.line_segment([p0, p1], Stroke::new(3.0, theme::ACCENT));
+                    }
+                }
+            }
+
             // Selection highlight
             if is_current && self.selected_sector == Some((gx, gz)) {
                 painter.rect_stroke(rect, 0.0, Stroke::new(2.0, theme::SECTOR_SELECT), StrokeKind::Middle);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge hover detection (for DrawWall tool)
+    // -----------------------------------------------------------------------
+    /// Returns which edge of sector (gx, gz) the mouse is near, in screen space.
+    /// A threshold of 10 pixels is used for each edge.
+    fn compute_edge_hover(
+        &self,
+        mouse_pos: Option<Pos2>,
+        room: &Room,
+        gx: usize,
+        gz: usize,
+        w2s: &impl Fn(f32, f32) -> Pos2,
+    ) -> Option<Direction> {
+        let mpos = mouse_pos?;
+        let bx = room.position.x + gx as f32 * SECTOR_SIZE;
+        let bz = room.position.z + gz as f32 * SECTOR_SIZE;
+
+        // Four corner positions in screen space
+        let tl = w2s(bx,               bz + SECTOR_SIZE);  // top-left  (north-west)
+        let tr = w2s(bx + SECTOR_SIZE, bz + SECTOR_SIZE);  // top-right (north-east)
+        let bl = w2s(bx,               bz);                // bot-left  (south-west)
+        let br = w2s(bx + SECTOR_SIZE, bz);                // bot-right (south-east)
+
+        // In egui Y increases downward, and our w2s flips Y, so:
+        //   "top" of rect = North, "bottom" = South (same as the draw_room rect)
+
+        let dist_north = dist_to_segment(mpos, tl, tr);
+        let dist_south = dist_to_segment(mpos, bl, br);
+        let dist_west  = dist_to_segment(mpos, tl, bl);
+        let dist_east  = dist_to_segment(mpos, tr, br);
+
+        let threshold = 10.0f32;
+        let min_dist = [dist_north, dist_south, dist_west, dist_east]
+            .iter().cloned().fold(f32::INFINITY, f32::min);
+
+        if min_dist > threshold { return None; }
+
+        if      (min_dist - dist_north).abs() < 0.5 { Some(Direction::North) }
+        else if (min_dist - dist_south).abs() < 0.5 { Some(Direction::South) }
+        else if (min_dist - dist_west).abs()  < 0.5 { Some(Direction::West)  }
+        else                                         { Some(Direction::East)  }
     }
 
     // -----------------------------------------------------------------------
@@ -564,19 +750,51 @@ impl WorldEditorPanel {
                     s.ceiling = Some(HorizontalFace::flat(self.ceiling_height, tex));
                 }
             }
+            EditorTool::DrawWall => {
+                let Some(dir) = self.hovered_edge else { return };
+                if gx < room.width && gz < room.depth {
+                    let slot = &mut room.sectors[gx][gz];
+                    let s = slot.get_or_insert_with(Sector::default);
+                    // Use existing floor/ceil heights if the sector has them
+                    let bot = s.floor.as_ref().map(|f| f.avg_height()).unwrap_or(self.floor_height);
+                    let top = s.ceiling.as_ref().map(|c| c.avg_height()).unwrap_or(self.ceiling_height);
+                    let wall = VerticalFace::new(bot, top, tex);
+                    let walls = s.walls_mut(dir);
+                    walls.clear();
+                    walls.push(wall);
+                }
+            }
+            EditorTool::PlaceObject => {
+                // Place a new AssetInstance at the clicked sector (asset_id=0 means "unassigned")
+                let instance = AssetInstance::new(gx, gz, 0);
+                room.objects.push(instance);
+            }
             EditorTool::Erase => {
                 room.remove_sector(gx, gz);
             }
             EditorTool::Select => {}
-            EditorTool::DrawWall | EditorTool::PlaceObject => {
-                // TODO
-            }
         }
     }
 }
 
 impl Default for WorldEditorPanel {
     fn default() -> Self { Self::new() }
+}
+
+// ---------------------------------------------------------------------------
+// Geometry helpers
+// ---------------------------------------------------------------------------
+
+/// Distance from point `p` to the closest point on segment [a, b]
+fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_sq();
+    if len_sq < 1e-6 {
+        return (p - a).length();
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    let closest = a + ab * t;
+    (p - closest).length()
 }
 
 // ---------------------------------------------------------------------------
