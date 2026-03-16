@@ -1,5 +1,6 @@
 use crate::asset::AssetHandle;
 use crate::project::Project;
+use crate::scene::Level;
 
 /// Shared editor state, accessible by all panels.
 /// Follows Hazel's pattern: EditorLayer owns this, panels borrow it.
@@ -8,6 +9,7 @@ pub struct EditorContext {
     pub selection: Selection,
     pub mode: EditorMode,
     pub pending_action: Option<EditorAction>,
+    pub current_level: Option<Level>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,8 +35,17 @@ pub enum EditorAction {
     NewProject,
     OpenProject(std::path::PathBuf),
     SaveProject,
+    ImportAsset(std::path::PathBuf),
     OpenAsset(AssetHandle),
     SwitchMode(EditorMode),
+    // Level actions
+    NewLevel,
+    SaveLevel,
+    // Song actions
+    NewSong,
+    OpenSong(std::path::PathBuf),
+    SaveSong,
+    SaveSongAs(std::path::PathBuf),
 }
 
 impl EditorContext {
@@ -44,6 +55,7 @@ impl EditorContext {
             selection: Selection::None,
             mode: EditorMode::Project,
             pending_action: None,
+            current_level: None,
         }
     }
 

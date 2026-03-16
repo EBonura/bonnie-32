@@ -481,6 +481,158 @@ impl TrackerState {
         self.dirty = false;
         self.apply_channel_settings();
     }
+
+    // ========================================================================
+    // Cursor navigation
+    // ========================================================================
+
+    pub fn move_cursor_up(&mut self) {
+        if self.current_row > 0 {
+            self.current_row -= 1;
+        }
+    }
+
+    pub fn move_cursor_down(&mut self) {
+        let len = self.pattern_length();
+        if self.current_row + 1 < len {
+            self.current_row += 1;
+        }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        if self.current_channel > 0 {
+            self.current_channel -= 1;
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        if self.current_channel + 1 < self.song.num_channels() {
+            self.current_channel += 1;
+        }
+    }
+
+    pub fn next_pattern(&mut self) {
+        if self.current_pattern_idx + 1 < self.song.arrangement.len() {
+            self.current_pattern_idx += 1;
+            self.current_row = 0;
+        }
+    }
+
+    pub fn prev_pattern(&mut self) {
+        if self.current_pattern_idx > 0 {
+            self.current_pattern_idx -= 1;
+            self.current_row = 0;
+        }
+    }
+
+    // ========================================================================
+    // Note input
+    // ========================================================================
+
+    /// Enter a note at the current cursor position
+    pub fn enter_note(&mut self, pitch: u8) {
+        if !self.edit_mode {
+            return;
+        }
+
+        let ch = self.current_channel;
+        let row = self.current_row;
+        let inst = self.current_instrument();
+
+        let note = Note {
+            pitch: Some(pitch),
+            instrument: Some(inst),
+            volume: None,
+            effect: None,
+            effect_param: None,
+        };
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set(ch, row, note);
+        }
+
+        // Preview the note
+        self.audio.note_on(ch as i32, pitch as i32, 100);
+
+        self.dirty = true;
+        self.move_cursor_down();
+    }
+
+    /// Enter a note-off at the current cursor position
+    pub fn enter_note_off(&mut self) {
+        if !self.edit_mode {
+            return;
+        }
+
+        let ch = self.current_channel;
+        let row = self.current_row;
+
+        let note = Note {
+            pitch: Some(0xFF),
+            instrument: None,
+            volume: None,
+            effect: None,
+            effect_param: None,
+        };
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set(ch, row, note);
+        }
+        self.dirty = true;
+        self.move_cursor_down();
+    }
+
+    /// Delete the note at the current cursor position
+    pub fn delete_note(&mut self) {
+        if !self.edit_mode {
+            return;
+        }
+
+        let ch = self.current_channel;
+        let row = self.current_row;
+
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.set(ch, row, Note::EMPTY);
+        }
+        self.dirty = true;
+    }
+
+    /// Convert a keyboard key to a MIDI pitch (piano keyboard layout)
+    /// Lower row: Z=C, S=C#, X=D, D=D#, C=E, V=F, G=F#, B=G, H=G#, N=A, J=A#, M=B
+    /// Upper row: Q=C+1, 2=C#+1, W=D+1, 3=D#+1, E=E+1, R=F+1, 5=F#+1, T=G+1, 6=G#+1, Y=A+1, 7=A#+1, U=B+1
+    pub fn key_to_pitch(&self, key: egui::Key) -> Option<u8> {
+        let semitone = match key {
+            // Lower row (current octave)
+            egui::Key::Z => Some(0),  // C
+            egui::Key::S => Some(1),  // C#
+            egui::Key::X => Some(2),  // D
+            egui::Key::D => Some(3),  // D#
+            egui::Key::C => Some(4),  // E
+            egui::Key::V => Some(5),  // F
+            egui::Key::G => Some(6),  // F#
+            egui::Key::B => Some(7),  // G
+            egui::Key::H => Some(8),  // G#
+            egui::Key::N => Some(9),  // A
+            egui::Key::J => Some(10), // A#
+            egui::Key::M => Some(11), // B
+            // Upper row (next octave)
+            egui::Key::Q => Some(12), // C
+            egui::Key::Num2 => Some(13), // C#
+            egui::Key::W => Some(14), // D
+            egui::Key::Num3 => Some(15), // D#
+            egui::Key::E => Some(16), // E
+            egui::Key::R => Some(17), // F
+            egui::Key::Num5 => Some(18), // F#
+            egui::Key::T => Some(19), // G
+            egui::Key::Num6 => Some(20), // G#
+            egui::Key::Y => Some(21), // A
+            egui::Key::Num7 => Some(22), // A#
+            egui::Key::U => Some(23), // B
+            _ => None,
+        };
+
+        semitone.map(|s| (self.octave * 12 + s).min(127))
+    }
 }
 
 impl Default for TrackerState {

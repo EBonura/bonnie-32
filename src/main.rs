@@ -43,11 +43,11 @@ impl App {
         self.last_frame = now;
 
         // Render 3D scene to software framebuffer
-        self.editor.viewport.render_frame(dt, &mut self.rotation);
+        self.editor.render_3d(dt, &mut self.rotation);
 
         // Upload framebuffer to GPU
         let renderer = self.renderer.as_ref().unwrap();
-        let fb = &self.editor.viewport.framebuffer;
+        let fb = self.editor.active_framebuffer();
         renderer.upload_framebuffer(&fb.pixels, fb.width as u32, fb.height as u32);
         renderer.update_viewport(fb.width as u32, fb.height as u32);
 
@@ -124,6 +124,9 @@ impl ApplicationHandler for App {
             1,
             false,
         );
+
+        // Apply theme + load custom fonts (Lucide icons, VT323)
+        bonnie_32::editor::theme::apply(&self.egui_ctx);
 
         self.window = Some(window);
         self.egui_state = Some(egui_state);

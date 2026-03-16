@@ -2,6 +2,7 @@
 
 use crate::tracker::TrackerState;
 use crate::tracker::pattern::Note;
+use super::icons::{icon, icon_button, icon_toggle};
 
 pub struct TrackerPanel {
     pub state: TrackerState,
@@ -28,26 +29,117 @@ impl TrackerPanel {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_pattern_view(ui);
         });
+
+        self.handle_keyboard(ctx);
+    }
+
+    fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        // Don't process keys if a text field has focus
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+
+        ctx.input(|i| {
+            // Space = play/stop
+            if i.key_pressed(egui::Key::Space) {
+                self.state.toggle_play();
+            }
+
+            // Navigation
+            if i.key_pressed(egui::Key::ArrowUp) {
+                self.state.move_cursor_up();
+            }
+            if i.key_pressed(egui::Key::ArrowDown) {
+                self.state.move_cursor_down();
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                self.state.move_cursor_left();
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                self.state.move_cursor_right();
+            }
+
+            // Pattern navigation (Ctrl+Left/Right)
+            if i.modifiers.command && i.key_pressed(egui::Key::ArrowLeft) {
+                self.state.prev_pattern();
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::ArrowRight) {
+                self.state.next_pattern();
+            }
+
+            // Octave (Ctrl+Up/Down)
+            if i.modifiers.command && i.key_pressed(egui::Key::ArrowUp) {
+                if self.state.octave < 9 {
+                    self.state.octave += 1;
+                }
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::ArrowDown) {
+                if self.state.octave > 0 {
+                    self.state.octave -= 1;
+                }
+            }
+
+            // Delete = clear note
+            if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
+                self.state.delete_note();
+            }
+
+            // Grave/backtick = note off
+            if i.key_pressed(egui::Key::Backtick) {
+                self.state.enter_note_off();
+            }
+
+            // Note input keys (only when not pressing modifiers)
+            if !i.modifiers.command && !i.modifiers.alt {
+                let note_keys = [
+                    egui::Key::Z, egui::Key::S, egui::Key::X, egui::Key::D,
+                    egui::Key::C, egui::Key::V, egui::Key::G, egui::Key::B,
+                    egui::Key::H, egui::Key::N, egui::Key::J, egui::Key::M,
+                    egui::Key::Q, egui::Key::Num2, egui::Key::W, egui::Key::Num3,
+                    egui::Key::E, egui::Key::R, egui::Key::Num5, egui::Key::T,
+                    egui::Key::Num6, egui::Key::Y, egui::Key::Num7, egui::Key::U,
+                ];
+
+                for key in note_keys {
+                    if i.key_pressed(key) {
+                        if let Some(pitch) = self.state.key_to_pitch(key) {
+                            self.state.enter_note(pitch);
+                        }
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     fn draw_transport(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            // Play/Stop
-            let play_label = if self.state.playing { "Stop" } else { "Play" };
-            if ui.button(play_label).clicked() {
+            // Rewind
+            if icon_button(ui, icon::SKIP_BACK, 16.0, "Rewind to start") {
+                self.state.playback_row = 0;
+                self.state.current_row = 0;
+            }
+
+            // Play / Stop
+            let (play_icon, play_tip) = if self.state.playing {
+                (icon::SQUARE, "Stop")
+            } else {
+                (icon::PLAY, "Play")
+            };
+            if icon_button(ui, play_icon, 16.0, play_tip) {
                 self.state.toggle_play();
             }
 
             ui.separator();
 
             // BPM
-            ui.label("BPM:");
+            ui.label("BPM");
             let mut bpm = self.state.song.bpm as f32;
             if ui.add(egui::DragValue::new(&mut bpm).range(40.0..=300.0).speed(0.5)).changed() {
                 self.state.song.bpm = bpm as u16;
             }
 
-            if ui.button("Tap").clicked() {
+            if ui.small_button("Tap").clicked() {
                 if let Some(bpm) = self.state.tap_tempo() {
                     self.state.song.bpm = bpm;
                 }
@@ -56,17 +148,19 @@ impl TrackerPanel {
             ui.separator();
 
             // Octave
-            ui.label("Oct:");
-            let mut oct = self.state.octave as f32;
-            if ui.add(egui::DragValue::new(&mut oct).range(0.0..=9.0).speed(0.1)).changed() {
-                self.state.octave = oct as u8;
+            ui.label("Oct");
+            if icon_button(ui, icon::MINUS, 12.0, "Octave down") && self.state.octave > 0 {
+                self.state.octave -= 1;
+            }
+            ui.label(format!("{}", self.state.octave));
+            if icon_button(ui, icon::PLUS, 12.0, "Octave up") && self.state.octave < 9 {
+                self.state.octave += 1;
             }
 
             ui.separator();
 
-            // Edit mode toggle
-            let edit_label = if self.state.edit_mode { "Edit: ON" } else { "Edit: OFF" };
-            if ui.selectable_label(self.state.edit_mode, edit_label).clicked() {
+            // Edit mode
+            if icon_toggle(ui, icon::PENCIL, 16.0, self.state.edit_mode, "Edit mode (record notes)") {
                 self.state.edit_mode = !self.state.edit_mode;
             }
 

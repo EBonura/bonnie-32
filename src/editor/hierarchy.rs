@@ -21,17 +21,24 @@ impl HierarchyPanel {
                     return;
                 }
 
-                // Placeholder room hierarchy
-                // Will be populated when Scene system is ported in Phase 4
-                ui.collapsing("Rooms", |ui| {
-                    let room_count = 0; // TODO: get from scene
-                    if room_count == 0 {
+                // Collect room info to avoid borrow conflicts
+                let room_info: Vec<(usize, usize)> = editor.current_level.as_ref()
+                    .map(|level| {
+                        level.rooms.iter().enumerate()
+                            .map(|(i, room)| (i, room.iter_sectors().count()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                ui.collapsing(format!("Rooms ({})", room_info.len()), |ui| {
+                    if room_info.is_empty() {
                         ui.weak("No rooms. Open a level from the Content Browser.");
                     }
-                    for i in 0..room_count {
-                        let selected = editor.selection == Selection::Room(i);
-                        if ui.selectable_label(selected, format!("Room {}", i)).clicked() {
-                            editor.select(Selection::Room(i));
+                    for (i, sector_count) in &room_info {
+                        let selected = editor.selection == Selection::Room(*i);
+                        let label = format!("Room {} ({} sectors)", i, sector_count);
+                        if ui.selectable_label(selected, &label).clicked() {
+                            editor.select(Selection::Room(*i));
                         }
                     }
                 });

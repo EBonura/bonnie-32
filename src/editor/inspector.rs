@@ -63,9 +63,29 @@ impl InspectorPanel {
                         }
                     }
                     Selection::Room(index) => {
-                        ui.label(format!("Room {}", index));
+                        ui.label(
+                            egui::RichText::new(format!("Room {}", index)).strong().size(16.0),
+                        );
                         ui.separator();
-                        ui.label("Room properties will appear here");
+
+                        if let Some(level) = &editor.current_level {
+                            if let Some(room) = level.rooms.get(*index) {
+                                ui.label(format!("Position: ({:.1}, {:.1}, {:.1})",
+                                    room.position.x, room.position.y, room.position.z));
+                                ui.label(format!("Grid: {}x{}", room.width, room.depth));
+                                ui.label(format!("Sectors: {}", room.iter_sectors().count()));
+                                ui.label(format!("Portals: {}", room.portals.len()));
+                                ui.label(format!("Objects: {}", room.objects.len()));
+                                ui.label(format!("Ambient: {:.0}%", room.ambient * 100.0));
+
+                                if room.fog.enabled {
+                                    ui.separator();
+                                    ui.label("Fog: enabled");
+                                    ui.label(format!("  Start: {:.1}", room.fog.start));
+                                    ui.label(format!("  Falloff: {:.1}", room.fog.falloff));
+                                }
+                            }
+                        }
                     }
                     Selection::Entity { room, index } => {
                         ui.label(format!("Entity {} in Room {}", index, room));
