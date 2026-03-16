@@ -540,6 +540,11 @@ impl WorldEditorPanel {
     // Tool application
     // -----------------------------------------------------------------------
     fn apply_tool_at(&self, editor: &mut EditorContext, gx: usize, gz: usize) {
+        if self.tool == EditorTool::Select { return; }
+
+        // Snapshot for undo before mutating
+        editor.push_level_undo();
+
         let Some(level) = editor.current_level.as_mut() else { return };
         let Some(room) = level.rooms.get_mut(self.current_room) else { return };
         let tex = self.selected_texture.clone();

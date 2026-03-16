@@ -1,6 +1,7 @@
 use crate::asset::AssetHandle;
 use crate::project::Project;
 use crate::scene::Level;
+use super::undo::UndoStack;
 
 /// Shared editor state, accessible by all panels.
 /// Follows Hazel's pattern: EditorLayer owns this, panels borrow it.
@@ -10,6 +11,8 @@ pub struct EditorContext {
     pub mode: EditorMode,
     pub pending_action: Option<EditorAction>,
     pub current_level: Option<Level>,
+    /// Undo/redo for level geometry edits
+    pub level_undo: UndoStack<Level>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +49,9 @@ pub enum EditorAction {
     OpenSong(std::path::PathBuf),
     SaveSong,
     SaveSongAs(std::path::PathBuf),
+    // Undo/redo
+    Undo,
+    Redo,
 }
 
 impl EditorContext {
@@ -56,6 +62,14 @@ impl EditorContext {
             mode: EditorMode::Project,
             pending_action: None,
             current_level: None,
+            level_undo: UndoStack::new(),
+        }
+    }
+
+    /// Call before mutating the level to record a snapshot for undo.
+    pub fn push_level_undo(&mut self) {
+        if let Some(level) = &self.current_level {
+            self.level_undo.push(level.clone());
         }
     }
 

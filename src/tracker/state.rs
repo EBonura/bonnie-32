@@ -3,6 +3,7 @@
 use super::audio::AudioEngine;
 use super::pattern::{Song, Note, Effect, MAX_CHANNELS};
 use super::spu::reverb::ReverbType;
+use crate::editor::undo::UndoStack;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -62,6 +63,9 @@ pub struct TrackerState {
 
     /// Clipboard for copy/paste
     pub clipboard: Option<Vec<Vec<Note>>>,
+
+    /// Undo/redo stack for song edits
+    pub undo: UndoStack<Song>,
 
     /// Tap tempo timestamps
     tap_times: Vec<Instant>,
@@ -139,7 +143,27 @@ impl TrackerState {
             preview_expression: [127; MAX_CHANNELS],
             instrument_scroll: 0,
             clipboard: None,
+            undo: UndoStack::new(),
             tap_times: Vec::new(),
+        }
+    }
+
+    /// Call before any edit to record a snapshot.
+    pub fn push_undo(&mut self) {
+        self.undo.push(self.song.clone());
+    }
+
+    pub fn do_undo(&mut self) {
+        if let Some(prev) = self.undo.undo(self.song.clone()) {
+            self.song = prev;
+            self.dirty = true;
+        }
+    }
+
+    pub fn do_redo(&mut self) {
+        if let Some(next) = self.undo.redo(self.song.clone()) {
+            self.song = next;
+            self.dirty = true;
         }
     }
 
@@ -535,6 +559,7 @@ impl TrackerState {
             return;
         }
 
+        self.push_undo();
         let ch = self.current_channel;
         let row = self.current_row;
         let inst = self.current_instrument();
@@ -564,6 +589,7 @@ impl TrackerState {
             return;
         }
 
+        self.push_undo();
         let ch = self.current_channel;
         let row = self.current_row;
 
@@ -588,6 +614,7 @@ impl TrackerState {
             return;
         }
 
+        self.push_undo();
         let ch = self.current_channel;
         let row = self.current_row;
 

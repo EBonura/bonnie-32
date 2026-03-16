@@ -2,6 +2,7 @@ pub mod context;
 pub mod icons;
 pub mod theme;
 pub mod toolbar;
+pub mod undo;
 pub mod content_browser;
 pub mod hierarchy;
 pub mod inspector;
@@ -48,6 +49,29 @@ impl Editor {
 
     /// Draw all editor UI. Call this inside egui_ctx.run().
     pub fn draw(&mut self, egui_ctx: &egui::Context) {
+        // Global keyboard shortcuts (skip when a text field has focus)
+        if !egui_ctx.wants_keyboard_input() {
+            egui_ctx.input(|i| {
+                if i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z) {
+                    self.ctx.request_action(context::EditorAction::Undo);
+                }
+                if i.modifiers.command
+                    && (i.key_pressed(egui::Key::Y)
+                        || (i.modifiers.shift && i.key_pressed(egui::Key::Z)))
+                {
+                    self.ctx.request_action(context::EditorAction::Redo);
+                }
+                // Global save: Ctrl+S
+                if i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::S) {
+                    match self.ctx.mode {
+                        EditorMode::Tracker => self.ctx.request_action(context::EditorAction::SaveSong),
+                        EditorMode::WorldEditor => self.ctx.request_action(context::EditorAction::SaveLevel),
+                        _ => self.ctx.request_action(context::EditorAction::SaveProject),
+                    }
+                }
+            });
+        }
+
         toolbar::draw_toolbar(egui_ctx, &mut self.ctx);
 
         match self.ctx.mode {
@@ -129,6 +153,38 @@ impl Editor {
                 self.tracker.state.current_file = Some(path);
                 if let Err(e) = self.tracker.state.save_song() {
                     log::error!("Failed to save song: {}", e);
+                }
+            }
+            EditorAction::Undo => {
+                match self.ctx.mode {
+                    EditorMode::Tracker => {
+                        self.tracker.state.do_undo();
+                    }
+                    EditorMode::WorldEditor => {
+                        if let Some(prev) = self.ctx.level_undo.undo(
+                            self.ctx.current_level.clone().unwrap_or_default()
+                        ) {
+                            self.viewport.rebuild_from_level(&prev);
+                            self.ctx.current_level = Some(prev);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            EditorAction::Redo => {
+                match self.ctx.mode {
+                    EditorMode::Tracker => {
+                        self.tracker.state.do_redo();
+                    }
+                    EditorMode::WorldEditor => {
+                        if let Some(next) = self.ctx.level_undo.redo(
+                            self.ctx.current_level.clone().unwrap_or_default()
+                        ) {
+                            self.viewport.rebuild_from_level(&next);
+                            self.ctx.current_level = Some(next);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

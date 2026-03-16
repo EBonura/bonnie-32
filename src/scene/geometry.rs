@@ -3453,6 +3453,10 @@ pub struct Level {
     pub skybox: Option<Skybox>,
 }
 
+impl Default for Level {
+    fn default() -> Self { Self::new() }
+}
+
 impl Level {
     pub fn new() -> Self {
         Self {
