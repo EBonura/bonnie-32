@@ -144,14 +144,14 @@ pub fn icon_button(ui: &mut egui::Ui, ch: char, size: f32, tooltip: &str) -> boo
         .clicked()
 }
 
-/// Selectable icon button with active highlight.
+/// Selectable icon button with active highlight (teal when active, matches v1).
 pub fn icon_toggle(ui: &mut egui::Ui, ch: char, size: f32, active: bool, tooltip: &str) -> bool {
     let text = icon_text(ch, size).color(if active {
-        egui::Color32::from_rgb(130, 180, 255)
+        egui::Color32::from_rgb(0, 210, 210)  // v1 cyan accent
     } else {
-        ui.visuals().text_color()
+        egui::Color32::from_rgb(140, 140, 155)
     });
-    ui.add(egui::Button::new(text).frame(active))
+    ui.add(egui::Button::new(text).frame(false))
         .on_hover_text(tooltip)
         .clicked()
 }

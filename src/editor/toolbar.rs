@@ -1,8 +1,13 @@
 use super::context::{EditorAction, EditorContext, EditorMode};
 use super::icons::icon;
+use super::theme;
 
 pub fn draw_toolbar(ctx: &egui::Context, editor: &mut EditorContext) {
-    egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+    egui::TopBottomPanel::top("toolbar")
+        .frame(egui::Frame::none()
+            .fill(theme::HEADER_BG)
+            .inner_margin(egui::Margin::symmetric(4, 0)))
+        .show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
             // File menu
             ui.menu_button("File", |ui| {
@@ -77,30 +82,48 @@ pub fn draw_toolbar(ctx: &egui::Context, editor: &mut EditorContext) {
 
             ui.separator();
 
-            // Mode tabs with icons
+            // Mode tabs — v1 underline style: no filled box, just a cyan bottom border
             let modes: &[(EditorMode, char, &str)] = &[
-                (EditorMode::Project,      icon::HOUSE,         "Project"),
-                (EditorMode::WorldEditor,  icon::GLOBE,         "World"),
+                (EditorMode::Project,      icon::HOUSE,          "Project"),
+                (EditorMode::WorldEditor,  icon::GLOBE,          "World"),
                 (EditorMode::Modeler,      icon::PERSON_STANDING,"Modeler"),
-                (EditorMode::Tracker,      icon::MUSIC,         "Tracker"),
-                (EditorMode::ScriptEditor, icon::PENCIL,        "Script"),
-                (EditorMode::Test,         icon::PLAY,          "Test"),
+                (EditorMode::Tracker,      icon::MUSIC,          "Tracker"),
+                (EditorMode::ScriptEditor, icon::PENCIL,         "Script"),
+                (EditorMode::Test,         icon::PLAY,           "Test"),
             ];
 
             for (mode, ic, label) in modes {
                 let selected = editor.mode == *mode;
-                let text = egui::RichText::new(format!("{} {label}", ic));
-                if ui.selectable_label(selected, text).clicked() && !selected {
+                let text_color = if selected { theme::ACCENT } else { theme::TEXT_DIM };
+                let text = egui::RichText::new(format!("{} {label}", ic))
+                    .color(text_color);
+
+                // Frameless button so we can draw our own indicator
+                let resp = ui.add(
+                    egui::Button::new(text)
+                        .frame(false)
+                        .min_size(egui::vec2(0.0, 28.0))
+                );
+
+                // Cyan underline on selected tab
+                if selected {
+                    let rect = resp.rect;
+                    ui.painter().line_segment(
+                        [rect.left_bottom(), rect.right_bottom()],
+                        egui::Stroke::new(2.0, theme::ACCENT),
+                    );
+                }
+
+                if resp.clicked() && !selected {
                     editor.request_action(EditorAction::SwitchMode(*mode));
                 }
             }
 
-            // Right-aligned project name + FPS
+            // Right-aligned: project name
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(editor.project_name())
-                        .small()
-                        .color(egui::Color32::GRAY),
+                        .color(theme::TEXT_DIM),
                 );
             });
         });

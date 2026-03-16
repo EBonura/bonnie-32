@@ -111,7 +111,7 @@ impl WorldEditorPanel {
 
                     // Grid toggle
                     let grid_active = self.show_grid;
-                    if icon_toggle(ui, icon::GRID, 18.0, grid_active, "Toggle Grid") {
+                    if icon_toggle(ui, icon::GRID, theme::ICON_SIZE_MD, grid_active, "Toggle Grid") {
                         self.show_grid = !self.show_grid;
                     }
                 });
@@ -120,7 +120,7 @@ impl WorldEditorPanel {
 
     fn tool_btn(&mut self, ui: &mut egui::Ui, tool: EditorTool, ic: char, tip: &str) {
         let active = self.tool == tool;
-        if icon_toggle(ui, ic, 18.0, active, tip) {
+        if icon_toggle(ui, ic, theme::ICON_SIZE_LG, active, tip) {
             self.tool = tool;
         }
         ui.add_space(2.0);
@@ -138,7 +138,7 @@ impl WorldEditorPanel {
                 ui.horizontal(|ui| {
                     ui.strong("Rooms");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button(ui, icon::PLUS, 14.0, "Add room") {
+                        if icon_button(ui, icon::PLUS, theme::ICON_SIZE_SM, "Add room") {
                             editor.request_action(EditorAction::NewLevel);
                         }
                     });
@@ -158,7 +158,7 @@ impl WorldEditorPanel {
                     ui.horizontal(|ui| {
                         // Eye toggle
                         let eye_ic = if hidden { icon::EYE_OFF } else { icon::EYE };
-                        if icon_button(ui, eye_ic, 12.0, "Toggle visibility") {
+                        if icon_button(ui, eye_ic, theme::ICON_SIZE_SM, "Toggle visibility") {
                             if hidden {
                                 self.hidden_rooms.remove(&i);
                             } else {

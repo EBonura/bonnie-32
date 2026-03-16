@@ -3,6 +3,7 @@
 use crate::tracker::TrackerState;
 use crate::tracker::pattern::Note;
 use super::icons::{icon, icon_button, icon_toggle};
+use super::theme;
 
 pub struct TrackerPanel {
     pub state: TrackerState,
@@ -115,7 +116,7 @@ impl TrackerPanel {
     fn draw_transport(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Rewind
-            if icon_button(ui, icon::SKIP_BACK, 16.0, "Rewind to start") {
+            if icon_button(ui, icon::SKIP_BACK, theme::ICON_SIZE_MD, "Rewind to start") {
                 self.state.playback_row = 0;
                 self.state.current_row = 0;
             }
@@ -126,7 +127,7 @@ impl TrackerPanel {
             } else {
                 (icon::PLAY, "Play")
             };
-            if icon_button(ui, play_icon, 16.0, play_tip) {
+            if icon_button(ui, play_icon, theme::ICON_SIZE_MD, play_tip) {
                 self.state.toggle_play();
             }
 
@@ -149,18 +150,18 @@ impl TrackerPanel {
 
             // Octave
             ui.label("Oct");
-            if icon_button(ui, icon::MINUS, 12.0, "Octave down") && self.state.octave > 0 {
+            if icon_button(ui, icon::MINUS, theme::ICON_SIZE_SM, "Octave down") && self.state.octave > 0 {
                 self.state.octave -= 1;
             }
             ui.label(format!("{}", self.state.octave));
-            if icon_button(ui, icon::PLUS, 12.0, "Octave up") && self.state.octave < 9 {
+            if icon_button(ui, icon::PLUS, theme::ICON_SIZE_SM, "Octave up") && self.state.octave < 9 {
                 self.state.octave += 1;
             }
 
             ui.separator();
 
             // Edit mode
-            if icon_toggle(ui, icon::PENCIL, 16.0, self.state.edit_mode, "Edit mode (record notes)") {
+            if icon_toggle(ui, icon::PENCIL, theme::ICON_SIZE_MD, self.state.edit_mode, "Edit mode (record notes)") {
                 self.state.edit_mode = !self.state.edit_mode;
             }
 
