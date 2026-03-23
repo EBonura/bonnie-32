@@ -5,7 +5,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use bonnie_32::editor::Editor;
+use bonnie_32::editor::Shell;
 use bonnie_32::platform::renderer::Renderer;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -17,7 +17,7 @@ struct App {
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
 
-    editor: Editor,
+    shell: Shell,
     rotation: f32,
     last_frame: Instant,
 }
@@ -31,7 +31,7 @@ impl App {
             egui_state: None,
             egui_renderer: None,
 
-            editor: Editor::new(),
+            shell: Shell::new(),
             rotation: 0.0,
             last_frame: Instant::now(),
         }
@@ -43,11 +43,11 @@ impl App {
         self.last_frame = now;
 
         // Render 3D scene to software framebuffer
-        self.editor.render_3d(dt, &mut self.rotation);
+        self.shell.render_3d(dt, &mut self.rotation);
 
         // Upload framebuffer to GPU
         let renderer = self.renderer.as_ref().unwrap();
-        let fb = self.editor.active_framebuffer();
+        let fb = self.shell.active_framebuffer();
         renderer.upload_framebuffer(&fb.pixels, fb.width as u32, fb.height as u32);
         renderer.update_viewport(fb.width as u32, fb.height as u32);
 
@@ -57,7 +57,7 @@ impl App {
         let raw_input = egui_state.take_egui_input(window);
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            self.editor.draw(ctx);
+            self.shell.draw(ctx);
         });
 
         egui_state.handle_platform_output(window, full_output.platform_output);
@@ -85,10 +85,10 @@ impl App {
         }
 
         // Tick tracker playback
-        self.editor.tick(dt as f64);
+        self.shell.tick(dt as f64);
 
         // Process editor actions after rendering
-        self.editor.process_actions();
+        self.shell.process_actions();
     }
 }
 
@@ -120,9 +120,7 @@ impl ApplicationHandler for App {
         let egui_renderer = egui_wgpu::Renderer::new(
             &renderer.device,
             renderer.surface_format(),
-            None,
-            1,
-            false,
+            egui_wgpu::RendererOptions::default(),
         );
 
         // Apply theme + load custom fonts (Lucide icons, VT323)

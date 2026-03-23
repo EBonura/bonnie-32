@@ -51,6 +51,8 @@ impl std::fmt::Display for LevelError {
     }
 }
 
+impl std::error::Error for LevelError {}
+
 fn is_valid_float(f: f32) -> bool {
     f.is_finite() && f.abs() <= limits::MAX_COORD
 }
@@ -156,9 +158,9 @@ pub fn load_level<P: AsRef<Path>>(path: P) -> Result<Level, LevelError> {
     let mut level: Level = ron::from_str(&contents)?;
     validate_level(&level)?;
 
-    // Strip legacy objects (objects without asset_id)
+    // Strip unlinked objects (objects with null asset handle)
     for room in &mut level.rooms {
-        room.objects.retain(|obj| obj.asset_id != 0);
+        room.objects.retain(|obj| !obj.model_path.is_empty());
     }
 
     for room in &mut level.rooms {
@@ -183,7 +185,7 @@ pub fn load_level_from_str(s: &str) -> Result<Level, LevelError> {
     let mut level: Level = ron::from_str(s)?;
     validate_level(&level)?;
     for room in &mut level.rooms {
-        room.objects.retain(|obj| obj.asset_id != 0);
+        room.objects.retain(|obj| !obj.model_path.is_empty());
     }
     for room in &mut level.rooms {
         room.recalculate_bounds();

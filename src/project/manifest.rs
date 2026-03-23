@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::asset::AssetHandle;
-
 const MANIFEST_EXTENSION: &str = "b32";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,25 +10,12 @@ pub struct ProjectManifest {
     pub author: String,
     #[serde(default = "default_resolution")]
     pub resolution: (u32, u32),
+    /// Level that loads first when the game runs (project-relative path)
     #[serde(default)]
-    pub start_level: Option<AssetHandle>,
-    #[serde(default = "default_asset_directory")]
-    pub asset_directory: PathBuf,
-    #[serde(default = "default_script_directory")]
-    pub script_directory: PathBuf,
+    pub start_level: Option<PathBuf>,
 }
 
-fn default_resolution() -> (u32, u32) {
-    (320, 240)
-}
-
-fn default_asset_directory() -> PathBuf {
-    PathBuf::from("assets")
-}
-
-fn default_script_directory() -> PathBuf {
-    PathBuf::from("scripts")
-}
+fn default_resolution() -> (u32, u32) { (320, 240) }
 
 impl ProjectManifest {
     pub fn new(name: impl Into<String>) -> Self {
@@ -39,8 +24,6 @@ impl ProjectManifest {
             author: String::new(),
             resolution: default_resolution(),
             start_level: None,
-            asset_directory: default_asset_directory(),
-            script_directory: default_script_directory(),
         }
     }
 
@@ -69,7 +52,5 @@ impl ProjectManifest {
 }
 
 impl Default for ProjectManifest {
-    fn default() -> Self {
-        Self::new("Untitled")
-    }
+    fn default() -> Self { Self::new("Untitled") }
 }

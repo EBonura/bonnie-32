@@ -2,21 +2,19 @@ pub mod manifest;
 
 use std::path::{Path, PathBuf};
 
-use crate::asset::{AssetManager, AssetSource, AssetType};
+use crate::asset::AssetType;
 use manifest::ProjectManifest;
 
 pub use manifest::ProjectManifest as Manifest;
 
 pub struct Project {
     pub manifest: ProjectManifest,
-    pub assets: AssetManager,
     root: PathBuf,
     manifest_path: PathBuf,
 }
 
 impl Project {
     /// Create a new project in the given directory.
-    /// Creates the directory structure and manifest file on disk.
     pub fn create(
         root: PathBuf,
         name: impl Into<String>,
@@ -26,23 +24,14 @@ impl Project {
 
         std::fs::create_dir_all(&root)?;
 
-        // Create subdirectories
-        for dir in &["levels", "assets", "textures", "songs", "scripts", "meshes"] {
+        for dir in &["levels", "meshes", "textures", "songs", "scripts"] {
             std::fs::create_dir_all(root.join(dir))?;
         }
 
         let manifest_path = root.join(ProjectManifest::manifest_filename(&name));
         manifest.save(&manifest_path)?;
 
-        let assets = AssetManager::with_project(root.clone())?;
-        assets.save_registry()?;
-
-        Ok(Self {
-            manifest,
-            assets,
-            root,
-            manifest_path,
-        })
+        Ok(Self { manifest, root, manifest_path })
     }
 
     /// Open an existing project from a .b32 manifest file.
@@ -53,80 +42,52 @@ impl Project {
             .ok_or("Manifest has no parent directory")?
             .to_path_buf();
 
-        let assets = AssetManager::with_project(root.clone())?;
-
-        Ok(Self {
-            manifest,
-            assets,
-            root,
-            manifest_path,
-        })
+        Ok(Self { manifest, root, manifest_path })
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
+    pub fn root(&self) -> &Path { &self.root }
+    pub fn manifest_path(&self) -> &Path { &self.manifest_path }
+    pub fn name(&self) -> &str { &self.manifest.name }
 
-    pub fn manifest_path(&self) -> &Path {
-        &self.manifest_path
-    }
-
-    pub fn name(&self) -> &str {
-        &self.manifest.name
-    }
-
-    /// Save manifest and asset registry to disk.
+    /// Save manifest to disk.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.manifest.save(&self.manifest_path)?;
-        self.assets.save_registry()?;
         Ok(())
     }
 
-    /// Scan all standard directories for unregistered assets and add them to the registry.
-    pub fn scan_assets(&mut self) -> Vec<crate::asset::AssetHandle> {
-        let mut found = Vec::new();
-
-        let scans: &[(AssetType, &str)] = &[
-            (AssetType::Level, "levels"),
-            (AssetType::Model, "assets"),
-            (AssetType::Song, "songs"),
-            (AssetType::Script, "scripts"),
-        ];
-
-        for &(asset_type, dir_name) in scans {
-            let dir = self.root.join(dir_name);
-            if dir.exists() {
-                let handles = self.assets.scan_directory(&dir, asset_type, AssetSource::Project);
-                found.extend(handles);
-            }
-        }
-
-        found
+    /// Scan one of the project's standard directories and return all matching paths.
+    /// Paths are absolute.
+    pub fn scan(&self, asset_type: AssetType) -> Vec<PathBuf> {
+        scan_dir(&self.root.join(asset_type.directory()), asset_type)
     }
 
-    /// Register bundled sample assets from the engine's assets/samples/ directory.
-    pub fn register_bundled_assets(&mut self, bundled_root: &Path) -> Vec<crate::asset::AssetHandle> {
-        let mut found = Vec::new();
-
-        let scans: &[(AssetType, &str)] = &[
-            (AssetType::Level, "levels"),
-            (AssetType::Model, "assets"),
-            (AssetType::Song, "songs"),
-        ];
-
-        for &(asset_type, dir_name) in scans {
-            let dir = bundled_root.join(dir_name);
-            if dir.exists() {
-                let handles = self.assets.scan_directory(&dir, asset_type, AssetSource::Bundled);
-                found.extend(handles);
-            }
-        }
-
-        found
-    }
-
-    /// Get the full path for a project-relative path.
+    /// Absolute path to a project-relative path.
     pub fn resolve(&self, relative: &Path) -> PathBuf {
         self.root.join(relative)
     }
+}
+
+/// Scan `dir` for files whose extension matches `asset_type`.
+/// Returns absolute paths, sorted by filename.
+pub fn scan_dir(dir: &Path, asset_type: AssetType) -> Vec<PathBuf> {
+    let exts = asset_type.extensions();
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| exts.contains(&e.to_lowercase().as_str()))
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    paths.sort_by(|a, b| {
+        a.file_name().cmp(&b.file_name())
+    });
+
+    paths
 }

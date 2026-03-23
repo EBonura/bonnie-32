@@ -1,5 +1,5 @@
-use crate::asset::AssetType;
-use super::context::{EditorContext, Selection};
+use crate::app::Selection;
+use super::level_edit::LevelEditState;
 
 pub struct InspectorPanel;
 
@@ -8,7 +8,7 @@ impl InspectorPanel {
         Self
     }
 
-    pub fn draw(&mut self, ctx: &egui::Context, editor: &mut EditorContext) {
+    pub fn draw(&mut self, ctx: &egui::Context, level: &LevelEditState, state: &crate::app::AppState) {
         egui::SidePanel::right("inspector")
             .resizable(true)
             .default_width(220.0)
@@ -17,50 +17,20 @@ impl InspectorPanel {
                 ui.strong("Inspector");
                 ui.separator();
 
-                match &editor.selection {
+                match &state.selection {
                     Selection::None => {
                         ui.weak("Nothing selected");
                     }
-                    Selection::Asset(handle) => {
-                        if let Some(project) = editor.project.as_ref() {
-                            if let Some(entry) = project.assets.registry.get(handle) {
-                                ui.label(
-                                    egui::RichText::new(&entry.name).strong().size(16.0),
-                                );
-                                ui.label(format!("Type: {}", entry.asset_type.label()));
-                                ui.label(format!("Source: {:?}", entry.source));
-                                ui.label(format!("Path: {}", entry.path.display()));
-                                ui.label(
-                                    egui::RichText::new(format!("UUID: {}", handle))
-                                        .small()
-                                        .color(egui::Color32::GRAY),
-                                );
-
-                                ui.separator();
-
-                                // Type-specific info
-                                match entry.asset_type {
-                                    AssetType::Level => {
-                                        ui.label("Level properties will appear here");
-                                    }
-                                    AssetType::Model => {
-                                        ui.label("Model components will appear here");
-                                    }
-                                    AssetType::Song => {
-                                        ui.label("Song properties will appear here");
-                                    }
-                                    AssetType::Script => {
-                                        ui.label("Script info will appear here");
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                ui.colored_label(
-                                    egui::Color32::RED,
-                                    "Asset not found in registry",
-                                );
-                            }
-                        }
+                    Selection::Asset(path) => {
+                        let name = path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("?");
+                        ui.label(egui::RichText::new(name).strong().size(16.0));
+                        ui.label(
+                            egui::RichText::new(path.to_string_lossy().as_ref())
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
                     }
                     Selection::Room(index) => {
                         ui.label(
@@ -68,7 +38,7 @@ impl InspectorPanel {
                         );
                         ui.separator();
 
-                        if let Some(level) = &editor.current_level {
+                        if let Some(level) = &level.current_level {
                             if let Some(room) = level.rooms.get(*index) {
                                 ui.label(format!("Position: ({:.1}, {:.1}, {:.1})",
                                     room.position.x, room.position.y, room.position.z));

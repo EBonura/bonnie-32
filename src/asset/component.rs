@@ -1,19 +1,22 @@
 use serde::{Deserialize, Serialize};
-use super::handle::AssetHandle;
 
+/// Components that can be attached to a placed asset instance.
+/// Asset references use project-relative paths (e.g. "meshes/ghost.obj").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AssetComponent {
     Mesh {
+        /// Project-relative path to the .obj file
         #[serde(default)]
-        mesh_data: AssetHandle,
+        mesh_path: String,
     },
 
     Collision {
         shape: CollisionShapeDef,
         #[serde(default)]
         is_trigger: bool,
+        /// Optional project-relative path to a collision mesh
         #[serde(default)]
-        collision_mesh: Option<AssetHandle>,
+        collision_mesh: Option<String>,
     },
 
     Light {
@@ -54,7 +57,8 @@ pub enum AssetComponent {
     },
 
     Audio {
-        sound: AssetHandle,
+        /// Project-relative path to the sound file
+        sound_path: String,
         #[serde(default = "default_volume")]
         volume: f32,
         radius: f32,
@@ -87,7 +91,8 @@ pub enum AssetComponent {
     },
 
     Script {
-        script: AssetHandle,
+        /// Project-relative path to the .lua file
+        script_path: String,
     },
 }
 
@@ -97,19 +102,19 @@ fn default_step_height() -> f32 { 384.0 }
 impl AssetComponent {
     pub fn type_name(&self) -> &'static str {
         match self {
-            Self::Mesh { .. } => "Mesh",
-            Self::Collision { .. } => "Collision",
-            Self::Light { .. } => "Light",
-            Self::Trigger { .. } => "Trigger",
-            Self::Pickup { .. } => "Pickup",
-            Self::Enemy { .. } => "Enemy",
-            Self::Door { .. } => "Door",
-            Self::Audio { .. } => "Audio",
-            Self::Particle { .. } => "Particle",
+            Self::Mesh { .. }               => "Mesh",
+            Self::Collision { .. }          => "Collision",
+            Self::Light { .. }              => "Light",
+            Self::Trigger { .. }            => "Trigger",
+            Self::Pickup { .. }             => "Pickup",
+            Self::Enemy { .. }              => "Enemy",
+            Self::Door { .. }               => "Door",
+            Self::Audio { .. }              => "Audio",
+            Self::Particle { .. }           => "Particle",
             Self::CharacterController { .. } => "CharacterController",
-            Self::SpawnPoint { .. } => "SpawnPoint",
-            Self::Skeleton { .. } => "Skeleton",
-            Self::Script { .. } => "Script",
+            Self::SpawnPoint { .. }         => "SpawnPoint",
+            Self::Skeleton { .. }           => "Skeleton",
+            Self::Script { .. }             => "Script",
         }
     }
 }
@@ -124,19 +129,11 @@ pub enum CollisionShapeDef {
 }
 
 impl Default for CollisionShapeDef {
-    fn default() -> Self {
-        Self::FromMesh
-    }
+    fn default() -> Self { Self::FromMesh }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EnemyType {
-    Grunt,
-    Archer,
-    Heavy,
-    Swarm,
-    Elite,
-}
+pub enum EnemyType { Grunt, Archer, Heavy, Swarm, Elite }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ItemType {

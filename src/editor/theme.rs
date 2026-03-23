@@ -1,5 +1,7 @@
 //! UI theme — matches v1 macroquad color scheme exactly.
-//! Key identity: teal/cyan accent, charcoal background, VT323 pixel font.
+//! Key identity: teal/cyan accent, charcoal background.
+//! Body text uses egui's default proportional font (matches v1's compact bitmap feel).
+//! VT323 is reserved for monospace/code contexts (tracker, script editor).
 
 use egui::{Color32, FontId, FontFamily, Stroke, Visuals, style::*, epaint::CornerRadius};
 
@@ -55,12 +57,12 @@ pub const SECTOR_SELECT: Color32  = Color32::from_rgb(0,   180, 180); // matches
 pub const WALL_COLOR: Color32     = Color32::from_rgb(140,  90,  60);
 
 // ---------------------------------------------------------------------------
-// Font size constants (v1 values, plus bigger for modern display)
+// Font size constants
 // ---------------------------------------------------------------------------
-pub const FONT_SIZE_UI: f32      = 15.0;  // body / button text
-pub const FONT_SIZE_SMALL: f32   = 13.0;
-pub const FONT_SIZE_HEADING: f32 = 17.0;
-pub const FONT_SIZE_MONO: f32    = 16.0;  // VT323 at 16px reads clearly
+pub const FONT_SIZE_UI: f32      = 13.0;  // body / button text
+pub const FONT_SIZE_SMALL: f32   = 11.0;
+pub const FONT_SIZE_HEADING: f32 = 15.0;
+pub const FONT_SIZE_MONO: f32    = 16.0;  // VT323 mono at 16px is pixel-perfect
 pub const ICON_SIZE_SM: f32      = 16.0;
 pub const ICON_SIZE_MD: f32      = 20.0;
 pub const ICON_SIZE_LG: f32      = 24.0;
@@ -72,34 +74,35 @@ pub fn apply(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     // --- Lucide icon font ---
+    // Added as fallback in both families so icon codepoints render anywhere.
     match std::fs::read("assets/fonts/lucide.ttf") {
         Ok(bytes) => {
             fonts.font_data.insert("lucide".to_owned(), egui::FontData::from_owned(bytes).into());
-            // Named family for explicit use
+            // Named family for explicit icon-only use
             fonts.families.entry(egui::FontFamily::Name("lucide".into())).or_default().push("lucide".to_owned());
             // Fallback on Proportional so icon chars render in plain RichText
             fonts.families.entry(egui::FontFamily::Proportional).or_default().push("lucide".to_owned());
-            // Fallback on Monospace too (tracker, code editor)
+            // Fallback on Monospace (tracker, code editor)
             fonts.families.entry(egui::FontFamily::Monospace).or_default().push("lucide".to_owned());
         }
         Err(_) => log::warn!("Lucide font not found at assets/fonts/lucide.ttf"),
     }
 
-    // --- VT323 pixel font — used as primary UI font (matches v1 tab bar) ---
+    // --- VT323 — monospace/code contexts only (tracker, script editor) ---
+    // Body text uses egui's default proportional font, matching v1's compact bitmap look.
     match std::fs::read("assets/fonts/VT323-Regular.ttf") {
         Ok(bytes) => {
             fonts.font_data.insert("VT323".to_owned(), egui::FontData::from_owned(bytes).into());
-            // VT323 first in Proportional — this makes the whole UI use the pixel font
-            fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "VT323".to_owned());
-            // Also first in Monospace (tracker row numbers, code)
+            // VT323 first in Monospace — tracker row numbers, code, terminal output
             fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "VT323".to_owned());
+            // NOT inserted into Proportional — body text stays as egui default
         }
         Err(_) => log::warn!("VT323 font not found at assets/fonts/VT323-Regular.ttf"),
     }
 
     ctx.set_fonts(fonts);
 
-    // --- Text styles (larger sizes for VT323 readability) ---
+    // --- Text styles ---
     let mut style = (*ctx.style()).clone();
     style.text_styles = [
         (TextStyle::Small,     FontId::new(FONT_SIZE_SMALL,   FontFamily::Proportional)),

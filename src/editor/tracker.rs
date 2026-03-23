@@ -38,6 +38,29 @@ impl TrackerPanel {
         self.handle_keyboard(ctx);
     }
 
+    pub fn draw_inside(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::TopBottomPanel::top("tracker_transport")
+            .show_inside(ui, |ui| {
+                self.draw_transport(ui);
+            });
+
+        egui::SidePanel::right("tracker_instruments")
+            .default_width(200.0)
+            .show_inside(ui, |ui| {
+                self.draw_instrument_panel(ui);
+            });
+
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            match self.state.view {
+                TrackerView::Pattern     => self.draw_pattern_view(ui),
+                TrackerView::Arrangement => self.draw_arrangement_view(ui),
+            }
+        });
+
+        self.handle_keyboard(&ctx);
+    }
+
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
         // Don't process keys if a text field has focus
         if ctx.wants_keyboard_input() {

@@ -3,21 +3,19 @@ use std::path::{Path, PathBuf};
 use crate::rasterizer::{Camera, Color, Framebuffer, Texture};
 use crate::rasterizer::constants::{WIDTH, HEIGHT};
 use crate::scene::{Level, TextureRef};
-use super::context::EditorContext;
-
 pub struct ViewportPanel {
     pub framebuffer: Framebuffer,
     pub camera: Camera,
-    /// Cached render data from level rooms (vertices, faces)
-    cached_render: Option<CachedLevelRender>,
+    /// Cached render data from level rooms (vertices, faces) — pub so WorldEditorPanel can read it
+    pub cached_render: Option<CachedLevelRender>,
     /// Texture cache: (pack, name) → index into CachedLevelRender::textures
     texture_cache: HashMap<(String, String), usize>,
 }
 
-struct CachedLevelRender {
-    vertices: Vec<crate::rasterizer::Vertex>,
-    faces: Vec<crate::rasterizer::Face>,
-    textures: Vec<Texture>,
+pub struct CachedLevelRender {
+    pub vertices: Vec<crate::rasterizer::Vertex>,
+    pub faces: Vec<crate::rasterizer::Face>,
+    pub textures: Vec<Texture>,
 }
 
 impl ViewportPanel {
@@ -37,7 +35,7 @@ impl ViewportPanel {
         }
     }
 
-    pub fn draw(&mut self, ctx: &egui::Context, _editor: &mut EditorContext) {
+    pub fn draw(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("Viewport");

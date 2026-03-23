@@ -1,4 +1,5 @@
-use super::context::{EditorContext, Selection};
+use crate::app::{AppState, Selection};
+use super::level_edit::LevelEditState;
 
 pub struct HierarchyPanel;
 
@@ -7,7 +8,7 @@ impl HierarchyPanel {
         Self
     }
 
-    pub fn draw(&mut self, ctx: &egui::Context, editor: &mut EditorContext) {
+    pub fn draw(&mut self, ctx: &egui::Context, level: &LevelEditState, state: &mut AppState) {
         egui::SidePanel::left("hierarchy")
             .resizable(true)
             .default_width(180.0)
@@ -16,13 +17,13 @@ impl HierarchyPanel {
                 ui.strong("Hierarchy");
                 ui.separator();
 
-                if !editor.has_project() {
+                if !state.has_project() {
                     ui.weak("No project");
                     return;
                 }
 
                 // Collect room info to avoid borrow conflicts
-                let room_info: Vec<(usize, usize)> = editor.current_level.as_ref()
+                let room_info: Vec<(usize, usize)> = level.current_level.as_ref()
                     .map(|level| {
                         level.rooms.iter().enumerate()
                             .map(|(i, room)| (i, room.iter_sectors().count()))
@@ -35,10 +36,10 @@ impl HierarchyPanel {
                         ui.weak("No rooms. Open a level from the Content Browser.");
                     }
                     for (i, sector_count) in &room_info {
-                        let selected = editor.selection == Selection::Room(*i);
+                        let selected = state.selection == Selection::Room(*i);
                         let label = format!("Room {} ({} sectors)", i, sector_count);
                         if ui.selectable_label(selected, &label).clicked() {
-                            editor.select(Selection::Room(*i));
+                            state.select(Selection::Room(*i));
                         }
                     }
                 });

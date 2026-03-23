@@ -132,6 +132,74 @@ impl ModelerPanel {
         });
     }
 
+    pub fn draw_inside(&mut self, ui: &mut egui::Ui) {
+        egui::TopBottomPanel::top("modeler_toolbar").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                for tool in [
+                    ModelTool::Select, ModelTool::Move, ModelTool::Rotate,
+                    ModelTool::Scale, ModelTool::Vertex, ModelTool::Face,
+                    ModelTool::Extrude,
+                ] {
+                    if ui.selectable_label(self.tool == tool, tool.label()).clicked() {
+                        self.tool = tool;
+                    }
+                }
+                ui.separator();
+                ui.weak(format!("Tool: {}", self.tool.label()));
+            });
+        });
+
+        egui::SidePanel::right("modeler_properties")
+            .default_width(200.0)
+            .show_inside(ui, |ui| {
+                ui.heading("Properties");
+                ui.separator();
+                ui.label("No model loaded");
+                ui.separator();
+                ui.collapsing("Mesh Info", |ui| {
+                    ui.label("Vertices: 0");
+                    ui.label("Faces: 0");
+                    ui.label("Textures: 0");
+                });
+                ui.collapsing("Transform", |ui| {
+                    ui.label("Position: (0, 0, 0)");
+                    ui.label("Rotation: (0, 0, 0)");
+                    ui.label("Scale: (1, 1, 1)");
+                });
+            });
+
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            let available = ui.available_size();
+            let (_rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+            if response.dragged_by(egui::PointerButton::Primary) {
+                let delta = response.drag_delta();
+                self.camera.rotation_y += delta.x * 0.005;
+                self.camera.rotation_x += delta.y * 0.005;
+                self.camera.rotation_x = self.camera.rotation_x.clamp(-1.5, 1.5);
+                self.camera.update_basis();
+            }
+            if response.dragged_by(egui::PointerButton::Secondary)
+                || response.dragged_by(egui::PointerButton::Middle)
+            {
+                let delta = response.drag_delta();
+                let right = self.camera.basis_x;
+                let up = self.camera.basis_y;
+                let speed = 0.01;
+                self.camera.position.x += (-right.x * delta.x + up.x * delta.y) * speed;
+                self.camera.position.y += (-right.y * delta.x + up.y * delta.y) * speed;
+                self.camera.position.z += (-right.z * delta.x + up.z * delta.y) * speed;
+            }
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll.abs() > 0.0 {
+                let forward = self.camera.basis_z;
+                let speed = 0.05;
+                self.camera.position.x += forward.x * scroll * speed;
+                self.camera.position.y += forward.y * scroll * speed;
+                self.camera.position.z += forward.z * scroll * speed;
+            }
+        });
+    }
+
     pub fn render_frame(&mut self, dt: f32) {
         use crate::rasterizer::{Vertex, Texture, RasterSettings, render_mesh};
         use crate::rasterizer::draw::{create_test_cube, draw_floor_grid};

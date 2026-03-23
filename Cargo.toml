@@ -11,13 +11,15 @@ path = "src/main.rs"
 
 [dependencies]
 winit = "0.30"
-wgpu = "24"
-egui = "0.31"
-egui-wgpu = "0.31"
-egui-winit = "0.31"
+wgpu = "27"
+egui = "0.33"
+egui-wgpu = "0.33"
+egui-winit = "0.33"
+egui_dock = "0.18"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
+dirs = "5"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"

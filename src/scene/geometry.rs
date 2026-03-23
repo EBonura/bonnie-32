@@ -2128,6 +2128,26 @@ impl Direction {
     }
 }
 
+/// Identifies a specific face within a sector — used for 3D selection and editing.
+/// Ported from v1/src/editor/state.rs SectorFace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SectorFace {
+    Floor,
+    Ceiling,
+    WallNorth(usize),   // index = vertical layer within the wall stack
+    WallEast(usize),
+    WallSouth(usize),
+    WallWest(usize),
+    WallNwSe(usize),
+    WallNeSw(usize),
+}
+
+impl SectorFace {
+    pub fn is_floor(&self) -> bool { matches!(self, SectorFace::Floor) }
+    pub fn is_ceiling(&self) -> bool { matches!(self, SectorFace::Ceiling) }
+    pub fn is_wall(&self) -> bool { !self.is_floor() && !self.is_ceiling() }
+}
+
 /// Axis-aligned bounding box
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Aabb {
@@ -2283,8 +2303,9 @@ impl ComponentOverrides {
 /// Asset instances are tied to sectors (tiles) using grid coordinates within the room.
 /// Height offset allows vertical positioning within the sector.
 ///
-/// All instances reference an asset by `asset_id`. The asset's components
-/// (from the AssetLibrary) define the instance's appearance and behavior at runtime.
+/// A placed instance of a model asset inside a room.
+/// The model is referenced by a project-relative path (e.g. "meshes/ghost.obj").
+/// An empty `model_path` means the instance has no linked asset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetInstance {
     /// Sector X coordinate within the room
@@ -2297,14 +2318,10 @@ pub struct AssetInstance {
     /// Facing direction (yaw angle in radians, 0 = +Z)
     #[serde(default)]
     pub facing: f32,
-    /// Reference to an asset by its stable ID
-    ///
-    /// This is the primary (and only) way to identify what the instance is.
-    /// The asset's components define the instance's behavior at runtime.
-    /// Default of 0 used for migration from legacy levels (filtered out on load).
+    /// Project-relative path to the model asset (empty = unlinked).
     #[serde(default)]
-    pub asset_id: u64,
-    /// Optional name/identifier for this instance
+    pub model_path: String,
+    /// Optional display name for this instance
     #[serde(default)]
     pub name: String,
     /// Is this instance active/enabled?
@@ -2316,14 +2333,13 @@ pub struct AssetInstance {
 }
 
 impl AssetInstance {
-    /// Create a new instance from an asset reference
-    pub fn new(sector_x: usize, sector_z: usize, asset_id: u64) -> Self {
+    pub fn new(sector_x: usize, sector_z: usize) -> Self {
         Self {
             sector_x,
             sector_z,
             height: 0.0,
             facing: 0.0,
-            asset_id,
+            model_path: String::new(),
             name: String::new(),
             enabled: true,
             overrides: ComponentOverrides::default(),
@@ -3441,6 +3457,9 @@ pub struct FloorInfo {
 /// The entire level
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Level {
+    /// Display name (shown in tabs, content browser, project composer)
+    #[serde(default)]
+    pub name: String,
     pub rooms: Vec<Room>,
     /// Editor layout configuration (optional, uses default if missing)
     #[serde(default)]
@@ -3460,6 +3479,7 @@ impl Default for Level {
 impl Level {
     pub fn new() -> Self {
         Self {
+            name: String::new(),
             rooms: Vec::new(),
             editor_layout: EditorLayoutConfig::default(),
             player_settings: PlayerSettings::default(),
@@ -3521,25 +3541,25 @@ impl Level {
         }
     }
 
-    /// Find object index by position and asset ID in a room
-    pub fn find_object(&self, room_idx: usize, sector_x: usize, sector_z: usize, asset_id: u64) -> Option<usize> {
+    /// Find object index by position and model path in a room.
+    pub fn find_object(&self, room_idx: usize, sector_x: usize, sector_z: usize, model_path: &str) -> Option<usize> {
         self.rooms.get(room_idx)?.objects.iter().position(|obj| {
             obj.sector_x == sector_x
                 && obj.sector_z == sector_z
-                && obj.asset_id == asset_id
+                && obj.model_path == model_path
         })
     }
 
-    /// Get mutable reference to an object by room and index
+    /// Get mutable reference to an object by room and index.
     pub fn get_object_mut(&mut self, room_idx: usize, object_idx: usize) -> Option<&mut AssetInstance> {
         self.rooms.get_mut(room_idx)?.objects.get_mut(object_idx)
     }
 
-    /// Count objects with a specific asset ID across all rooms
-    pub fn count_objects_with_asset(&self, asset_id: u64) -> usize {
+    /// Count objects referencing a specific model path across all rooms.
+    pub fn count_objects_with_model(&self, model_path: &str) -> usize {
         self.rooms.iter()
             .flat_map(|room| room.objects.iter())
-            .filter(|obj| obj.asset_id == asset_id)
+            .filter(|obj| obj.model_path == model_path)
             .count()
     }
 
