@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use egui_dock::{DockArea, DockState, TabViewer};
 
 use crate::app::{AppState, EditorAction, Tab};
+use crate::asset::AssetType;
 use crate::config::AppConfig;
 use crate::scene::Level;
 
@@ -144,6 +145,22 @@ impl ShellViewer {
     fn rebuild_viewport_from_level(&mut self, level: &Level) {
         let root = self.state.store.project.as_ref().map(|p| p.root().to_path_buf());
         self.viewport.rebuild_from_level_with_textures(level, root.as_deref());
+    }
+
+    /// Sync working level to store and persist to disk.
+    fn save_current_level(&mut self) {
+        if let (Some(path), Some(level)) =
+            (self.loaded_level_path.clone(), self.level_edit.current_level.clone())
+        {
+            if let Some(stored) = self.state.store.mutate_level(&path) {
+                *stored = level;
+            }
+            if let Err(e) = self.state.store.save_level(&path) {
+                log::error!("Failed to save level: {}", e);
+            } else {
+                self.level_edit.level_dirty = false;
+            }
+        }
     }
 
     fn flush_level_to_store(&mut self) {
@@ -357,15 +374,8 @@ impl Shell {
                 self.viewer.state.request_action(EditorAction::NewProject);
             }
             ProjectAction::OpenProject => {
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Open Project")
-                    .add_filter("Bonnie-32 Project", &["b32"])
-                    .pick_file()
-                {
-                    self.config.push_recent(path.clone());
-                    self.viewer.state.request_action(EditorAction::OpenProject(path));
-                }
+                self.viewer.content_browser.open_project_picker();
+                self.viewer.state.open_tab(Tab::ContentBrowser);
             }
             ProjectAction::SaveProject => {
                 self.viewer.state.request_action(EditorAction::SaveProject);
@@ -427,19 +437,8 @@ impl Shell {
                     Some(Tab::MusicTracker { .. }) => {
                         self.viewer.state.request_action(EditorAction::SaveSong);
                     }
-                    Some(Tab::LevelEditor { path, .. }) => {
-                        let path = path.clone();
-                        if let Some(level) = &self.viewer.level_edit.current_level {
-                            let level = level.clone();
-                            if let Some(stored) = self.viewer.state.store.mutate_level(&path) {
-                                *stored = level;
-                            }
-                        }
-                        if let Err(e) = self.viewer.state.store.save_level(&path) {
-                            log::error!("Failed to save level: {}", e);
-                        } else {
-                            self.viewer.level_edit.level_dirty = false;
-                        }
+                    Some(Tab::LevelEditor { .. }) => {
+                        self.viewer.state.request_action(EditorAction::SaveLevel);
                     }
                     _ => {}
                 }
@@ -451,6 +450,7 @@ impl Shell {
 
     fn handle_action(&mut self, action: EditorAction) {
         match action {
+            // ---- Undo / Redo ---------------------------------------------------
             EditorAction::Undo => {
                 if let Some(Tab::LevelEditor { .. }) = &self.viewer.focused_tab {
                     if let Some(prev) = self.viewer.level_edit.level_undo.undo(
@@ -475,41 +475,117 @@ impl Shell {
                     self.viewer.tracker.state.do_redo();
                 }
             }
+
+            // ---- Project -------------------------------------------------------
+            EditorAction::NewProject => {
+                self.viewer.content_browser.open_new_project_dialog();
+            }
+            EditorAction::OpenProject(path) => {
+                if let Err(e) = self.viewer.state.store.open_project(path.clone()) {
+                    log::error!("Failed to open project: {}", e);
+                } else {
+                    self.config.push_recent(path);
+                    self.viewer.state.open_tab(Tab::ProjectComposer);
+                }
+            }
+            EditorAction::SaveProject => {
+                if let Some(project) = &self.viewer.state.store.project {
+                    if let Err(e) = project.save() {
+                        log::error!("Failed to save project: {}", e);
+                    }
+                }
+            }
+
+            // ---- Level ---------------------------------------------------------
+            EditorAction::NewLevel => {
+                if self.viewer.state.has_project() {
+                    self.viewer.content_browser.trigger_new_level_dialog();
+                }
+            }
+            EditorAction::AddRoom => { self.viewer.add_room(); }
+            EditorAction::SaveLevel => {
+                self.viewer.save_current_level();
+            }
+
+            // ---- Assets --------------------------------------------------------
+            EditorAction::OpenAsset(path) => {
+                let asset_type = infer_asset_type(&path);
+                if let Some(at) = asset_type {
+                    self.viewer.content_browser.open_asset(
+                        &mut self.viewer.state, path, at,
+                    );
+                }
+            }
+            EditorAction::ImportAsset(source) => {
+                if let Some(project) = &self.viewer.state.store.project {
+                    if let Some(dest) = import_asset_into_project(project.root(), &source) {
+                        let asset_type = infer_asset_type(&dest);
+                        if let Some(at) = asset_type {
+                            self.viewer.content_browser.open_asset(
+                                &mut self.viewer.state, dest, at,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ---- Song ----------------------------------------------------------
+            EditorAction::NewSong => { self.viewer.tracker.state.new_song(); }
+            EditorAction::OpenSong(p)   => { self.viewer.tracker.state.load_song(&p).ok(); }
             EditorAction::SaveSong      => { self.viewer.tracker.state.save_song().ok(); }
             EditorAction::SaveSongAs(p) => {
                 self.viewer.tracker.state.current_file = Some(p);
                 self.viewer.tracker.state.save_song().ok();
             }
-            EditorAction::OpenSong(p)   => {
-                self.viewer.tracker.state.load_song(&p).ok();
-            }
-            EditorAction::NewSong => { self.viewer.tracker.state.new_song(); }
-            EditorAction::AddRoom => { self.viewer.add_room(); }
-            EditorAction::SaveLevel => {
-                if let Some(path) = self.viewer.loaded_level_path.clone() {
-                    if let Some(level) = &self.viewer.level_edit.current_level {
-                        let level = level.clone();
-                        if let Some(stored) = self.viewer.state.store.mutate_level(&path) {
-                            *stored = level;
-                        }
-                    }
-                    if let Err(e) = self.viewer.state.store.save_level(&path) {
-                        log::error!("Failed to save level: {}", e);
-                    } else {
-                        self.viewer.level_edit.level_dirty = false;
-                    }
-                }
-            }
-            EditorAction::NewProject
-            | EditorAction::OpenProject(_)
-            | EditorAction::SaveProject
-            | EditorAction::ImportAsset(_)
-            | EditorAction::OpenAsset(_)
-            | EditorAction::NewLevel => {}
         }
     }
 }
 
 impl Default for Shell {
     fn default() -> Self { Self::new() }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Infer asset type from file path (uses parent directory name, then extension).
+fn infer_asset_type(path: &std::path::Path) -> Option<AssetType> {
+    // Try parent directory first (most reliable within a project)
+    if let Some(dir) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        match dir {
+            "levels"   => return Some(AssetType::Level),
+            "meshes"   => return Some(AssetType::Model),
+            "textures" => return Some(AssetType::Texture),
+            "songs"    => return Some(AssetType::Song),
+            "scripts"  => return Some(AssetType::Script),
+            _ => {}
+        }
+    }
+    // Fall back to extension
+    path.extension()
+        .and_then(|e| e.to_str())
+        .and_then(AssetType::from_extension)
+}
+
+/// Copy a file into the appropriate project subdirectory. Returns the destination path.
+fn import_asset_into_project(project_root: &std::path::Path, source: &std::path::Path) -> Option<PathBuf> {
+    let ext = source.extension().and_then(|e| e.to_str())?;
+    let asset_type = AssetType::from_extension(ext)?;
+    let dest_dir = project_root.join(asset_type.directory());
+    std::fs::create_dir_all(&dest_dir).ok()?;
+
+    let filename = source.file_name()?;
+    let dest = dest_dir.join(filename);
+
+    if dest == source {
+        return Some(dest); // already in place
+    }
+
+    if let Err(e) = std::fs::copy(source, &dest) {
+        log::error!("Failed to import {:?}: {}", source, e);
+        return None;
+    }
+
+    Some(dest)
 }

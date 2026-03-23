@@ -14,6 +14,29 @@ use crate::store::projects_root;
 use super::icons::icon;
 use super::radial_menu::{RadialItem, WheelOut, WheelSession};
 
+/// Scan projects_root() for directories containing a .b32 manifest.
+/// Returns (project_name, manifest_path) sorted by name.
+fn scan_projects() -> Vec<(String, PathBuf)> {
+    let root = projects_root();
+    let Ok(entries) = std::fs::read_dir(&root) else { return Vec::new() };
+    let mut projects: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let dir = e.path();
+            // Look for a .b32 file inside the directory
+            let manifest = std::fs::read_dir(&dir).ok()?
+                .filter_map(|f| f.ok())
+                .map(|f| f.path())
+                .find(|p| p.extension().and_then(|e| e.to_str()) == Some("b32"))?;
+            let name = dir.file_name()?.to_str()?.to_string();
+            Some((name, manifest))
+        })
+        .collect();
+    projects.sort_by(|a, b| a.0.cmp(&b.0));
+    projects
+}
+
 // ---------------------------------------------------------------------------
 // Type filter
 // ---------------------------------------------------------------------------
@@ -89,9 +112,12 @@ pub struct ContentBrowserPanel {
     show_new_level_dialog: bool,
     new_level_name: String,
 
-    // New-project dialog (shown after folder is picked)
-    pending_project_dir: Option<PathBuf>,
+    // New-project dialog
+    show_new_project_dialog: bool,
     new_project_name: String,
+
+    // Open-project picker
+    show_open_project_picker: bool,
 
     // Content creation wheel
     content_wheel: Option<WheelSession<ContentAction>>,
@@ -105,8 +131,9 @@ impl ContentBrowserPanel {
             selected: None,
             show_new_level_dialog: false,
             new_level_name: String::new(),
-            pending_project_dir: None,
+            show_new_project_dialog: false,
             new_project_name: String::new(),
+            show_open_project_picker: false,
             content_wheel: None,
         }
     }
@@ -114,6 +141,7 @@ impl ContentBrowserPanel {
     pub fn draw(&mut self, egui_ctx: &egui::Context, state: &mut AppState) {
         self.draw_new_level_dialog(egui_ctx, state);
         self.draw_new_project_dialog(egui_ctx, state);
+        self.draw_open_project_picker(egui_ctx, state);
 
         egui::CentralPanel::default().show(egui_ctx, |ui| {
             self.draw_content(ui, state);
@@ -126,6 +154,7 @@ impl ContentBrowserPanel {
         let ctx = ui.ctx().clone();
         self.draw_new_level_dialog(&ctx, state);
         self.draw_new_project_dialog(&ctx, state);
+        self.draw_open_project_picker(&ctx, state);
 
         if state.store.has_project() {
             self.draw_project_view(ui, state);
@@ -163,7 +192,7 @@ impl ContentBrowserPanel {
                 }
                 ui.add_space(20.0);
                 if ui.add_sized(btn, egui::Button::new("Open Project")).clicked() {
-                    self.open_project_file_dialog(state);
+                    self.show_open_project_picker = true;
                 }
             });
 
@@ -186,30 +215,19 @@ impl ContentBrowserPanel {
                 ui.add_space(8.0);
                 for recent in &recents {
                     let exists = recent.path.exists();
-                    ui.horizontal(|ui| {
-                        let label = egui::RichText::new(&recent.name).color(
-                            if exists { egui::Color32::from_rgb(180, 200, 220) }
-                            else      { egui::Color32::from_rgb(90, 90, 105)  }
-                        );
-                        let resp = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
-                        ui.label(
-                            egui::RichText::new(recent.path.to_string_lossy().as_ref())
-                                .size(11.0)
-                                .color(if exists {
-                                    egui::Color32::from_rgb(80, 80, 95)
-                                } else {
-                                    egui::Color32::from_rgb(130, 60, 60)
-                                }),
-                        );
-                        if resp.clicked() && exists {
-                            let path = recent.path.clone();
-                            if let Err(e) = state.store.open_project(path) {
-                                log::error!("Failed to open recent project: {}", e);
-                            } else {
-                                state.open_tab(Tab::ProjectComposer);
-                            }
+                    let label = egui::RichText::new(&recent.name).color(
+                        if exists { egui::Color32::from_rgb(180, 200, 220) }
+                        else      { egui::Color32::from_rgb(90, 90, 105)  }
+                    );
+                    let resp = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+                    if resp.clicked() && exists {
+                        let path = recent.path.clone();
+                        if let Err(e) = state.store.open_project(path) {
+                            log::error!("Failed to open recent project: {}", e);
+                        } else {
+                            state.open_tab(Tab::ProjectComposer);
                         }
-                    });
+                    }
                     ui.add_space(4.0);
                 }
             }
@@ -367,7 +385,7 @@ impl ContentBrowserPanel {
 
     // ---- Open asset --------------------------------------------------------
 
-    fn open_asset(&self, state: &mut AppState, path: PathBuf, asset_type: AssetType) {
+    pub fn open_asset(&self, state: &mut AppState, path: PathBuf, asset_type: AssetType) {
         match asset_type {
             AssetType::Level => {
                 if let Err(e) = state.store.open_level(path.clone()) {
@@ -426,12 +444,7 @@ impl ContentBrowserPanel {
     }
 
     fn draw_new_project_dialog(&mut self, egui_ctx: &egui::Context, state: &mut AppState) {
-        if self.pending_project_dir.is_none() { return; }
-
-        let dir_label = self.pending_project_dir
-            .as_ref()
-            .map(|d| d.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        if !self.show_new_project_dialog { return; }
 
         let mut confirmed = false;
         let mut cancelled = false;
@@ -441,12 +454,6 @@ impl ContentBrowserPanel {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(egui_ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(&dir_label)
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(120, 120, 140)),
-                );
-                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("Project name:");
                     let resp = ui.text_edit_singleline(&mut self.new_project_name);
@@ -464,54 +471,76 @@ impl ContentBrowserPanel {
             });
 
         if confirmed && !self.new_project_name.is_empty() {
-            if let Some(dir) = self.pending_project_dir.take() {
-                let name = self.new_project_name.clone();
-                let root = dir.join(&name);
-                if let Err(e) = state.store.create_project(root, &name) {
-                    log::error!("Failed to create project: {}", e);
-                } else {
-                    state.open_tab(Tab::ProjectComposer);
-                }
+            let name = self.new_project_name.clone();
+            let root = projects_root().join(&name);
+            if let Err(e) = state.store.create_project(root, &name) {
+                log::error!("Failed to create project: {}", e);
+            } else {
+                state.open_tab(Tab::ProjectComposer);
             }
+            self.show_new_project_dialog = false;
             self.new_project_name.clear();
         } else if cancelled {
-            self.pending_project_dir = None;
+            self.show_new_project_dialog = false;
             self.new_project_name.clear();
         }
     }
 
-    // ---- File dialogs -------------------------------------------------------
+    fn draw_open_project_picker(&mut self, egui_ctx: &egui::Context, state: &mut AppState) {
+        if !self.show_open_project_picker { return; }
 
-    fn open_new_project_dialog(&mut self) {
-        let start = projects_root();
-        if let Some(dir) = rfd::FileDialog::new()
-            .set_title("Choose project location")
-            .set_directory(&start)
-            .pick_folder()
-        {
-            let name = dir.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("New Project")
-                .to_string();
-            self.new_project_name = name;
-            self.pending_project_dir = Some(dir);
-        }
-    }
+        let mut picked: Option<PathBuf> = None;
+        let mut cancelled = false;
 
-    fn open_project_file_dialog(&self, state: &mut AppState) {
-        let start = projects_root();
-        if let Some(path) = rfd::FileDialog::new()
-            .set_title("Open project")
-            .set_directory(&start)
-            .add_filter("Bonnie-32 project", &["b32"])
-            .pick_file()
-        {
+        egui::Window::new("Open Project")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(300.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(egui_ctx, |ui| {
+                let projects = scan_projects();
+                if projects.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No projects found")
+                            .color(egui::Color32::from_rgb(120, 120, 140)),
+                    );
+                } else {
+                    for (name, manifest_path) in &projects {
+                        if ui.selectable_label(false, name).clicked() {
+                            picked = Some(manifest_path.clone());
+                        }
+                    }
+                }
+                ui.add_space(8.0);
+                if ui.button("Cancel").clicked() { cancelled = true; }
+            });
+
+        if let Some(path) = picked {
             if let Err(e) = state.store.open_project(path) {
                 log::error!("Failed to open project: {}", e);
             } else {
                 state.open_tab(Tab::ProjectComposer);
             }
+            self.show_open_project_picker = false;
+        } else if cancelled {
+            self.show_open_project_picker = false;
         }
+    }
+
+    // ---- Public triggers ----------------------------------------------------
+
+    pub fn trigger_new_level_dialog(&mut self) {
+        self.new_level_name = "New Level".to_string();
+        self.show_new_level_dialog = true;
+    }
+
+    pub fn open_new_project_dialog(&mut self) {
+        self.new_project_name = "New Project".to_string();
+        self.show_new_project_dialog = true;
+    }
+
+    pub fn open_project_picker(&mut self) {
+        self.show_open_project_picker = true;
     }
 
     // ---- Content wheel -----------------------------------------------------
