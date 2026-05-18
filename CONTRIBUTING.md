@@ -1,40 +1,10 @@
 # Contributing to BONNIE-32
 
-Thanks for your interest in contributing! This project is a passion project with a specific vision, but contributions are welcome.
+BONNIE-32 is discontinued and no longer maintained.
 
-## How to Contribute
+There will be no new releases, bug fixes, or feature work in this repository.
+The source remains available under the MIT license, and forks are welcome.
 
-### Reporting Bugs
-- Open an issue with a clear description
-- Include steps to reproduce
-- Mention if it's native or web (WASM) build
-
-### Suggesting Features
-- Open an issue to discuss before implementing
-- Keep in mind the PS1 aesthetic focus
-
-### Pull Requests
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Make your changes
-4. Test both native and WASM builds:
-   ```bash
-   cargo run                                           # Native
-   cargo build --target wasm32-unknown-unknown         # WASM
-   ```
-5. Submit a PR to `main`
-
-### Code Style
-- Follow existing patterns in the codebase
-- Keep it simple - avoid over-engineering
-- No unnecessary dependencies
-
-## What's Needed
-Check the README backlog for current priorities. Areas where help is especially welcome:
-- Bug fixes
-- Documentation
-- Texture packs (with appropriate licensing)
-- Testing on different platforms
-
-## License
-By contributing, you agree that your contributions will be licensed under the same license as the project.
+Active development has continued in
+[PSoXide](https://github.com/EBonura/PSoXide), the spiritual successor to
+BONNIE-32.
